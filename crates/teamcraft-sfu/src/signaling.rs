@@ -29,9 +29,12 @@ pub enum Outgoing {
   /// The session moved to another connection (#1309): what was queued before this goes out on the
   /// current one, then its writer hands the queue on ([`SignalQueue::hand_over`]) and closes it.
   HandOver,
-  /// The secret of a connection for the session's own audio (#1979, #2141): not an event, it takes
-  /// no sequence number.
-  AudioSocket(Base64Bytes),
+  /// The secret of a connection for the session's own audio (#1979, #2141), and the SFU's second
+  /// reflection port (#127): not an event, it takes no sequence number.
+  AudioSocket {
+    secret: Base64Bytes,
+    maybe_reflect_port: Option<u16>,
+  },
 }
 
 /// Numbers events per session, starting at 1 (api-conventions.md).
@@ -94,7 +97,13 @@ impl EventSequence {
         id,
         maybe_received_us: Some(received_us),
       },
-      Outgoing::AudioSocket(secret) => CallServerMessage::AudioSocket { secret },
+      Outgoing::AudioSocket {
+        secret,
+        maybe_reflect_port,
+      } => CallServerMessage::AudioSocket {
+        secret,
+        maybe_reflect_port,
+      },
       Outgoing::HandOver => return None,
     })
   }
@@ -221,9 +230,13 @@ mod tests {
       })
     );
     assert_eq!(
-      sequence.frame(Outgoing::AudioSocket(Base64Bytes::new(vec![7; 4]))),
+      sequence.frame(Outgoing::AudioSocket {
+        secret: Base64Bytes::new(vec![7; 4]),
+        maybe_reflect_port: Some(9),
+      }),
       Some(CallServerMessage::AudioSocket {
-        secret: Base64Bytes::new(vec![7; 4])
+        secret: Base64Bytes::new(vec![7; 4]),
+        maybe_reflect_port: Some(9),
       })
     );
     assert!(matches!(

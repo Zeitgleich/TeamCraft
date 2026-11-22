@@ -497,6 +497,12 @@ depend on any of it.
   - **Descriptors:** the SFU warns at start when `RLIMIT_NOFILE` is below those two connection limits
     plus a margin. Raise it (`LimitNOFILE=` in systemd, `--ulimit nofile=` in Docker) or lower the
     limits: running out would also hurt QUIC calls through the roster reports and the health endpoint.
+- Direct media in 1:1 calls (#127, ARCHITECTURE.md §6.7) works through most home routers with the
+  SFU's port alone. Calls behind NATs that map each destination to a new port ("hard" NATs, e.g.
+  some mobile carriers and corporate firewalls) go direct only where the SFU has a second UDP port
+  that answers reflections and nothing else: `TEAMCRAFT_SFU_REFLECT_BIND` (for example `[::]:3479`;
+  unset, the default, means none). Publish it under the same port number as bound, next to the
+  SFU's port; it costs one short connection per call and device.
 - The SFU asks for a 4 MiB UDP receive buffer (`TEAMCRAFT_SFU_UDP_RECEIVE_BUFFER_BYTES`), so a
   keyframe's burst isn't lost while it is busy. The kernel caps it at `net.core.rmem_max` without an
   error, often about 200 KiB: raise that sysctl on the host to at least the same value (it isn't

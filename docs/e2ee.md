@@ -7250,12 +7250,36 @@ served again at once.
 **What a hostile peer can do.** Learn the addresses above, which is what the policy and the setting
 consent to. Put somebody else's address into its offer: the device then sends QUIC handshakes (at
 most 8 candidates, 5 s, with backoff after failures; no media before the pinned handshake completes)
-to that address, which bounds any reflection to a few kilobytes.
+to that address, which bounds any reflection to a few kilobytes. Birthday probing (ARCHITECTURE.md §6.7,
+"Hard NATs") can't be aimed elsewhere: a device probes or punches only the address the SFU itself
+saw the other device's call connection come from (`observed_ip`, added by the SFU to the relayed
+offer), and only when the offer's reflexive address is that one. So a hostile member reaches no
+host but its own address (and that of its own NAT). There, per round: at most 2048 probes of
+12 bytes (about 82 KB with the IP and UDP headers, over 10 s, 200 a second) from a device behind an
+easy NAT, or 256 × 3 punches of 12 bytes (about 31 KB, two of them with a TTL of 3) from one behind
+a hard NAT. At most 3 rounds per call, 30 s and then 60 s apart; the other device's offers neither
+shorten the wait nor add rounds. Only this device's own network change starts the count over. In
+all, at most about 250 KB per call and network to the peer's own address. The SFU could name
+another address (it is not a member, but it relays everything anyway): a hostile server could
+then direct the same bounded traffic elsewhere, which it can do more cheaply itself. A probe carries no
+key: its token (8 random bytes per socket, sealed in the offer) only tells the hard side that a
+probe is this call's, and the handshake that follows is pinned like every direct connection.
+
+**What a hostile router can do.** Port mapping (PCP, NAT-PMP, UPnP-IGD) asks the default gateway,
+and anything on the local network can answer in its place. A device takes only the exact answer to
+its request (version, opcode, protocol, internal port, PCP's nonce, connected socket), and offers
+the external address only if it is a global one; UPnP's descriptions and SOAP answers are bounded
+in size and their URLs must point at the router that answered. The worst a hostile router does is
+offer a wrong address as the mapped candidate, which the other device dials like any other (above);
+it learns nothing it doesn't already see as the router.
 
 **The reflection.** The reflexive candidate comes from the SFU: the direct path socket opens a
 short WebTransport connection to the session's SFU, names the session's audio-socket secret
 (`reflect`), and the SFU answers with the address it saw (`reflected`). The SFU learns one more
 port of an address it already sees, and only for a session that runs; an unknown secret is refused.
+An SFU with a second port that only reflects (`reflect_port`) is asked there too, from the same
+socket, under the same secret and the same pre-join limit per address; it answers `reflect` only.
+The two answers tell the device whether its NAT is a hard one; the SFU learns that much as well.
 
 **The direct connection's certificates.** Each device makes a fresh self-signed certificate for
 each direct path socket (a new socket after every network change) and offers its SHA-256. The

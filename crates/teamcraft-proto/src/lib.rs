@@ -38,8 +38,8 @@ mod wire_enum;
 pub use api::*;
 pub use bytes::{Base64Bytes, ClientMessageId, ClientMessageIdError, IdempotencyKey, UnixMillis};
 pub use call_direct::{
-  CallPeerStanding, DirectCandidate, DirectCandidateKind, DirectMediaMode, DirectMediaPolicy,
-  DirectOfferBody, MAX_DIRECT_CANDIDATES, MAX_DIRECT_OFFER_BYTES,
+  CallPeerStanding, DIRECT_PROBE_TOKEN_BYTES, DirectCandidate, DirectCandidateKind, DirectMediaMode,
+  DirectMediaPolicy, DirectNatKind, DirectOfferBody, MAX_DIRECT_CANDIDATES, MAX_DIRECT_OFFER_BYTES,
 };
 pub use call_fallback::{
   CALL_FALLBACK_PATH, CALL_FALLBACK_PROTOCOL, FallbackFrame, FallbackFrameError, JOIN_TOKEN_PROTOCOL_PREFIX,

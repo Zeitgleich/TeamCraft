@@ -894,9 +894,12 @@ async fn run_call(
             engine.handle_datagram(&datagram.bytes, datagram.read_at);
           }
         },
-        ConnectionEvent::Input(LinkInput::SessionSecret(secret)) => {
+        ConnectionEvent::Input(LinkInput::SessionSecret {
+          secret,
+          maybe_reflect_port,
+        }) => {
           if let Some(direct) = maybe_direct.as_mut() {
-            direct.on_session_secret(secret, connection.reflect_target());
+            direct.on_session_secret(secret, connection.reflect_target(maybe_reflect_port));
           }
         },
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
@@ -1334,7 +1337,11 @@ enum LinkInput {
   Datagram(ReadDatagram),
   /// The session's secret for a second connection (`audio_socket`): the direct path's `reflect`
   /// names it too (#127).
-  SessionSecret(Base64Bytes),
+  SessionSecret {
+    secret: Base64Bytes,
+    /// The SFU's second port that only reflects, if it has one: hard NATs show there.
+    maybe_reflect_port: Option<u16>,
+  },
   Ended(LinkEnd),
 }
 
@@ -1730,11 +1737,12 @@ impl CallConnection {
 
   /// Leaves: the SFU frees the slot at once.
   /// Where the direct path asks for its reflexive address: the SFU of the current QUIC link (#127).
-  fn reflect_target(&self) -> Option<ReflectTarget> {
+  fn reflect_target(&self, maybe_second_port: Option<u16>) -> Option<ReflectTarget> {
     let address = self.maybe_link.as_ref()?.maybe_quic_remote()?;
     Some(ReflectTarget {
       sfu_url: self.ticket.sfu_url.clone(),
       address,
+      maybe_second: maybe_second_port.map(|port| SocketAddr::new(address.ip(), port)),
       certificate_hashes: accepted_hashes(self.maybe_pinned_hash, &self.ticket.certificate_hashes),
     })
   }
@@ -1841,7 +1849,7 @@ async fn try_switch(
           }
         },
         // The direct path reflects with the secret the SFU sends after the switch.
-        Some(LinkInput::SessionSecret(_)) => {},
+        Some(LinkInput::SessionSecret { .. }) => {},
         other => return other,
       }
     }
@@ -3348,8 +3356,15 @@ async fn read_signaling(
     }
     match serde_json::from_slice::<CallServerMessage>(&body) {
       // The SFU offers the own audio a connection of its own (#2141): the session's, not the call's.
-      Ok(CallServerMessage::AudioSocket { secret }) => {
-        if inputs.send(LinkInput::SessionSecret(secret.clone())).is_err() {
+      Ok(CallServerMessage::AudioSocket {
+        secret,
+        maybe_reflect_port,
+      }) => {
+        let input = LinkInput::SessionSecret {
+          secret: secret.clone(),
+          maybe_reflect_port,
+        };
+        if inputs.send(input).is_err() {
           return;
         }
         if let Some(voice) = voice.upgrade() {
@@ -3399,7 +3414,7 @@ async fn read_fallback(
   let end = read_socket(stream, received, sender, move |input| {
     let input = match input {
       // The SFU offers the own audio a connection of its own (#1979): the session's, not the call's.
-      SocketInput::Signal(CallServerMessage::AudioSocket { secret }) => {
+      SocketInput::Signal(CallServerMessage::AudioSocket { secret, .. }) => {
         audio.attach(secret);
         return true;
       },

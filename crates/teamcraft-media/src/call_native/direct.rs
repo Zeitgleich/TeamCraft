@@ -8,20 +8,29 @@
 //! these two devices, its user's setting is on, and the call has exactly two devices whose DAVE
 //! group this device authenticated. Anything else tears it down, and the media goes through the SFU.
 //!
+//! Behind NATs (ARCHITECTURE.md §6.7, "Hard NATs" and "Endpoint discovery"): the socket asks its
+//! router for a port mapping (`crate::port_mapping`, desktop builds), reflects on the SFU's two ports
+//! to learn whether its NAT maps every destination to a new port, and when exactly one of the two
+//! devices is behind such a hard NAT, the two find a way in by birthday probing: the hard side opens
+//! [`BIRTHDAY_SOCKETS`] sockets that punch toward the other device, the other side probes random
+//! ports of the hard side's address from its direct path socket, and the first probe that arrives
+//! tells the hard side which socket to move its endpoint to and whom to dial.
+//!
 //! Only the audio takes the direct path in this step (the full voice and the screen's sound); the
 //! video keeps going through the SFU, which picks its layers per receiver. The audio keeps going to
 //! the SFU as well: its speaker selection and voice guard watch it, and the SFU forwards it again
 //! the moment either device reports its direct path down. Addresses are never logged.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use rand_core::OsRng;
+use rand_core::RngCore;
 use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallPeerStanding, CallServerMessage, DeviceId, DirectMediaPolicy,
-  DirectOfferBody,
+  Base64Bytes, CallClientMessage, CallPeerStanding, CallServerMessage, DIRECT_PROBE_TOKEN_BYTES, DeviceId,
+  DirectMediaPolicy, DirectNatKind, DirectOfferBody,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -44,13 +53,18 @@ use wtransport::tls::{Certificate, Sha256Digest};
 use wtransport::{Endpoint, Identity};
 
 use super::{bind_wildcard, local_route_to, read_framed, with_trusted_roots, write_framed};
-use crate::call_engine::CallEngine;
+use crate::call_engine::{CallEngine, RelayedDirectOffer};
 use crate::direct_path::{
-  CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram, DirectPair, DirectPathInputs,
-  DownReason, OfferInbox, PathChange, PathSelector, Pinger, RelayArbiter, accepted_connection_wins,
-  dial_delay, direct_copy, eligibility, offer_epoch, open_offer, own_candidates, read_direct, seal_offer,
+  BIRTHDAY_LINGER, BIRTHDAY_PROBE_INTERVAL, BIRTHDAY_PUNCHES, BIRTHDAY_SOCKETS, BIRTHDAY_TIMEOUT,
+  BirthdayBudget, BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram,
+  DirectPair, DirectPathInputs, DownReason, OfferInbox, OwnNat, PathChange, PathSelector, Pinger,
+  RelayArbiter, accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, dial_delay,
+  direct_copy, eligibility, is_birthday_probe, nat_kind, offer_epoch, open_offer, own_candidates,
+  read_direct, seal_offer,
 };
-use crate::sfu_address::PinnedResolver;
+#[cfg(feature = "port-mapping")]
+use crate::port_mapping::PortMapper;
+use crate::sfu_address::{PinnedResolver, with_port};
 
 /// The direct connection's ALPN: only another TeamCraft direct path endpoint speaks it.
 const DIRECT_ALPN: &[u8] = b"teamcraft-direct/1";
@@ -65,6 +79,11 @@ const DIRECT_CLOSE: u32 = 0;
 const REFLECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// After the direct path socket couldn't be opened (no UDP, no certificate), the next try waits.
 const SOCKET_RETRY_AFTER: Duration = Duration::from_secs(10);
+/// The headroom of descriptors birthday probing leaves when the system runs short of them: the
+/// last sockets it opened are closed again.
+const BIRTHDAY_SPARE_SOCKETS: usize = 32;
+/// The largest datagram a birthday socket reads: probes are shorter, longer ones are no probe.
+const BIRTHDAY_READ_BYTES: usize = 64;
 /// Addresses whose route shows the interface the system sends from in each family: documentation
 /// ranges (RFC 5737, RFC 3849), never contacted; the route lookup sends nothing.
 const IPV4_ROUTE_PROBE: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 9);
@@ -97,9 +116,16 @@ pub(super) struct DirectPath {
   /// This device's offers of the current epoch, numbered.
   counter: u64,
   /// An offer of a later epoch than this device holds: opened once its key is there.
-  maybe_held_offer: Option<Base64Bytes>,
+  maybe_held_offer: Option<RelayedDirectOffer>,
   maybe_peer: Option<PeerOffer>,
   maybe_reflexive: Option<SocketAddr>,
+  /// How this device's NAT maps the socket, once both of the SFU's ports reflected it.
+  maybe_nat: Option<DirectNatKind>,
+  /// The port the router mapped to the socket, while it holds.
+  maybe_mapped: Option<SocketAddr>,
+  /// The birthday round running now, and when the next may start.
+  maybe_birthday: Option<JoinHandle<()>>,
+  birthday: BirthdayBudget,
   maybe_session_secret: Option<Base64Bytes>,
   maybe_reflect_target: Option<ReflectTarget>,
   selector: PathSelector,
@@ -125,6 +151,8 @@ pub(super) struct DirectSender {
 pub(super) struct ReflectTarget {
   pub(super) sfu_url: String,
   pub(super) address: SocketAddr,
+  /// The SFU's second port that only reflects (`audio_socket`'s `reflect_port`).
+  pub(super) maybe_second: Option<SocketAddr>,
   pub(super) certificate_hashes: Vec<[u8; 32]>,
 }
 
@@ -142,21 +170,46 @@ pub(super) enum DirectInput {
   Closed {
     connection_id: usize,
   },
-  Reflected(SocketAddr),
+  /// The SFU's reflections: its main port's, and its second port's where it has one.
+  Reflected {
+    first: SocketAddr,
+    maybe_second: Option<SocketAddr>,
+  },
+  /// The router's mapping of the socket changed (`None`: none any more).
+  Mapped(Option<SocketAddr>),
+  /// A birthday probe reached one of the hard side's sockets: the endpoint moves there and dials
+  /// `peer`, where the probe came from.
+  BirthdayHit {
+    socket: UdpSocket,
+    peer: SocketAddr,
+  },
+  /// A birthday round ended without a way in.
+  BirthdayEnded,
 }
 
 /// The direct path socket: one QUIC endpoint that dials and accepts, and its certificate.
 struct DirectSocket {
   endpoint: quinn::Endpoint,
+  /// The same socket, for the birthday probes, which aren't QUIC.
+  raw: UdpSocket,
   identity: Identity,
   certificate_hash: [u8; 32],
+  /// What the other device puts into its birthday probes to this socket, sealed in the offer.
+  probe_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
+  /// The endpoint moved to a birthday socket: its offer's addresses are stale.
+  is_rebound: bool,
   accepting: JoinHandle<()>,
+  #[cfg(feature = "port-mapping")]
+  maybe_mapper: Option<PortMapper>,
 }
 
 /// The other device's offer, as this device dials it.
 struct PeerOffer {
   certificate_hash: [u8; 32],
   candidates: Vec<SocketAddr>,
+  body: DirectOfferBody,
+  /// Where the SFU saw the other device's call connection come from, with this offer.
+  maybe_observed_ip: Option<IpAddr>,
 }
 
 struct DirectConnection {
@@ -200,6 +253,10 @@ impl DirectPath {
       maybe_held_offer: None,
       maybe_peer: None,
       maybe_reflexive: None,
+      maybe_nat: None,
+      maybe_mapped: None,
+      maybe_birthday: None,
+      birthday: BirthdayBudget::default(),
       maybe_session_secret: None,
       maybe_reflect_target: None,
       selector: PathSelector::new(),
@@ -262,10 +319,11 @@ impl DirectPath {
       .maybe_connection
       .as_ref()
       .and_then(|_| self.pinger.next_deadline());
-    match (selector, pinger) {
-      (Some(a), Some(b)) => Some(a.min(b)),
-      (deadline, None) | (None, deadline) => deadline,
-    }
+    let birthday = self
+      .birthday
+      .next_start()
+      .filter(|_| self.maybe_birthday.is_none() && self.maybe_connection.is_none());
+    [selector, pinger, birthday].into_iter().flatten().min()
   }
 
   /// Follows the call: eligibility, the epoch's key, the other device's offers. After every step
@@ -292,6 +350,7 @@ impl DirectPath {
           self.maybe_socket_failed_at = None;
           self.maybe_socket = Some(socket);
           self.spawn_accepting();
+          self.start_mapping();
           self.start_reflect();
         },
         Err(error) => {
@@ -303,11 +362,11 @@ impl DirectPath {
     }
     self.follow_key(engine);
     if let Some(held) = self.maybe_held_offer.take() {
-      self.take_offer(engine, held.as_slice(), now);
+      self.take_offer(engine, held, now);
     }
-    for (from, sealed) in offers {
-      if from == pair.peer {
-        self.take_offer(engine, sealed.as_slice(), now);
+    for offer in offers {
+      if offer.from == pair.peer {
+        self.take_offer(engine, offer, now);
       }
     }
     self.maybe_dial(now);
@@ -344,14 +403,43 @@ impl DirectPath {
           self.drop_connection();
           let change = self.selector.on_closed(now, DownReason::Closed);
           self.apply_change(change, engine);
+          if self.maybe_socket.as_ref().is_some_and(|socket| socket.is_rebound) {
+            // The birthday socket's way in is gone with its connection, and the offer names the
+            // socket before it: a fresh socket, reflections and offer.
+            self.renew_socket(engine, now);
+          }
         }
         None
       },
-      DirectInput::Reflected(address) => {
-        if self.maybe_reflexive != Some(address) {
-          self.maybe_reflexive = Some(address);
+      DirectInput::Reflected { first, maybe_second } => {
+        let maybe_nat = maybe_second.map(|second| nat_kind(first, second));
+        if self.maybe_reflexive != Some(first) || self.maybe_nat != maybe_nat {
+          debug!(nat = ?maybe_nat, "direct path socket reflected");
+          self.maybe_reflexive = Some(first);
+          self.maybe_nat = maybe_nat;
+          self.send_offer(engine);
+          self.maybe_birthday(now);
+        }
+        None
+      },
+      DirectInput::Mapped(maybe_mapped) => {
+        if self.maybe_mapped != maybe_mapped {
+          self.maybe_mapped = maybe_mapped;
           self.send_offer(engine);
         }
+        None
+      },
+      DirectInput::BirthdayHit { socket, peer } => {
+        self.on_birthday_hit(socket, peer, now);
+        None
+      },
+      DirectInput::BirthdayEnded => {
+        self.maybe_birthday = None;
+        self.birthday.on_ended(now);
+        debug!(
+          failed = self.birthday.failed(),
+          "a birthday round found no way in"
+        );
         None
       },
     }
@@ -371,14 +459,16 @@ impl DirectPath {
     }
     let change = self.selector.poll(now);
     self.apply_change(change, engine);
-    // A round the selector gave up stops dialing; a path that failed to prove itself is closed.
-    if !self.selector.is_dialing() {
+    // A round the selector gave up stops dialing, unless its connection may still win over the
+    // one there is; a path that failed to prove itself is closed.
+    if !self.selector.is_dialing() && !self.may_be_replaced() {
       self.stop_dialing();
     }
     if !self.selector.is_connected() {
       self.drop_connection();
     }
     self.maybe_dial(now);
+    self.maybe_birthday(now);
     self.publish_sender(now);
   }
 
@@ -390,9 +480,18 @@ impl DirectPath {
     }
     let change = self.selector.on_closed(now, DownReason::Closed);
     self.apply_change(change, engine);
+    self.selector.reset_backoff();
+    // A new network may have another NAT: birthday probing may start again at once.
+    self.birthday.on_network_changed();
+    self.renew_socket(engine, now);
+  }
+
+  /// A fresh socket, with fresh reflections, mapping and offer.
+  fn renew_socket(&mut self, engine: &mut CallEngine, now: Instant) {
     self.close_socket();
     self.maybe_reflexive = None;
-    self.selector.reset_backoff();
+    self.maybe_nat = None;
+    self.maybe_mapped = None;
     self.sync(engine, now);
   }
 
@@ -451,14 +550,15 @@ impl DirectPath {
     self.send_offer(engine);
   }
 
-  fn take_offer(&mut self, engine: &mut CallEngine, sealed: &[u8], now: Instant) {
+  fn take_offer(&mut self, engine: &mut CallEngine, offer: RelayedDirectOffer, now: Instant) {
     let (Some(key), Some(pair)) = (self.maybe_key.as_ref(), self.maybe_pair) else {
       return;
     };
+    let sealed = offer.sealed.as_slice();
     match offer_epoch(sealed) {
       Ok(epoch) if epoch > key.epoch() => {
         // This device hasn't processed that epoch's commit yet.
-        self.maybe_held_offer = Some(Base64Bytes::new(sealed.to_vec()));
+        self.maybe_held_offer = Some(offer);
         return;
       },
       Ok(epoch) if epoch < key.epoch() => return,
@@ -481,11 +581,15 @@ impl DirectPath {
       return;
     };
     debug!(candidates = body.candidates.len(), "direct path offer taken");
-    let candidates = body
+    let candidates: Vec<SocketAddr> = body
       .candidates
       .iter()
       .map(|candidate| candidate.address)
       .collect();
+    let has_new_candidates = self
+      .maybe_peer
+      .as_ref()
+      .is_none_or(|peer| peer.candidates != candidates);
     let has_new_certificate = self
       .maybe_peer
       .as_ref()
@@ -493,13 +597,23 @@ impl DirectPath {
     self.maybe_peer = Some(PeerOffer {
       certificate_hash,
       candidates,
+      body,
+      maybe_observed_ip: offer.maybe_observed_ip,
     });
     if has_new_certificate {
       self.pin_server(certificate_hash);
     }
-    // A new offer: the other device may have moved, so the next round starts at once.
+    // A new offer: the other device may have moved, so the next round starts at once; one that
+    // runs with the old addresses starts over with the new ones (its reflexive address often
+    // comes a moment after its first offer).
     self.selector.reset_backoff();
+    if has_new_candidates && self.maybe_dialing.is_some() {
+      self.stop_dialing();
+      self.spawn_dial(now);
+    }
     self.maybe_dial(now);
+    // Birthday probing keeps its own backoff: the other device's offers can't make it run more.
+    self.maybe_birthday(now);
     // The first offer of an epoch is answered, so each side has the other's even when one of the
     // offers went out before the other device could open it.
     if is_first_of_epoch {
@@ -521,7 +635,7 @@ impl DirectPath {
     let hosts = [IPV6_ROUTE_PROBE, IPV4_ROUTE_PROBE]
       .into_iter()
       .filter_map(local_route_to);
-    let candidates = own_candidates(hosts, local.port(), self.maybe_reflexive, None);
+    let candidates = own_candidates(hosts, local.port(), self.maybe_reflexive, self.maybe_mapped);
     if candidates.is_empty() {
       debug!("no address to offer: the call stays on the SFU");
       return;
@@ -531,6 +645,8 @@ impl DirectPath {
       counter: self.counter,
       certificate_hash: Base64Bytes::new(socket.certificate_hash.to_vec()),
       candidates,
+      maybe_nat: self.maybe_nat.clone(),
+      maybe_probe_token: Some(Base64Bytes::new(socket.probe_token.to_vec())),
     };
     match seal_offer(key, &pair, &body, &mut OsRng) {
       Ok(sealed) => {
@@ -549,6 +665,14 @@ impl DirectPath {
   /// the other ([`dial_delay`]), while this socket accepts the other side's dialing.
   fn maybe_dial(&mut self, now: Instant) {
     if self.maybe_connection.is_some() || self.maybe_dialing.is_some() || !self.selector.may_dial(now) {
+      return;
+    }
+    self.spawn_dial(now);
+  }
+
+  /// Dials every candidate of the other device's offer in a round of its own.
+  fn spawn_dial(&mut self, now: Instant) {
+    if self.maybe_connection.is_some() {
       return;
     }
     let (Some(socket), Some(peer)) = (self.maybe_socket.as_ref(), self.maybe_peer.as_ref()) else {
@@ -582,7 +706,14 @@ impl DirectPath {
       }
       self.drop_connection();
     }
-    self.stop_dialing();
+    let is_winning_kind = is_accepted == accepted_connection_wins(&pair);
+    if is_winning_kind {
+      self.stop_dialing();
+    }
+    // Else the own dialing goes on: when it connects as well, the other device takes that one (the
+    // lower device ID's accepted one wins on both sides), so it must not be dropped here.
+    self.stop_birthday();
+    self.birthday.on_connected();
     info!(call_id = %pair.call_id, is_accepted, "direct connection up: proving it");
     let reading = tokio::spawn(read_direct_datagrams(connection.clone(), self.inputs_tx.clone()));
     self.maybe_connection = Some(DirectConnection {
@@ -592,6 +723,19 @@ impl DirectPath {
     });
     self.selector.on_connected(now);
     self.pinger.start(now);
+  }
+
+  /// Whether the connection there is may still give way to the own dialing's: it is of the kind
+  /// that loses when both directions connect, and the dialing runs.
+  fn may_be_replaced(&self) -> bool {
+    let (Some(pair), Some(current)) = (self.maybe_pair, self.maybe_connection.as_ref()) else {
+      return false;
+    };
+    current.is_accepted != accepted_connection_wins(&pair)
+      && self
+        .maybe_dialing
+        .as_ref()
+        .is_some_and(|dialing| !dialing.is_finished())
   }
 
   fn on_datagram(&mut self, bytes: Bytes, read_at: Instant, now: Instant) -> Option<(Bytes, Instant)> {
@@ -694,15 +838,137 @@ impl DirectPath {
     let endpoint = socket.endpoint.clone();
     let inputs = self.inputs_tx.clone();
     self.maybe_reflecting = Some(tokio::spawn(async move {
-      match tokio::time::timeout(REFLECT_TIMEOUT, reflect(endpoint, target, secret)).await {
-        Ok(Ok(address)) => {
+      let maybe_second = target.maybe_second;
+      let first = timed_reflect(endpoint.clone(), target.clone(), target.address, secret.clone());
+      let second = async {
+        match maybe_second {
+          Some(address) => timed_reflect(endpoint, target, address, secret).await.ok(),
+          None => None,
+        }
+      };
+      let (first, maybe_second) = tokio::join!(first, second);
+      match first {
+        Ok(first) => {
           // The call task may be gone.
-          let _ = inputs.send(DirectInput::Reflected(address));
+          let _ = inputs.send(DirectInput::Reflected { first, maybe_second });
         },
-        Ok(Err(reason)) => debug!(reason, "no reflexive address: host candidates only"),
-        Err(_) => debug!("the SFU's reflection timed out: host candidates only"),
+        Err(reason) => debug!(reason, "no reflexive address: host candidates only"),
       }
     }));
+  }
+
+  /// Asks the router for a mapping of the socket's port (desktop builds).
+  fn start_mapping(&mut self) {
+    #[cfg(feature = "port-mapping")]
+    {
+      let Some(socket) = &mut self.maybe_socket else {
+        return;
+      };
+      let Ok(local) = socket.endpoint.local_addr() else {
+        return;
+      };
+      let inputs = self.inputs_tx.clone();
+      socket.maybe_mapper = Some(PortMapper::start(local.port(), move |maybe_mapped| {
+        // The call task may be gone.
+        let _ = inputs.send(DirectInput::Mapped(maybe_mapped.map(SocketAddr::V4)));
+      }));
+    }
+  }
+
+  /// Starts a birthday round when this device has a part in one (one of the two behind a hard
+  /// NAT), none runs, no connection is there, and the backoff after failed rounds has passed.
+  fn maybe_birthday(&mut self, now: Instant) {
+    if self.maybe_birthday.is_some() || self.maybe_connection.is_some() || !self.birthday.may_start(now) {
+      return;
+    }
+    let (Some(socket), Some(peer)) = (self.maybe_socket.as_ref(), self.maybe_peer.as_ref()) else {
+      return;
+    };
+    if socket.is_rebound {
+      return;
+    }
+    let own = OwnNat {
+      maybe_kind: self.maybe_nat.clone(),
+      has_mapped: self.maybe_mapped.is_some(),
+      token: socket.probe_token,
+    };
+    let Some(role) = birthday_role(&own, &peer.body, peer.maybe_observed_ip) else {
+      return;
+    };
+    self.birthday.on_started();
+    let inputs = self.inputs_tx.clone();
+    match role {
+      BirthdayRole::Open { peer, own_token } => {
+        info!(
+          role = "open",
+          "birthday round: the other device probes this device's sockets"
+        );
+        self.maybe_birthday = Some(tokio::spawn(open_birthday(peer, own_token, inputs)));
+      },
+      BirthdayRole::Probe { peer_ip, peer_token } => {
+        let raw = match socket.raw.try_clone() {
+          Ok(raw) => raw,
+          Err(error) => {
+            debug!(%error, "no handle on the direct path socket for birthday probes");
+            return;
+          },
+        };
+        let is_dual_stack = socket.endpoint.local_addr().is_ok_and(|local| local.is_ipv6());
+        info!(role = "probe", "birthday round: probing the other device's NAT");
+        let ports = birthday_ports(&mut OsRng);
+        self.maybe_birthday = Some(tokio::spawn(probe_birthday(
+          raw,
+          is_dual_stack,
+          peer_ip,
+          peer_token,
+          ports,
+          inputs,
+        )));
+      },
+    }
+  }
+
+  /// A probe found one of this device's birthday sockets: the endpoint moves to it, and dials the
+  /// other device from there (its NAT opened exactly that socket's port toward the other device).
+  fn on_birthday_hit(&mut self, socket: UdpSocket, peer: SocketAddr, now: Instant) {
+    self.stop_birthday();
+    if self.maybe_connection.is_some() {
+      return;
+    }
+    let (Some(direct), Some(certificate_hash)) = (
+      self.maybe_socket.as_mut(),
+      self.maybe_peer.as_ref().map(|peer| peer.certificate_hash),
+    ) else {
+      return;
+    };
+    if let Err(error) = direct.endpoint.rebind(socket) {
+      debug!(%error, "the direct path endpoint couldn't move to the birthday socket");
+      return;
+    }
+    direct.is_rebound = true;
+    let client = match direct.client_config(certificate_hash) {
+      Ok(client) => client,
+      Err(error) => {
+        debug!(%error, "the direct path's client configuration failed");
+        return;
+      },
+    };
+    let endpoint = direct.endpoint.clone();
+    info!("birthday probe arrived: dialing from the socket it found");
+    self.stop_dialing();
+    self.selector.on_dialing(now);
+    self.maybe_dialing = Some(tokio::spawn(dial(
+      endpoint,
+      client,
+      vec![peer],
+      self.inputs_tx.clone(),
+    )));
+  }
+
+  fn stop_birthday(&mut self) {
+    if let Some(birthday) = self.maybe_birthday.take() {
+      birthday.abort();
+    }
   }
 
   fn stop_dialing(&mut self) {
@@ -722,6 +988,7 @@ impl DirectPath {
 
   fn close_socket(&mut self) {
     self.stop_dialing();
+    self.stop_birthday();
     self.drop_connection();
     if let Some(reflecting) = self.maybe_reflecting.take() {
       reflecting.abort();
@@ -746,6 +1013,8 @@ impl DirectPath {
     self.maybe_peer = None;
     self.maybe_held_offer = None;
     self.maybe_reflexive = None;
+    self.maybe_nat = None;
+    self.maybe_mapped = None;
     self.inbox = OfferInbox::default();
     self.selector = PathSelector::new();
     self.arbiter.clear();
@@ -777,7 +1046,10 @@ impl DirectSocket {
   /// nothing until an offer names the other device's certificate.
   fn open() -> Result<Self, DirectSetupError> {
     let socket = bind_wildcard(true)?;
+    let raw = socket.try_clone()?;
     let endpoint = quinn::Endpoint::new(EndpointConfig::default(), None, socket, Arc::new(TokioRuntime))?;
+    let mut probe_token = [0u8; DIRECT_PROBE_TOKEN_BYTES];
+    OsRng.fill_bytes(&mut probe_token);
     let identity = Identity::self_signed([DIRECT_SERVER_NAME])
       .map_err(|error| DirectSetupError::Certificate(error.to_string()))?;
     let certificate_hash = identity
@@ -788,9 +1060,14 @@ impl DirectSocket {
       .ok_or_else(|| DirectSetupError::Certificate("no certificate".into()))?;
     Ok(Self {
       endpoint,
+      raw,
       identity,
       certificate_hash,
+      probe_token,
+      is_rebound: false,
       accepting: tokio::spawn(async {}),
+      #[cfg(feature = "port-mapping")]
+      maybe_mapper: None,
     })
   }
 
@@ -1004,6 +1281,148 @@ async fn accept(endpoint: quinn::Endpoint, inputs: mpsc::UnboundedSender<DirectI
   }
 }
 
+/// The hard side's birthday round: up to [`BIRTHDAY_SOCKETS`] IPv4 sockets, each punching toward
+/// the other device (at the times and TTLs of [`BIRTHDAY_PUNCHES`]) so the NAT maps a port for each,
+/// and waiting for the other device's probe. The first socket a probe with `own_token` from the
+/// other device's address reaches is handed back, with the system's TTL again; the others close.
+async fn open_birthday(
+  peer: SocketAddr,
+  own_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
+  inputs: mpsc::UnboundedSender<DirectInput>,
+) {
+  let sockets = open_birthday_sockets().await;
+  if sockets.is_empty() {
+    let _ = inputs.send(DirectInput::BirthdayEnded);
+    return;
+  }
+  debug!(sockets = sockets.len(), "birthday sockets open");
+  let maybe_default_ttl = sockets.first().and_then(|socket| socket.ttl().ok());
+  let sockets: Vec<Arc<tokio::net::UdpSocket>> = sockets.into_iter().map(Arc::new).collect();
+  let (hit_tx, mut hit_rx) = mpsc::unbounded_channel::<(usize, SocketAddr)>();
+  let mut readers = Vec::with_capacity(sockets.len());
+  for (index, socket) in sockets.iter().enumerate() {
+    let (socket, hit_tx) = (Arc::clone(socket), hit_tx.clone());
+    readers.push(tokio::spawn(async move {
+      let mut buffer = [0u8; BIRTHDAY_READ_BYTES];
+      loop {
+        // An error is an ICMP answer to a punch (Windows reports them on any UDP socket): the
+        // socket is still good.
+        let Ok((length, from)) = socket.recv_from(&mut buffer).await else {
+          continue;
+        };
+        let is_peer = from.ip().to_canonical() == peer.ip().to_canonical();
+        if is_peer && is_birthday_probe(&buffer[..length], &own_token) {
+          let _ = hit_tx.send((index, from));
+          return;
+        }
+      }
+    }));
+  }
+  drop(hit_tx);
+  let punch = birthday_probe(&own_token);
+  let punching = {
+    let sockets = sockets.clone();
+    tokio::spawn(async move {
+      let started = tokio::time::Instant::now();
+      for (at, maybe_ttl) in BIRTHDAY_PUNCHES {
+        tokio::time::sleep_until(started + at).await;
+        for socket in &sockets {
+          // A socket whose TTL can't be set punches with the one it has: that may cost its port
+          // at the other NAT, not the round.
+          if let Some(ttl) = maybe_ttl.or(maybe_default_ttl) {
+            let _ = socket.set_ttl(ttl);
+          }
+          // A punch that can't go out maps nothing; the others still may.
+          let _ = socket.send_to(&punch, peer).await;
+        }
+      }
+    })
+  };
+  let maybe_hit = tokio::time::timeout(BIRTHDAY_TIMEOUT, hit_rx.recv())
+    .await
+    .ok()
+    .flatten();
+  punching.abort();
+  // Aborted: it gives back its handles on the sockets.
+  let _ = punching.await;
+  for reader in &readers {
+    reader.abort();
+  }
+  for reader in readers {
+    // Aborted: each gives back its handle on the socket.
+    let _ = reader.await;
+  }
+  let input = maybe_hit
+    .and_then(|(index, from)| {
+      let socket = Arc::into_inner(sockets.into_iter().nth(index)?)?;
+      if let Some(ttl) = maybe_default_ttl {
+        // The direct connection's packets go all the way.
+        socket.set_ttl(ttl).ok()?;
+      }
+      let socket = socket.into_std().ok()?;
+      Some(DirectInput::BirthdayHit { socket, peer: from })
+    })
+    .unwrap_or(DirectInput::BirthdayEnded);
+  let _ = inputs.send(input);
+}
+
+/// Opens the birthday sockets: as many as the system allows, up to [`BIRTHDAY_SOCKETS`]; when it
+/// runs short, the last [`BIRTHDAY_SPARE_SOCKETS`] close again so the app keeps descriptors.
+async fn open_birthday_sockets() -> Vec<tokio::net::UdpSocket> {
+  let mut sockets = Vec::with_capacity(BIRTHDAY_SOCKETS);
+  for _ in 0..BIRTHDAY_SOCKETS {
+    match tokio::net::UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).await {
+      Ok(socket) => sockets.push(socket),
+      Err(error) => {
+        debug!(%error, opened = sockets.len(), "no more birthday sockets");
+        sockets.truncate(sockets.len().saturating_sub(BIRTHDAY_SPARE_SOCKETS));
+        break;
+      },
+    }
+  }
+  sockets
+}
+
+/// The easy side's birthday round: probes with the other device's token from the direct path
+/// socket to `ports` of `peer_ip`, [`BIRTHDAY_PROBE_INTERVAL`] apart. It ends by itself after the
+/// last port; a connection that comes meanwhile stops it.
+async fn probe_birthday(
+  raw: UdpSocket,
+  is_dual_stack: bool,
+  peer_ip: IpAddr,
+  peer_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
+  ports: Vec<u16>,
+  inputs: mpsc::UnboundedSender<DirectInput>,
+) {
+  let socket = match raw
+    .set_nonblocking(true)
+    .and_then(|()| tokio::net::UdpSocket::from_std(raw))
+  {
+    Ok(socket) => socket,
+    Err(error) => {
+      debug!(%error, "birthday probes can't be sent");
+      let _ = inputs.send(DirectInput::BirthdayEnded);
+      return;
+    },
+  };
+  // A dual-stack socket sends to IPv4 in the IPv4-mapped form.
+  let peer_ip = match peer_ip {
+    IpAddr::V4(ip) if is_dual_stack => IpAddr::V6(ip.to_ipv6_mapped()),
+    ip => ip,
+  };
+  let probe = birthday_probe(&peer_token);
+  let mut ticks = tokio::time::interval(BIRTHDAY_PROBE_INTERVAL);
+  ticks.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+  for port in ports {
+    ticks.tick().await;
+    // A probe that can't go out is one fewer; the round goes on.
+    let _ = socket.send_to(&probe, SocketAddr::new(peer_ip, port)).await;
+  }
+  // The last probes' answers may still be on their way.
+  tokio::time::sleep(BIRTHDAY_LINGER).await;
+  let _ = inputs.send(DirectInput::BirthdayEnded);
+}
+
 async fn read_direct_datagrams(connection: quinn::Connection, inputs: mpsc::UnboundedSender<DirectInput>) {
   let connection_id = connection.stable_id();
   loop {
@@ -1027,12 +1446,25 @@ async fn read_direct_datagrams(connection: quinn::Connection, inputs: mpsc::Unbo
   }
 }
 
+/// [`reflect`] within [`REFLECT_TIMEOUT`].
+async fn timed_reflect(
+  endpoint: quinn::Endpoint,
+  target: ReflectTarget,
+  address: SocketAddr,
+  secret: Base64Bytes,
+) -> Result<SocketAddr, String> {
+  tokio::time::timeout(REFLECT_TIMEOUT, reflect(endpoint, target, address, secret))
+    .await
+    .map_err(|_| "the SFU's reflection timed out".to_string())?
+}
+
 /// Asks the SFU from the direct path socket where its packets come from (ARCHITECTURE.md §6.7,
 /// "Endpoint discovery"): a WebTransport connection on the same QUIC endpoint, `reflect` with the
 /// session's secret, the SFU's `reflected`, and the close.
 async fn reflect(
   endpoint: quinn::Endpoint,
   target: ReflectTarget,
+  address: SocketAddr,
   secret: Base64Bytes,
 ) -> Result<SocketAddr, String> {
   let builder = ClientConfig::builder().with_bind_default();
@@ -1041,12 +1473,14 @@ async fn reflect(
   } else {
     builder.with_server_certificate_hashes(target.certificate_hashes.iter().copied().map(Sha256Digest::new))
   };
-  let config = builder.dns_resolver(PinnedResolver(target.address)).build();
+  let config = builder.dns_resolver(PinnedResolver(address)).build();
   let client: Endpoint<Client> = Endpoint::client_on_endpoint(config, endpoint);
-  let connection = client
-    .connect(&target.sfu_url)
-    .await
-    .map_err(|error| error.to_string())?;
+  let url = if address == target.address {
+    target.sfu_url.clone()
+  } else {
+    with_port(&target.sfu_url, address.port()).ok_or("the SFU's address is no URL")?
+  };
+  let connection = client.connect(&url).await.map_err(|error| error.to_string())?;
   let (mut send, mut recv) = connection
     .open_bi()
     .await

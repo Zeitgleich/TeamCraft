@@ -19,7 +19,11 @@
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
-use std::{fmt, net::SocketAddr, num::NonZeroU16};
+use std::{
+  fmt,
+  net::{IpAddr, SocketAddr},
+  num::NonZeroU16,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -348,6 +352,11 @@ pub enum CallServerMessage {
   /// none, and clients from before ignore it.
   AudioSocket {
     secret: Base64Bytes,
+    /// A second UDP port of the same SFU address that answers only `reflect` (#127): the direct
+    /// path reflects there as well, and a different mapped port tells it its NAT is a hard one
+    /// (ARCHITECTURE.md §6.7, "Hard NATs"). SFUs without one, and older ones, send none.
+    #[serde(default, rename = "reflect_port", skip_serializing_if = "Option::is_none")]
+    maybe_reflect_port: Option<u16>,
   },
   /// Answer to [`CallClientMessage::Reflect`] (#127): the address and port the reflecting
   /// connection's packets came from, as the SFU saw them (IPv4 peers in their IPv4 form).
@@ -621,6 +630,11 @@ pub enum CallEvent {
   DirectOffer {
     from_device_id: DeviceId,
     sealed: Base64Bytes,
+    /// The address the SFU sees the other device's call connection come from (IPv4 peers in their
+    /// IPv4 form): birthday probing aims only at the address the SFU saw, never at one the offer
+    /// alone names (ARCHITECTURE.md §6.7, "Hard NATs"). None on the WebSocket fallback.
+    #[serde(default, rename = "observed_ip", skip_serializing_if = "Option::is_none")]
+    maybe_observed_ip: Option<IpAddr>,
   },
   #[serde(other)]
   Unknown,
@@ -1453,10 +1467,24 @@ mod tests {
   fn audio_socket_wire_format() {
     let offer = CallServerMessage::AudioSocket {
       secret: Base64Bytes::new(vec![1, 2]),
+      maybe_reflect_port: None,
     };
     let json = serde_json::to_string(&offer).unwrap();
     assert_eq!(json, r#"{"type":"audio_socket","secret":"AQI="}"#);
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), offer);
+    let with_port = CallServerMessage::AudioSocket {
+      secret: Base64Bytes::new(vec![1, 2]),
+      maybe_reflect_port: Some(3479),
+    };
+    let json = serde_json::to_string(&with_port).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"audio_socket","secret":"AQI=","reflect_port":3479}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<CallServerMessage>(&json).unwrap(),
+      with_port
+    );
     let attach = CallClientMessage::AttachAudio {
       secret: Base64Bytes::new(vec![1, 2]),
     };
@@ -1483,6 +1511,7 @@ mod tests {
     let relayed = CallEvent::DirectOffer {
       from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
       sealed: Base64Bytes::new(vec![3]),
+      maybe_observed_ip: None,
     };
     let json = serde_json::to_string(&relayed).unwrap();
     assert_eq!(
@@ -1490,6 +1519,17 @@ mod tests {
       r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw=="}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), relayed);
+    let observed = CallEvent::DirectOffer {
+      from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
+      sealed: Base64Bytes::new(vec![3]),
+      maybe_observed_ip: Some("198.51.100.4".parse().unwrap()),
+    };
+    let json = serde_json::to_string(&observed).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw==","observed_ip":"198.51.100.4"}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), observed);
   }
 
   /// #127: the direct path's report and the reflexive address. The secret never shows in a debug

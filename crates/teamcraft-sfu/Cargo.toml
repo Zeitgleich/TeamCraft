@@ -54,7 +54,7 @@ portal-e2e = ["teamcraft-media/pipewire"]
 [dev-dependencies]
 # The native call client (engine, Opus, driver, and its video stats) for end-to-end tests against
 # this SFU.
-teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source", "call-view"] }
+teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264-source", "call-view", "port-mapping"] }
 # Raw sockets for what a hostile client sends to the fallback's listener.
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 # Device identities for the clients' call key bindings.

@@ -643,7 +643,7 @@ mod audio_socket {
         let message = socket.next().await.expect("socket ended").expect("socket failed");
         if let Message::Binary(bytes) = message
           && let FallbackFrame::Signal(body) = FallbackFrame::decode(&bytes).unwrap()
-          && let CallServerMessage::AudioSocket { secret } = serde_json::from_slice(body).unwrap()
+          && let CallServerMessage::AudioSocket { secret, .. } = serde_json::from_slice(body).unwrap()
         {
           return secret;
         }

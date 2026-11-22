@@ -437,6 +437,8 @@ async fn handle_connection(
       &mut sink,
       &CallServerMessage::AudioSocket {
         secret: secret.to_wire(),
+        // The direct path reflects on QUIC only.
+        maybe_reflect_port: None,
       },
     )
     .await;

@@ -16,24 +16,25 @@ CI (`vendored-and-fuzz` in `ci.yml`, part of `ci-gate`) builds every target on s
 it says the lock needs an update, run `cargo update --manifest-path fuzz/Cargo.toml -w` and commit
 the lockfile. Fuzzing itself stays manual (`run.sh`).
 
-| Target                | What it feeds                                                                                                    |
-|-----------------------|------------------------------------------------------------------------------------------------------------------|
-| `proto_requests`      | every request body and query type of the REST API, and the notification/status types: decode, re-encode, decode  |
-| `call_fallback_frame` | a call's WebSocket fallback frames (ARCHITECTURE.md §6.6) and the JSON inside them                               |
-| `proto_gateway`       | gateway frames in both directions, events, rendezvous frames and the main response types                         |
-| `bridge_ingest`       | Slack/Mattermost webhook bodies (JSON and form), plain/NDJSON log lines, Slack markup, then batching             |
-| `bridge_multipart`    | webhooks with files (`multipart/form-data`) cut at random points: same outcome, bounded buffer, limits held      |
-| `thumbnail`           | untrusted pictures of every format apps and the bridge decode for thumbnails, within the bridge's pixel limit    |
-| `app_link`            | links the operating system hands to the apps: no panic, no traversal, stable round trip through both spellings   |
-| `motion_photo`        | pictures with a video behind the JPEG (Motion Photos): parts inside the file, video an MP4, metadata blanked     |
-| `voice_decode`        | voice messages (Ogg or WebM Opus) decoded to WAV: no panic, output bounded by the input's size                   |
-| `imip`                | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
-| `workspace_log`       | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
-| `channel_anchor`      | a channel's anchor and properties changes: no panic, size limit held, stable re-encoding, no random signature    |
-| `strict_roles`        | a strict channel's roles and roles changes: no panic, size and role limits held, stable re-encoding, no forgery  |
-| `crypto_decoders`     | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
-| `dpop_proof`          | DPoP proofs from the `DPoP` header or a first WebSocket frame, also valid ones with bytes changed: never a panic |
-| `scim`                | SCIM filters, PATCH paths and operations, user and group resources: no panic, bounded, stable round trip         |
+| Target                 | What it feeds                                                                                                    |
+|------------------------|------------------------------------------------------------------------------------------------------------------|
+| `proto_requests`       | every request body and query type of the REST API, and the notification/status types: decode, re-encode, decode  |
+| `call_fallback_frame`  | a call's WebSocket fallback frames (ARCHITECTURE.md §6.6) and the JSON inside them                               |
+| `port_mapping_answers` | routers' NAT-PMP and PCP answers for the direct path's port mapping (#127): no panic, only usable mappings       |
+| `proto_gateway`        | gateway frames in both directions, events, rendezvous frames and the main response types                         |
+| `bridge_ingest`        | Slack/Mattermost webhook bodies (JSON and form), plain/NDJSON log lines, Slack markup, then batching             |
+| `bridge_multipart`     | webhooks with files (`multipart/form-data`) cut at random points: same outcome, bounded buffer, limits held      |
+| `thumbnail`            | untrusted pictures of every format apps and the bridge decode for thumbnails, within the bridge's pixel limit    |
+| `app_link`             | links the operating system hands to the apps: no panic, no traversal, stable round trip through both spellings   |
+| `motion_photo`         | pictures with a video behind the JPEG (Motion Photos): parts inside the file, video an MP4, metadata blanked     |
+| `voice_decode`         | voice messages (Ogg or WebM Opus) decoded to WAV: no panic, output bounded by the input's size                   |
+| `imip`                 | received iMIP REPLY text; rendering events from arbitrary strings (CR/LF injection, line folding)                |
+| `workspace_log`        | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
+| `channel_anchor`       | a channel's anchor and properties changes: no panic, size limit held, stable re-encoding, no random signature    |
+| `strict_roles`         | a strict channel's roles and roles changes: no panic, size and role limits held, stable re-encoding, no forgery  |
+| `crypto_decoders`      | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
+| `dpop_proof`           | DPoP proofs from the `DPoP` header or a first WebSocket frame, also valid ones with bytes changed: never a panic |
+| `scim`                 | SCIM filters, PATCH paths and operations, user and group resources: no panic, bounded, stable round trip         |
 
 There is no target for CalDAV responses: the CalDAV client only looks at HTTP status codes and
 parses no XML.

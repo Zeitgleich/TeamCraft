@@ -15,8 +15,9 @@ use teamcraft_crypto::call_binding::CallId as BindingCallId;
 use teamcraft_crypto::direct_path::{DirectPathError, DirectPathKey, OfferContext, sealed_epoch};
 use teamcraft_crypto::ids::DeviceId as BindingDeviceId;
 use teamcraft_proto::{
-  Base64Bytes, CallId, CallPeerStanding, DeviceId, DirectCandidate, DirectCandidateKind, DirectMediaPolicy,
-  DirectOfferBody, Id, MAX_DIRECT_CANDIDATES, MAX_DIRECT_OFFER_BYTES,
+  Base64Bytes, CallId, CallPeerStanding, DIRECT_PROBE_TOKEN_BYTES, DeviceId, DirectCandidate,
+  DirectCandidateKind, DirectMediaPolicy, DirectNatKind, DirectOfferBody, Id, MAX_DIRECT_CANDIDATES,
+  MAX_DIRECT_OFFER_BYTES,
 };
 use thiserror::Error;
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
@@ -55,6 +56,51 @@ const CONTROL_MARK: u8 = 0b1100_0000;
 const PING_TYPE: u8 = CONTROL_MARK | 1;
 const PONG_TYPE: u8 = CONTROL_MARK | 2;
 const CONTROL_LEN: usize = 5;
+
+/// Birthday probing (ARCHITECTURE.md §6.7, "Hard NATs"): the sockets the device behind the hard NAT
+/// opens, each of which its NAT maps to a port of its own toward the other device.
+pub const BIRTHDAY_SOCKETS: usize = 256;
+/// The probes the other device sends to random ports of the hard NAT's address, at most, per round.
+/// With [`BIRTHDAY_SOCKETS`] open ports among 64 512, one of them is hit with a chance of
+/// 1 − (1 − 256/64 512)^2048 ≈ 99.97 %; half the rounds find one within about 175 probes.
+pub const BIRTHDAY_PROBES: usize = 2048;
+/// Between two probes: 200 a second, so a round's probes take about 10 s.
+pub const BIRTHDAY_PROBE_INTERVAL: Duration = Duration::from_millis(5);
+/// When the hard side's sockets each punch toward the other device's address, from the round's
+/// start, and with which TTL (`None`: the system's). The NAT maps a port for each socket at its
+/// first punch; the second covers a lost one. The first two are short-lived ([`BIRTHDAY_PUNCH_TTL`]):
+/// a punch that reached the other device's NAT first could take the port pair for itself there, and
+/// a NAT like Linux's without a firewall in front then gives the other device's probe to that very
+/// port another source port (and keeps using it), which the hard NAT drops. The last one goes all
+/// the way, for a hard NAT more than two hops away (a company network), at the cost of the ports
+/// the other device hasn't probed by then, where the other NAT is such a NAT.
+pub const BIRTHDAY_PUNCHES: [(Duration, Option<u32>); 3] = [
+  (Duration::ZERO, Some(BIRTHDAY_PUNCH_TTL)),
+  (Duration::from_secs(1), Some(BIRTHDAY_PUNCH_TTL)),
+  (Duration::from_secs(4), None),
+];
+/// The short-lived punches' TTL: enough to pass the own NAT and a carrier NAT behind it (two
+/// hops), too little to reach the other device's NAT across the internet.
+pub const BIRTHDAY_PUNCH_TTL: u32 = 3;
+/// How long the easy side waits after its last probe for a connection to come.
+pub const BIRTHDAY_LINGER: Duration = Duration::from_secs(1);
+/// A birthday round ends after this without a hit.
+pub const BIRTHDAY_TIMEOUT: Duration = Duration::from_secs(12);
+/// The wait after a birthday round that found nothing; it doubles up to [`MAX_BIRTHDAY_WAIT`].
+/// Only a network change of this device starts the next round earlier, not the other device's
+/// offers: what the other device sends can't make this one probe more often.
+pub const FIRST_BIRTHDAY_WAIT: Duration = Duration::from_secs(30);
+pub const MAX_BIRTHDAY_WAIT: Duration = Duration::from_secs(300);
+/// Birthday rounds one device starts in a call, at most; only a network change of its own grants
+/// more. With the rounds' bound this caps what a hostile member can direct at its own address.
+pub const MAX_BIRTHDAY_ROUNDS: u32 = 3;
+/// The lowest port probed: the system ports below it are never a NAT's mapping.
+pub const BIRTHDAY_MIN_PORT: u16 = 1024;
+/// A probe: [`PROBE_MARK`] and the receiver's probe token. Small enough that a QUIC endpoint it
+/// reaches by mistake answers nothing (no stateless reset for so short a packet), and its first byte
+/// has QUIC's fixed bit clear, so no QUIC packet is ever taken for one.
+pub const BIRTHDAY_PROBE_LEN: usize = PROBE_MARK.len() + DIRECT_PROBE_TOKEN_BYTES;
+const PROBE_MARK: [u8; 4] = [0x00, b'T', b'C', b'B'];
 
 /// What this device knows when it decides whether to go direct.
 #[derive(Debug, Clone, Copy)]
@@ -100,6 +146,8 @@ pub enum OfferError {
   UnusableAddress,
   #[error("an offer of this epoch with counter {held} or higher was already taken")]
   Stale { held: u64 },
+  #[error("the offer's probe token has {0} bytes")]
+  ProbeToken(usize),
 }
 
 /// Who this device is in the call and who the other device is: the context of every offer.
@@ -156,6 +204,33 @@ pub enum DirectControl {
 pub enum DirectDatagram<'a> {
   Control(DirectControl),
   Media(&'a [u8]),
+}
+
+/// This device's part in birthday probing (ARCHITECTURE.md §6.7, "Hard NATs"), when one of the two
+/// is behind a hard NAT and the other isn't.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BirthdayRole {
+  /// Behind the hard NAT: open [`BIRTHDAY_SOCKETS`] sockets, punch from each toward `peer` (the
+  /// other device's reflexive address), and wait for a probe with `own_token` on any of them.
+  Open {
+    peer: SocketAddr,
+    own_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
+  },
+  /// Toward the hard NAT: send probes with `peer_token` from the direct path socket to random ports
+  /// of `peer_ip` (the other device's reflexive address) until a connection comes.
+  Probe {
+    peer_ip: IpAddr,
+    peer_token: [u8; DIRECT_PROBE_TOKEN_BYTES],
+  },
+}
+
+/// What this device knows of itself when it decides on birthday probing.
+#[derive(Debug, Clone)]
+pub struct OwnNat {
+  pub maybe_kind: Option<DirectNatKind>,
+  /// The own router mapped a port: the other device reaches that one without probing.
+  pub has_mapped: bool,
+  pub token: [u8; DIRECT_PROBE_TOKEN_BYTES],
 }
 
 /// Pings on the direct connection every [`PING_INTERVAL`]; one unanswered for [`PING_LOST_AFTER`] is
@@ -342,6 +417,145 @@ pub fn read_direct(datagram: &[u8]) -> Option<DirectDatagram<'_>> {
   }
 }
 
+/// How this device's NAT maps the direct path socket, from the SFU's reflections of it on two
+/// ports: the same address both times is an easy NAT (or none), a different one a hard NAT.
+pub fn nat_kind(first: SocketAddr, second: SocketAddr) -> DirectNatKind {
+  if first == second {
+    DirectNatKind::Easy
+  } else {
+    DirectNatKind::Hard
+  }
+}
+
+/// Whether, and how, this device takes part in birthday probing with the other device's offer: one
+/// side behind a hard NAT, the other behind an easy one, on IPv4, and neither one's router mapped a
+/// port (that one would reach). Two hard NATs, or a side that doesn't know its NAT, stay on the SFU.
+///
+/// Probes and punches go only to the address the SFU saw the other device's call connection come
+/// from (`maybe_observed_ip`), never to one the offer alone names: a member's offer can't turn this
+/// device's probing on somebody else's host.
+pub fn birthday_role(
+  own: &OwnNat,
+  peer: &DirectOfferBody,
+  maybe_observed_ip: Option<IpAddr>,
+) -> Option<BirthdayRole> {
+  let peer_reflexive = peer
+    .candidates
+    .iter()
+    .find(|candidate| candidate.kind == DirectCandidateKind::Reflexive && candidate.address.is_ipv4())?
+    .address;
+  let observed = maybe_observed_ip?.to_canonical();
+  if observed != peer_reflexive.ip().to_canonical() {
+    return None;
+  }
+  let peer_has_mapped = peer
+    .candidates
+    .iter()
+    .any(|candidate| candidate.kind == DirectCandidateKind::Mapped);
+  match (own.maybe_kind.as_ref(), peer.maybe_nat.as_ref()) {
+    (Some(DirectNatKind::Hard), Some(DirectNatKind::Easy)) if !own.has_mapped => Some(BirthdayRole::Open {
+      peer: peer_reflexive,
+      own_token: own.token,
+    }),
+    (Some(DirectNatKind::Easy), Some(DirectNatKind::Hard)) if !peer_has_mapped => {
+      let peer_token = probe_token(peer.maybe_probe_token.as_ref()?.as_slice())?;
+      Some(BirthdayRole::Probe {
+        peer_ip: peer_reflexive.ip(),
+        peer_token,
+      })
+    },
+    _ => None,
+  }
+}
+
+/// A birthday probe carrying `token`, the probed device's.
+pub fn birthday_probe(token: &[u8; DIRECT_PROBE_TOKEN_BYTES]) -> [u8; BIRTHDAY_PROBE_LEN] {
+  let mut probe = [0u8; BIRTHDAY_PROBE_LEN];
+  probe[..PROBE_MARK.len()].copy_from_slice(&PROBE_MARK);
+  probe[PROBE_MARK.len()..].copy_from_slice(token);
+  probe
+}
+
+/// Whether a datagram is a birthday probe carrying `token`; anything else is not.
+pub fn is_birthday_probe(datagram: &[u8], token: &[u8; DIRECT_PROBE_TOKEN_BYTES]) -> bool {
+  datagram.len() == BIRTHDAY_PROBE_LEN
+    && datagram[..PROBE_MARK.len()] == PROBE_MARK
+    && datagram[PROBE_MARK.len()..] == token[..]
+}
+
+/// The ports a birthday round probes, in order: [`BIRTHDAY_PROBES`] distinct random ports from
+/// [`BIRTHDAY_MIN_PORT`] up.
+pub fn birthday_ports(rng: &mut (impl CryptoRngCore + ?Sized)) -> Vec<u16> {
+  let mut ports: Vec<u16> = (BIRTHDAY_MIN_PORT..=u16::MAX).collect();
+  let count = BIRTHDAY_PROBES.min(ports.len());
+  // The first `count` steps of a Fisher-Yates shuffle.
+  for index in 0..count {
+    let remaining = ports.len() - index;
+    let pick = index + usize::try_from(rng.next_u32()).unwrap_or(0) % remaining;
+    ports.swap(index, pick);
+  }
+  ports.truncate(count);
+  ports
+}
+
+/// How many birthday rounds this device may still start, and when the next one: [`MAX_BIRTHDAY_ROUNDS`]
+/// per call, [`birthday_wait`] between rounds that found nothing; a network change of this device
+/// starts over, nothing the other device sends does.
+#[derive(Debug, Default)]
+pub struct BirthdayBudget {
+  started: u32,
+  failed: u32,
+  maybe_after: Option<Instant>,
+}
+
+impl BirthdayBudget {
+  pub fn may_start(&self, now: Instant) -> bool {
+    self.started < MAX_BIRTHDAY_ROUNDS && self.maybe_after.is_none_or(|after| now >= after)
+  }
+
+  /// When the next round may start, if one may still start and has to wait.
+  pub fn next_start(&self) -> Option<Instant> {
+    self.maybe_after.filter(|_| self.started < MAX_BIRTHDAY_ROUNDS)
+  }
+
+  pub fn on_started(&mut self) {
+    self.started = self.started.saturating_add(1);
+  }
+
+  /// A round ended without a way in.
+  pub fn on_ended(&mut self, now: Instant) {
+    self.maybe_after = Some(now + birthday_wait(self.failed));
+    self.failed = self.failed.saturating_add(1);
+  }
+
+  /// A direct connection came: the next round, if one is needed, needn't wait. Rounds stay counted.
+  pub fn on_connected(&mut self) {
+    self.failed = 0;
+    self.maybe_after = None;
+  }
+
+  /// This device's network changed: its NAT may be another one.
+  pub fn on_network_changed(&mut self) {
+    *self = Self::default();
+  }
+
+  pub fn failed(&self) -> u32 {
+    self.failed
+  }
+}
+
+/// The wait after `failed` birthday rounds that found nothing.
+pub fn birthday_wait(failed: u32) -> Duration {
+  FIRST_BIRTHDAY_WAIT
+    .saturating_mul(1u32 << failed.min(16))
+    .min(MAX_BIRTHDAY_WAIT)
+}
+
+/// A probe token as an offer carries it, or `None` if it has the wrong length.
+pub fn probe_token(bytes: &[u8]) -> Option<[u8; DIRECT_PROBE_TOKEN_BYTES]> {
+  bytes.try_into().ok()
+}
+
 impl DirectControl {
   pub fn to_bytes(self) -> [u8; CONTROL_LEN] {
     let (kind, id) = match self {
@@ -517,9 +731,10 @@ impl PathSelector {
     matches!(self.phase, Phase::Idle) && self.maybe_retry_at.is_none_or(|at| now >= at)
   }
 
-  /// A dialing round started.
+  /// A dialing round started, or a running one started over with new addresses (a new offer, a
+  /// birthday probe's find): its time runs from now.
   pub fn on_dialing(&mut self, now: Instant) {
-    if matches!(self.phase, Phase::Idle) {
+    if matches!(self.phase, Phase::Idle | Phase::Dialing { .. }) {
       self.phase = Phase::Dialing { since: now };
     }
   }
@@ -685,6 +900,11 @@ fn check_body(body: &DirectOfferBody) -> Result<(), OfferError> {
   }
   if body.certificate_hash.len() != CERTIFICATE_HASH_LEN {
     return Err(OfferError::CertificateHash(body.certificate_hash.len()));
+  }
+  if let Some(token) = &body.maybe_probe_token
+    && token.len() != DIRECT_PROBE_TOKEN_BYTES
+  {
+    return Err(OfferError::ProbeToken(token.len()));
   }
   if body
     .candidates
@@ -1152,6 +1372,17 @@ mod tests {
     }
 
     #[test]
+    fn a_round_started_over_runs_its_full_time_again() {
+      let start = Instant::now();
+      let mut selector = PathSelector::new();
+      selector.on_dialing(start);
+      selector.on_dialing(at(start, 3000));
+      assert_eq!(selector.next_deadline(), Some(at(start, 8000)));
+      selector.poll(at(start, 6000));
+      assert!(selector.is_dialing(), "the first round's end doesn't count");
+    }
+
+    #[test]
     fn a_lost_ping_while_proving_starts_the_proof_over() {
       let start = Instant::now();
       let mut selector = PathSelector::new();
@@ -1212,6 +1443,223 @@ mod tests {
     }
   }
 
+  mod birthday {
+    use super::*;
+
+    const OWN_TOKEN: [u8; DIRECT_PROBE_TOKEN_BYTES] = [3; DIRECT_PROBE_TOKEN_BYTES];
+    const PEER_TOKEN: [u8; DIRECT_PROBE_TOKEN_BYTES] = [4; DIRECT_PROBE_TOKEN_BYTES];
+
+    #[test]
+    fn two_reflections_tell_the_nat() {
+      let first: SocketAddr = "198.51.100.1:4000".parse().unwrap();
+      assert_eq!(nat_kind(first, first), DirectNatKind::Easy);
+      assert_eq!(
+        nat_kind(first, "198.51.100.1:4001".parse().unwrap()),
+        DirectNatKind::Hard
+      );
+      assert_eq!(
+        nat_kind(first, "198.51.100.2:4000".parse().unwrap()),
+        DirectNatKind::Hard,
+        "another address of the pool is endpoint-dependent too"
+      );
+    }
+
+    #[test]
+    fn the_hard_side_opens_and_the_easy_side_probes() {
+      let reflexive: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+      let hard = own(DirectNatKind::Hard, false);
+      let easy_peer = peer(DirectNatKind::Easy, reflexive, false);
+      assert_eq!(
+        role(&hard, &easy_peer),
+        Some(BirthdayRole::Open {
+          peer: reflexive,
+          own_token: OWN_TOKEN,
+        })
+      );
+      let easy = own(DirectNatKind::Easy, false);
+      let hard_peer = peer(DirectNatKind::Hard, reflexive, false);
+      assert_eq!(
+        role(&easy, &hard_peer),
+        Some(BirthdayRole::Probe {
+          peer_ip: reflexive.ip(),
+          peer_token: PEER_TOKEN,
+        })
+      );
+    }
+
+    #[test]
+    fn no_probing_where_it_can_not_help_or_is_not_needed() {
+      let reflexive: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+      let hard = own(DirectNatKind::Hard, false);
+      let easy = own(DirectNatKind::Easy, false);
+      assert_eq!(role(&hard, &peer(DirectNatKind::Hard, reflexive, false)), None);
+      assert_eq!(role(&easy, &peer(DirectNatKind::Easy, reflexive, false)), None);
+      // A mapped port reaches the hard side without probing.
+      assert_eq!(
+        role(
+          &own(DirectNatKind::Hard, true),
+          &peer(DirectNatKind::Easy, reflexive, false)
+        ),
+        None
+      );
+      assert_eq!(role(&easy, &peer(DirectNatKind::Hard, reflexive, true)), None);
+      // A side that doesn't know its NAT, a newer kind, IPv6 only, or no token: nothing.
+      let unknown = OwnNat {
+        maybe_kind: None,
+        ..easy.clone()
+      };
+      assert_eq!(role(&unknown, &peer(DirectNatKind::Hard, reflexive, false)), None);
+      assert_eq!(
+        role(
+          &easy,
+          &peer(DirectNatKind::Unknown("cone".into()), reflexive, false)
+        ),
+        None
+      );
+      let ipv6 = peer(DirectNatKind::Hard, "[2001:db8::9]:5000".parse().unwrap(), false);
+      assert_eq!(role(&easy, &ipv6), None);
+      let tokenless = DirectOfferBody {
+        maybe_probe_token: None,
+        ..peer(DirectNatKind::Hard, reflexive, false)
+      };
+      assert_eq!(role(&easy, &tokenless), None);
+    }
+
+    /// A member's offer can't aim this device's probes or punches at another host: only the
+    /// address the SFU saw the other device come from counts, and without one nothing is sent.
+    #[test]
+    fn only_the_address_the_sfu_saw_is_probed() {
+      let reflexive: SocketAddr = "203.0.113.9:5000".parse().unwrap();
+      let easy = own(DirectNatKind::Easy, false);
+      let hard = own(DirectNatKind::Hard, false);
+      let victim: IpAddr = "192.0.2.77".parse().unwrap();
+      for (me, peer_kind) in [(&easy, DirectNatKind::Hard), (&hard, DirectNatKind::Easy)] {
+        let offer = peer(peer_kind, reflexive, false);
+        assert!(birthday_role(me, &offer, Some(OBSERVED)).is_some());
+        assert_eq!(birthday_role(me, &offer, Some(victim)), None);
+        assert_eq!(birthday_role(me, &offer, None), None);
+      }
+      let mapped_form = IpAddr::V6(std::net::Ipv4Addr::new(203, 0, 113, 9).to_ipv6_mapped());
+      assert!(
+        birthday_role(
+          &easy,
+          &peer(DirectNatKind::Hard, reflexive, false),
+          Some(mapped_form)
+        )
+        .is_some(),
+        "an IPv4-mapped form is the same address"
+      );
+    }
+
+    #[test]
+    fn three_rounds_per_call_and_a_network_change_starts_over() {
+      let start = Instant::now();
+      let mut budget = BirthdayBudget::default();
+      for round in 0..MAX_BIRTHDAY_ROUNDS {
+        let now = start + Duration::from_secs(u64::from(round) * 1000);
+        assert!(budget.may_start(now), "round {round}");
+        budget.on_started();
+        budget.on_ended(now);
+        assert!(!budget.may_start(now), "the backoff after round {round}");
+      }
+      let much_later = start + Duration::from_secs(100_000);
+      assert!(!budget.may_start(much_later), "no fourth round");
+      assert_eq!(budget.next_start(), None);
+      budget.on_connected();
+      assert!(!budget.may_start(much_later), "a connection doesn't grant rounds");
+      budget.on_network_changed();
+      assert!(budget.may_start(much_later));
+    }
+
+    #[test]
+    fn a_probe_is_recognised_by_its_token_only() {
+      let probe = birthday_probe(&OWN_TOKEN);
+      assert_eq!(probe.len(), 12);
+      assert_eq!(probe[0] & 0x40, 0, "QUIC's fixed bit is clear");
+      assert!(is_birthday_probe(&probe, &OWN_TOKEN));
+      assert!(!is_birthday_probe(&probe, &PEER_TOKEN));
+      assert!(!is_birthday_probe(&probe[..11], &OWN_TOKEN));
+      let mut long = probe.to_vec();
+      long.push(0);
+      assert!(!is_birthday_probe(&long, &OWN_TOKEN));
+      assert!(!is_birthday_probe(&[], &OWN_TOKEN));
+      let mut marked = probe;
+      marked[1] = b'X';
+      assert!(!is_birthday_probe(&marked, &OWN_TOKEN));
+    }
+
+    #[test]
+    fn a_round_probes_distinct_unprivileged_ports() {
+      let ports = birthday_ports(&mut OsRng);
+      assert_eq!(ports.len(), BIRTHDAY_PROBES);
+      assert!(ports.iter().all(|port| *port >= BIRTHDAY_MIN_PORT));
+      let distinct: std::collections::HashSet<u16> = ports.iter().copied().collect();
+      assert_eq!(distinct.len(), ports.len());
+    }
+
+    #[test]
+    fn rounds_back_off_up_to_five_minutes() {
+      assert_eq!(birthday_wait(0), Duration::from_secs(30));
+      assert_eq!(birthday_wait(1), Duration::from_secs(60));
+      assert_eq!(birthday_wait(4), Duration::from_secs(300));
+      assert_eq!(birthday_wait(40), Duration::from_secs(300));
+    }
+
+    #[test]
+    fn an_offer_with_a_wrong_token_length_is_refused() {
+      let key = key(1);
+      let body = DirectOfferBody {
+        maybe_probe_token: Some(Base64Bytes::new(vec![1; 7])),
+        ..body(1)
+      };
+      let sealed = seal_offer(&key, &alice(), &body, &mut OsRng).unwrap();
+      assert_eq!(
+        open_offer(&key, &bob(), &mut OfferInbox::default(), sealed.as_slice()),
+        Err(OfferError::ProbeToken(7))
+      );
+    }
+
+    /// The address the SFU saw the other device come from: the reflexive one of [`peer`]'s offers.
+    const OBSERVED: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(203, 0, 113, 9));
+
+    fn role(own: &OwnNat, peer: &DirectOfferBody) -> Option<BirthdayRole> {
+      birthday_role(own, peer, Some(OBSERVED))
+    }
+
+    fn own(kind: DirectNatKind, has_mapped: bool) -> OwnNat {
+      OwnNat {
+        maybe_kind: Some(kind),
+        has_mapped,
+        token: OWN_TOKEN,
+      }
+    }
+
+    fn peer(kind: DirectNatKind, reflexive: SocketAddr, has_mapped: bool) -> DirectOfferBody {
+      let mut candidates = vec![
+        DirectCandidate {
+          kind: DirectCandidateKind::Host,
+          address: "192.168.1.5:5000".parse().unwrap(),
+        },
+        DirectCandidate {
+          kind: DirectCandidateKind::Reflexive,
+          address: reflexive,
+        },
+      ];
+      if has_mapped {
+        candidates.push(DirectCandidate {
+          kind: DirectCandidateKind::Mapped,
+          address: "203.0.113.9:6000".parse().unwrap(),
+        });
+      }
+      DirectOfferBody {
+        candidates,
+        maybe_nat: Some(kind),
+        maybe_probe_token: Some(Base64Bytes::new(PEER_TOKEN.to_vec())),
+        ..body(1)
+      }
+    }
+  }
+
   fn inputs(policy: &DirectMediaPolicy) -> DirectPathInputs<'_> {
     DirectPathInputs {
       policy,
@@ -1240,6 +1688,8 @@ mod tests {
           address: "198.51.100.9:62000".parse().unwrap(),
         },
       ],
+      maybe_nat: None,
+      maybe_probe_token: None,
     }
   }
 

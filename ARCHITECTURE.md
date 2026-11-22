@@ -1265,10 +1265,42 @@ where UDP is blocked it simply never connects.
   the same socket (`reflect`, with the session's secret as for `attach_audio`), and the SFU answers
   with the address it came from. Behind a NAT with endpoint-independent mapping (most home routers,
   many carrier NATs) that is also the address the peer can reach;
-- *mapped* (optional): a port the router maps on request (UPnP-IGD, NAT-PMP, PCP), where the
-  router offers it and the device's settings allow it.
+- *mapped* (desktop): a port the router maps on request. When the socket opens, the device asks its
+  default gateway with PCP and NAT-PMP and searches for a UPnP-IGD router, all at once; the first
+  mapping granted is the candidate (`teamcraft_media::port_mapping`). It is asked for 20 minutes,
+  renewed at half its lifetime and removed when the socket closes, so a crash leaves it behind for
+  at most that long. A router's answer is untrusted: only the exact answer to the request counts,
+  and an external address the other device couldn't reach (private, carrier-grade NAT, loopback)
+  is never offered. Where no router answers, the next try waits a minute, doubling up to 15. It
+  runs only while the direct path does, so "Connect directly in calls" covers it.
 
 At most 8 candidates, deduplicated, IPv6 first (no NAT in the way, usually).
+
+**Hard NATs.** A NAT with endpoint-dependent mapping gives the socket a new public port for every
+destination, so the reflexive candidate (the port toward the SFU) is useless to the other device.
+Where the SFU has a second port that only reflects (`TEAMCRAFT_SFU_REFLECT_BIND`, told to each
+session with its `audio_socket` secret as `reflect_port`), the device reflects on both ports from
+the same socket: the same address twice is an *easy* NAT (or none), two different ones a *hard*
+NAT. The offer says which (`nat`) and carries a random probe token (`probe_token`). When exactly
+one of the two devices is behind a hard NAT, neither has a mapped port, and the easy side has an
+IPv4 reflexive address, they probe as Tailscale's "How NAT traversal works" describes (birthday
+paradox): the hard side opens 256 extra sockets, each sending small punches (12 bytes) to the easy
+side's reflexive address, so its NAT maps 256 ports toward the easy side; the easy side sends probes with the hard side's token from its direct path socket to random
+ports of the hard side's address, 200 a second, at most 2048 per round (≈ 99.97 % to hit one of
+the 256). The first probe that arrives tells the hard side which socket its NAT opened toward the
+easy side: its QUIC endpoint moves to that socket and dials the probe's source, which the easy
+side's own probes opened. The punches go at the start and a second later with a TTL of 3, enough
+for the own NAT and a carrier NAT behind it but not to reach the easy side's NAT: a punch that
+arrived there first would hold the port pair, and a Linux NAT without a firewall in front (many
+routers run Linux) then sends the easy side's probe to that very port from another port, which the
+hard NAT drops, and keeps that other port for every later probe. A third punch at 4 s goes with the
+system's TTL, for hard NATs further away (company networks). A connection stops the round; a round without a hit ends after 12 s and
+the next waits 30 s, doubling up to 5 minutes, at most 3 rounds in a call (only the device's own
+network change starts over, never the other device's offers). Probes and punches go only to the
+address the SFU itself sees the other device's call connection come from: the SFU adds it to each
+relayed `direct_offer` (`observed_ip`), and a device takes part only when the offer's reflexive
+address is that one, so a member can't aim the other device's probing at somebody else's host. Two hard NATs, a device that can't tell its NAT, or an
+SFU without the second port: the call stays on the SFU.
 
 **Offers.** A device sends its candidates in a `direct_offer` to the other device through the SFU.
 The offer is end-to-end encrypted and authenticated (e2ee.md §8.4): XChaCha20-Poly1305 under a key
@@ -1285,11 +1317,12 @@ each new reflexive address.
 and the peer's candidates (IPv6 pairs first, a new pair every 50 ms) and accepts at the same
 time. A QUIC Initial going out is also what opens the own NAT for the answer, so whichever side's
 packets get through first opens the path for both; NATs with endpoint-dependent mapping ("hard"
-NATs) rarely let either through, and those calls stay on the SFU (birthday-paradox probing over many
-ports is a later step). Each side checks the other's certificate against the hash in its offer
+NATs) don't let either through, which is what birthday probing is for (above). Each side checks the other's certificate against the hash in its offer
 (mutual pinning), so a path to anybody who didn't send the offer is refused. When both directions
-connect, the connection the device with the lower device ID accepted wins; the other is closed. The
-dialing ends after 5 s without a connection, and starts again after a network change or a new offer,
+connect, the connection the device with the lower device ID accepted wins; the other is closed (the
+device whose accepted connection would lose keeps dialing after it, so both end on the same one).
+A round starts over when the other device's offer brings new addresses (its reflexive address
+usually comes a moment after its first offer). The dialing ends after 5 s without a connection, and starts again after a network change or a new offer,
 with a backoff (2 s, doubling, up to 60 s) after paths that failed.
 
 **Switching paths.** The direct path proves itself before it takes media: pings every 200 ms on
@@ -1331,12 +1364,13 @@ SFU's relay with its limits, `reflect` and the `direct_path` rule, the client's 
 path-switching logic (`teamcraft_media::direct_path`, sans I/O), and the native call engine's direct
 path (`teamcraft_media::call_native::direct`: the socket, the dual-role QUIC endpoint with mutually
 pinned certificates, the reflection over the same endpoint, offers, dialing rounds, pings, the
-switch of the audio). The desktop app passes the verified policy, the user's setting and the
+switch of the audio), port mapping on the desktop (PCP, NAT-PMP, UPnP-IGD), the SFU's second
+reflection port, hard NAT detection and birthday probing. The desktop app passes the verified policy, the user's setting and the
 standing of the call's devices (`teamcraft_core::workspace::call_peer_standing`); the connection
 details ("Stats for nerds") show the audio's path. Measurements: docs/performance.md, "Direct
-media". Still to come (issue #127's follow-ups): the Android and iOS engines' inputs and setting
-switch, the video on the direct path, port mapping, birthday-paradox probing for hard NATs, and the
-success rate per NAT type.
+media" and "Direct media through NATs" (the success rate per NAT type). Still to come (issue
+#127's follow-ups): the Android and iOS engines' inputs and setting switch (with port mapping
+there), the video on the direct path, and PCP firewall pinholes for IPv6.
 
 ## 7. Clients
 

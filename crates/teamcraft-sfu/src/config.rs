@@ -21,6 +21,12 @@ pub struct SfuConfig {
   /// (`IPV6_V6ONLY` off), so the default `[::]` also accepts IPv4 clients as IPv4-mapped addresses
   /// (ARCHITECTURE.md §1.2).
   pub bind_addr: SocketAddr,
+  /// A second UDP port that answers only the direct path's `reflect` (#127, ARCHITECTURE.md §6.7,
+  /// "Hard NATs"): two reflections of one socket toward two ports tell a client whether its NAT maps
+  /// each destination to a new port, and so whether birthday probing is its only way to a direct
+  /// path. Published under the same port as bound (clients take the port from the SFU's address).
+  /// `None`: no second port; clients then can't tell hard NATs, and those calls stay on the SFU.
+  pub maybe_reflect_bind_addr: Option<SocketAddr>,
   /// Serves the browser test page over plain HTTP when set. Development only: it also enables the
   /// [`crate::auth::DevTokenVerifier`] in `main`.
   pub maybe_dev_http_addr: Option<SocketAddr>,
@@ -251,6 +257,8 @@ impl Default for SfuConfig {
   fn default() -> Self {
     Self {
       bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 3478)),
+      // It takes a published port of its own, which an instance opens deliberately.
+      maybe_reflect_bind_addr: None,
       maybe_dev_http_addr: None,
       forwarding: ForwardingConfig::default(),
       join_timeout: Duration::from_secs(10),

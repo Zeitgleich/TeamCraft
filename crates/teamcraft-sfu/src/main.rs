@@ -147,6 +147,7 @@ async fn run() -> anyhow::Result<()> {
   if let Some(bind) = env_addr("TEAMCRAFT_SFU_BIND")? {
     config.bind_addr = bind;
   }
+  config.maybe_reflect_bind_addr = env_addr("TEAMCRAFT_SFU_REFLECT_BIND")?;
   config.maybe_dev_http_addr = env_addr("TEAMCRAFT_SFU_DEV_HTTP")?;
   if let Some(grace) = env_duration_secs("TEAMCRAFT_SFU_RECONNECT_GRACE_SECS")? {
     config.reconnect_grace = grace;

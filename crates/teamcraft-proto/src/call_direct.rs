@@ -17,6 +17,8 @@ use crate::{Base64Bytes, Role};
 pub const MAX_DIRECT_OFFER_BYTES: usize = 2048;
 /// The most candidates an offer may name; receivers refuse an offer with more.
 pub const MAX_DIRECT_CANDIDATES: usize = 8;
+/// The length of an offer's probe token (birthday probing, ARCHITECTURE.md §6.7, "Hard NATs").
+pub const DIRECT_PROBE_TOKEN_BYTES: usize = 8;
 
 /// The `direct_media` group of the signed workspace policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -92,6 +94,14 @@ pub struct DirectOfferBody {
   pub certificate_hash: Base64Bytes,
   /// Where the sender can be reached, most promising first; at most [`MAX_DIRECT_CANDIDATES`].
   pub candidates: Vec<DirectCandidate>,
+  /// How the sender's NAT maps its direct path socket, once two reflections told it; `None` while
+  /// it doesn't know (one reflection, or none).
+  #[serde(default, rename = "nat", skip_serializing_if = "Option::is_none")]
+  pub maybe_nat: Option<DirectNatKind>,
+  /// [`DIRECT_PROBE_TOKEN_BYTES`] random bytes the receiver puts into its birthday probes to the
+  /// sender, so the sender takes only the receiver's probes (ARCHITECTURE.md §6.7, "Hard NATs").
+  #[serde(default, rename = "probe_token", skip_serializing_if = "Option::is_none")]
+  pub maybe_probe_token: Option<Base64Bytes>,
 }
 
 /// One address a device's direct path socket may be reached at.
@@ -110,6 +120,19 @@ wire_enum! {
     Reflexive => "reflexive",
     /// A port the device's router mapped on request (UPnP-IGD, NAT-PMP, PCP).
     Mapped => "mapped",
+  }
+}
+
+wire_enum! {
+  /// How a device's NAT maps its direct path socket, from the SFU's reflections of it on two
+  /// ports (ARCHITECTURE.md §6.7, "Hard NATs").
+  pub enum DirectNatKind {
+    /// The same public address and port toward every destination, or no NAT at all: the
+    /// reflexive candidate is where the other device reaches it.
+    Easy => "easy",
+    /// A new public port per destination (endpoint-dependent mapping): only birthday probing finds
+    /// the port its NAT opened toward the other device.
+    Hard => "hard",
   }
 }
 
@@ -179,6 +202,8 @@ mod tests {
           address: "192.0.2.1:5000".parse().unwrap(),
         },
       ],
+      maybe_nat: None,
+      maybe_probe_token: None,
     };
     let json = serde_json::to_string(&body).unwrap();
     assert_eq!(
@@ -186,6 +211,20 @@ mod tests {
       r#"{"counter":2,"certificate_hash":"AQ==","candidates":[{"kind":"host","address":"[2001:db8::1]:4000"},{"kind":"reflexive","address":"192.0.2.1:5000"}]}"#
     );
     assert_eq!(serde_json::from_str::<DirectOfferBody>(&json).unwrap(), body);
+    let hard = DirectOfferBody {
+      maybe_nat: Some(DirectNatKind::Hard),
+      maybe_probe_token: Some(Base64Bytes::new(vec![2; 2])),
+      candidates: Vec::new(),
+      ..body
+    };
+    assert_eq!(
+      serde_json::to_string(&hard).unwrap(),
+      r#"{"counter":2,"certificate_hash":"AQ==","candidates":[],"nat":"hard","probe_token":"AgI="}"#
+    );
+    let newer: DirectOfferBody =
+      serde_json::from_str(r#"{"counter":1,"certificate_hash":"AQ==","candidates":[],"nat":"cone"}"#)
+        .unwrap();
+    assert_eq!(newer.maybe_nat, Some(DirectNatKind::Unknown("cone".into())));
     let newer: DirectCandidate = serde_json::from_str(r#"{"kind":"relay","address":"192.0.2.1:1"}"#).unwrap();
     assert_eq!(newer.kind, DirectCandidateKind::Unknown("relay".into()));
   }

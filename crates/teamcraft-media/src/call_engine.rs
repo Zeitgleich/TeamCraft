@@ -206,7 +206,7 @@ pub struct CallEngine {
   maybe_trusted_roster: Option<BTreeSet<DeviceId>>,
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// The other device's direct path offers (#127), until the driver takes them.
-  direct_offers: Vec<(DeviceId, Base64Bytes)>,
+  direct_offers: Vec<RelayedDirectOffer>,
   /// What the driver says of its direct path; the SFU hears it again after every (re)join.
   is_direct_path_active: bool,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
@@ -318,6 +318,16 @@ pub struct CallEngine {
   is_recording_unconfirmed_reported: bool,
   is_deafened: bool,
   outputs: VecDeque<EngineOutput>,
+}
+
+/// The other device's direct path offer as the SFU relayed it (#127).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelayedDirectOffer {
+  pub from: DeviceId,
+  pub sealed: Base64Bytes,
+  /// Where the SFU sees the other device's call connection come from: what birthday probing may
+  /// aim at.
+  pub maybe_observed_ip: Option<std::net::IpAddr>,
 }
 
 /// Static settings of a call.
@@ -1421,7 +1431,7 @@ impl CallEngine {
   }
 
   /// The other device's offers that arrived since the last call (#127).
-  pub fn take_direct_offers(&mut self) -> Vec<(DeviceId, Base64Bytes)> {
+  pub fn take_direct_offers(&mut self) -> Vec<RelayedDirectOffer> {
     std::mem::take(&mut self.direct_offers)
   }
 
@@ -2248,9 +2258,14 @@ impl CallEngine {
       CallEvent::DirectOffer {
         from_device_id,
         sealed,
+        maybe_observed_ip,
       } => {
         if self.direct_offers.len() < MAX_HELD_DIRECT_OFFERS {
-          self.direct_offers.push((from_device_id, sealed));
+          self.direct_offers.push(RelayedDirectOffer {
+            from: from_device_id,
+            sealed,
+            maybe_observed_ip,
+          });
         }
         Ok(())
       },

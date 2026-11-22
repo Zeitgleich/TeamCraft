@@ -271,7 +271,7 @@ fn message_handler(
       },
       Ok(FallbackFrame::Signal(body)) => match serde_json::from_slice::<CallServerMessage>(body) {
         // The SFU offers the own audio a connection of its own (#1979): the session's, not the call's.
-        Ok(CallServerMessage::AudioSocket { secret }) => audio.attach(secret),
+        Ok(CallServerMessage::AudioSocket { secret, .. }) => audio.attach(secret),
         Ok(message) => {
           let _ = inputs.unbounded_send(Input::Signal { generation, message });
         },

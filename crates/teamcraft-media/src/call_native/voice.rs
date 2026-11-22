@@ -303,6 +303,7 @@ mod tests {
     ));
     let offer = CallServerMessage::AudioSocket {
       secret: Base64Bytes::new(SECRET.to_vec()),
+      maybe_reflect_port: None,
     };
     write_server(&mut send, &offer).await;
 
