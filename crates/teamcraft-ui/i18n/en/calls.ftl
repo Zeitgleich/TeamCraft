@@ -286,6 +286,8 @@ incoming-video = { $name } is video calling you
 incoming-decline = Decline
 incoming-accept-audio = Accept with audio
 incoming-accept-video = Accept with video
+incoming-shortcuts = Answer with { $accept }, decline with { $decline }.
+incoming-shortcuts-video = Answer with { $accept }, answer with video with { $video }, decline with { $decline }.
 
 ## Settings: display, sidebar, language, privacy, devices, calls
 calls-devices = Default devices

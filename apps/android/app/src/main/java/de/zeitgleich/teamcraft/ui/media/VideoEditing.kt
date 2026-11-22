@@ -298,15 +298,16 @@ fun VideoTrimBar(uri: Uri, facts: VideoFacts, edit: VideoEdit, quality: MediaQua
 @Composable
 private fun TrimHandle(offsetPx: Float, label: String, valueMs: Long, durationMs: Long, onSet: (Long) -> Unit, onDrag: (Float) -> Unit) {
   val currentOnDrag by rememberUpdatedState(onDrag)
+  // The handle is 14 dp wide to see, 48 dp to grab, centred on the trim point (A11y #2285).
+  val grabShiftPx = with(LocalDensity.current) { ((HANDLE_TOUCH_WIDTH - HANDLE_WIDTH) / 2).toPx() }
   Box(
     Modifier
-      .offset { IntOffset(offsetPx.roundToInt(), 0) }
-      .width(HANDLE_WIDTH)
+      .offset { IntOffset((offsetPx - grabShiftPx).roundToInt(), 0) }
+      .width(HANDLE_TOUCH_WIDTH)
       .fillMaxHeight()
       // At the screen's edges the handles sit where the system's back gesture starts: without
       // this, dragging one went back to the camera and dropped the video.
       .systemGestureExclusion()
-      .background(HANDLE_COLOR, RoundedCornerShape(6.dp))
       .semantics {
         contentDescription = label
         progressBarRangeInfo = ProgressBarRangeInfo(valueMs.toFloat(), 0f..durationMs.toFloat())
@@ -315,11 +316,14 @@ private fun TrimHandle(offsetPx: Float, label: String, valueMs: Long, durationMs
       .pointerInput(Unit) { detectHorizontalDragGestures { change, amount -> change.consume(); currentOnDrag(amount) } },
     contentAlignment = Alignment.Center,
   ) {
-    Box(Modifier.width(3.dp).height(18.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(2.dp)))
+    Box(Modifier.width(HANDLE_WIDTH).fillMaxHeight().background(HANDLE_COLOR, RoundedCornerShape(6.dp)), contentAlignment = Alignment.Center) {
+      Box(Modifier.width(3.dp).height(18.dp).background(Color.Black.copy(alpha = 0.6f), RoundedCornerShape(2.dp)))
+    }
   }
 }
 
 private val TRIM_HEIGHT = 52.dp
 private val HANDLE_WIDTH = 14.dp
+private val HANDLE_TOUCH_WIDTH = 48.dp
 private val HANDLE_COLOR = Color(0xFFFFFFFF)
 private val DIM = Color.Black.copy(alpha = 0.6f)

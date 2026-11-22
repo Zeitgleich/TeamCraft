@@ -16,6 +16,7 @@ demo instance's Dex, docs/operations.md "Demo instance"):
   DEV_TOKEN_PASSWORD  the password of every user instead of "<user>-dev-pass"; one user's own
                       wins from DEV_TOKEN_PASSWORD_<USER> (the name before any "@", upper case,
                       other characters as "_": DEV_TOKEN_PASSWORD_REVIEWER_1)
+  DEV_TOKEN_CLIENT    the public client to sign in with (default "teamcraft", the apps' client)
   DEV_TOKEN_SCOPES    scopes to ask for (default "openid"; Dex needs "openid profile email groups")
   DEV_TOKEN_REDIRECT  redirect URI registered for the client (default http://127.0.0.1:9/callback)
 
@@ -36,7 +37,7 @@ import urllib.parse
 import urllib.request
 
 ISSUER = os.environ.get("DEV_TOKEN_ISSUER", "http://127.0.0.1:8080/realms/teamcraft-dev").rstrip("/")
-CLIENT_ID = "teamcraft"
+CLIENT_ID = os.environ.get("DEV_TOKEN_CLIENT", "teamcraft")
 # Never contacted; Keycloak ignores the loopback port, Dex needs it registered as is.
 REDIRECT_URI = os.environ.get("DEV_TOKEN_REDIRECT", "http://127.0.0.1:9/callback")
 SCOPES = os.environ.get("DEV_TOKEN_SCOPES", "openid")

@@ -1,5 +1,10 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.media.mediaTileDescription
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.Role
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
@@ -203,11 +208,13 @@ private fun RecentMediaStrip(onAdd: (List<RecentMediaItem>) -> Unit) {
 @Composable
 private fun AccessTile(label: String, onClick: () -> Unit) {
   Column(
+    // The label grows with the font scale: the tile is 96 dp wide at least tall, not a fixed square.
     Modifier
-      .size(MEDIA_TILE)
+      .width(MEDIA_TILE)
+      .heightIn(min = MEDIA_TILE)
       .clip(RoundedCornerShape(12.dp))
       .background(MaterialTheme.colorScheme.secondaryContainer)
-      .clickable(onClick = onClick)
+      .clickable(role = Role.Button, onClick = onClick)
       .padding(8.dp),
     horizontalAlignment = Alignment.CenterHorizontally,
     verticalArrangement = Arrangement.Center,
@@ -226,14 +233,18 @@ private fun MediaTile(item: RecentMediaItem, selectionNumber: Int, onToggle: () 
     value = recentMediaThumbnail(context, item, sidePx)?.asImageBitmap()
   }
   val isSelected = selectionNumber > 0
-  val description = stringResource(if (item.isVideo) R.string.attach_recent_video else R.string.attach_recent_photo)
+  val description = mediaTileDescription(item)
+  val selectedState = if (isSelected) stringResource(R.string.a11y_selection_number, selectionNumber) else stringResource(R.string.a11y_not_selected)
   Box(
     Modifier
       .size(MEDIA_TILE)
       .clip(RoundedCornerShape(12.dp))
       .background(MaterialTheme.colorScheme.surfaceContainerHighest)
-      .toggleable(value = isSelected, onValueChange = { onToggle() })
-      .semantics { contentDescription = description },
+      .toggleable(value = isSelected, role = Role.Checkbox, onValueChange = { onToggle() })
+      .semantics {
+        contentDescription = description
+        stateDescription = selectedState
+      },
   ) {
     maybeThumbnail?.let { Image(it, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.matchParentSize()) }
     if (isSelected) Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.25f)))
@@ -242,7 +253,7 @@ private fun MediaTile(item: RecentMediaItem, selectionNumber: Int, onToggle: () 
         DateUtils.formatElapsedTime(item.durationMs / 1000),
         style = MaterialTheme.typography.labelSmall,
         color = Color.White,
-        modifier = Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp)).padding(horizontal = 4.dp),
+        modifier = Modifier.align(Alignment.BottomStart).padding(4.dp).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp)).padding(horizontal = 4.dp).clearAndSetSemantics {},
       )
     }
     Box(
@@ -255,7 +266,9 @@ private fun MediaTile(item: RecentMediaItem, selectionNumber: Int, onToggle: () 
         .border(1.5.dp, Color.White, CircleShape),
       contentAlignment = Alignment.Center,
     ) {
-      if (isSelected) Text(selectionNumber.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
+      if (isSelected) {
+        Text(selectionNumber.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.clearAndSetSemantics {})
+      }
     }
   }
 }

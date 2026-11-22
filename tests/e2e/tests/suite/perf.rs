@@ -40,7 +40,7 @@ use futures_util::StreamExt;
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_crypto::local_store::LocalStoreKeys;
 use teamcraft_crypto::secret::SymmetricKey;
-use teamcraft_e2e::browser::{BrowserSession, WebPortLease, artifact_dir, lease_web_port, web_dir};
+use teamcraft_e2e::browser::{BrowserSession, WebPortLease, artifact_dir, lease_every_web_port, web_dir};
 use teamcraft_e2e::peer::PASSPHRASE;
 use teamcraft_e2e::resources::ProcessUsage;
 use teamcraft_e2e::scenario::space_with;
@@ -49,10 +49,9 @@ use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, UserId};
 
 use crate::web::{TEST_CSP, click_text, enter_recovery_key, wait_for_element, wait_for_text};
 
+/// One of the web test ports; this test holds all of them: what it measures (times, CPU, memory)
+/// shouldn't depend on another Chromium running next to it.
 const PORT: u16 = 8083;
-/// The other port the dev realm registers. This test holds it as well: what it measures (times,
-/// CPU, memory) shouldn't depend on a second Chromium running next to it.
-const OTHER_BROWSER_TESTS_PORT: u16 = 8082;
 const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
 const IMAGES: [&[u8]; 3] = [
   include_bytes!("../../../../assets/backgrounds/lake-morning.jpg"),
@@ -161,7 +160,7 @@ async fn the_web_client_stays_fast_and_lean_with_a_large_workspace() {
       let baseline = mib(ProcessUsage::of_matching(&profile).pss_bytes);
       let (baseline_cpu, baseline_wakeups) = idle_usage(&profile, BASELINE_IDLE).await;
       let started = Instant::now();
-      sign_in_and_unlock(&page, "carol").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
       let first_setup = started.elapsed().as_secs_f64();
       // Carol leaves; the page unloads with the client in it.
       page.goto("about:blank").await.unwrap();
@@ -230,7 +229,7 @@ struct Rig {
   alice: Peer,
   /// A second writer, so conversations have more than one author.
   bob: Peer,
-  _turn: [WebPortLease; 2],
+  _turn: Vec<WebPortLease>,
 }
 
 /// Every number of one run (written as JSON as-is).
@@ -435,10 +434,7 @@ impl Rig {
       .with_env("TEAMCRAFT_SECURITY__RATE_LIMITS__IS_ENABLED", "false")
       // More connections than the harness default: the seeding peers and the browser in parallel.
       .with_env("TEAMCRAFT_DATABASE__MAX_CONNECTIONS", "16");
-    let turn = [
-      lease_web_port(PORT).await,
-      lease_web_port(OTHER_BROWSER_TESTS_PORT).await,
-    ];
+    let turn = lease_every_web_port().await;
     let stack = builder.start().await?;
     let browser = BrowserSession::launch_for_measurements().await?;
     let alice = Peer::enroll(&stack, "alice").await;
@@ -457,13 +453,13 @@ impl Rig {
 }
 
 /// Signs in through Keycloak and unlocks the account's keys with the recovery passphrase.
-pub(crate) async fn sign_in_and_unlock(page: &Page, user: &str) {
-  page.goto(format!("{WEB_ORIGIN}/healthz")).await.unwrap();
+pub(crate) async fn sign_in_and_unlock(page: &Page, origin: &str, user: &str) {
+  page.goto(format!("{origin}/healthz")).await.unwrap();
   page
     .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
     .await
     .unwrap();
-  page.goto(format!("{WEB_ORIGIN}/?backend=server")).await.unwrap();
+  page.goto(format!("{origin}/?backend=server")).await.unwrap();
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
   sign_in_at_keycloak(page, user).await;

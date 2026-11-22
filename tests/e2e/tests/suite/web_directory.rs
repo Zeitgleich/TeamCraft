@@ -15,8 +15,8 @@ use crate::perf::sign_in_and_unlock;
 use crate::web::{shot, wait_for_element, wait_for_text};
 
 /// The port `sign_in_and_unlock` signs in on; the lease keeps the browser tests that share it apart.
-const PORT: u16 = 8083;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
+const PORT: u16 = 8090;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8090";
 const WAIT: Duration = Duration::from_secs(30);
 const INVITED: &str = "invited@example.org";
 
@@ -67,7 +67,7 @@ async fn the_directory_lists_people_and_channels_and_manages_invitations() {
   browser
     .screenshot_on_failure("directory", |page| async move {
       prefer_mouse(&page).await;
-      sign_in_and_unlock(&page, "alice").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "alice").await;
       page.goto(format!("{WEB_ORIGIN}/people")).await.unwrap();
 
       wait_for_element(&page, ".person-card").await;

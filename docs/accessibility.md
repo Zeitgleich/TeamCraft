@@ -80,17 +80,17 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-3  | Forward and Save only on the hover toolbar, not in the "more" menu (Shift+F10)                                                 | 2.1.1      | High     | fixed   |
 | W-4  | After Delete from the menu the focus fell to the page; Undo (6 s toast) out of reach                                           | 2.2.1, 2.4.3 | High   | focus fixed (returns to the message or its neighbour); undo fixed (Ctrl/Cmd+Z, named in the toast) |
 | W-5  | The app under the full call screen stayed focusable and readable                                                              | 2.4.11     | High     | fixed: `inert` while the call screen is up |
-| W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | #2278   |
+| W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | fixed: Alt+Shift+A / V / D, named in the announcement |
 | W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions"; `aria-controls` only while the list exists |
-| W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | #2280   |
+| W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | fixed: focus in, Esc closes and returns, `aria-haspopup` + `aria-expanded` |
 | W-9  | Joins, leaves, lobby arrivals and shortcut mutes aren't announced                                                             | 4.1.3      | Medium   | #2281   |
 | W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | #2281   |
-| W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | #2280   |
+| W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | fixed: a changing label has no `aria-pressed` |
 | W-12 | Date and "new messages" dividers were separators with text and a button inside (axe: nested-interactive)                       | 1.3.1      | Medium   | fixed   |
 | W-13 | A channel switch focuses the composer, which doesn't name the channel                                                         | 2.4.6      | Medium   | fixed   |
 | W-14 | Presence by colour only (away vs online 1.19:1) and hidden from screen readers                                                | 1.4.1, 1.4.11 | Medium | #2282  |
 | W-15 | Quick switcher: unread, group names and "no results" not conveyed                                                             | 1.3.1, 4.1.3 | Medium | fixed   |
-| W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | #2280   |
+| W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | fixed: roving tabindex, arrows, Home, End |
 | W-17 | Every pending message announces "Sending"                                                                                     | 4.1.3      | Low      | fixed   |
 | W-18 | Muted space header at `opacity: 0.6`: 3.58:1                                                                                  | 1.4.3      | Low      | fixed   |
 | W-19 | 22 px icon buttons (toast close, chip remove), passing only by spacing                                                        | 2.5.8      | Low      | fixed   |
@@ -100,7 +100,7 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-23 | Custom status emoji has only a `title`                                                                                        | 1.1.1      | Low      | fixed   |
 | W-24 | "Jump to latest" count: white on the dark theme's accent, 2.71:1 (axe)                                                         | 1.4.3      | High     | fixed: the accent's own text colour |
 | W-26 | "Browse channels" link in the sidebar 21 px tall (axe)                                                                        | 2.5.8      | Low      | fixed   |
-| W-27 | Send options chevron 22 px wide (axe)                                                                                         | 2.5.8      | Low      | #2284   |
+| W-27 | Send options chevron 22 px wide (axe)                                                                                         | 2.5.8      | Low      | fixed   |
 | W-25 | Activity list items contain focusable elements; code blocks in excerpts scroll but take no focus (axe)                        | 4.1.2, 2.1.1 | Low    | #2283   |
 
 ### Findings: Android
@@ -113,7 +113,7 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | A-4  | Switches and radios without a name (notification dialog, Do not disturb, meeting lobby, UnifiedPush, blur faces) | High | fixed: whole rows `toggleable`/`selectable` with a role |
 | A-5  | The voice recording timer was a live region: read every second, into the recording                         | High     | fixed; the record button says "Recording" and its disabled state |
 | A-6  | Record button: no role, disabled and recording only shown visually                                         | Medium   | fixed with A-5 |
-| A-7  | A-33: poll results, media review strip, pickable tiles, mention suggestions, upload progress, targets, font scale, new-message announcements | Medium/Low | #2285, call parts #2281, presence #2282 |
+| A-7  | A-33: poll own vote, media review strip, pickable tiles, mention and emoji suggestions, upload progress, 48 dp targets (reactions, thread link, attachment remove, zoom, trim handles), font scale (attach tiles, call avatar initial), lobby buttons, shutter, repeat field, external invitee error, option switches, selection mode | Medium/Low | fixed: #2285 (new messages are announced at the bottom, the jump pill is a polite live region); call parts #2281, presence #2282 |
 
 ### Findings: iOS
 

@@ -1,5 +1,9 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.compose.ui.platform.LocalView
+import android.view.accessibility.AccessibilityManager
+import android.os.SystemClock
+import android.view.View
 import de.zeitgleich.teamcraft.ui.theme.popOnChange
 import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import android.content.ActivityNotFoundException
@@ -108,6 +112,8 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.Layout
@@ -127,7 +133,8 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.role
-import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.toggleableState
+import androidx.compose.ui.state.ToggleableState
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontStyle
@@ -403,6 +410,8 @@ fun MessageFeed(
   val showsJumpDown by remember {
     derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > AT_BOTTOM_SLOP_PX }
   }
+  val view = LocalView.current
+  val announceNew = rememberNewMessageAnnouncer(view)
   LaunchedEffect(items, firstUnread) {
     // The opening waits for the unread position, or it would land at the end and stay there.
     if (items.isEmpty() || (!scrollState.isOpened && firstUnread == FirstUnread.Loading)) return@LaunchedEffect
@@ -423,6 +432,12 @@ fun MessageFeed(
       if (newer.isEmpty()) return@LaunchedEffect
       val me = snapshot?.me?.id
       val event = FeedScrollEvent.NewMessages(fromOthers = newer.count { it.author != me }, hasOwn = newer.any { it.author == me })
+      // At the bottom the new message just appears: TalkBack users hear it (A11y #2285).
+      if (wasNearBottom) {
+        newer.lastOrNull { it.author != me }?.let { last ->
+          announceNew(snapshot?.name(last.author).orEmpty(), newer.count { it.author != me })
+        }
+      }
       decide(event, wasNearBottom)
     }
     listState.perform(action)
@@ -801,6 +816,34 @@ private class FeedLook(
   val groupGap: Dp get() = if (isCompact) COMPACT_GROUP_GAP else LIST_GROUP_GAP
 }
 
+/**
+ * Announces new messages of others to a screen reader while the feed sits at the bottom, at most
+ * once every few seconds (a busy channel would talk over the user); nothing without one.
+ */
+@Composable
+private fun rememberNewMessageAnnouncer(view: View): (name: String, count: Int) -> Unit {
+  val resources = LocalContext.current.resources
+  val lastAt = remember { longArrayOf(0L) }
+  return remember(view, resources) {
+    announce@{ name, count ->
+      val manager = view.context.getSystemService(Context.ACCESSIBILITY_SERVICE) as? AccessibilityManager
+      if (manager?.isEnabled != true || !manager.isTouchExplorationEnabled) return@announce
+      val now = SystemClock.elapsedRealtime()
+      if (now - lastAt[0] < NEW_MESSAGE_ANNOUNCE_GAP_MS) return@announce
+      lastAt[0] = now
+      view.announceForAccessibility(
+        if (count == 1 && name.isNotEmpty()) {
+          resources.getString(R.string.a11y_new_message_from, name)
+        } else {
+          resources.getQuantityString(R.plurals.a11y_new_messages, count, count)
+        },
+      )
+    }
+  }
+}
+
+private const val NEW_MESSAGE_ANNOUNCE_GAP_MS = 3_000L
+
 /** The newest message the feed has handled; a plain holder, reading it never recomposes. */
 private class NewestSeen(var maybeMessage: Message? = null)
 
@@ -860,7 +903,11 @@ private fun JumpDownButton(unseenCount: Int, onClick: () -> Unit) {
       color = MaterialTheme.colorScheme.primaryContainer,
       contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
       shadowElevation = 3.dp,
-      modifier = Modifier.semantics { contentDescription = label },
+      modifier = Modifier.semantics {
+        contentDescription = label
+        // New messages arrive while the feed is read: say the count, politely (A11y #2285).
+        liveRegion = LiveRegionMode.Polite
+      },
     ) {
       Row(Modifier.padding(start = 10.dp, end = 14.dp, top = 8.dp, bottom = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, modifier = Modifier.size(20.dp))
@@ -1183,6 +1230,9 @@ private fun MessageRow(
     haptics.performHapticFeedback(HapticFeedbackType.Confirm)
     viewModel.act(ChatActions.react(message.conversation, message.id, QUICK_REACTION))
   }
+  // The gesture detector below outlives a recomposition: it calls the latest of these.
+  val currentReactQuickly by rememberUpdatedState(reactQuickly)
+  val currentOnLongPress by rememberUpdatedState(onLongPress)
   // Not readable yet (issue #888): no reactions, replies or actions until it is.
   val isPlaceholder = message.maybePlaceholder != null
   val rowModifier = Modifier
@@ -1193,18 +1243,21 @@ private fun MessageRow(
         label = "highlight",
       ).value,
     )
-    .combinedClickable(
-      onClick = {},
-      // Without the right to react, a tap doesn't wait to tell a double tap apart either.
-      onDoubleClick = reactQuickly.takeIf { canReact && !isPlaceholder },
-      onLongClick = {
-        // A long-press on a link in the text opens the link's own menu (#2048), not the message's.
-        if (!LinkPress.isActive) {
-          haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-          onLongPress()
-        }
-      }.takeIf { !isPlaceholder },
-    )
+    // Gestures without a click action: TalkBack would offer a "double tap" that does nothing; its
+    // actions are the custom ones below (A11y #2285).
+    .pointerInput(isPlaceholder, canReact) {
+      detectTapGestures(
+        // Without the right to react, a tap doesn't wait to tell a double tap apart either.
+        onDoubleTap = if (canReact && !isPlaceholder) { _ -> currentReactQuickly() } else null,
+        onLongPress = if (isPlaceholder) null else { _ ->
+          // A long-press on a link in the text opens the link's own menu (#2048), not the message's.
+          if (!LinkPress.isActive) {
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+            currentOnLongPress()
+          }
+        },
+      )
+    }
     .semantics {
       if (isPlaceholder) return@semantics
       customActions = listOfNotNull(
@@ -1691,8 +1744,9 @@ private fun BelowBubble(
       color = MaterialTheme.colorScheme.primary,
       style = MaterialTheme.typography.labelLarge,
       modifier = Modifier
+        .minimumInteractiveComponentSize()
         .clip(RoundedCornerShape(8.dp))
-        .clickable { onOpenThread(message.id) }
+        .clickable(role = Role.Button) { onOpenThread(message.id) }
         .padding(horizontal = 4.dp, vertical = 6.dp),
     )
   }
@@ -1720,6 +1774,7 @@ private fun AddReactionPill(onClick: () -> Unit) {
     shape = CircleShape,
     color = scheme.surfaceContainerHigh,
     border = BorderStroke(1.dp, scheme.outlineVariant),
+    modifier = Modifier.minimumInteractiveComponentSize(),
   ) {
     Icon(
       painterResource(R.drawable.ic_face),
@@ -1766,6 +1821,8 @@ private fun ReactionPill(
     modifier = Modifier
       // The count or the own reaction changing pops the pill, as `motion-pop` does on the web.
       .popOnChange(count to isMine, popsOnEnter)
+      // The pill stays small; its touch target is 48 dp (A11y #2285).
+      .minimumInteractiveComponentSize()
       .clip(CircleShape)
       .combinedClickable(
         onClick = { if (isEnabled) onClick() },
@@ -2050,7 +2107,11 @@ private fun UploadControl(
           style = MaterialTheme.typography.labelMedium.copy(fontFeatureSettings = "tnum"),
           maxLines = 1,
           overflow = TextOverflow.Ellipsis,
-          modifier = Modifier.padding(start = 4.dp).semantics { liveRegion = LiveRegionMode.Polite },
+          modifier = Modifier.padding(start = 4.dp).semantics {
+            // The bytes change many times a second and the ring has the progress: announce only
+            // the changes of state (A11y #2285).
+            if (pill !is UploadPill.Sending) liveRegion = LiveRegionMode.Polite
+          },
         )
       }
     }
@@ -2552,7 +2613,7 @@ private fun SelectableRow(
     return
   }
   val isSelected = message.id in selection.orEmpty()
-  val description = "${snapshot?.name(message.author).orEmpty()}, ${message.body}"
+  val description = "${snapshot?.name(message.author).orEmpty()}, ${spokenText(message.body)}"
   Box(
     Modifier.background(
       animateColorAsState(
@@ -2567,7 +2628,7 @@ private fun SelectableRow(
         .matchParentSize()
         .semantics(mergeDescendants = true) {
           contentDescription = description
-          selected = isSelected
+          toggleableState = if (isSelected) ToggleableState.On else ToggleableState.Off
           role = Role.Checkbox
         }
         // A long press picks too, as a tap does.
@@ -2583,3 +2644,10 @@ private fun SelectableRow(
     }
   }
 }
+
+private val MARKDOWN_LINK = Regex("\\[([^\\]]*)]\\([^)]*\\)")
+private val MARKDOWN_MARKS = Regex("[*_~`>#]+")
+
+/** A message body as it is read aloud: links by their text, no markdown marks (A11y #2285). */
+private fun spokenText(body: String): String =
+  body.replace(MARKDOWN_LINK, "$1").replace(MARKDOWN_MARKS, "").replace(Regex("\\s+"), " ").trim()

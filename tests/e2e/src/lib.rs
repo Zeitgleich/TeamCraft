@@ -17,6 +17,8 @@ pub mod demo_peers;
 pub mod desktop;
 #[cfg(feature = "browser")]
 pub mod firefox;
+#[cfg(feature = "browser")]
+pub mod keycloak;
 pub mod mail;
 pub mod netem;
 pub mod peer;

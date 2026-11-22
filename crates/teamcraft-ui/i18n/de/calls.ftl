@@ -286,6 +286,8 @@ incoming-video = { $name } ruft dich per Video an
 incoming-decline = Ablehnen
 incoming-accept-audio = Mit Audio annehmen
 incoming-accept-video = Mit Video annehmen
+incoming-shortcuts = Annehmen mit { $accept }, ablehnen mit { $decline }.
+incoming-shortcuts-video = Annehmen mit { $accept }, mit Video annehmen mit { $video }, ablehnen mit { $decline }.
 
 ## Einstellungen: Darstellung, Seitenleiste, Sprache, Datenschutz, Geräte, Anrufe
 calls-devices = Standardgeräte

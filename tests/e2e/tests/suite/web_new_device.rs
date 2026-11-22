@@ -19,8 +19,8 @@ use teamcraft_e2e::{Peer, Stack};
 
 use crate::perf::sign_in_and_unlock;
 
-const PORT: u16 = 8083;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
+const PORT: u16 = 8089;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8089";
 const NEWEST: &str = "the newest message of the DM";
 /// Channels with history beside the DM, and their messages each.
 const OTHER_CHANNELS: usize = 12;
@@ -145,7 +145,7 @@ async fn a_new_browser_shows_a_long_dm_without_calling_it_empty() {
 /// Signs Carol in on the fresh browser, opens the DM and waits until a message of it shows:
 /// milliseconds from opening it, frames with the empty state, and when that first showed.
 async fn open_the_dm_on_a_new_browser(page: &Page, dm: String) -> (f64, u64, Option<f64>) {
-  sign_in_and_unlock(page, "carol").await;
+  sign_in_and_unlock(page, WEB_ORIGIN, "carol").await;
   page.evaluate_on_new_document(FEED_RECORDER).await.unwrap();
   page.goto(format!("{WEB_ORIGIN}/dm/{dm}")).await.unwrap();
   let started = Instant::now();

@@ -15,8 +15,8 @@ use crate::pending_echo::type_into_composer;
 use crate::perf::sign_in_and_unlock;
 use crate::web::{TEST_CSP, wait_for_element};
 
-const PORT: u16 = 8083;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
+const PORT: u16 = 8086;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8086";
 const WAIT: Duration = Duration::from_secs(60);
 /// Animated images in the conversation.
 const ANIMATED_IMAGES: usize = 6;
@@ -72,7 +72,7 @@ async fn animated_images_out_of_view_cost_nothing() {
   browser
     .screenshot_on_failure("animated-images", |page| async move {
       prefer_mouse(&page).await;
-      sign_in_and_unlock(&page, "carol").await;
+      sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
       page.goto(format!("{WEB_ORIGIN}/c/{channel}")).await.unwrap();
       wait_for_element(&page, "[data-composer]").await;
       let_the_browser_in(alice_ref, &page).await;

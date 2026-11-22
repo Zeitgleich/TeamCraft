@@ -145,10 +145,17 @@ private fun LobbyRow(person: LobbyPerson, isDeciding: Boolean, isEnabled: Boolea
       LobbyPersonStatus.Member -> Unit
     }
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-      Button(onClick = { onDecide(LobbyDecision.ADMIT) }, enabled = isEnabled && person.canAdmit) {
+      val admitLabel = stringResource(R.string.a11y_lobby_admit, person.displayName)
+      val denyLabel = stringResource(R.string.a11y_lobby_deny, person.displayName)
+      // Several people wait: the buttons name who they act on (A11y #2285).
+      Button(
+        onClick = { onDecide(LobbyDecision.ADMIT) },
+        enabled = isEnabled && person.canAdmit,
+        modifier = Modifier.semantics { contentDescription = admitLabel },
+      ) {
         Text(stringResource(R.string.call_lobby_admit))
       }
-      OutlinedButton(onClick = { onDecide(LobbyDecision.DENY) }, enabled = isEnabled) {
+      OutlinedButton(onClick = { onDecide(LobbyDecision.DENY) }, enabled = isEnabled, modifier = Modifier.semantics { contentDescription = denyLabel }) {
         Text(stringResource(R.string.call_lobby_deny))
       }
       if (isDeciding) CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp)
