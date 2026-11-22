@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  CrashReportsInfo, DEFAULT_CALL_REPORTS_PER_CALL, DEFAULT_SLOW_JOB_MS, is_crash_environment,
+  CrashReportsInfo, CrashReportsRecipient, DEFAULT_CALL_REPORTS_PER_CALL, DEFAULT_SLOW_JOB_MS,
+  is_crash_environment,
 };
 pub use teamcraft_proto::{Dsn, DsnError};
 use thiserror::Error;
@@ -84,6 +85,40 @@ pub struct CrashReportingConfig {
   /// The apps say once, on the first start with reports on, that they send them.
   #[serde(default = "is_on")]
   pub shows_notice: bool,
+  /// Who receives the reports; the first-start notice and the settings hint name it. A config
+  /// stored by an older version: the organization.
+  #[serde(default)]
+  pub recipient: CrashReportsRecipient,
+}
+
+/// What the first-start notice and the settings hint say, chosen by who receives the reports and
+/// whether people may turn them off. The apps map each variant to its text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CrashReportsNoticeKind {
+  /// The app developer receives them; people may opt out.
+  PublisherOptional,
+  /// The app developer receives them; the instance requires them.
+  PublisherRequired,
+  /// The organization receives them; people may opt out.
+  OrganizationOptional,
+  /// The organization receives them; the instance requires them.
+  OrganizationRequired,
+}
+
+impl CrashReportsNoticeKind {
+  pub fn new(recipient: &CrashReportsRecipient, allows_opt_out: bool) -> Self {
+    match (recipient.is_publisher(), allows_opt_out) {
+      (true, true) => Self::PublisherOptional,
+      (true, false) => Self::PublisherRequired,
+      (false, true) => Self::OrganizationOptional,
+      (false, false) => Self::OrganizationRequired,
+    }
+  }
+
+  /// Whether the notice offers a button to the settings: only where there is a switch to find.
+  pub fn offers_settings(self) -> bool {
+    matches!(self, Self::PublisherOptional | Self::OrganizationOptional)
+  }
 }
 
 /// The user's own choice in the privacy settings. Reports are on when the admin enabled them,
@@ -157,6 +192,7 @@ impl CrashReportingConfig {
       environment: Environment::new(environment)?,
       allows_opt_out: true,
       shows_notice: true,
+      recipient: CrashReportsRecipient::default(),
     })
   }
 
@@ -166,6 +202,7 @@ impl CrashReportingConfig {
     Ok(Self {
       allows_opt_out: info.allows_opt_out,
       shows_notice: info.shows_notice,
+      recipient: info.recipient.clone(),
       trace_rate: SampleRate::new(f64::from(info.trace_percent) / 100.0)?,
       slow_job_ms: info.slow_job_ms,
       call_reports_per_call: info.call_reports_per_call,
@@ -318,6 +355,28 @@ mod tests {
   }
 
   #[test]
+  fn the_notice_follows_the_recipient_and_the_opt_out() {
+    use CrashReportsNoticeKind::*;
+    let publisher = CrashReportsRecipient::Publisher;
+    let organization = CrashReportsRecipient::Organization;
+    let unknown = CrashReportsRecipient::Unknown("later".to_owned());
+    assert_eq!(CrashReportsNoticeKind::new(&publisher, true), PublisherOptional);
+    assert_eq!(CrashReportsNoticeKind::new(&publisher, false), PublisherRequired);
+    assert_eq!(
+      CrashReportsNoticeKind::new(&organization, true),
+      OrganizationOptional
+    );
+    assert_eq!(
+      CrashReportsNoticeKind::new(&organization, false),
+      OrganizationRequired
+    );
+    // A value this version doesn't know is read as the organization.
+    assert_eq!(CrashReportsNoticeKind::new(&unknown, true), OrganizationOptional);
+    assert!(PublisherOptional.offers_settings() && OrganizationOptional.offers_settings());
+    assert!(!PublisherRequired.offers_settings() && !OrganizationRequired.offers_settings());
+  }
+
+  #[test]
   fn config_from_the_server_info() {
     let info = CrashReportsInfo {
       dsn: "https://abc123@errors.example.com/7".to_owned(),
@@ -328,8 +387,10 @@ mod tests {
       environment: "production".to_owned(),
       allows_opt_out: false,
       shows_notice: true,
+      recipient: CrashReportsRecipient::Publisher,
     };
     let config = CrashReportingConfig::from_info(&info).unwrap();
+    assert_eq!(config.recipient, CrashReportsRecipient::Publisher);
     assert_eq!(config.sample_rate.get(), 0.2);
     assert_eq!(config.trace_rate.get(), 0.05);
     assert!(!config.allows_opt_out);
@@ -368,6 +429,7 @@ mod tests {
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
+        "recipient": "organization",
       })
     );
     assert_eq!(

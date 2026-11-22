@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import androidx.annotation.StringRes
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.AlertDialog
@@ -30,7 +31,7 @@ fun CrashReportsRow(shapes: ListItemShapes, crashReports: CrashReports, status: 
     shapes,
     stringResource(R.string.crash_reports_send),
     isOn = isAllowed || !status.allowsOptOut,
-    maybeSummary = stringResource(if (status.allowsOptOut) R.string.crash_reports_send_hint else R.string.crash_reports_required_hint),
+    maybeSummary = stringResource(hintText(status)),
     isEnabled = status.allowsOptOut,
   ) {
     isAllowed = it
@@ -43,7 +44,8 @@ fun CrashReportsRow(shapes: ListItemShapes, crashReports: CrashReports, status: 
 fun CrashReportsNotice(crashReports: CrashReports, onSettings: () -> Unit) {
   val maybeStatus by crashReports.status.collectAsState()
   var isDismissed by remember { mutableStateOf(false) }
-  if (maybeStatus == null || isDismissed || !crashReports.isNoticeDue) return
+  val status = maybeStatus
+  if (status == null || isDismissed || !crashReports.isNoticeDue) return
   val close = {
     crashReports.markNoticeSeen()
     isDismissed = true
@@ -52,13 +54,36 @@ fun CrashReportsNotice(crashReports: CrashReports, onSettings: () -> Unit) {
     onDismissRequest = close,
     icon = { Icon(Icons.Outlined.Info, contentDescription = null) },
     title = { Text(stringResource(R.string.crash_reports_title)) },
-    text = { Text(stringResource(R.string.crash_reports_notice)) },
+    text = { Text(stringResource(noticeText(status))) },
     confirmButton = { TextButton(onClick = close) { Text(stringResource(R.string.ok)) } },
-    dismissButton = {
-      TextButton(onClick = {
-        close()
-        onSettings()
-      }) { Text(stringResource(R.string.crash_reports_notice_settings)) }
+    // Only an instance that lets people opt out has a switch to point to.
+    dismissButton = if (status.allowsOptOut) {
+      {
+        TextButton(onClick = {
+          close()
+          onSettings()
+        }) { Text(stringResource(R.string.crash_reports_notice_settings)) }
+      }
+    } else {
+      null
     },
   )
+}
+
+/** Who receives the reports and whether people may opt out choose the notice's words. */
+@StringRes
+internal fun noticeText(status: CrashReportsStatus): Int = when {
+  status.isPublisherRecipient && status.allowsOptOut -> R.string.crash_reports_notice_publisher_optional
+  status.isPublisherRecipient -> R.string.crash_reports_notice_publisher_required
+  status.allowsOptOut -> R.string.crash_reports_notice_organization_optional
+  else -> R.string.crash_reports_notice_organization_required
+}
+
+/** The privacy settings' hint under the switch, by the same two facts. */
+@StringRes
+internal fun hintText(status: CrashReportsStatus): Int = when {
+  status.isPublisherRecipient && status.allowsOptOut -> R.string.crash_reports_send_hint_publisher
+  status.isPublisherRecipient -> R.string.crash_reports_required_hint_publisher
+  status.allowsOptOut -> R.string.crash_reports_send_hint_organization
+  else -> R.string.crash_reports_required_hint_organization
 }

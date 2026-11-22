@@ -38,6 +38,9 @@ pub struct CrashReportsConfig {
   pub allows_opt_out: bool,
   /// Say once, on the first start with reports on, that the app sends them.
   pub shows_notice: bool,
+  /// The publisher's service receives the reports (the notice says "the app developer"); else the
+  /// organization does, which an older server and an unknown value also count as.
+  pub is_publisher_recipient: bool,
 }
 
 /// The crash reports setting in a `GET /api/v1/server-info` answer (`response_json`, status 200).
@@ -55,6 +58,7 @@ pub fn crash_reports_config(response_json: String) -> Option<CrashReportsConfig>
     environment: config.environment.as_str().to_owned(),
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
+    is_publisher_recipient: config.recipient.is_publisher(),
   })
 }
 
@@ -121,6 +125,13 @@ mod tests {
     assert_eq!(config.environment, "production");
     assert!(!config.allows_opt_out);
     assert!(config.shows_notice);
+    // An older server doesn't say who receives them: the organization.
+    assert!(!config.is_publisher_recipient);
+    let publisher = crash_reports_config(answer(&format!(
+      r#"{{"dsn":"{DSN}","sample_percent":25,"environment":"production","recipient":"publisher"}}"#
+    )))
+    .expect("config");
+    assert!(publisher.is_publisher_recipient);
   }
 
   #[test]

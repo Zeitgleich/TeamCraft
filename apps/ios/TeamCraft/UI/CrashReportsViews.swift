@@ -13,7 +13,7 @@ struct CrashReportsSection: View {
       } header: {
         Text("crash_reports_title")
       } footer: {
-        Text(status.allowsOptOut ? LocalizedStringKey("crash_reports_send_hint") : LocalizedStringKey("crash_reports_required_hint"))
+        Text(status.hintKey)
       }
     }
   }
@@ -42,12 +42,15 @@ private struct CrashReportsNotice: ViewModifier {
       isPresented: Binding(get: { reports.isNoticeDue }, set: { if !$0 { reports.markNoticeSeen() } })
     ) {
       Button("crash_reports_notice_ok", role: .cancel) { reports.markNoticeSeen() }
-      Button("crash_reports_notice_settings") {
-        reports.markNoticeSeen()
-        onSettings()
+      // Only an instance that lets people opt out has a switch to point to.
+      if reports.status?.allowsOptOut == true {
+        Button("crash_reports_notice_settings") {
+          reports.markNoticeSeen()
+          onSettings()
+        }
       }
     } message: {
-      Text("crash_reports_notice")
+      if let status = reports.status { Text(status.noticeKey) }
     }
   }
 }

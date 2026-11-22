@@ -1845,11 +1845,15 @@ fn follow_crash_reports(state: AppState, settings: Settings, i18n: I18n) {
     Effect::new(move |_| {
       if crate::crash_reports::is_notice_due() {
         crate::crash_reports::mark_notice_seen();
-        untrack(|| {
-          state.show_toast_with_action(
-            i18n.t("crash-reports-notice"),
+        // Only an instance that lets people opt out has a switch to point to.
+        let maybe_notice = crate::crash_reports::status().map(|status| status.notice);
+        untrack(|| match maybe_notice {
+          Some(notice) if notice.offers_settings() => state.show_toast_with_action(
+            i18n.t(crate::crash_reports::notice_key(notice)),
             ToastAction::OpenCrashReportSettings,
-          )
+          ),
+          Some(notice) => state.show_toast(i18n.t(crate::crash_reports::notice_key(notice))),
+          None => {},
         });
       }
     });

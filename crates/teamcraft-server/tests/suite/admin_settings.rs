@@ -985,6 +985,7 @@ mod instance_settings {
         "environment": "production",
         "allows_opt_out": true,
         "shows_notice": true,
+        "recipient": "organization",
       })
     );
     values["mode"] = json!("off");

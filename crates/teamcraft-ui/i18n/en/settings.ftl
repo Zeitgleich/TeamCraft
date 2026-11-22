@@ -957,7 +957,12 @@ settings-holiday-feed-error-too_many = the calendar has more than 5000 holidays.
 ## Crash reports (docs/crash-reports.md)
 crash-reports-heading = Crash reports
 crash-reports-send = Send crash reports
-crash-reports-send-hint = When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
-crash-reports-required-hint = Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
-crash-reports-notice = This app sends crash reports to your organization: where a crash happened and the app version, never messages, names or files.
+crash-reports-send-hint-publisher = When the app crashes or hits an error, it sends a report to the app developer: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-send-hint-organization = When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-required-hint-publisher = Your organization requires crash reports. They go to the app developer and say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-required-hint-organization = Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys.
+crash-reports-notice-publisher-optional = TeamCraft sends error reports to the app developer when it crashes. You can turn this off in Settings.
+crash-reports-notice-publisher-required = TeamCraft sends error reports to the app developer when it crashes. They contain no personal information and never chat content.
+crash-reports-notice-organization-optional = TeamCraft sends error reports to your organization when it crashes. You can turn this off in Settings.
+crash-reports-notice-organization-required = TeamCraft sends error reports to your organization when it crashes. They contain no personal information and never chat content.
 crash-reports-notice-settings = Settings
