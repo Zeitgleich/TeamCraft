@@ -323,8 +323,15 @@ async fn dms_go_with_their_deleted_participant_not_with_other_members() {
   // Bob's deletion takes his memberships; the DM stays his, as deletions before #1066 left it.
   db.delete_user(bob).await.unwrap();
   assert_eq!(
-    db.deleted_users_with_direct_conversations(10).await.unwrap(),
+    db.deleted_users_with_direct_conversations(&[], 10).await.unwrap(),
     vec![bob]
+  );
+  // A DM held by name doesn't count (data-export.md §4.2).
+  assert!(
+    db.deleted_users_with_direct_conversations(&[dm], 10)
+      .await
+      .unwrap()
+      .is_empty()
   );
   let leftover = db.direct_conversations_deleted_with(bob).await.unwrap();
   assert_eq!(leftover.len(), 1);
@@ -370,12 +377,24 @@ async fn dms_go_with_their_deleted_participant_not_with_other_members() {
   assert!(db.enqueue_push_retry(&retry, 10).await.unwrap());
   assert_eq!(db.count_push_retries(device).await.unwrap(), 1);
 
-  db.delete_direct_conversation(dm, &leftover[0].remaining)
+  // A hold keeps it, decided under its lock.
+  let kept = db
+    .delete_direct_conversation_locked(dm, &leftover[0].remaining, |_| {
+      Ok::<_, teamcraft_db::DbError>(true)
+    })
     .await
     .unwrap();
+  assert_eq!(kept, None);
+  assert_eq!(db.count_push_retries(device).await.unwrap(), 1);
+  db.delete_direct_conversation_locked(dm, &leftover[0].remaining, |_| {
+    Ok::<_, teamcraft_db::DbError>(false)
+  })
+  .await
+  .unwrap()
+  .unwrap();
   assert_eq!(db.count_push_retries(device).await.unwrap(), 0);
   assert!(
-    db.deleted_users_with_direct_conversations(10)
+    db.deleted_users_with_direct_conversations(&[], 10)
       .await
       .unwrap()
       .is_empty()
@@ -794,7 +813,10 @@ mod health_alerts {
 mod legal_hold_race {
   use std::time::Duration;
 
-  use teamcraft_db::{AppendOutcome, Database, DbError, NewAuditEntry, NewWorkspaceLogEntry, RetentionCut};
+  use teamcraft_db::{
+    AppendOutcome, Database, DbError, HeldPerson, HistoryQuery, NewAuditEntry, NewWorkspaceLogEntry,
+    RetentionCut, Withdrawal,
+  };
   use teamcraft_proto::WorkspaceLogKind;
 
   use super::*;
@@ -819,8 +841,8 @@ mod legal_hold_race {
       let channel = fixture.channel;
       let audit_id = fixture.ids.next_snowflake().unwrap();
       async move {
-        db.delete_channel_locked(channel, &audit(audit_id), None, move |_, _, maybe_policy| {
-          assert_eq!(maybe_policy, None);
+        db.delete_channel_locked(channel, &audit(audit_id), None, move |_, _, evidence| {
+          assert_eq!(evidence.maybe_policy, None);
           in_decide.send(()).unwrap();
           // Holds the transaction open, with the channel locked, until the append waits for it.
           // Blocking is fine: this worker runs nothing else meanwhile.
@@ -836,7 +858,7 @@ mod legal_hold_race {
     go_on.send(()).unwrap();
 
     assert!(deletion.await.unwrap().unwrap().is_some());
-    assert_eq!(append.await.unwrap(), AppendOutcome::NotExistingChannels);
+    assert_eq!(append.await.unwrap(), AppendOutcome::NotExistingConversations);
     assert_eq!(
       test_db
         .db
@@ -863,15 +885,12 @@ mod legal_hold_race {
       let channel = fixture.channel;
       let audit_id = fixture.ids.next_snowflake().unwrap();
       async move {
-        db.delete_channel_locked(
-          channel,
-          &audit(audit_id),
-          None,
-          |_, _, maybe_policy| match maybe_policy {
+        db.delete_channel_locked(channel, &audit(audit_id), None, |_, _, evidence| {
+          match evidence.maybe_policy.as_deref() {
             Some(payload) => Err(Refusal::Held(payload.to_vec())),
             None => Ok(()),
-          },
-        )
+          }
+        })
         .await
       }
     });
@@ -901,15 +920,12 @@ mod legal_hold_race {
       let space = fixture.space;
       let audit_id = fixture.ids.next_snowflake().unwrap();
       async move {
-        db.delete_space_locked(
-          space,
-          &audit(audit_id),
-          None,
-          |_, maybe_policy| match maybe_policy {
+        db.delete_space_locked(space, &audit(audit_id), None, |_, evidence| {
+          match evidence.maybe_policy.as_deref() {
             Some(payload) => Err(Refusal::Held(payload.to_vec())),
             None => Ok(()),
-          },
-        )
+          }
+        })
         .await
       }
     });
@@ -935,8 +951,8 @@ mod legal_hold_race {
       let db = test_db.db.clone();
       let (space, user, channel) = (fixture.space, fixture.alice, fixture.channel);
       async move {
-        db.remove_space_member(space, user, true, |maybe_policy| {
-          Ok::<_, DbError>(match maybe_policy {
+        db.remove_space_member(space, user, true, |evidence| {
+          Ok::<_, DbError>(match evidence.maybe_policy.as_deref() {
             Some(payload) if payload == HOLD_POLICY => vec![channel],
             _ => Vec::new(),
           })
@@ -951,6 +967,186 @@ mod legal_hold_race {
     assert_eq!(left.left, vec![fixture.channel]);
     assert!(left.deleted.is_empty());
     assert!(test_db.db.channel_facts(fixture.channel).await.unwrap().is_some());
+    test_db.drop_database().await;
+  }
+
+  /// A person hold (issue #2135) locks the conversations the person is in like a hold by name: a
+  /// deletion that starts meanwhile waits and then finds the channel covered.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn a_deletion_started_while_a_person_hold_is_appended_finds_the_channel_covered() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let fixture = Fixture::create(&test_db.db).await;
+    let people = [held(fixture.alice, false)];
+    let append = PendingAppend::start_with(&test_db, {
+      let (db, fixture) = (test_db.db.clone(), fixture.clone());
+      async move { append_people(&db, &fixture, 0, &people).await }
+    })
+    .await;
+
+    let deletion = tokio::spawn({
+      let db = test_db.db.clone();
+      let channel = fixture.channel;
+      let audit_id = fixture.ids.next_snowflake().unwrap();
+      async move {
+        db.delete_channel_locked(channel, &audit(audit_id), None, move |_, _, evidence| {
+          if evidence.covered_by_people.contains(&channel) {
+            Err(Refusal::Held(Vec::new()))
+          } else {
+            Ok(())
+          }
+        })
+        .await
+      }
+    });
+    wait_for_lock_waiters(&test_db.pool, 2).await;
+
+    assert_eq!(append.finish().await, AppendOutcome::Appended);
+    assert!(matches!(deletion.await.unwrap(), Err(Refusal::Held(_))));
+    assert!(test_db.db.channel_facts(fixture.channel).await.unwrap().is_some());
+    test_db.drop_database().await;
+  }
+
+  /// A held person's conversations stay covered after they leave, until the hold is released; a
+  /// hold on their direct messages only leaves channels out; unknown people are refused.
+  #[tokio::test]
+  async fn a_person_hold_covers_what_they_are_in_and_what_they_leave_while_held() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let db = &test_db.db;
+    let fixture = Fixture::create(db).await;
+    let stranger: UserId = fixture.ids.next_id().unwrap();
+    assert_eq!(
+      append_people(db, &fixture, 0, &[held(stranger, false)]).await,
+      AppendOutcome::UnknownPeople
+    );
+    assert_eq!(
+      append_people(db, &fixture, 0, &[held(fixture.alice, true)]).await,
+      AppendOutcome::Appended
+    );
+    assert!(db.conversations_covered_by_people().await.unwrap().is_empty());
+    assert_eq!(
+      append_people(db, &fixture, 1, &[held(fixture.alice, false)]).await,
+      AppendOutcome::Appended
+    );
+    assert_eq!(
+      db.conversations_covered_by_people().await.unwrap(),
+      vec![fixture.channel]
+    );
+    assert_eq!(db.held_people().await.unwrap(), vec![held(fixture.alice, false)]);
+
+    let left = db
+      .remove_space_member(fixture.space, fixture.alice, false, |_| {
+        Ok::<_, DbError>(Vec::new())
+      })
+      .await
+      .unwrap();
+    assert_eq!(left.left, vec![fixture.channel]);
+    assert_eq!(
+      db.conversations_covered_by_people().await.unwrap(),
+      vec![fixture.channel]
+    );
+
+    assert_eq!(append_people(db, &fixture, 2, &[]).await, AppendOutcome::Appended);
+    assert!(db.conversations_covered_by_people().await.unwrap().is_empty());
+    assert!(db.held_people().await.unwrap().is_empty());
+    // Held again: the departure before this hold doesn't count.
+    assert_eq!(
+      append_people(db, &fixture, 3, &[held(fixture.alice, false)]).await,
+      AppendOutcome::Appended
+    );
+    assert!(db.conversations_covered_by_people().await.unwrap().is_empty());
+    test_db.drop_database().await;
+  }
+
+  /// A member's withdrawal of their own message: gone at once without a hold; under one, marked,
+  /// hidden from history and removed once no hold keeps the conversation.
+  #[tokio::test]
+  async fn a_withdrawal_under_a_hold_waits_for_the_release() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let db = &test_db.db;
+    let fixture = Fixture::create(db).await;
+    let kept = ClientMessageId::from_bytes([1; 16]);
+    let gone = ClientMessageId::from_bytes([2; 16]);
+    for client_id in [kept, gone] {
+      store(db, &fixture, client_id).await;
+    }
+    let other: UserId = fixture.ids.next_id().unwrap();
+    assert_eq!(
+      db.withdraw_message_locked(fixture.channel, other, kept, |_| Ok::<_, teamcraft_db::DbError>(
+        false
+      ))
+      .await
+      .unwrap(),
+      Withdrawal::Nothing
+    );
+    assert_eq!(
+      db.withdraw_message_locked(fixture.channel, fixture.alice, gone, |_| Ok::<
+        _,
+        teamcraft_db::DbError,
+      >(false))
+        .await
+        .unwrap(),
+      Withdrawal::Deleted {
+        maybe_object_key: None
+      }
+    );
+    assert!(
+      db.get_message_by_client_id(fixture.channel, gone)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    for _ in 0..2 {
+      assert_eq!(
+        db.withdraw_message_locked(fixture.channel, fixture.alice, kept, |_| Ok::<
+          _,
+          teamcraft_db::DbError,
+        >(true))
+          .await
+          .unwrap(),
+        Withdrawal::KeptForHold
+      );
+    }
+    assert!(history(db, &fixture).await.is_empty());
+    assert!(
+      db.get_message_by_client_id(fixture.channel, kept)
+        .await
+        .unwrap()
+        .is_some()
+    );
+    assert_eq!(
+      db.conversations_with_pending_deletions(10).await.unwrap(),
+      vec![fixture.channel]
+    );
+    assert_eq!(
+      db.apply_pending_deletions_locked(fixture.channel, |_| Ok::<_, teamcraft_db::DbError>(true))
+        .await
+        .unwrap(),
+      None
+    );
+    let applied = db
+      .apply_pending_deletions_locked(fixture.channel, |_| Ok::<_, teamcraft_db::DbError>(false))
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(applied.messages, 1);
+    assert!(
+      db.get_message_by_client_id(fixture.channel, kept)
+        .await
+        .unwrap()
+        .is_none()
+    );
+    assert!(
+      db.conversations_with_pending_deletions(10)
+        .await
+        .unwrap()
+        .is_empty()
+    );
     test_db.drop_database().await;
   }
 
@@ -989,8 +1185,8 @@ mod legal_hold_race {
       let db = test_db.db.clone();
       let channel = fixture.channel;
       async move {
-        db.delete_past_retention_locked(channel, &cut, |maybe_policy| {
-          Ok::<_, DbError>(maybe_policy == Some(HOLD_POLICY))
+        db.delete_past_retention_locked(channel, &cut, |evidence| {
+          Ok::<_, DbError>(evidence.maybe_policy.as_deref() == Some(HOLD_POLICY))
         })
         .await
       }
@@ -1101,6 +1297,13 @@ mod legal_hold_race {
 
   impl PendingAppend {
     async fn start(test_db: &TestDatabase, fixture: &Fixture) -> Self {
+      Self::start_with(test_db, append_hold(test_db.db.clone(), fixture.clone())).await
+    }
+
+    async fn start_with(
+      test_db: &TestDatabase,
+      append: impl std::future::Future<Output = AppendOutcome> + Send + 'static,
+    ) -> Self {
       let mut rival = test_db.pool.begin().await.unwrap();
       sqlx::query(
         "INSERT INTO workspace_log (kind, version, payload, signature) VALUES ('policy', 1, 'x', 'y')",
@@ -1108,7 +1311,7 @@ mod legal_hold_race {
       .execute(&mut *rival)
       .await
       .unwrap();
-      let task = tokio::spawn(append_hold(test_db.db.clone(), fixture.clone()));
+      let task = tokio::spawn(append);
       wait_for_lock_waiters(&test_db.pool, 1).await;
       Self { rival, task }
     }
@@ -1128,7 +1331,63 @@ mod legal_hold_race {
       signature: b"signature",
       signer: fixture.signer,
       new_holds: &[fixture.channel],
+      maybe_held_people: Some(&[]),
       audit: &[],
+    })
+    .await
+    .unwrap()
+  }
+
+  /// Appends a policy at `expected_version` that holds `people` and nothing by name.
+  async fn append_people(
+    db: &Database,
+    fixture: &Fixture,
+    expected_version: u64,
+    people: &[HeldPerson],
+  ) -> AppendOutcome {
+    db.append_workspace_log(&NewWorkspaceLogEntry {
+      kind: &WorkspaceLogKind::Policy,
+      expected_version,
+      payload: b"a policy that holds people",
+      signature: b"signature",
+      signer: fixture.signer,
+      new_holds: &[],
+      maybe_held_people: Some(people),
+      audit: &[],
+    })
+    .await
+    .unwrap()
+  }
+
+  fn held(user: UserId, is_direct_only: bool) -> HeldPerson {
+    HeldPerson { user, is_direct_only }
+  }
+
+  async fn store(db: &Database, fixture: &Fixture, client_message_id: ClientMessageId) {
+    db.store_message(&NewMessage {
+      id: fixture.ids.next_id().unwrap(),
+      client_message_id,
+      conversation_id: fixture.channel,
+      sender_user_id: fixture.alice,
+      sender_device_id: fixture.signer,
+      maybe_thread_id: None,
+      mentioned_user_ids: &[],
+      is_urgent: false,
+      content_key_id: b"k",
+      ciphertext: b"opaque",
+    })
+    .await
+    .unwrap();
+  }
+
+  async fn history(db: &Database, fixture: &Fixture) -> Vec<teamcraft_db::StoredMessage> {
+    db.list_messages(&HistoryQuery {
+      conversation: fixture.channel,
+      maybe_before: None,
+      maybe_after: None,
+      maybe_not_before: None,
+      sees_imported: false,
+      limit: 10,
     })
     .await
     .unwrap()

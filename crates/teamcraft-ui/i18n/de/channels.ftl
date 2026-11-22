@@ -474,7 +474,7 @@ channel-sources-bridge-configured = Unter der eingestellten Adresse
 channel-sources-bridge-configured-hint = Die Bridge läuft auf einem eigenen Host, Quellen senden an { $url }, die Adresse, die die Admins eingestellt haben.
 
 inactivity-notice-quiet = In diesem Kanal hat länger niemand geschrieben.
-legal-hold-notice = Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, { $reference }). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, und das Gespräch kann nicht gelöscht werden, bis die Anordnung aufgehoben ist.
+legal-hold-notice = Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, { $reference }). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, das Gespräch kann nicht gelöscht werden, und eine Nachricht, die du löschst, bleibt verborgen auf dem Server, bis die Anordnung aufgehoben ist.
 inactivity-notice-archive-on = In diesem Kanal hat länger niemand geschrieben. Er wird am { $date } archiviert, wenn niemand darin schreibt oder ihn offen hält.
 inactivity-notice-archived = Dieser Kanal wurde automatisch archiviert, weil es still war.
 inactivity-notice-delete-on = Dieser Kanal wurde archiviert, weil es still war. Er wird am { $date } gelöscht, wenn ihn niemand wiederherstellt oder das Löschen aufschiebt.

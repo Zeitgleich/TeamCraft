@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM messages WHERE conversation_id = $1 AND id = ANY($2)\n       RETURNING ciphertext_s3_key AS \"key?\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "key?",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "messages",
+            "name": "ciphertext_s3_key"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "59b270d9f5661c25039cf5646bfae126b90c38cff9cf78e6d62a2a912aac6069"
+}

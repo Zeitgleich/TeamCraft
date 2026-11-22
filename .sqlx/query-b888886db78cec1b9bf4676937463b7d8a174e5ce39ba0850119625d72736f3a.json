@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT conversation_id AS \"conversation_id!\" FROM legal_hold_covered\n           WHERE conversation_id = ANY($1) ORDER BY 1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "conversation_id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "legal_hold_covered",
+            "name": "conversation_id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b888886db78cec1b9bf4676937463b7d8a174e5ce39ba0850119625d72736f3a"
+}

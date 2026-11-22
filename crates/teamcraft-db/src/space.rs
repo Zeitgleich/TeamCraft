@@ -664,19 +664,19 @@ impl Database {
 
   /// Removes the user from the space and from all of its channels. Returns the channels they left.
   /// With `deletes_memberless`, private channels left without members are deleted, except those
-  /// `held` names: it gets the newest signed policy's payload, read after the channels are locked, and
-  /// returns the conversations under a legal hold (data-export.md §4.2, issue #2143).
+  /// `held` names: it gets the legal holds, read after the channels are locked ([`HoldEvidence`]),
+  /// and returns the conversations under a legal hold (data-export.md §4.2, issue #2143).
   pub async fn remove_space_member<E: From<DbError>>(
     &self,
     space: SpaceId,
     user: UserId,
     deletes_memberless: bool,
-    held: impl FnOnce(Option<&[u8]>) -> Result<Vec<ConversationId>, E>,
+    held: impl FnOnce(&crate::HoldEvidence) -> Result<Vec<ConversationId>, E>,
   ) -> Result<crate::SpaceLeft, E> {
     let mut tx = self.pool().begin().await.map_err(DbError::from)?;
-    Self::lock_member_channels(&mut tx, space, user).await?;
+    let channels = Self::lock_member_channels(&mut tx, space, user).await?;
     let kept = if deletes_memberless {
-      held(Self::latest_policy_payload_in(&mut tx).await?.as_deref())?
+      held(&Self::hold_evidence_in(&mut tx, &channels).await?)?
     } else {
       Vec::new()
     };
@@ -719,9 +719,9 @@ impl Database {
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     space: SpaceId,
     user: UserId,
-  ) -> Result<(), DbError> {
+  ) -> Result<Vec<ConversationId>, DbError> {
     // Against a join or a leave at the same moment: who stays is counted below.
-    sqlx::query_scalar!(
+    let ids = sqlx::query_scalar!(
       r#"SELECT c.id FROM conversations c JOIN memberships m ON m.conversation_id = c.id
          WHERE c.space_id = $1 AND m.user_id = $2 ORDER BY c.id FOR UPDATE OF c"#,
       to_db(space),
@@ -729,7 +729,7 @@ impl Database {
     )
     .fetch_all(&mut **tx)
     .await?;
-    Ok(())
+    ids.into_iter().map(from_db).collect()
   }
 
   async fn remove_member_in(

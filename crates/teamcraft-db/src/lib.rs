@@ -35,6 +35,7 @@ mod key_bag;
 mod key_package;
 mod last_seen;
 mod leavers;
+mod legal_hold;
 mod local_account;
 mod meeting;
 mod meeting_notice;
@@ -125,6 +126,7 @@ pub use key_bag::{KeyBag, KeyBagOutcome};
 pub use key_package::{AddPackagesOutcome, ClaimedPackage, KeyPackageCounts, NewKeyPackage};
 pub use last_seen::StoredLastSeen;
 pub use leavers::{LeaverClaim, StoredLeaver};
+pub use legal_hold::{HeldPerson, HoldEvidence, PendingDeletionsApplied, Withdrawal};
 pub use local_account::{LOCAL_ISSUER, LocalAccount, SessionLimits, SessionState};
 pub use meeting::{
   AttendeeDiff, AttendeeKey, Handover, HostListOutcome, LobbyRow, MeetingChanges, NewAttendee, NewHostList,

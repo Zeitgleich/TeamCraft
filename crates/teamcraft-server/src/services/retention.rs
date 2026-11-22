@@ -27,6 +27,8 @@ pub struct RetentionReport {
   pub attachments_deleted: u64,
   pub index_segments_deleted: u64,
   pub partitions_dropped: u64,
+  /// Messages withdrawn under a legal hold that went once it was released (data-export.md §4.2).
+  pub held_deletions_applied: u64,
 }
 
 pub async fn get_space_retention(
@@ -136,15 +138,12 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
   let (_, policy, _) = current_policy(state).await?;
   let retention = policy.retention;
   let mut report = RetentionReport::default();
+  let held = super::legal_hold::held_conversations(state).await?;
 
   for target in state.database.list_retention_targets().await? {
     // data-export.md §4.2: a held conversation keeps everything until the hold is released. This
     // skips what was held when the run started; `enforce` checks again under the lock.
-    if policy
-      .compliance_archive
-      .legal_hold(target.conversation)
-      .is_some()
-    {
+    if held.contains(&target.conversation) {
       continue;
     }
     // The limit also holds for settings made before it was lowered.
@@ -161,6 +160,8 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
     }
   }
 
+  // Withdrawals a hold kept, where it was released since (data-export.md §4.2).
+  report.held_deletions_applied = super::legal_hold::apply_pending_deletions(state).await?;
   let dropped = state.database.drop_empty_message_partitions(now).await?;
   report.partitions_dropped = dropped.len() as u64;
   state
@@ -180,6 +181,7 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
         "attachments": report.attachments_deleted,
         "index_segments": report.index_segments_deleted,
         "partitions": report.partitions_dropped,
+        "held_deletions_applied": report.held_deletions_applied,
       }),
     )
     .await?;
@@ -221,8 +223,8 @@ async fn enforce(
   // since this run read the policy keeps it (#2143).
   let Some(deleted) = state
     .database
-    .delete_past_retention_locked(conversation, &cut, |maybe_policy| {
-      super::legal_hold::is_held_in(maybe_policy, conversation)
+    .delete_past_retention_locked(conversation, &cut, |evidence| {
+      super::legal_hold::is_held_in(evidence, conversation)
     })
     .await?
   else {

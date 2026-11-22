@@ -13,21 +13,22 @@ use futures_channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
 use futures_util::StreamExt;
 use teamcraft_proto::{
   AddConversationMemberRequest, AddSpaceMemberRequest, Base64Bytes, ChannelMentions, ChannelModeration,
-  ChannelRole, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ConversationHead,
-  ConversationId, ConversationKind, ConversationMemberResponse, ConversationResponse, ConversationVisibility,
-  CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceActivity, DeviceId, DeviceResponse,
-  ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage, GetMeResponse, HistoryPolicy, Id,
-  IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse, KeyPackageStatusResponse,
-  ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse, ListMessagesQuery,
-  ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse, ListScheduledMessagesResponse,
-  ListSpaceMembersResponse, ListSpacesResponse, ListUserGroupRostersResponse, MessageId, MessageResponse,
-  MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest, MyMembership, NotificationLevel,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutKeyBagRequest,
-  RegisterDeviceRequest, Role, ScheduleMessageRequest, ScheduledHoldReason, ScheduledMessageId,
-  ScheduledMessageResponse, SendMessageRequest, SendScheduledMessageResponse, SetPresenceRequest,
-  SetReadPositionRequest, Snowflake, SpaceHead, SpaceId, SpaceMemberResponse, SpaceResponse, SpaceRole,
-  SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest, UpdateScheduledMessageRequest,
-  UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId, UserKind, UserSummary,
+  ChannelRole, ClaimKeyPackagesRequest, ClaimKeyPackagesResponse, ClaimedKeyPackage, ClientMessageId,
+  ConversationHead, ConversationId, ConversationKind, ConversationMemberResponse, ConversationResponse,
+  ConversationVisibility, CreateChannelRequest, CreateDmRequest, CreateGroupDmRequest, DeviceActivity,
+  DeviceId, DeviceResponse, ErrorCode, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  GetMeResponse, HistoryPolicy, Id, IdempotencyKey, IdentityKeyResponse, JoinPolicy, KeyBagResponse,
+  KeyPackageStatusResponse, ListConversationMembersResponse, ListConversationsResponse, ListDevicesResponse,
+  ListMessagesQuery, ListMessagesResponse, ListMlsMessagesQuery, ListMlsMessagesResponse,
+  ListScheduledMessagesResponse, ListSpaceMembersResponse, ListSpacesResponse, ListUserGroupRostersResponse,
+  MessageId, MessageResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse, MoveChannelRequest,
+  MyMembership, NotificationLevel, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutKeyBagRequest, RegisterDeviceRequest, Role, ScheduleMessageRequest, ScheduledHoldReason,
+  ScheduledMessageId, ScheduledMessageResponse, SendMessageRequest, SendScheduledMessageResponse,
+  SetPresenceRequest, SetReadPositionRequest, Snowflake, SpaceHead, SpaceId, SpaceMemberResponse,
+  SpaceResponse, SpaceRole, SyncHeadsResponse, UnixMillis, UpdateConversationMemberRequest,
+  UpdateScheduledMessageRequest, UploadIdentityKeyRequest, UploadKeyPackagesRequest, UserGroupRoster, UserId,
+  UserKind, UserSummary,
 };
 use teamcraft_proto::{AdminJoinRequestChange, AdminJoinRequestResponse, ClientCompatibilityResponse};
 use teamcraft_proto::{
@@ -1728,6 +1729,22 @@ impl FakeServer {
     }
   }
 
+  /// The client message IDs of the messages the server keeps in `conversation`, oldest first.
+  pub fn stored_client_ids(&self, conversation: ConversationId) -> Vec<ClientMessageId> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .map(|found| {
+        found
+          .messages
+          .iter()
+          .map(|message| message.client_message_id)
+          .collect()
+      })
+      .unwrap_or_default()
+  }
+
   /// While `is_dropping`, the server answers `user`'s messages as stored but neither keeps nor
   /// delivers them: a server that keeps a message from the members (or a sender that crashed
   /// before sending it, as the members see it).
@@ -2536,6 +2553,7 @@ fn sent_request(entry: &ScheduledMessageResponse) -> SendMessageRequest {
     mentioned_user_ids: entry.mentioned_user_ids.clone(),
     is_urgent: entry.is_urgent,
     is_channel_mention: entry.is_channel_mention,
+    maybe_deletes: None,
   }
 }
 
@@ -4931,6 +4949,13 @@ impl ServerApi for FakeServerApi {
         return Ok(message);
       }
       let entry = state.member_conversation_mut(conversation, me)?;
+      // A withdrawal of an own message removes it, as the real server does without a legal hold
+      // (data-export.md §4.2; holds are tested against the real server).
+      if let Some(target) = request.maybe_deletes {
+        entry
+          .messages
+          .retain(|stored| !(stored.client_message_id == target && stored.sender_user_id == me));
+      }
       entry.messages.push(message.clone());
       let members: Vec<UserId> = entry.members.keys().copied().collect();
       state.publish(

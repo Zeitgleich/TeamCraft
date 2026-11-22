@@ -42,6 +42,14 @@ pub struct SendMessageRequest {
   /// as for a mention (notifications.md, "Per-conversation filters").
   #[serde(default, skip_serializing_if = "is_false")]
   pub is_channel_mention: bool,
+  /// This message withdraws one of the sender's own earlier messages in the conversation, named by
+  /// its client message ID (issue #2135, data-export.md §4.2). The encrypted delete inside is what
+  /// devices act on; this lets the server remove the withdrawn message's ciphertext, or, while a
+  /// legal hold keeps the conversation, mark it deleted and keep it until the hold is released. The
+  /// server ignores it for another user's message. Older clients don't send it: the ciphertext then
+  /// stays until retention, as before.
+  #[serde(rename = "deletes", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_deletes: Option<ClientMessageId>,
 }
 
 /// Words that address the whole conversation, written with a leading `@`.
@@ -128,9 +136,11 @@ mod tests {
       mentioned_user_ids: Vec::new(),
       is_urgent: false,
       is_channel_mention: false,
+      maybe_deletes: None,
     };
     let json = serde_json::to_string(&request).unwrap();
     assert!(!json.contains("is_channel_mention"));
+    assert!(!json.contains("deletes"));
     // Older clients send no bit: it reads as unset.
     assert_eq!(
       serde_json::from_str::<SendMessageRequest>(&json).unwrap(),
@@ -144,6 +154,22 @@ mod tests {
       serde_json::to_string(&set)
         .unwrap()
         .contains(r#""is_channel_mention":true"#)
+    );
+  }
+
+  #[test]
+  fn a_deletion_names_the_withdrawn_message() {
+    let json = r#"{"client_message_id":"01010101010101010101010101010101","device_id":"2","content_key_id":"","ciphertext":"","deletes":"02020202020202020202020202020202"}"#;
+    let parsed: SendMessageRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(parsed.maybe_deletes, Some(ClientMessageId::from_bytes([2; 16])));
+    let written = serde_json::to_string(&parsed).unwrap();
+    assert!(
+      written.contains(r#""deletes":"02020202020202020202020202020202""#),
+      "{written}"
+    );
+    assert_eq!(
+      serde_json::from_str::<SendMessageRequest>(&written).unwrap(),
+      parsed
     );
   }
 }

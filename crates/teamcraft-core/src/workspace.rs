@@ -952,15 +952,89 @@ pub fn call_recording_allowance(store: &impl LocalStore, user: UserId, now_ms: i
   policy.allows(role).then(|| policy.max_seconds())
 }
 
-/// The legal holds of the verified policy (data-export.md §4.2), for the banner in held
-/// conversations. Empty before a workspace was verified or when the state can't be read: only an
-/// owner's signature shows a conversation as held, never the server's word.
+/// The legal holds of the verified policy (data-export.md §4.2), one per held conversation this
+/// device knows, for the banner: the conversations held by name, and those a held person is in
+/// (issue #2135), each with the reference of the hold that keeps it ([`legal_hold_of_conversation`]).
+/// Empty before a workspace was verified or when the state can't be read: only an owner's signature
+/// shows a conversation as held, never the server's word. Every app reads its banner from this list
+/// (desktop, web, Android and iOS), so a person's hold shows wherever a conversation's would.
 pub fn legal_holds(store: &impl LocalStore) -> Vec<teamcraft_proto::LegalHold> {
+  let Some(archive) = verified_compliance_archive(store) else {
+    return Vec::new();
+  };
+  if archive.person_holds.is_empty() {
+    return archive.legal_holds;
+  }
+  let conversations: Vec<teamcraft_proto::ConversationResponse> =
+    records::list_json(store, Table::Conversations).unwrap_or_default();
+  let me = records::account_user_id(store).ok().flatten();
+  let mut holds = archive.legal_holds.clone();
+  for conversation in &conversations {
+    if teamcraft_proto::legal_hold_of(&holds, conversation.id).is_some() {
+      continue;
+    }
+    let people = conversation_people(store, conversation, me);
+    if let Some(hold) = archive.hold_covering(conversation.id, &conversation.kind, &people) {
+      holds.push(hold);
+    }
+  }
+  holds
+}
+
+/// The hold that keeps `conversation` under the verified policy, its own or a held person's, if this
+/// device knows the conversation or holds it by name; `None` before a workspace was verified.
+pub fn legal_hold_of_conversation(
+  store: &impl LocalStore,
+  conversation: teamcraft_proto::ConversationId,
+) -> Option<teamcraft_proto::LegalHold> {
+  let archive = verified_compliance_archive(store)?;
+  if let Some(hold) = archive.legal_hold(conversation) {
+    return Some(hold.clone());
+  }
+  if archive.person_holds.is_empty() {
+    return None;
+  }
+  let known: teamcraft_proto::ConversationResponse =
+    records::get_json(store, Table::Conversations, &conversation.to_string())
+      .ok()
+      .flatten()?;
+  let me = records::account_user_id(store).ok().flatten();
+  archive.hold_covering(conversation, &known.kind, &conversation_people(store, &known, me))
+}
+
+fn verified_compliance_archive(store: &impl LocalStore) -> Option<teamcraft_proto::ComplianceArchivePolicy> {
   records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
     .ok()
     .flatten()
-    .map(|state| state.policy.compliance_archive.legal_holds)
-    .unwrap_or_default()
+    .map(|state| state.policy.compliance_archive)
+}
+
+/// Who this device knows to be in a conversation, for a person's hold: a direct message's
+/// participants, the member list it has, and the user itself while a member. The server's word, as
+/// every member list is; the hold itself is the owner's signature.
+fn conversation_people(
+  store: &impl LocalStore,
+  conversation: &teamcraft_proto::ConversationResponse,
+  maybe_me: Option<UserId>,
+) -> Vec<UserId> {
+  let mut people: Vec<UserId> = conversation
+    .participants
+    .iter()
+    .map(|participant| participant.id)
+    .collect();
+  let maybe_members: Option<teamcraft_proto::ListConversationMembersResponse> =
+    records::get_json(store, Table::Members, &conversation.id.to_string())
+      .ok()
+      .flatten();
+  if let Some(list) = maybe_members {
+    people.extend(list.members.iter().map(|member| member.user.id));
+  }
+  if let (Some(me), Some(_)) = (maybe_me, &conversation.maybe_my_membership) {
+    people.push(me);
+  }
+  people.sort_unstable();
+  people.dedup();
+  people
 }
 
 /// Who may record calls under the verified policy (e2ee.md §8.3). `None` before a workspace was

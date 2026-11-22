@@ -489,3 +489,22 @@
 .legal-hold-form .btn-primary {
   margin-top: 16px;
 }
+
+/* Channel or person (issue #2135), then the person's scope as radios. */
+.legal-hold-form .segmented {
+  margin-bottom: 12px;
+}
+
+.legal-hold-scope {
+  display: grid;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  border: 0;
+}
+
+.legal-hold-scope > legend {
+  padding: 0;
+  margin-bottom: 4px;
+  font-weight: var(--weight-semibold);
+}

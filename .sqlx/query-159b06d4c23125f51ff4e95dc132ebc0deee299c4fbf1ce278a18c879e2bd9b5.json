@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT user_id, direct_only FROM legal_hold_people ORDER BY user_id",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "legal_hold_people",
+            "name": "user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "direct_only",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "legal_hold_people",
+            "name": "direct_only"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "159b06d4c23125f51ff4e95dc132ebc0deee299c4fbf1ce278a18c879e2bd9b5"
+}

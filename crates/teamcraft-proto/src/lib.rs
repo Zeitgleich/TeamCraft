@@ -90,8 +90,9 @@ pub use integration::{
   SourceTokenHash, SourceTokenHashError, check_source_picture, clean_source_name,
 };
 pub use legal_hold::{
-  LegalHold, LegalHoldError, MAX_LEGAL_HOLD_REFERENCE_CHARS, MAX_LEGAL_HOLDS, check_legal_holds,
-  legal_hold_changes, legal_hold_of,
+  LegalHold, LegalHoldError, MAX_LEGAL_HOLD_REFERENCE_CHARS, MAX_LEGAL_HOLDS, PersonHoldScope,
+  PersonLegalHold, check_legal_holds, hold_covering, legal_hold_changes, legal_hold_of, person_hold_changes,
+  person_hold_of,
 };
 pub use log_level::{LevelMatch, LogLevel, find_level, level_from_number, parse_level_field};
 pub use motion::{DEFAULT_MAX_MOTION_BYTES, MAX_MOTION_BYTES_LIMIT, MIN_MOTION_BYTES_LIMIT, MotionLimits};

@@ -1102,7 +1102,10 @@ every device that processes a removal or a return records it there, shares what 
 linked device, and takes the records of the others into its check for all conversations whenever it
 loads or merges the account data, before it decrypts anything. A device can't know removals that
 none of the user's devices processed (or that only a device not updated yet knows). Edits, deletes and reactions are
-messages too, so nobody can change or delete someone else's message. A device that left a conversation
+messages too, so nobody can change or delete someone else's message. A delete also names the withdrawn
+message to the server (`deletes`, its client message ID), which then removes that message's ciphertext,
+or keeps it marked and hidden while a legal hold keeps the conversation (data-export.md §4.2); only the
+sender's own message counts. A device that left a conversation
 (removed, or its user removed) can't add messages dated after it left and before it was added
 back, if it was (five minutes of slack for clocks). Messages from before signatures existed are refused unless the client setting
 `accept_unsigned_messages` allows them.
@@ -1696,7 +1699,9 @@ from every channel first, then the server deletes. Direct messages with nobody l
 DMs, group DMs that would keep one other person) are deleted on the server with their ciphertext,
 attachments and MLS state; the remaining participants' devices hide them on the gateway's
 `conversation_delete` or, offline, on the next full sync (`deleted_conversation_ids`), and their local
-history goes after a retention, as for a channel ("Deleting a channel or a space" below).
+history goes after a retention, as for a channel ("Deleting a channel or a space" below). One under a
+legal hold, by its ID or through a held person, stays with its ciphertext until the hold is released
+(data-export.md §4.2).
 
 **Leaving an archived channel, or as the only listed member** (issue #1130). A channel's leave normally
 waits for a member's commit. It doesn't when the device knows the channel as archived (nothing new is

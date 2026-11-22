@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM legal_hold_departures WHERE NOT (user_id = ANY($1))",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3c70ecf3593a6b4b57eb109d4647d00a8ab0c35f44656312e283bf8881a24eeb"
+}

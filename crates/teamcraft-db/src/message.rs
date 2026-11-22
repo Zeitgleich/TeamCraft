@@ -128,7 +128,8 @@ impl Database {
   }
 
   /// One page of history. `after` queries return oldest first, all others newest first.
-  /// Fetches `limit + 1` rows so the caller can tell whether more exist.
+  /// Fetches `limit + 1` rows so the caller can tell whether more exist. A message its sender
+  /// withdrew while a legal hold kept it is left out, as if it were gone (data-export.md §4.2).
   pub async fn list_messages(&self, query: &HistoryQuery) -> Result<Vec<StoredMessage>, DbError> {
     let is_forward = query.maybe_after.is_some();
     let rows = if is_forward {
@@ -137,6 +138,7 @@ impl Database {
                   mentioned_user_ids, is_urgent, content_key_id, ciphertext AS "ciphertext?"
            FROM messages
            WHERE conversation_id = $1 AND id > $2 AND ($3::bigint IS NULL OR id >= $3 OR (is_imported AND $5))
+             AND deleted_at IS NULL
            ORDER BY id ASC LIMIT $4"#,
         to_db(query.conversation),
         query.maybe_after.map(to_db),
@@ -169,6 +171,7 @@ impl Database {
            FROM messages
            WHERE conversation_id = $1 AND ($2::bigint IS NULL OR id < $2)
              AND ($3::bigint IS NULL OR id >= $3 OR (is_imported AND $5))
+             AND deleted_at IS NULL
            ORDER BY id DESC LIMIT $4"#,
         to_db(query.conversation),
         query.maybe_before.map(to_db),

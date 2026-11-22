@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM message_client_ids WHERE conversation_id = $1 AND message_id = ANY($2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8Array"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e7510522bfea7e19058b0745734fc627fc23281023d4255792c60a817ff2904e"
+}

@@ -74,6 +74,8 @@ pub async fn append(
   let version = request.expected_version + 1;
   let mut audit_rows = Vec::new();
   let mut new_holds = Vec::new();
+  let mut maybe_held_people = None;
+  let mut releases_holds = false;
   let maybe_document = if kind == WorkspaceLogKind::Policy {
     let document = check_policy_payload(request.payload.as_slice(), version)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
@@ -82,7 +84,9 @@ pub async fn append(
     // is appended meanwhile, this append conflicts and nothing is audited.
     let previous = policy_at(state, request.expected_version).await?;
     new_holds = super::legal_hold::new_holds(&previous, &document.policy);
+    maybe_held_people = Some(super::legal_hold::held_people(&document.policy));
     audit_rows = super::legal_hold::audit_rows(state, caller.user.id, &previous, &document.policy, version)?;
+    releases_holds = audit_rows.iter().any(super::legal_hold::AuditRow::is_release);
     Some(document)
   } else {
     None
@@ -101,6 +105,7 @@ pub async fn append(
       signature: request.signature.as_slice(),
       signer: request.signer_device_id,
       new_holds: &new_holds,
+      maybe_held_people: maybe_held_people.as_deref(),
       audit: &audit_entries,
     })
     .await?;
@@ -109,7 +114,8 @@ pub async fn append(
     AppendOutcome::VersionConflict { current_version } => {
       return Err(ApiError::VersionConflict { current_version });
     },
-    AppendOutcome::NotExistingChannels => return Err(super::legal_hold::not_a_channel()),
+    AppendOutcome::NotExistingConversations => return Err(super::legal_hold::not_a_channel()),
+    AppendOutcome::UnknownPeople => return Err(super::legal_hold::unknown_person()),
   }
 
   let maybe_self_join = maybe_document.map(|document| {
@@ -138,6 +144,11 @@ pub async fn append(
     && let Err(error) = admin_join_requests::close_all_after_policy_change(state, &self_join).await
   {
     tracing::warn!(%error, "could not close the admin join requests after a policy change");
+  }
+  // data-export.md §4.2: withdrawals a released hold kept go now; best effort, as every retention
+  // run catches up (a restart, or a failure here).
+  if releases_holds && let Err(error) = super::legal_hold::apply_pending_deletions(state).await {
+    tracing::warn!(%error, "could not apply the deletions a released legal hold kept");
   }
 
   if kind == WorkspaceLogKind::Roster {
@@ -433,7 +444,9 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
       "scheduled_messages limits are out of range".into(),
     ));
   }
-  teamcraft_proto::check_legal_holds(&policy.compliance_archive.legal_holds)
+  policy
+    .compliance_archive
+    .check_holds()
     .map_err(|error| ApiError::InvalidRequest(format!("compliance_archive: {error}")))?;
   // Clients read the group from the signature anyway; this keeps owners from publishing one no app
   // understands (e2ee.md §8.3).

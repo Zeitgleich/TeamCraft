@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT p.id AS \"id!\" FROM unnest($1::bigint[], $2::boolean[]) AS p (id, direct_only)\n         WHERE NOT EXISTS (SELECT 1 FROM legal_hold_people h\n                           WHERE h.user_id = p.id AND (h.direct_only = p.direct_only OR NOT h.direct_only))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array",
+        "BoolArray"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "c96d82089c2d4fd0330a14b9da861ad8e8b8caf1a7948ead89ff309f2e60c7ee"
+}

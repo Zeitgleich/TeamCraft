@@ -10,6 +10,7 @@ use crate::admin::ChatRemovalEffects;
 use crate::database::Database;
 use crate::error::DbError;
 use crate::ids::{from_db, to_db, to_db_all};
+use crate::legal_hold::HoldEvidence;
 use crate::local_account::LOCAL_ISSUER;
 use crate::push_retry::delete_push_retries_of;
 
@@ -101,16 +102,25 @@ impl Database {
   }
 
   /// Deleted users who are still a participant of a DM, at most `limit`: their DMs were left
-  /// behind by a deletion that missed them (issue #1066) and go with the next housekeeping.
-  pub async fn deleted_users_with_direct_conversations(&self, limit: i64) -> Result<Vec<UserId>, DbError> {
+  /// behind by a deletion that missed them (issue #1066), or kept by a legal hold since released,
+  /// and go with the next housekeeping. DMs held now don't count: `held` (held by name) and those a
+  /// person hold covers (issue #2135), so they can't fill every round.
+  pub async fn deleted_users_with_direct_conversations(
+    &self,
+    held: &[ConversationId],
+    limit: i64,
+  ) -> Result<Vec<UserId>, DbError> {
     let ids = sqlx::query_scalar!(
       r#"SELECT u.id FROM users u
          WHERE u.deleted_at IS NOT NULL
            AND EXISTS (SELECT 1 FROM conversations c
                        WHERE c.kind = 'dm'
-                         AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[]))
+                         AND u.id = ANY(string_to_array(c.participants_key, '-')::bigint[])
+                         AND NOT (c.id = ANY($2))
+                         AND NOT EXISTS (SELECT 1 FROM legal_hold_covered h WHERE h.conversation_id = c.id))
          ORDER BY u.id LIMIT $1"#,
       limit,
+      &to_db_all(held),
     )
     .fetch_all(self.pool())
     .await?;
@@ -135,14 +145,41 @@ impl Database {
   }
 
   /// Deletes a direct conversation with everything in it (messages, MLS state, attachments) and
-  /// records it for the remaining participants, whose devices drop it on their next sync. Its
-  /// objects in storage are deleted before ([`Self::conversation_object_keys`]). Idempotent.
-  pub async fn delete_direct_conversation(
+  /// records it for the remaining participants, whose devices drop it on their next sync, unless a
+  /// legal hold keeps it: `is_held` gets the [`HoldEvidence`] read after the conversation's row is
+  /// locked (data-export.md §4.2, issue #2135), so a hold placed at the same moment either waits for
+  /// this or is seen here. `None` when it is held (nothing changes); otherwise its objects in storage,
+  /// for the caller to delete after the commit. Idempotent.
+  pub async fn delete_direct_conversation_locked<E: From<DbError>>(
     &self,
     conversation: ConversationId,
     remaining: &[UserId],
-  ) -> Result<(), DbError> {
-    let mut tx = self.pool().begin().await?;
+    is_held: impl FnOnce(&HoldEvidence) -> Result<bool, E>,
+  ) -> Result<Option<Vec<String>>, E> {
+    let mut tx = self.pool().begin().await.map_err(DbError::from)?;
+    let is_there = sqlx::query_scalar!(
+      "SELECT id FROM conversations WHERE id = $1 AND kind IN ('dm', 'group') FOR UPDATE",
+      to_db(conversation),
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(DbError::from)?
+    .is_some();
+    if is_there && is_held(&Self::hold_evidence_in(&mut tx, &[conversation]).await?)? {
+      return Ok(None);
+    }
+    let keys = sqlx::query_scalar!(
+      r#"SELECT s3_key AS "key!" FROM attachments WHERE conversation_id = $1
+         UNION ALL
+         SELECT ciphertext_s3_key AS "key!" FROM messages
+           WHERE conversation_id = $1 AND ciphertext_s3_key IS NOT NULL
+         UNION ALL
+         SELECT s3_key AS "key!" FROM index_segments WHERE conversation_id = $1"#,
+      to_db(conversation),
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(DbError::from)?;
     sqlx::query!(
       r#"INSERT INTO deleted_conversations (user_id, conversation_id)
          SELECT unnest($1::bigint[]), $2 ON CONFLICT DO NOTHING"#,
@@ -150,14 +187,16 @@ impl Database {
       to_db(conversation),
     )
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(DbError::from)?;
     // Attachment rows would only lose their conversation (ON DELETE SET NULL).
     sqlx::query!(
       "DELETE FROM attachments WHERE conversation_id = $1",
       to_db(conversation)
     )
     .execute(&mut *tx)
-    .await?;
+    .await
+    .map_err(DbError::from)?;
     // The other participants' queued wake-ups for it (the deleted user's own go with the user).
     delete_push_retries_of(&mut tx, &[to_db(conversation)]).await?;
     sqlx::query!(
@@ -165,9 +204,10 @@ impl Database {
       to_db(conversation)
     )
     .execute(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(())
+    .await
+    .map_err(DbError::from)?;
+    tx.commit().await.map_err(DbError::from)?;
+    Ok(Some(keys))
   }
 
   /// Conversations deleted (a channel, or a direct message with a deleted user) that this user's

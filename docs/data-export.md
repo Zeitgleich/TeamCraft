@@ -246,19 +246,41 @@ and every legal hold placed or released are entries of the audit log (admin.md �
 
 ### 4.2 Legal hold (implemented)
 
-A legal hold keeps a conversation: what retention, the inactivity policy or a deletion would remove
-stays on the server until the hold is released. Holds are part of the signed policy
-(`compliance_archive.legal_holds`), placed and released by owners in Administration > Retention.
+A legal hold keeps a conversation: what retention, the inactivity policy, a deletion or a member's
+deletion of their own message would remove stays on the server until the hold is released. Holds
+are part of the signed policy (`compliance_archive`), placed and released by owners in
+Administration > Retention. A hold names a conversation (`legal_holds`) or a person (`person_holds`,
+issue #2135).
 
 | Field             | Meaning                                                                      |
 |-------------------|------------------------------------------------------------------------------|
-| `conversation_id` | the held channel; the server refuses DMs, groups and meeting chats           |
+| `conversation_id` | the held channel, direct message or group; the server refuses meeting chats  |
 | `reference`       | the organisation's case reference, 1 to 64 characters, read by every member  |
 | `placed_at`       | when the owner placed it, by the owner's clock; shown only                   |
 
-At most 500 holds, each conversation once, each an existing channel: direct messages, groups and
-meeting chats are removed by paths a hold can't stop (account deletion, meetings), so a hold on them
-is refused. The server and the owners' apps refuse other values.
+A person's hold has `user_id`, `reference`, `placed_at` and `scope`: `all` (the default, left out of
+the JSON) holds every channel, direct message and group the person is in, `direct` only their
+direct messages and groups. Meeting chats go with their meeting, which a hold can't stop, so neither
+a hold by name nor a person's hold covers them.
+
+At most 500 holds, conversations and people together, each conversation and each person once. A new
+hold by name must name an existing channel, direct message or group, a person's hold a known account.
+The server and the owners' apps refuse other values; an unknown `scope` is refused when signing and
+read as `all` by apps, so a newer app's narrower hold never shows as no hold.
+
+**What a person's hold covers.** On the server: the conversations the person is a member of, the
+direct messages and groups opened for them (their participants, which stay when an account is
+deleted), and the conversations they leave while the hold lasts (recorded when the membership goes:
+leaving, removal, account deletion; `legal_hold_departures`). Releasing the hold forgets those. A
+conversation the person left before the hold isn't covered. The server keeps the held people beside
+the policy entry (`legal_hold_people`), written in the transaction that stores the entry, and a
+deletion reads both under its lock (below). On a member's device: the direct messages and groups
+whose participants include the person, and the conversations whose member list (as the device knows
+it) names them; the banner comes from one shared function of the core
+(`teamcraft_core::workspace::legal_holds`), which every app reads.
+
+Owner apps before person holds re-sign the policy without `person_holds`, which releases them; each
+release is an audit entry, so it doesn't go unnoticed.
 
 **What a hold does on the server.**
 
@@ -267,35 +289,59 @@ is refused. The server and the owners' apps refuse other values.
 - Deleting the channel, deleting its space, and the last member's leave that would delete a private
   channel are refused with `legal_hold`; the apps say why. Leaving a whole space with
   `delete_if_last` goes through, but a held private channel it would delete stays, without members.
+- Deleting an account keeps the held direct messages and groups that would go with it, with their
+  ciphertext, attachments and MLS state; the remaining participant still sees the conversation with
+  the deleted user. Once the hold is released, the account housekeeping deletes such a direct message
+  like one a deletion left behind (issue #1066); a group DM stays.
+- **A member's deletion of their own message.** The app sends the encrypted delete as before and
+  names the withdrawn message in the request (`deletes`, its client message ID): metadata only, the
+  server learns which of the sender's messages was withdrawn, not what it said. Without a hold the
+  server deletes that message's ciphertext at once. Under a hold it marks it deleted (`deleted_at`)
+  and keeps it: history no longer lists it, so devices see the same as without a hold. When no hold
+  keeps the conversation any more, the server removes the marked messages: right after the policy
+  entry that releases a hold, and with every retention run, so a restart, a release stored on another
+  instance or a failure catches up. Only a message the caller sent counts; another user's is ignored.
+  The request is part of the queued message, so a deletion made offline arrives with it and is
+  judged by the holds when it arrives: a hold placed meanwhile keeps the message. A repeated request
+  (a retry, another device) changes nothing more. Edits and reactions stay until retention, as the
+  server can't tell which message they belong to; apps before this send no `deletes`, and their
+  deletions leave the ciphertext until retention, as before.
 - A hold and a deletion at the same moment can't both win (#2143). Appending a policy that places a
-  hold share-locks the held channels' rows and checks they still exist, in the transaction that
-  stores the entry; every deletion locks the rows it deletes and only then reads the newest policy,
-  in its own transaction. Retention does the same for each conversation before it deletes anything
-  of it, and deletes the objects in the storage only for rows deleted under that check. Whichever
-  comes second sees the other: the hold is refused for the deleted channel, the deletion is refused
-  with `legal_hold`, or retention skips the conversation.
+  hold share-locks the conversations it holds by name and those the newly held people are in, and
+  checks the named ones still exist, in the transaction that stores the entry; every deletion (a
+  channel, a space, a direct message with a deleted account, a withdrawn message, the removal of
+  withdrawn messages after a release) locks the rows it deletes and only then reads the newest
+  policy and the held people, in its own transaction. Retention does the same for each conversation
+  before it deletes anything of it, and deletes the objects in the storage only for rows deleted under
+  that check. Whichever comes second sees the other: the hold is refused for the deleted conversation
+  (a person's hold just doesn't cover it), the deletion is refused with `legal_hold`, the message is
+  marked instead of deleted, or retention skips the conversation.
 - Releasing the hold returns it to the normal rules; the next retention run catches up.
 
 **Who is told.** Every member of a held conversation sees a banner "This conversation is under legal
-hold (reference). Retention doesn't delete its messages." On desktop and web it is `LegalHoldNotice`;
-on Android and iOS the conversation screen draws it from `SecuritySnapshot.legal_holds`, which the
-apps read with the chat snapshot (the same verified policy), and a deletion the apps know to be held
-is refused at once with the `legal_hold` text (`TeamCraftError::LegalHold`; the server's refusal
-maps to it too). It comes from the verified policy, so the
-server can't show it for a conversation nobody held; like any policy update, it can delay or
-withhold a newer policy (a new hold or a release) from a member. Holds are not
+hold (reference)." that also says a message they delete stays on the server until the hold is
+released. It shows the same for a person's hold that covers the conversation, with that hold's
+reference. On desktop and web it is `LegalHoldNotice`; on Android and iOS the conversation screen
+draws it from `SecuritySnapshot.legal_holds`, which the apps read with the chat snapshot (the same
+verified policy, with person holds already expanded by the core), and a deletion the apps know to
+be held is refused at once with the `legal_hold` text (`TeamCraftError::LegalHold`; the server's
+refusal maps to it too). It comes from the verified policy, so the server can't show it for a
+conversation nobody held; like any policy update, it can delay or withhold a newer policy (a new
+hold or a release) from a member, and who is in a conversation is the server's word, as every
+member list is. Holds are not
 secret: the signed policy is readable by every signed-in user, which is why the console asks for a
-reference and not a name or a reason.
+reference and not a name or a reason (a person's hold names its account, as the roster does).
 
 **Audit.** Every hold placed or released is an audit entry (`legal_hold_placed`,
-`legal_hold_released`) with the signing owner, the conversation, the reference and the policy
-version.
+`legal_hold_released`) with the signing owner, the conversation or the person (target `user`, with
+the scope), the reference and the policy version. Removing withdrawn messages after a release is an
+entry `legal_hold_deletions_applied` per conversation, with how many went.
 
 **Limits.** The server is untrusted: a hostile server can delete ciphertext whatever the policy says.
 A hold protects against the routine deletions, not against the operator; the vault's own copy (§4.1)
-is what protects against that. A member can still delete their own messages (a signed deletion,
-e2ee.md §4.6); keeping those under a hold, holds on people (all their conversations) and on direct
-messages are later steps.
+is what protects against that. The console offers the channels and the people; it doesn't list other
+people's direct messages (admin.md §2.1), so a direct message is held through a person's hold with the
+scope `direct`, or by its ID through the API.
 
 ### 4.3 Audit log CSV
 
@@ -326,7 +372,6 @@ the desktop app saves it to the downloads folder). Admins and owners only (`Read
 | What                                                          | Issue |
 |---------------------------------------------------------------|-------|
 | Vault node, archive mode and approved export requests (§4.1)  | #2134 |
-| Legal hold on people and DMs, keeping signed deletions        | #2135 |
 
 ## 5. Manual test steps
 
@@ -363,6 +408,18 @@ Legal hold (an owner's account on desktop or web, a member's account in a second
       and in German. Delete the channel from its menu: "This conversation is under legal hold." Release
       the hold: the banner goes without reopening the channel.
 - [ ] Administration > Audit log lists "Legal hold placed" and "Legal hold released" with the owner.
+- [ ] Place a hold on a person (A person, All their conversations): the table says what it covers.
+      The member, in a channel and a direct message with that person, sees the banner in both; in a
+      conversation without them, none. Change to "Their direct messages and groups": the channel's
+      banner goes, the direct message's stays.
+- [ ] With the person held, the person deletes one of their messages in the direct message: it
+      disappears for both as usual. Reload: it stays gone. Release the hold: nothing changes for
+      the members; the audit log lists "Held deletions applied".
+- [ ] With the person held, delete the other participant's account: the direct message stays for
+      the held person, with the deleted user. Release the hold: within the next housekeeping round
+      it goes.
+- [ ] Offline: turn the network off, delete an own message in a held conversation, turn it on: the
+      deletion goes through and the message stays hidden.
 
 Audit log CSV (an admin's account on desktop or web):
 

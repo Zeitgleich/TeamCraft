@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM conversations\n       WHERE id = ANY($1) AND kind = 'channel' AND deleted_at IS NULL\n       ORDER BY id FOR SHARE",
+  "query": "SELECT id FROM conversations\n       WHERE id = ANY($1) AND kind IN ('dm', 'group', 'channel') AND deleted_at IS NULL\n       ORDER BY id FOR SHARE",
   "describe": {
     "columns": [
       {
@@ -24,5 +24,5 @@
       false
     ]
   },
-  "hash": "1e7719a7112e500dba98f6c4e770df0abd42ce7f3886d1dc65db124fbac3bcd5"
+  "hash": "3968273baef56994a40303328c0bdc9ebc6c94e3074ad9b9178f80d036572516"
 }

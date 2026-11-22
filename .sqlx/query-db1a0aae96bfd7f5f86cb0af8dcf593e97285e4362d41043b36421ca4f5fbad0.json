@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT DISTINCT c.id AS \"id!\" FROM conversations c\n           WHERE c.deleted_at IS NULL AND c.kind IN ('dm', 'group', 'channel')\n             AND (EXISTS (SELECT 1 FROM memberships m WHERE m.conversation_id = c.id AND m.user_id = ANY($1))\n               OR (c.participants_key IS NOT NULL\n                   AND string_to_array(c.participants_key, '-')::bigint[] && $1))",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "id"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "db1a0aae96bfd7f5f86cb0af8dcf593e97285e4362d41043b36421ca4f5fbad0"
+}

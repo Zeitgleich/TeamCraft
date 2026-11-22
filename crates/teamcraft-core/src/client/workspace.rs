@@ -536,9 +536,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Err(CoreError::NotAnOwner);
     }
     // data-export.md §4.2: nothing is signed that the server and every app would have to refuse.
-    teamcraft_proto::check_legal_holds(&policy.compliance_archive.legal_holds)
+    policy
+      .compliance_archive
+      .check_holds()
       .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
-    self.refuse_holds_on_non_channels(&state.policy, &policy)?;
+    self.refuse_holds_on_meeting_chats(&state.policy, &policy)?;
     if policy.maybe_role_signing.is_none() {
       policy.maybe_role_signing = state.policy.maybe_role_signing.clone();
     }
@@ -554,9 +556,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .append_log(WorkspaceLogKind::Policy, WorkspaceLog::Policy, version, &document)
       .await
   }
-  /// A new hold on a conversation this device knows is not a channel (a DM, group or meeting chat)
-  /// is refused before signing; the server checks the ones this device doesn't know (§4.2).
-  fn refuse_holds_on_non_channels(
+  /// A new hold on a conversation this device knows as a meeting chat is refused before signing:
+  /// it goes with its meeting, which a hold can't stop. Channels, direct messages and groups may be
+  /// held (issue #2135); the server checks the ones this device doesn't know (§4.2).
+  fn refuse_holds_on_meeting_chats(
     &self,
     before: &WorkspacePolicy,
     after: &WorkspacePolicy,
@@ -572,10 +575,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &hold.conversation_id.to_string(),
       )?;
       if maybe_known
-        .is_some_and(|conversation| conversation.kind != teamcraft_proto::ConversationKind::Channel)
+        .is_some_and(|conversation| conversation.kind == teamcraft_proto::ConversationKind::Meeting)
       {
         return Err(CoreError::InvalidRequest(
-          "a legal hold must name a channel".into(),
+          "a legal hold must name a channel, direct message or group".into(),
         ));
       }
     }
