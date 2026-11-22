@@ -152,16 +152,25 @@ impl BrowserSession {
   }
 }
 
-/// Exclusive use of a web client port (one the dev realm registers as redirect URI: 8082, 8083)
-/// for as long as it is held, across every test process on the machine: other checkouts run the
-/// suite too, and a second server on the port fails to start. Each port is its own lane: browser
-/// tests on 8082 and 8083 run at the same time.
+/// The ports browser tests serve the web client on, one lane each: tests on different ports run at
+/// the same time. Each is a redirect target of the dev realm's apps client ([`lease_web_port`]
+/// registers them on the running Keycloak). A test that measures alone leases all of them.
+pub const WEB_TEST_PORTS: [u16; 8] = [8082, 8083, 8084, 8085, 8086, 8087, 8089, 8090];
+
+/// Exclusive use of a web client port for as long as it is held, across every test process on the
+/// machine: other checkouts run the suite too, and a second server on the port fails to start.
 pub struct WebPortLease {
   _file: std::fs::File,
 }
 
-/// Waits until no other test (in this process or another) uses `port`.
+/// Waits until no other test (in this process or another) uses `port`. Signing in on the port's
+/// origin needs it registered at the identity provider: every test port is, on the dev realm.
 pub async fn lease_web_port(port: u16) -> WebPortLease {
+  debug_assert!(WEB_TEST_PORTS.contains(&port), "{port} is not a web test port");
+  // A missing dev stack makes the test skip (or fail) at its start, with a better message.
+  if let Err(error) = crate::keycloak::ensure_web_ports(&WEB_TEST_PORTS).await {
+    eprintln!("could not register the web test ports at Keycloak: {error}");
+  }
   let path = std::env::temp_dir().join(format!("teamcraft-e2e-web-port-{port}.lock"));
   let file = std::fs::File::options()
     .create(true)
@@ -178,6 +187,16 @@ pub async fn lease_web_port(port: u16) -> WebPortLease {
   .await
   .expect("waiting for the port lock");
   WebPortLease { _file: file }
+}
+
+/// Every web test port, for a test that must run alone (measurements). Taken in ascending order, so
+/// two tests that take several never wait on each other.
+pub async fn lease_every_web_port() -> Vec<WebPortLease> {
+  let mut leases = Vec::with_capacity(WEB_TEST_PORTS.len());
+  for port in WEB_TEST_PORTS {
+    leases.push(lease_web_port(port).await);
+  }
+  leases
 }
 
 /// `$E2E_ARTIFACTS`, else `target/e2e-artifacts` of the workspace.

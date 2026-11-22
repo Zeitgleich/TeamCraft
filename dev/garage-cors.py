@@ -16,8 +16,11 @@ import hmac
 import sys
 import urllib.request
 
-# The dev web client (trunk serve) and the e2e servers (tests/e2e), as registered in Keycloak.
-ORIGINS = ["http://localhost:8082", "http://127.0.0.1:8082", "http://127.0.0.1:8083"]
+# The dev web client (trunk serve) and the e2e servers (tests/e2e, `WEB_TEST_PORTS` in
+# tests/e2e/src/browser.rs), as registered in Keycloak.
+ORIGINS = ["http://localhost:8082"] + [
+    f"http://127.0.0.1:{port}" for port in (8082, 8083, 8084, 8085, 8086, 8087, 8089, 8090)
+]
 REGION = "garage"
 # Uploads in parts left unfinished this long are aborted by the storage itself.
 ABORT_INCOMPLETE_AFTER_DAYS = 3
