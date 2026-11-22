@@ -1387,9 +1387,7 @@ impl Room {
       return None;
     }
     let mut state = lock(&self.state);
-    let Some(participant) = state.participants.get_mut(&device_id) else {
-      return None;
-    };
+    let participant = state.participants.get_mut(&device_id)?;
     if !participant.recording_notice_limit.allow(now) {
       debug!(call_id = %self.call_id, device_id = %device_id, "recording notice over the limit");
       return None;
