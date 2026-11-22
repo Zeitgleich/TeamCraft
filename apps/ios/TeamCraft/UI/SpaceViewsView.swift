@@ -210,7 +210,8 @@ private struct SpaceMeetingsList: View {
         ProgressView("loading")
       }
     }
-    .task(id: model.changeCount) { maybeMeetings = await model.meetings() }
+    // Read again when the meetings change (#2258), not on every change of the store.
+    .task(id: model.meetingsChanges) { maybeMeetings = await model.meetings() }
     .alert("meetings_rsvp_failed", isPresented: $isRsvpFailed) {
       Button("done", role: .cancel) {}
     }

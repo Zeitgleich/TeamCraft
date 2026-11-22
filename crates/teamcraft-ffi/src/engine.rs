@@ -201,6 +201,9 @@ pub(crate) struct Engine {
   maybe_jobs: Option<mpsc::WeakUnboundedSender<Job>>,
   /// When the meeting upkeep last had the core compare each meeting's signed admitters (#1841).
   pub(crate) meeting_admitters_synced: crate::meetings::AdmittersSyncedAt,
+  /// What the meeting watch keeps between runs (#2258): the list it read last, and who it is
+  /// letting in.
+  pub(crate) meeting_watch: crate::meeting_admission::MeetingWatchState,
 }
 
 /// What the app's handle shares with every sync loop the engine starts.
@@ -840,6 +843,7 @@ impl Engine {
       active_drains: 0,
       maybe_jobs: None,
       meeting_admitters_synced: Default::default(),
+      meeting_watch: Default::default(),
     };
     if let Some(account) = maybe_account {
       engine.know_account(&account);

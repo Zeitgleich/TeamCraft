@@ -821,7 +821,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// failing doesn't keep the others from being repaired. Returns how many were completed.
   pub(crate) async fn repair_dm_setups(&mut self) -> Result<usize, CoreError> {
     let mut repaired = 0;
-    let mut maybe_first_error = None;
+    // Meeting chat setups queued but lost before they ran (#2258).
+    let mut maybe_first_error = self.finish_owed_meeting_setups().await.err();
     // Guests this device admitted whose access has ended leave the group even if the server's
     // removal event never came.
     self.queue_ended_guests()?;

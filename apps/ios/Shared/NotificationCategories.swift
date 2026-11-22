@@ -2,7 +2,7 @@ import UserNotifications
 
 /// The actions on a notification: reply from the lock screen and mark as read on messages (like the
 /// Android notification), answer and decline on an incoming-call alert, approve and decline on an
-/// admin's request to join. The extension puts the category on what it shows; the app on the
+/// admin's request to join, remove on somebody let into a meeting without a click. The extension puts the category on what it shows; the app on the
 /// requests it notifies about itself.
 enum NotificationCategories {
   static let messageCategory = "message"
@@ -23,6 +23,9 @@ enum NotificationCategories {
   /// (#1859): "Hand over" opens the choice of whom to hand the meeting to.
   static let lobbyLeftCategory = "lobby_left"
   static let handOverAction = "hand_over"
+  /// Somebody this device let into a meeting without a click (#2258): "Remove" takes them out.
+  static let linkArrivalCategory = "link_arrival"
+  static let removeLinkArrivalAction = "remove_link_arrival"
   /// Key of the conversation ID in a notification's `userInfo`.
   static let conversationKey = "conversation_id"
 
@@ -73,6 +76,15 @@ enum NotificationCategories {
       options: [.foreground, .authenticationRequired])
     let lobbyLeft = UNNotificationCategory(
       identifier: lobbyLeftCategory, actions: [handOver], intentIdentifiers: [], options: [])
-    center.setNotificationCategories([message, call, meeting, joinRequest, joinRequestDeclineOnly, lobbyLeft])
+    // Taking somebody out of a meeting changes who reads it: unlock first; the app does it in the
+    // background.
+    let removeLinkArrival = UNNotificationAction(
+      identifier: removeLinkArrivalAction, title: String(localized: "link_arrival_remove"),
+      options: [.destructive, .authenticationRequired])
+    let linkArrival = UNNotificationCategory(
+      identifier: linkArrivalCategory, actions: [removeLinkArrival], intentIdentifiers: [], options: [])
+    center.setNotificationCategories([
+      message, call, meeting, joinRequest, joinRequestDeclineOnly, lobbyLeft, linkArrival,
+    ])
   }
 }

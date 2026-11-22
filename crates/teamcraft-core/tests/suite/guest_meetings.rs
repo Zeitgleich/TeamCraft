@@ -733,10 +733,19 @@ mod admitters {
 
     rig.alice.client.note_meeting_lobby(rig.meeting, false).unwrap();
     rig.publish_admitters().await;
+    let before = meetings_mark(&bob);
     check(&mut bob, rig.chat).await;
     check(&mut carol, rig.chat).await;
 
     assert!(admits_link_arrivals(&bob.store, rig.chat, NOW_MS));
+    // The apps read the lobbies again with the meetings, so who waits is let in now (#2258).
+    assert_eq!(
+      meetings_mark(&bob),
+      before + 1,
+      "the door opening is a meetings change"
+    );
+    check(&mut bob, rig.chat).await;
+    assert_eq!(meetings_mark(&bob), before + 1, "the same list again is none");
     assert!(
       !admits_link_arrivals(&bob.store, rig.chat, ACCESS_ENDS_MS + 1),
       "not once the list ended"
@@ -2371,4 +2380,9 @@ async fn rig() -> Rig {
     clock,
     guest_clock,
   }
+}
+
+/// How many meeting changes `peer`'s device noted (the apps read the meetings again on each).
+fn meetings_mark(peer: &Peer) -> u64 {
+  teamcraft_core::read_state::marks(&peer.store).unwrap().meetings
 }

@@ -42,6 +42,8 @@ import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.ui.VersionedPictureCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
 import de.zeitgleich.teamcraft.notifications.JoinRequestWatcher
+import de.zeitgleich.teamcraft.notifications.LinkArrivalNotifier
+import de.zeitgleich.teamcraft.notifications.MeetingWatch
 import de.zeitgleich.teamcraft.notifications.MentionPrefs
 import de.zeitgleich.teamcraft.notifications.MessageNotifier
 import de.zeitgleich.teamcraft.notifications.NotificationContentPrefs
@@ -131,6 +133,10 @@ class AppGraph(context: Context) {
   /** Admins asking to join a channel the user owns: notified while the app runs (#799). */
   val joinRequestNotifier = JoinRequestNotifier(context, notificationContent)
   val joinRequestWatcher = JoinRequestWatcher(core, joinRequestNotifier, scope)
+  /** Somebody let into a meeting by this device without a click, with "Remove" (#2258). */
+  val linkArrivalNotifier = LinkArrivalNotifier(context, notificationContent)
+  /** The meetings while the app runs: the organizer's upkeep and link arrivals let in (#2258). */
+  val meetingWatch = MeetingWatch(core, linkArrivalNotifier, calls.callState, scope)
   /** The home screen widget's unread conversations, sealed (#2076). */
   val widgetSnapshots = WidgetSnapshotStore(context.filesDir)
   val homeWidgets = HomeWidgets(context, core, notificationContent, widgetSnapshots, scope)
@@ -177,6 +183,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     graph.settingsSync.start()
     graph.placeholderWatcher.start()
     graph.joinRequestWatcher.start()
+    graph.meetingWatch.start()
     graph.homeWidgets.start()
     graph.network.start()
     // Older versions staged uploads in the cache, never deleted; the core's staging folder replaced it.
@@ -227,6 +234,7 @@ class TeamCraftApplication : Application(), Configuration.Provider {
       maybeStopping?.cancel()
       maybeStopping = null
       graph.connectionGrace.appReturned()
+      graph.meetingWatch.appForeground()
       graph.scope.launch { refreshCrashReports(graph) }
       maybeStarting?.cancel()
       // An access token that ran out is renewed while the core opens, so the connection doesn't

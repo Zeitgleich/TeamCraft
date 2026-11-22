@@ -80,6 +80,16 @@ impl LobbyAdmission {
   }
 }
 
+/// Whether a device lets the waiting `entry` in by itself, unasked (docs/meetings.md, "Lobby";
+/// e2ee.md §4.6, "Meeting guests"): only when `is_open` – on the organizer's device the organizer's
+/// own record of "no lobby" (`Client::is_open_by_own_record`), on an admitter's the organizer's
+/// signed admitters naming this user with "no lobby" (`admits_link_arrivals`); the server's
+/// `has_lobby` counts for nothing – and only for somebody who came with the meeting link and
+/// reported a device whose key can be added. Desktop, web and the phone apps all decide by this.
+pub fn admits_by_itself(is_open: bool, entry: &LobbyEntry, membership: SignedMembership) -> bool {
+  is_open && entry.is_by_link && entry.has_device && LobbyAdmission::of(entry, membership).has_device_to_add()
+}
+
 /// Until when a guest admitted now keeps access (e2ee.md §4.6, "Meeting guests"; #1873): the end
 /// the host's app asked for (`asked_ms`, from the server's meeting), but never past the trusted end:
 /// the validity of the organizer-signed admitters this device verified (`maybe_signed_ms`, the
@@ -165,6 +175,40 @@ mod tests {
     }
   }
 
+  mod by_itself {
+    use super::*;
+
+    #[test]
+    fn only_the_open_record_lets_a_device_admit_by_itself() {
+      let guest = link_entry(UserKind::Guest, true, true, Some("ab"));
+      let not_signed = SignedMembership::NotSigned;
+      // The server says "no lobby" and "came with the link": without this device's own reason to
+      // let people in (the organizer's record, the signed admitters) nobody is let in unattended.
+      assert!(!admits_by_itself(false, &guest, not_signed));
+      assert!(admits_by_itself(true, &guest, not_signed));
+    }
+
+    #[test]
+    fn an_old_link_or_a_guest_without_a_device_or_key_always_waits_for_a_click() {
+      let not_signed = SignedMembership::NotSigned;
+      for entry in [
+        link_entry(UserKind::Guest, false, true, Some("ab")),
+        link_entry(UserKind::Guest, true, false, Some("ab")),
+        link_entry(UserKind::Guest, true, true, None),
+      ] {
+        assert!(!admits_by_itself(true, &entry, not_signed));
+      }
+    }
+
+    #[test]
+    fn a_member_is_let_in_by_itself_only_by_the_signed_roster() {
+      let member = link_entry(UserKind::Member, true, true, None);
+      assert!(admits_by_itself(true, &member, SignedMembership::Member));
+      // The server's word "member" without the signed roster's lets nobody in (#1873).
+      assert!(!admits_by_itself(true, &member, SignedMembership::NotSigned));
+    }
+  }
+
   mod access_end {
     use super::*;
 
@@ -214,6 +258,15 @@ mod tests {
   }
 
   fn entry(kind: UserKind, has_device: bool, maybe_fingerprint: Option<&str>) -> LobbyEntry {
+    link_entry(kind, true, has_device, maybe_fingerprint)
+  }
+
+  fn link_entry(
+    kind: UserKind,
+    is_by_link: bool,
+    has_device: bool,
+    maybe_fingerprint: Option<&str>,
+  ) -> LobbyEntry {
     let kind = if kind == UserKind::Guest {
       "guest"
     } else {
@@ -222,7 +275,7 @@ mod tests {
     serde_json::from_value(serde_json::json!({
       "user": {"id": "77", "display_name": "Gus", "kind": kind},
       "requested_at": 1,
-      "is_by_link": true,
+      "is_by_link": is_by_link,
       "has_device": has_device,
       "knock_fingerprint": maybe_fingerprint,
     }))

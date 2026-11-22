@@ -348,7 +348,10 @@ founded anchored, #1747), notes the lobby and signs the admitters. The organizer
 group of a meeting from before 1.0.3 first (`prepare_meeting_join`). The apps read their meeting
 list through `meeting_upkeep`, which also keeps the admitters of the organizer's meetings that run
 or start within a day current and finishes edits whose removal is still owed (kept in the store
-before the save, as desktop keeps them in local storage). The co-hosts as ticked are signed after
+before the save, as desktop keeps them in local storage). The chat's setup after a create is
+noted in the store before it is queued (#2258, `note_meeting_setup_owed`, desktop too) and cleared
+once it ran: an app killed between the server's answer and the queue's run finishes it on the next
+sync instead of leaving the chat without a group until the organizer joins its call. The co-hosts as ticked are signed after
 the save (`ChangeMeetingHosts`, #1720); a ticked notetaker is asked into every call after the
 chat's setup, an unticked one is stopped before the edit takes it out of the group.
 
@@ -392,6 +395,30 @@ Whether a row is a member or a guest is the owners' signed roster's word, not th
 kind (#1873): a member the roster doesn't vouch for yet and who reported no key gets "Not
 confirmed as a member yet. Invite them to the meeting instead." and no "Admit"
 (`LobbyPersonStatus::UnconfirmedMember`); a guest the server calls a member is a guest row.
+
+**Letting people of the link in from the apps** (#2258). The phones do what desktop does on top
+of the lobby: while the app runs, the core's meeting watch (`meeting_watch` in the FFI) reads the
+meeting list once per foreground, whenever the user's meetings change (`meetings_revision`: a
+`meeting_update`, a knock, or a newly verified admitters list that lets this device admit) and after
+joining a call. Each run is the organizer's upkeep (`meeting_upkeep`; a meeting handed to the user
+since the last list gets its hosts and admitters signed with the user's key right away, whenever it
+starts), then the lobbies of the meetings this device may let people of the link into: the ones the
+user organizes, where the organizer chose "no lobby" on this device (`is_open_by_own_record`), and
+the one whose call the device is in, where the organizer's signed admitters name the user with "no
+lobby" (`admits_link_arrivals`, read again on each run). Who is let in is the core's one rule, which
+desktop uses too (`teamcraft_core::meeting_lobby::admits_by_itself`): somebody who came with the
+meeting's token, with a device whose key they reported, a member only by the signed roster; the
+admission is a host's "Admit" (`Client::let_in_from_lobby`). Each admission is said with "Remove" (a
+notification on the phones, so it shows in the call screen too; on the lock screen only "somebody
+joined"), which takes the person out of the chat and its group. The app tells the server once per
+start that it admits by itself (`PUT /meetings/admitter`), so guests of a phone-only organizer
+aren't told the organizer's app needs an update. The meeting screens read their list on the same
+revision, not on every change of the store. Join on a meeting's notice runs `prepare_meeting_join`
+first, as Join on the list does (waited for five seconds at most).
+
+A knock while the app isn't running reaches nobody's phone: no push wakes it for a knock. The
+guest waits in the lobby until a host's app runs (the next foreground reads the lobbies at once) or
+a host admits them from another device.
 
 **Who is a guest in the meeting chat** (#1926; e2ee.md §4.6, "Who is a guest, and until when").
 The same rule holds for every decision an app makes in a meeting chat, not only in the lobby: a

@@ -31,6 +31,7 @@ mod join_requests;
 mod logging;
 mod markup;
 mod media_viewer;
+mod meeting_admission;
 mod meeting_guests;
 mod meeting_hosts;
 mod meeting_lobby;
@@ -102,6 +103,7 @@ pub use media_viewer::{
   AlbumLayout, MediaScope, MediaViewer, MediaViewerItem, MediaViewerLimits, MediaViewerState,
   OriginalDownload, album_layout, fetches_original_automatically, media_viewer_limits,
 };
+pub use meeting_admission::LinkArrival;
 pub use meeting_guests::{MeetingGuestLink, MeetingsWithLobbies};
 pub use meeting_hosts::{MeetingHostAction, MeetingHosts, MeetingPart};
 pub use meeting_lobby::{
@@ -1822,6 +1824,54 @@ impl TeamCraft {
   pub async fn meeting_upkeep(&self) -> Result<String, TeamCraftError> {
     self
       .call(|engine| Box::pin(async move { engine.meeting_upkeep().await }))
+      .await
+  }
+
+  /// One run of the meeting watch (#2258), as desktop keeps it while it runs: the meeting list with
+  /// the organizer's upkeep ([`Self::meeting_upkeep`], also signing the hosts and admitters of a
+  /// meeting just handed to the user), then whoever knocked with the meeting link is let in by
+  /// this device where it may (the organizer's "no lobby" here, or the organizer's signed
+  /// admitters naming the user while it is in the meeting's call; docs/meetings.md, "Lobby").
+  /// The apps run it once per foreground and whenever [`Self::meetings_revision`] changes, and
+  /// after joining a meeting's call; each admission it returns is said with "Remove"
+  /// ([`Self::remove_link_arrival`]).
+  pub async fn meeting_watch(&self) -> Result<Vec<LinkArrival>, TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.meeting_watch().await }))
+      .await
+  }
+
+  /// "Remove" on the notice of an admission by the meeting watch: takes `user_id` out of the
+  /// meeting chat `conversation_id` and its encryption group.
+  pub async fn remove_link_arrival(
+    &self,
+    conversation_id: String,
+    user_id: String,
+  ) -> Result<(), TeamCraftError> {
+    self
+      .call(move |engine| {
+        Box::pin(async move { engine.remove_link_arrival(&conversation_id, &user_id).await })
+      })
+      .await
+  }
+
+  /// Tells the server this app lets guests of the meeting link in by itself (#987, #2258), so
+  /// guests of the user's meetings aren't told the organizer's app needs an update. Once per
+  /// signed-in start is enough; a failure is tried again on the next.
+  pub async fn mark_admitter(&self) -> Result<(), TeamCraftError> {
+    self
+      .call(|engine| Box::pin(async move { engine.mark_admitter().await }))
+      .await
+  }
+
+  /// Counts the changes of the user's meetings this device heard of (a meeting changed, somebody
+  /// knocked at a lobby, a newly verified admitters list lets this device admit): the meeting
+  /// screens and the meeting watch read again when it moves, not on every change of the store.
+  pub async fn meetings_revision(&self) -> Result<u64, TeamCraftError> {
+    use teamcraft_client_api::backend::ChatBackend as _;
+    self
+      .read_queue()?
+      .query(|reads| Ok(reads.backend()?.meetings_revision()))
       .await
   }
 

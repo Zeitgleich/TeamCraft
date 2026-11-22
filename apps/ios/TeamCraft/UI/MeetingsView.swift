@@ -51,8 +51,9 @@ struct MeetingsView: View {
       }
       .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
-    // A knock (`lobby_join`) changes the meetings too, so the lobbies are read again with them.
-    .task(id: model.changeCount) {
+    // Read again when the meetings change (#2258), not on every change of the store; a knock
+    // (`lobby_join`) changes the meetings too, so the lobbies are read again with them.
+    .task(id: model.meetingsChanges) {
       keyCodeReads = 0
       await readUpcoming()
     }

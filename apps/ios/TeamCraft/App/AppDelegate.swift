@@ -83,6 +83,16 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         notificationId: response.notification.request.identifier)
       return
     }
+    // "Remove" on somebody this device let into a meeting without a click (#2258). Routed by the
+    // category the app sets on its own notice, and acted on only with the app's tag over it.
+    if response.notification.request.content.categoryIdentifier == NotificationCategories.linkArrivalCategory,
+      response.actionIdentifier == NotificationCategories.removeLinkArrivalAction
+    {
+      await AppModel.shared.handle(
+        linkArrivalRemoval: info, tag: info[NotificationAuthenticator.tagKey] as? String,
+        notificationId: response.notification.request.identifier)
+      return
+    }
     // A meeting's notice dealt with here (Join, or cleared): the server takes it down on the user's
     // other phones. Clearing is nothing more than that; Join goes on to open the call.
     if info[NotificationKeys.kind] as? String == NotificationKeys.meetingKind,
@@ -112,6 +122,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
       notificationAction: response.actionIdentifier, conversationId: conversationId, tag: tag,
       replyText: reply, maybeThreadId: info[NotificationKeys.thread] as? String,
       notificationId: response.notification.request.identifier,
-      maybeMessageId: info[NotificationKeys.message] as? String)
+      maybeMessageId: info[NotificationKeys.message] as? String,
+      maybeMeetingId: info[NotificationKeys.meetingId] as? String)
   }
 }

@@ -116,8 +116,18 @@ final class CallManager: NSObject, @unchecked Sendable {
 
   /// Main-thread state; the in-call screen observes it.
   private(set) var activeCall: ActiveCall? {
-    didSet { followProximity() }
+    didSet {
+      followProximity()
+      if let call = activeCall, call.phase == .connected, !call.conversationId.isEmpty,
+        oldValue?.phase != .connected || oldValue?.conversationId != call.conversationId
+      {
+        onConnected?(call.conversationId)
+      }
+    }
   }
+  /// Told once this device is in a call: in somebody else's meeting it may be an admitter now, so
+  /// the meeting watch looks at the meeting's lobby (#2258).
+  @ObservationIgnored var onConnected: ((String) -> Void)?
   /// The call screen is put away while the call goes on (#2066): the app shows a bar to return.
   /// A new call always opens its screen.
   private(set) var isMinimised = false

@@ -114,8 +114,9 @@ extension AppModel {
   }
 
   /// Names (and so the actions) only where messages would show them: not behind the app lock, and
-  /// not while this device or the workspace policy shows nothing in notifications.
-  private func joinRequestShowsNames(_ core: TeamCraft) async -> Bool {
+  /// not while this device or the workspace policy shows nothing in notifications. The meeting
+  /// watch's notices follow it too.
+  func joinRequestShowsNames(_ core: TeamCraft) async -> Bool {
     guard !SharedContainer().isAppLockOn, let settings = try? await core.notificationContent() else { return false }
     return settings.device != .nothing && settings.workspace != .nothing
   }

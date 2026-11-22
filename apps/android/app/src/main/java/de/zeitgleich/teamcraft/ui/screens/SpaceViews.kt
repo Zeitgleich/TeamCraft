@@ -249,7 +249,8 @@ private fun callDirectionLabel(direction: String): Int = when (direction) {
 /** The space's meetings, and "Schedule" for one listed in this space (#1905), as desktop's tab. */
 @Composable
 private fun SpaceMeetings(viewModel: MainViewModel, spaceId: String, contentPadding: PaddingValues) {
-  val read = rememberRead(viewModel) { meetings() }
+  // Read again when the meetings change (#2258), not on every change of the store.
+  val read = rememberRead(viewModel, changes = viewModel.meetingsChanges) { meetings() }
   val meetings = meetingsOfSpace(read.maybeValue.orEmpty(), spaceId)
   var isFormOpen by remember { mutableStateOf(false) }
   var maybeCreated by remember { mutableStateOf<SavedMeeting?>(null) }
