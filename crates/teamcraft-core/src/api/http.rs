@@ -2019,6 +2019,60 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     })
   }
 
+  #[cfg(not(target_arch = "wasm32"))]
+  fn get_blob_range_detached(&self, url: &str, start: u64, end: u64) -> DetachedDownload {
+    let wanted = end.saturating_sub(start);
+    let request = self.http().get(url).header(
+      reqwest::header::RANGE,
+      format!("bytes={start}-{}", end.saturating_sub(1)),
+    );
+    Box::pin(async move {
+      if wanted == 0 {
+        return Ok(Vec::new());
+      }
+      // Per phase like `get_blob_from_detached`: the answer, then each piece.
+      let mut response = tokio::time::timeout(API_ANSWER_TIMEOUT, send(request))
+        .await
+        .map_err(|_| ApiError::Network(format!("no answer within {} s", API_ANSWER_TIMEOUT.as_secs())))??;
+      if response.status() != reqwest::StatusCode::PARTIAL_CONTENT
+        || content_range_start(response.headers()) != Some(start)
+      {
+        return Err(ApiError::Decode(
+          "the storage did not answer the range asked for".into(),
+        ));
+      }
+      let mut blob = Vec::with_capacity(usize::try_from(wanted).unwrap_or(0));
+      loop {
+        let piece = tokio::time::timeout(TRANSFER_STALL_TIMEOUT, response.chunk())
+          .await
+          .map_err(|_| {
+            ApiError::Network(format!(
+              "the transfer made no progress for {} s",
+              TRANSFER_STALL_TIMEOUT.as_secs()
+            ))
+          })?
+          .map_err(network_error)?;
+        let Some(piece) = piece else {
+          break;
+        };
+        if blob.len() as u64 + piece.len() as u64 > wanted {
+          return Err(ApiError::BlobTooLarge { max_bytes: wanted });
+        }
+        blob.extend_from_slice(&piece);
+      }
+      if blob.len() as u64 != wanted {
+        return Err(ApiError::Network("the range ended early".into()));
+      }
+      Ok(blob)
+    })
+  }
+
+  #[cfg(target_arch = "wasm32")]
+  fn get_blob_range_detached(&self, url: &str, start: u64, end: u64) -> DetachedDownload {
+    let url = url.to_owned();
+    Box::pin(async move { super::xhr::get_range(&url, start, end).await })
+  }
+
   async fn get_blob(&self, url: &str) -> Result<Vec<u8>, ApiError> {
     let response = send(self.http().get(url)).await?;
     response

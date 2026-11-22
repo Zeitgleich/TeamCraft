@@ -17,8 +17,9 @@ use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::SetIfAlive;
 use crate::video_controls::{
-  PlaybackState, PlayerCommand, STALL_TIMEOUT, StallCheck, buffered_until, format_seconds, format_speed,
-  next_speed, percent_of, scrubber_time, seek_target, tenth_target, volume_target,
+  PlaybackState, PlayerCommand, STALL_TIMEOUT, STREAMED_STALL_TIMEOUT, StallCheck, buffered_until,
+  format_seconds, format_speed, next_speed, percent_of, scrubber_time, seek_target, tenth_target,
+  volume_target,
 };
 
 /// The volume unmuting goes back to when the volume was turned all the way down.
@@ -33,7 +34,7 @@ const HAVE_CURRENT_DATA: u16 = 2;
 /// box; the video is letterboxed inside it.
 #[component]
 pub fn VideoPlayer(
-  /// The decrypted file's `blob:` URL.
+  /// The decrypted file's `blob:` URL, or a stream's (`crate::media_stream`).
   src: String,
   /// The video element, for the caller's own control (the lightbox's play key, pausing out of view).
   video: NodeRef<html::Video>,
@@ -45,6 +46,10 @@ pub fn VideoPlayer(
   /// Starts playing once loaded (the user just pressed play on the tile).
   #[prop(optional)]
   is_autoplay: bool,
+  /// `src` streams: its bytes still come from the network, so it gets longer before a stall counts
+  /// ([`STREAMED_STALL_TIMEOUT`]).
+  #[prop(optional)]
+  is_streamed: bool,
   /// The first frame's size is known.
   #[prop(optional)]
   maybe_on_loaded: Option<Callback<()>>,
@@ -71,7 +76,11 @@ pub fn VideoPlayer(
     is_fullscreen,
   };
   // Counted from here, when the file's `blob:` URL is set: never while it still downloads.
-  let stalls = StallWatch::new(video, on_unplayable);
+  let stall_timeout = match is_streamed {
+    true => STREAMED_STALL_TIMEOUT,
+    false => STALL_TIMEOUT,
+  };
+  let stalls = StallWatch::new(video, on_unplayable, stall_timeout);
   stalls.watch(StallCheck::Metadata);
   on_cleanup(move || stalls.stop());
 
@@ -313,6 +322,7 @@ struct IdleWatch {
 struct StallWatch {
   video: NodeRef<html::Video>,
   on_unplayable: Callback<()>,
+  timeout: Duration,
   maybe_metadata_timer: StoredValue<Option<TimeoutHandle>>,
   maybe_start_timer: StoredValue<Option<TimeoutHandle>>,
   is_reported: StoredValue<bool>,
@@ -392,10 +402,11 @@ impl IdleWatch {
 }
 
 impl StallWatch {
-  fn new(video: NodeRef<html::Video>, on_unplayable: Callback<()>) -> Self {
+  fn new(video: NodeRef<html::Video>, on_unplayable: Callback<()>, timeout: Duration) -> Self {
     Self {
       video,
       on_unplayable,
+      timeout,
       maybe_metadata_timer: StoredValue::new(None),
       maybe_start_timer: StoredValue::new(None),
       is_reported: StoredValue::new(false),
@@ -418,7 +429,7 @@ impl StallWatch {
         self.report();
       }
     };
-    match set_timeout_with_handle(fire, STALL_TIMEOUT) {
+    match set_timeout_with_handle(fire, self.timeout) {
       Ok(handle) => {
         if let Some(Some(earlier)) = slot.try_get_value() {
           earlier.clear();

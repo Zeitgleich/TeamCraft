@@ -34,6 +34,7 @@ use teamcraft_core::connection::{
 use teamcraft_core::downloads::Downloads;
 use teamcraft_core::export::{ExportError, ExportJob, ExportStep};
 use teamcraft_core::media_cache::FileMediaCache;
+use teamcraft_core::media_stream::{MediaStreamToken, OpenedStream, StreamPart};
 use teamcraft_core::records;
 use teamcraft_core::store::{
   DEFAULT_MESSAGE_CACHE_BYTES, DatabaseKeySource, KeySourceError, LocalStore, SecretVault, SqlCipherStore,
@@ -391,6 +392,19 @@ enum Request {
     priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
+  /// A video to play while it streams (#200, `teamcraft_core::media_stream`).
+  OpenStream {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    reply: oneshot::Sender<Result<OpenedStream, String>>,
+  },
+  ReadStream {
+    token: MediaStreamToken,
+    start: u64,
+    reply: oneshot::Sender<Result<StreamPart, String>>,
+  },
+  CloseStream(MediaStreamToken),
   OrgBackgroundPicture(OrgBackgroundId, oneshot::Sender<Result<Vec<u8>, String>>),
   /// "Save…" (#719): the file goes to the path the user picked in the save dialog; "Download all"
   /// (#1014): into the folder the user picked.
@@ -833,6 +847,38 @@ impl CoreRuntime {
       })
       .await
       .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Opens a video of a message to play while it streams (#200).
+  pub async fn open_stream(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+  ) -> Result<OpenedStream, String> {
+    self
+      .ask(|reply| Request::OpenStream {
+        conversation,
+        message,
+        file_id,
+        reply,
+      })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Reads an open stream from `start` on (at most `teamcraft_core::media_stream::MAX_READ_BYTES`).
+  pub async fn read_stream(&self, token: MediaStreamToken, start: u64) -> Result<StreamPart, String> {
+    self
+      .ask(|reply| Request::ReadStream { token, start, reply })
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Closes a stream the page no longer plays.
+  pub fn close_stream(&self, token: MediaStreamToken) {
+    // A stopped core has no streams left to close.
+    drop(self.requests.send(Request::CloseStream(token)));
   }
 
   /// Saves one file of a message to `target`, which the user picked in a save or folder dialog. It
@@ -1729,6 +1775,18 @@ impl Core {
         priority,
         reply,
       } => self.queue_attachment(conversation, message, &file_id, priority, reply),
+      Request::OpenStream {
+        conversation,
+        message,
+        file_id,
+        reply,
+      } => self.queue_stream_open(conversation, message, &file_id, reply),
+      Request::ReadStream { token, start, reply } => {
+        self
+          .downloads
+          .read_stream(token, start, Box::new(move |part| drop(reply.send(part))))
+      },
+      Request::CloseStream(token) => self.downloads.close_stream(&token),
       Request::OrgBackgroundPicture(id, reply) => drop(reply.send(self.org_background_picture(id).await)),
       Request::SaveAttachment {
         conversation,
@@ -1791,6 +1849,27 @@ impl Core {
       Box::new(deliver),
       Box::new(|| true),
     );
+  }
+
+  /// Queues opening a video to stream; it is answered once the blob's header arrived.
+  fn queue_stream_open(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    reply: oneshot::Sender<Result<OpenedStream, String>>,
+  ) {
+    let maybe_reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
+    };
+    self
+      .downloads
+      .open_stream(reference, Box::new(move |opened| drop(reply.send(opened))));
   }
 
   /// Starts the downloads that may run now.

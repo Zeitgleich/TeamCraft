@@ -40,6 +40,7 @@ pub mod space_dms;
 pub mod group_mentions;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod media_cache;
+pub mod media_stream;
 pub mod mls_storage;
 pub mod motion_photo;
 pub mod notetaker;

@@ -1138,7 +1138,7 @@ The message list shows the encrypted thumbnail at once. On web and desktop it th
 picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,
 raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
-platform; bigger files are only saved. The page holds the plaintext only as `blob:` URLs in a session
+platform; bigger files are only saved, except videos, which stream (below). The page holds the plaintext only as `blob:` URLs in a session
 cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown.
 The full file is never written to disk unless the user saves it; only the inline rendition of a still
 picture (at most 960 pixels a side) is also kept in the persistent media cache (§9.6), sealed like the
@@ -1154,6 +1154,36 @@ the encrypted message (optional; older clients ignore it). The message shows the
 badge. A click plays the video in the row (one at a time, paused when scrolled out of view) when it is at most
 64 MiB, as the player gets the whole decrypted file as a `blob:` (`MAX_INLINE_VIDEO_BYTES`); bigger videos
 open in the lightbox. The desktop app's CSP allows `media-src 'self' blob:` for this, as the web client's does.
+
+**Streaming playback** (#200). The lightbox plays a video of any size while it streams, without holding
+it in memory: the player reads the file in ranges as from a web server, and the core answers each
+range from the encrypted blob (`teamcraft-core` `media_stream`). It asks the storage for just the
+chunks the range covers (an HTTP `Range` request on the presigned URL) and decrypts them at their
+position (`AttachmentRangeDecryptor`). The blob's hash is not checked first, as it covers the whole
+blob; each chunk is authenticated on its own instead: its position and whether it is the last are
+part of its nonce, and the file's key is its own. So a chunk the storage swapped, moved, dropped or
+took from another file, a blob cut short or made longer (also by a wrong length from the server,
+which only decides where the core expects the last chunk) fails to decrypt, and the player gets
+nothing the sender didn't encrypt in the place the sender put it. Only video types the webviews
+play stream (`streamable_type`), and the player is told that type, never the sender's own.
+- A stream is opened per video and named by a random 128-bit token in the player's URL, never the
+  file's ID; a few are open at once (`MAX_OPEN_STREAMS`, the oldest closed for a new one), a read
+  answers at most 2 MiB, a few reads run at once, and the page closes a stream when it no longer
+  shows the video. The presigned URL is asked for again after five minutes or a failed read.
+- Desktop: the shell answers `http://127.0.0.1:<port>/<token>` from a loopback server (hyper) that
+  starts with the first stream (CSP `media-src http://127.0.0.1:*`). A request needs a token of an
+  open stream and the server's own `Host` (against DNS rebinding); the answer to a range is the
+  whole range, streamed one read after the other as the player takes it, and stops when the player
+  closes the connection. WebKitGTK plays no media from a custom URI scheme and doesn't ask again
+  after a short answer, hence the server.
+- Web: the service worker answers `/media-stream/<token>` (same origin, `media-src 'self'`) with a
+  stream it pulls from the page whose player asked, over a `MessageChannel`; the page's core reads
+  and decrypts, and the bytes move to the worker without a copy left in the page. The worker keeps
+  nothing. Only the tab that runs the core streams, and only while a worker that streams controls
+  it (it answers `/media-stream/ready`); otherwise, and in a follower tab, the file opens whole as
+  before, up to `MAX_VIEWER_BYTES`. The storage's CORS rule must allow the `Range` header.
+- A stream that loses the network shows "try again" instead of "can't be played"; a player waits
+  longer for a streamed video's first frame before it counts as unplayable (30 s instead of 8 s).
 
 The mobile apps (#200) show the poster with the length and the size, and a tap opens the player: Media3 on
 Android, AVFoundation on iOS, with the device's decoders. There the core streams the blob into a plaintext file

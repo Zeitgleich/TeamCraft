@@ -55,6 +55,7 @@ use crate::lightbox::{
   player_command_for_video, position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
+use crate::media_stream::{self, StreamUrl};
 use crate::model::{ConversationId, ConversationKind, thread_id_of};
 use crate::object_url::ObjectUrl;
 use crate::reactive::SetIfAlive;
@@ -80,6 +81,8 @@ fn initial_thread_shown(maybe_stored: Option<bool>, is_wide: bool) -> bool {
 pub enum FullMedia {
   Loading,
   Ready(Rc<ObjectUrl>),
+  /// A video that plays while it streams (#200): no size limit, nothing held whole in memory.
+  Streaming(Rc<StreamUrl>),
   Failed,
   /// A video this webview can't play (#804): it can still be saved or opened in the system's player.
   Unplayable,
@@ -573,18 +576,40 @@ fn load_current(inputs: LoadInputs) {
         .map(|url| Placeholder { key, url }),
     );
     let size_bytes = current_file.with_untracked(|file| file.as_ref().map_or(0, |file| file.size_bytes));
-    if size_bytes > MAX_VIEWER_BYTES {
-      full.set(FullMedia::TooLarge);
-      return;
-    }
     let is_video = kind.get_untracked() == Some(MediaKind::Video);
     // Seen before in this session (inline or in the lightbox): shown at once.
     if let Some(url) = media_cache::cached(key, Rendition::Full) {
       full.set(loaded(key, is_video, url));
       return;
     }
+    if is_video && media_cache::is_unplayable(key) {
+      full.set(FullMedia::Unplayable);
+      return;
+    }
+    if !is_video && size_bytes > MAX_VIEWER_BYTES {
+      full.set(FullMedia::TooLarge);
+      return;
+    }
     full.set(FullMedia::Loading);
     spawn_local(async move {
+      // A video streams where the platform can: any size, played while it arrives.
+      if is_video {
+        match media_stream::open(conversation, key.message, key.attachment.to_string()).await {
+          Ok(stream) => {
+            if ticket.try_get_value() == Some(next_ticket) {
+              drop(full.try_set(FullMedia::Streaming(Rc::new(stream))));
+            }
+            return;
+          },
+          Err(error) => tracing::debug!(%error, "a video doesn't stream here; opening it whole"),
+        }
+        if size_bytes > MAX_VIEWER_BYTES {
+          if ticket.try_get_value() == Some(next_ticket) {
+            drop(full.try_set(FullMedia::TooLarge));
+          }
+          return;
+        }
+      }
       let result = media_cache::load(conversation, key, &media_type, Rendition::Full, None, || true).await;
       if ticket.try_get_value() != Some(next_ticket) {
         // The user moved on or closed the lightbox; the cache keeps the file for next time.
@@ -606,6 +631,25 @@ fn load_current(inputs: LoadInputs) {
     drop(full.try_set(FullMedia::Loading));
     drop(thumbnail.try_set(None));
   });
+}
+
+/// `MediaError.MEDIA_ERR_NETWORK`: the bytes stopped coming, the file itself may be fine.
+const MEDIA_ERR_NETWORK: u16 = 2;
+
+/// Whether the video stopped because its bytes didn't arrive.
+fn has_network_error(video: NodeRef<html::Video>) -> bool {
+  video
+    .get_untracked()
+    .and_then(|video| video.error())
+    .is_some_and(|error| error.code() == MEDIA_ERR_NETWORK)
+}
+
+/// The `blob:` URL of a loaded file; empty for anything else.
+fn shown_url(shown: &FullMedia) -> String {
+  match shown {
+    FullMedia::Ready(url) => url.as_str().to_owned(),
+    _ => String::new(),
+  }
 }
 
 /// A loaded file, or that it can't be played: a video that already failed to play in this session
@@ -837,11 +881,16 @@ fn Stage(
         // then the two cross-fade.
         <div class="lightbox-slot is-current">
           {move || match (full.get(), kind.get()) {
-            (FullMedia::Ready(url), Some(MediaKind::Video)) => {
+            (shown @ (FullMedia::Ready(_) | FullMedia::Streaming(_)), Some(MediaKind::Video)) => {
               let key = arrival.with_untracked(|arrival| arrival.key());
+              let (src, is_streamed) = match &shown {
+                FullMedia::Streaming(stream) => (stream.as_str().to_owned(), true),
+                _ => (shown_url(&shown), false),
+              };
               view! {
                 <VideoPlayer
-                  src=url.as_str().to_owned()
+                  src=src
+                  is_streamed=is_streamed
                   video=video
                   label=Signal::derive(name)
                   class="lightbox-video"
@@ -850,6 +899,12 @@ fn Stage(
                     motion.shown();
                   })
                   on_unplayable=Callback::new(move |()| {
+                    // A stream that lost the network can play once it is back: tried again, not
+                    // marked as unplayable.
+                    if is_streamed && has_network_error(video) {
+                      drop(full.try_set(FullMedia::Failed));
+                      return;
+                    }
                     if let Some(key) = key {
                       media_cache::mark_unplayable(key);
                     }
@@ -1097,7 +1152,7 @@ fn Status(
       </div>
     }
     .into_any(),
-    FullMedia::Ready(_) => ().into_any(),
+    FullMedia::Ready(_) | FullMedia::Streaming(_) => ().into_any(),
   }
 }
 

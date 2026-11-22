@@ -332,6 +332,8 @@ struct State {
   ignores_ranges: bool,
   /// The offset of every ranged download asked for, in order.
   download_starts: Vec<u64>,
+  /// Every range of a blob read for streaming playback, in order.
+  download_ranges: Vec<(u64, u64)>,
   roster_log: Vec<WorkspaceLogEntryResponse>,
   policy_log: Vec<WorkspaceLogEntryResponse>,
   /// Larger attachments are refused like the server's `max_attachment_bytes`; `None`: no limit.
@@ -2265,6 +2267,11 @@ impl FakeServer {
   /// The offsets ranged downloads asked for so far, in order.
   pub fn download_starts(&self) -> Vec<u64> {
     self.lock().download_starts.clone()
+  }
+
+  /// The ranges read for streaming playback so far, in order.
+  pub fn download_ranges(&self) -> Vec<(u64, u64)> {
+    self.lock().download_ranges.clone()
   }
 
   /// Flips a byte in every stored blob, as a malicious storage backend could.
@@ -6890,6 +6897,37 @@ impl ServerApi for FakeServerApi {
       };
       received.add(blob.len() as u64);
       Ok(blob)
+    })
+  }
+
+  fn get_blob_range_detached(&self, url: &str, start: u64, end: u64) -> super::DetachedDownload {
+    let (api, url) = (self.clone(), url.to_owned());
+    Box::pin(async move {
+      api.with(|state, _| {
+        state.download_ranges.push((start, end));
+        if state.ignores_ranges {
+          return Err(ApiError::Decode(
+            "the storage did not answer the range asked for".into(),
+          ));
+        }
+        let blob = blob_entry(state, &url)?
+          .maybe_blob
+          .as_ref()
+          .ok_or(ApiError::Status {
+            status: 404,
+            maybe_body: None,
+            maybe_retry_after: None,
+          })?;
+        let (start, end) = (start as usize, end as usize);
+        if start >= end || end > blob.len() {
+          return Err(ApiError::Status {
+            status: 416,
+            maybe_body: None,
+            maybe_retry_after: None,
+          });
+        }
+        Ok(blob[start..end].to_vec())
+      })
     })
   }
 

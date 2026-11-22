@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-core-open-media-stream"
+description = "Enables the core_open_media_stream command without any pre-configured scope."
+commands.allow = ["core_open_media_stream"]
+
+[[permission]]
+identifier = "deny-core-open-media-stream"
+description = "Denies the core_open_media_stream command without any pre-configured scope."
+commands.deny = ["core_open_media_stream"]

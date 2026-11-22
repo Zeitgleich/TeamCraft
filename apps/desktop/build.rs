@@ -68,6 +68,8 @@ const COMMANDS: &[&str] = &[
   "core_action",
   "core_query",
   "core_attachment",
+  "core_open_media_stream",
+  "core_close_media_stream",
   "core_save_attachment",
   "core_save_attachments",
   "core_data_export",

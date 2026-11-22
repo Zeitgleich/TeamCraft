@@ -1104,6 +1104,10 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     Box::pin(self.refused("get_blob_from_detached"))
   }
 
+  fn get_blob_range_detached(&self, _url: &str, _start: u64, _end: u64) -> DetachedDownload {
+    Box::pin(self.refused("get_blob_range_detached"))
+  }
+
   fn get_blob(&self, _url: &str) -> impl Future<Output = Result<Vec<u8>, ApiError>> {
     self.refused("get_blob")
   }

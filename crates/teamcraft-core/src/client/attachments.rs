@@ -115,6 +115,18 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.start_download(attachment, Some(max_bytes)).await
   }
 
+  /// Where a file's blob can be read now: a fresh presigned URL and the blob's length (the server's
+  /// word, checked by decryption). For streaming playback ([`crate::media_stream`]).
+  pub(crate) async fn blob_location(&self, attachment: AttachmentId) -> Result<(String, u64), CoreError> {
+    let download = self.api.download_attachment(attachment).await?;
+    Ok((download.download_url, download.size_bytes))
+  }
+
+  /// Bytes `start..end` of a blob, as a request of its own beside the host's loop.
+  pub(crate) fn blob_range(&self, url: &str, start: u64, end: u64) -> DetachedDownload {
+    self.api.get_blob_range_detached(url, start, end)
+  }
+
   /// Encrypts with a fresh key, uploads through a presigned URL and returns what the message needs.
   pub(crate) async fn upload_encrypted(
     &self,
