@@ -193,6 +193,11 @@ pub enum CallAction {
   SetStatusSounds {
     sounds: CallStatusSounds,
   },
+  /// The user's "Connect directly in calls" (#127; a synced setting, also before any call): off
+  /// keeps every call on the SFU and ends a running direct path.
+  SetDirectConnections {
+    is_allowed: bool,
+  },
   /// The highest quality the own camera is sent at (#967; a device setting, also before any
   /// call). A running camera restarts with it.
   SetCameraQuality {

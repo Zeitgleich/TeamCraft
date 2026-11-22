@@ -7213,8 +7213,21 @@ consent to. Put somebody else's address into its offer: the device then sends QU
 most 8 candidates, 5 s, with backoff after failures; no media before the pinned handshake completes)
 to that address, which bounds any reflection to a few kilobytes.
 
-**Logs.** Apps log that a direct path came up or went down (call ID, the candidate kind, the round
-trip), never the addresses. The SFU logs relayed offers by count only.
+**The reflection.** The reflexive candidate comes from the SFU: the direct path socket opens a
+short WebTransport connection to the session's SFU, names the session's audio-socket secret
+(`reflect`), and the SFU answers with the address it saw (`reflected`). The SFU learns one more
+port of an address it already sees, and only for a session that runs; an unknown secret is refused.
+
+**The direct connection's certificates.** Each device makes a fresh self-signed certificate for
+each direct path socket (a new socket after every network change) and offers its SHA-256. The
+endpoint refuses every incoming connection until an offer named the other device's certificate,
+then accepts only that one (TLS 1.3 client authentication, verified by hash), and checks the
+server's certificate the same way when it dials. Signatures are verified as in any TLS handshake;
+only the chain of trust is replaced by the pin. ALPN `teamcraft-direct/1`.
+
+**Logs.** Apps log that a direct path came up or went down (call ID, the reason, the round trip),
+never the addresses. The SFU logs relayed offers by count, reports by state, and reflections by
+session, never the address it reflected.
 
 ## 9. Local storage
 

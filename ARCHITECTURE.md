@@ -1312,14 +1312,31 @@ Keyframe requests, NACKs and the voice's FEC work end to end as on the SFU path.
 **Status.** The call's connection details show "Direct" or "Through the server" (no badge on the
 call screen itself: the path is an implementation detail, the privacy choice is the setting).
 
+**This step: audio only.** The direct path carries the voice and the shared screen's sound (layer 0,
+without the transport sequence number, whose numbers would mix with the SFU's in the receiver's
+feedback); the video still goes through the SFU, which picks each receiver's layers (the video's
+layer choice on the direct path is a follow-up). The audio also keeps going to the SFU: its
+speaker selection and voice guard watch it, and it is forwarded again the moment either device
+reports its path down, without waiting for the sender. While both devices report the direct path
+up, the SFU forwards neither one's audio to the other (`direct_path`, `Forwarder::is_direct_pair`);
+a third device, a lost connection or a rejoin makes it forward again until the devices report anew.
+A receiver drops the SFU's copy of a voice while the direct path brought that voice in the last
+100 ms (the SFU renumbers voices per receiver, so the copies can't be told apart by number).
+Liveness on the direct connection: pings and pongs as QUIC datagrams whose first byte has the
+datagram version 3, which no media datagram has.
+
 **State of the implementation.** In place: the policy and the user setting, the encrypted offer
-(`teamcraft_crypto::direct_path`, the exporter in the vendored `davey`), the wire messages and the
-SFU's relay with its limits, and the client's decision and path-switching logic, which runs without
-I/O and is tested on its own (`teamcraft_media::direct_path`). Still to come (issue #127's
-follow-ups): the direct-path socket and QUIC endpoint in the native call engine with the SFU's
-`reflect`, the media switch and `direct_path` towards the SFU, port mapping, the connection details,
-and the measurements on the shaped test stack (latency and SFU bandwidth with and without, success
-per NAT type).
+(`teamcraft_crypto::direct_path`, the exporter in the vendored `davey`), the wire messages, the
+SFU's relay with its limits, `reflect` and the `direct_path` rule, the client's decision and
+path-switching logic (`teamcraft_media::direct_path`, sans I/O), and the native call engine's direct
+path (`teamcraft_media::call_native::direct`: the socket, the dual-role QUIC endpoint with mutually
+pinned certificates, the reflection over the same endpoint, offers, dialing rounds, pings, the
+switch of the audio). The desktop app passes the verified policy, the user's setting and the
+standing of the call's devices (`teamcraft_core::workspace::call_peer_standing`); the connection
+details ("Stats for nerds") show the audio's path. Measurements: docs/performance.md, "Direct
+media". Still to come (issue #127's follow-ups): the Android and iOS engines' inputs and setting
+switch, the video on the direct path, port mapping, birthday-paradox probing for hard NATs, and the
+success rate per NAT type.
 
 ## 7. Clients
 

@@ -6,6 +6,7 @@
 //! ping was answered or lost, something arrived); it asks [`PathSelector`] where to send. Media on
 //! either path is the same DAVE-encrypted datagram.
 
+use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
@@ -20,6 +21,9 @@ use teamcraft_proto::{
 use thiserror::Error;
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
+
+use crate::datagram::DatagramHeader;
+use crate::fallback_queue::is_audio;
 
 /// How often the direct path is pinged while it is tried or used.
 pub const PING_INTERVAL: Duration = Duration::from_millis(200);
@@ -40,6 +44,17 @@ pub const FIRST_RETRY_WAIT: Duration = Duration::from_secs(2);
 pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(60);
 /// The length of a certificate hash in an offer (SHA-256).
 pub const CERTIFICATE_HASH_LEN: usize = 32;
+/// A ping without its pong for this long counts as lost.
+pub const PING_LOST_AFTER: Duration = Duration::from_millis(400);
+/// While the other device's audio of a stream came on the direct path this recently, the SFU's copy
+/// of it is dropped: the two may be numbered differently (the SFU renumbers voices per receiver).
+pub const DIRECT_PREFERRED_FOR: Duration = Duration::from_millis(100);
+/// The first byte's top bits of a direct path control datagram: datagram version 3, which no media
+/// datagram has (`crate::datagram`, version 0).
+const CONTROL_MARK: u8 = 0b1100_0000;
+const PING_TYPE: u8 = CONTROL_MARK | 1;
+const PONG_TYPE: u8 = CONTROL_MARK | 2;
+const CONTROL_LEN: usize = 5;
 
 /// What this device knows when it decides whether to go direct.
 #[derive(Debug, Clone, Copy)]
@@ -127,6 +142,44 @@ pub enum DownReason {
   Closed,
   /// The call is no longer 1:1, or the policy or the setting changed.
   NotAllowed,
+}
+
+/// A control datagram of the direct connection: its liveness, beside the media.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectControl {
+  Ping(u32),
+  Pong(u32),
+}
+
+/// What arrived on the direct connection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DirectDatagram<'a> {
+  Control(DirectControl),
+  Media(&'a [u8]),
+}
+
+/// Pings on the direct connection every [`PING_INTERVAL`]; one unanswered for [`PING_LOST_AFTER`] is
+/// lost. Without I/O: the driver sends what [`Pinger::poll`] returns and hands it the pongs.
+#[derive(Debug, Default)]
+pub struct Pinger {
+  next_id: u32,
+  maybe_next_at: Option<Instant>,
+  outstanding: VecDeque<(u32, Instant)>,
+  maybe_rtt: Option<Duration>,
+}
+
+/// What [`Pinger::poll`] found due.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PingDue {
+  pub maybe_send: Option<DirectControl>,
+  pub lost: u32,
+}
+
+/// Keeps the SFU's copy of the other device's audio out while the direct path brings it
+/// ([`DIRECT_PREFERRED_FOR`]): the receiver hears each voice from one path at a time.
+#[derive(Debug, Default)]
+pub struct RelayArbiter {
+  direct_at: HashMap<u32, Instant>,
 }
 
 /// Decides, from what happens on the direct path, where the media goes (ARCHITECTURE.md §6.7,
@@ -262,7 +315,138 @@ pub fn dial_delay(index: usize) -> Duration {
   DIAL_STEP.saturating_mul(u32::try_from(index).unwrap_or(u32::MAX))
 }
 
+/// The copy of an own datagram that goes on the direct path, if it goes there: the full voice and
+/// the screen's sound (audio of layer 0; the thin copy is for the SFU's thin receivers), without
+/// the transport sequence number. Video stays on the SFU for now (#127 follow-up: the layer choice
+/// of a direct path).
+pub fn direct_copy(datagram: &[u8]) -> Option<Vec<u8>> {
+  let header = DatagramHeader::parse(datagram).ok()?;
+  if header.layer.value() != 0 || !is_audio(datagram) {
+    return None;
+  }
+  DatagramHeader::unstamped(datagram).ok()
+}
+
+/// Reads what arrived on the direct connection. `None` for a malformed control datagram.
+pub fn read_direct(datagram: &[u8]) -> Option<DirectDatagram<'_>> {
+  let first = *datagram.first()?;
+  if first & CONTROL_MARK != CONTROL_MARK {
+    return Some(DirectDatagram::Media(datagram));
+  }
+  let id_bytes: [u8; 4] = datagram.get(1..CONTROL_LEN)?.try_into().ok()?;
+  let id = u32::from_be_bytes(id_bytes);
+  match first {
+    PING_TYPE => Some(DirectDatagram::Control(DirectControl::Ping(id))),
+    PONG_TYPE => Some(DirectDatagram::Control(DirectControl::Pong(id))),
+    _ => None,
+  }
+}
+
+impl DirectControl {
+  pub fn to_bytes(self) -> [u8; CONTROL_LEN] {
+    let (kind, id) = match self {
+      Self::Ping(id) => (PING_TYPE, id),
+      Self::Pong(id) => (PONG_TYPE, id),
+    };
+    let mut bytes = [kind, 0, 0, 0, 0];
+    bytes[1..].copy_from_slice(&id.to_be_bytes());
+    bytes
+  }
+}
+
+impl Pinger {
+  /// Starts pinging a fresh connection now.
+  pub fn start(&mut self, now: Instant) {
+    *self = Self {
+      next_id: self.next_id,
+      maybe_next_at: Some(now),
+      ..Self::default()
+    };
+  }
+
+  pub fn stop(&mut self) {
+    self.maybe_next_at = None;
+    self.outstanding.clear();
+  }
+
+  /// The pings that went unanswered too long, and the next one if it is due.
+  pub fn poll(&mut self, now: Instant) -> PingDue {
+    let mut due = PingDue::default();
+    while let Some(&(_, sent_at)) = self.outstanding.front() {
+      if now.saturating_duration_since(sent_at) < PING_LOST_AFTER {
+        break;
+      }
+      self.outstanding.pop_front();
+      due.lost += 1;
+    }
+    if let Some(at) = self.maybe_next_at
+      && now >= at
+    {
+      let id = self.next_id;
+      self.next_id = self.next_id.wrapping_add(1);
+      self.outstanding.push_back((id, now));
+      self.maybe_next_at = Some(now + PING_INTERVAL);
+      due.maybe_send = Some(DirectControl::Ping(id));
+    }
+    due
+  }
+
+  /// A pong arrived; `true` if it answered a ping still waiting.
+  pub fn on_pong(&mut self, id: u32, now: Instant) -> bool {
+    let Some(index) = self.outstanding.iter().position(|(sent, _)| *sent == id) else {
+      return false;
+    };
+    let (_, sent_at) = self.outstanding.remove(index).unwrap_or((id, now));
+    self.maybe_rtt = Some(now.saturating_duration_since(sent_at));
+    true
+  }
+
+  /// The round trip of the last answered ping.
+  pub fn rtt(&self) -> Option<Duration> {
+    self.maybe_rtt
+  }
+
+  /// When [`Pinger::poll`] has something to do next.
+  pub fn next_deadline(&self) -> Option<Instant> {
+    let maybe_loss = self.outstanding.front().map(|(_, at)| *at + PING_LOST_AFTER);
+    match (self.maybe_next_at, maybe_loss) {
+      (Some(next), Some(loss)) => Some(next.min(loss)),
+      (deadline, None) | (None, deadline) => deadline,
+    }
+  }
+}
+
+impl RelayArbiter {
+  /// The other device's datagram came on the direct path.
+  pub fn on_direct(&mut self, datagram: &[u8], now: Instant) {
+    if let Ok(header) = DatagramHeader::parse(datagram) {
+      self.direct_at.insert(header.stream_id.0, now);
+    }
+  }
+
+  /// Whether a datagram from the SFU is taken: anything but audio the direct path brings now.
+  pub fn admits_relay(&self, datagram: &[u8], now: Instant) -> bool {
+    let Ok(header) = DatagramHeader::parse(datagram) else {
+      return true;
+    };
+    self
+      .direct_at
+      .get(&header.stream_id.0)
+      .is_none_or(|at| now.saturating_duration_since(*at) >= DIRECT_PREFERRED_FOR)
+      || !is_audio(datagram)
+  }
+
+  pub fn clear(&mut self) {
+    self.direct_at.clear();
+  }
+}
+
 impl OfferInbox {
+  /// Whether an offer of `epoch` was taken: the first one of an epoch is answered with an own.
+  pub fn holds_epoch(&self, epoch: u64) -> bool {
+    self.maybe_latest.is_some_and(|(held, _)| held == epoch)
+  }
+
   /// Takes `counter` of `epoch` if it is newer than what was taken; a new epoch starts over.
   fn take(&mut self, epoch: u64, counter: u64) -> Result<(), OfferError> {
     match self.maybe_latest {
@@ -313,6 +497,17 @@ impl PathSelector {
       Phase::Proving { .. } => self.is_overlapping(now),
       Phase::Idle | Phase::Dialing { .. } => false,
     }
+  }
+
+  /// Whether a dialing round runs: the driver dials while it does.
+  pub fn is_dialing(&self) -> bool {
+    matches!(self.phase, Phase::Dialing { .. })
+  }
+
+  /// Whether a direct connection proves itself or carries the media: the driver keeps it open
+  /// exactly while it does.
+  pub fn is_connected(&self) -> bool {
+    matches!(self.phase, Phase::Proving { .. } | Phase::Up { .. })
   }
 
   /// Whether a dialing round may start now: none is running and the backoff after failed rounds
@@ -749,6 +944,108 @@ mod tests {
     }
   }
 
+  /// The direct connection's own datagrams and what of the media goes there.
+  mod datagrams {
+    use crate::datagram::{SimulcastLayer, TransportSeq};
+    use crate::rtp::PayloadType;
+
+    use super::*;
+
+    #[test]
+    fn pings_and_pongs_round_trip_and_media_is_never_taken_for_one() {
+      for control in [DirectControl::Ping(7), DirectControl::Pong(u32::MAX)] {
+        assert_eq!(
+          read_direct(&control.to_bytes()),
+          Some(DirectDatagram::Control(control))
+        );
+      }
+      let media = audio(3, 0, true);
+      assert_eq!(read_direct(&media), Some(DirectDatagram::Media(&media)));
+      assert_eq!(read_direct(&[0xC1, 0, 0]), None, "truncated");
+      assert_eq!(read_direct(&[0xC9, 0, 0, 0, 1]), None, "unknown type");
+      assert_eq!(read_direct(&[]), None);
+    }
+
+    #[test]
+    fn only_the_full_audio_goes_direct_without_its_transport_number() {
+      let copy = direct_copy(&audio(3, 0, true)).unwrap();
+      assert_eq!(copy, audio(3, 0, false));
+      assert_eq!(
+        direct_copy(&audio(3, 1, true)),
+        None,
+        "the thin copy stays with the SFU"
+      );
+      let mut video = audio(4, 0, false);
+      video[6] = 96;
+      assert_eq!(direct_copy(&video), None, "video stays with the SFU");
+    }
+
+    #[test]
+    fn the_sfu_copy_of_a_voice_waits_while_the_direct_one_flows() {
+      let start = Instant::now();
+      let mut arbiter = RelayArbiter::default();
+      let voice = audio(3, 0, false);
+      assert!(arbiter.admits_relay(&voice, start));
+      arbiter.on_direct(&voice, start);
+      assert!(!arbiter.admits_relay(&voice, start + Duration::from_millis(50)));
+      assert!(arbiter.admits_relay(&audio(9, 0, false), start), "another stream");
+      let mut video = audio(3, 0, false);
+      video[6] = 96;
+      assert!(arbiter.admits_relay(&video, start), "not audio");
+      assert!(
+        arbiter.admits_relay(&voice, start + DIRECT_PREFERRED_FOR),
+        "the direct path went quiet: the SFU's copy at once"
+      );
+    }
+
+    #[test]
+    fn a_ping_unanswered_for_long_is_lost_and_an_answered_one_measures_the_round_trip() {
+      let start = Instant::now();
+      let mut pinger = Pinger::default();
+      assert_eq!(pinger.poll(start), PingDue::default(), "not started");
+      pinger.start(start);
+      let first = pinger.poll(start);
+      assert_eq!(first.maybe_send, Some(DirectControl::Ping(0)));
+      assert_eq!(pinger.next_deadline(), Some(start + PING_INTERVAL));
+      assert!(pinger.on_pong(0, start + Duration::from_millis(30)));
+      assert_eq!(pinger.rtt(), Some(Duration::from_millis(30)));
+      assert!(!pinger.on_pong(0, start), "answered once");
+      let second = pinger.poll(start + PING_INTERVAL);
+      assert_eq!(second.maybe_send, Some(DirectControl::Ping(1)));
+      let later = pinger.poll(start + PING_INTERVAL + PING_LOST_AFTER);
+      assert_eq!(later.lost, 1);
+      pinger.stop();
+      assert_eq!(pinger.next_deadline(), None);
+    }
+
+    /// An Opus datagram of `stream` and `layer`, with a transport number or without.
+    fn audio(stream: u32, layer: u8, is_stamped: bool) -> Vec<u8> {
+      let header = DatagramHeader {
+        stream_id: crate::datagram::StreamId(stream),
+        layer: SimulcastLayer::new(layer).unwrap(),
+        maybe_transport_seq: is_stamped.then_some(TransportSeq(41)),
+      };
+      let mut bytes = Vec::new();
+      header.write_to(&mut bytes);
+      bytes.extend_from_slice(&[
+        0x80,
+        PayloadType::OPUS.value(),
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        1,
+        0xAB,
+      ]);
+      bytes
+    }
+  }
+
   mod switching {
     use super::*;
 
@@ -879,8 +1176,25 @@ mod tests {
       selector.on_connected(start);
       assert_eq!(selector.poll(at(start, 600)), None);
       assert_eq!(selector.state(), PathState::Relay);
+      assert!(!selector.is_connected(), "the driver closes the connection");
       assert!(!selector.may_dial(at(start, 600)));
       assert!(selector.may_dial(at(start, 2600)));
+    }
+
+    #[test]
+    fn the_phases_tell_the_driver_what_to_keep() {
+      let start = Instant::now();
+      let mut selector = PathSelector::new();
+      assert!(!selector.is_dialing() && !selector.is_connected());
+      selector.on_dialing(start);
+      assert!(selector.is_dialing());
+      selector.poll(start + DIAL_TIMEOUT);
+      assert!(
+        !selector.is_dialing(),
+        "the round ended: the driver stops dialing"
+      );
+      selector.on_connected(at(start, 6000));
+      assert!(selector.is_connected());
     }
 
     fn up_selector() -> (PathSelector, Instant) {

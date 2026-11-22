@@ -98,9 +98,12 @@ use crate::video_pipeline::{
 };
 use crate::voice_congestion::set_voice_congestion;
 
+mod direct;
 mod receive;
 mod voice;
 
+pub use self::direct::DirectPathConfig;
+use self::direct::{DirectInput, DirectPath, DirectSender, ReflectTarget};
 pub use self::receive::DecodeReporter;
 use self::receive::{Asks, RemoteVideo};
 use self::voice::{VoiceLink, voice_socket};
@@ -188,6 +191,9 @@ pub struct NativeCallConfig {
   /// What a measurement before the call showed ([`measure_link`], #1969): the join starts from it
   /// while it is fresh. The caller drops one taken on another network.
   pub maybe_prior_link: Option<PriorLink>,
+  /// What a direct path of a 1:1 call goes by (#127, ARCHITECTURE.md §6.7); `None` keeps every
+  /// call on the SFU (development tools, apps that don't pass the policy yet).
+  pub maybe_direct: Option<DirectPathConfig>,
 }
 
 /// Gets a fresh join ticket from `teamcraft-server` (a new token, possibly another SFU URL).
@@ -263,6 +269,8 @@ enum Command {
   StopScreenAudio,
   NetworkChanged,
   SetStatusCues(StatusCues),
+  /// The user's "Connect directly in calls" changed during the call (#127).
+  DirectConnections(bool),
   /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
   /// the signed notice.
   Recording(Option<RecordingSink>),
@@ -437,6 +445,7 @@ impl NativeCallConfig {
       status_cues: StatusCues::default(),
       is_muted_at_start: false,
       maybe_prior_link: None,
+      maybe_direct: None,
     }
   }
 
@@ -710,6 +719,13 @@ impl NativeCall {
     let _ = self.commands.send(Command::SetStatusCues(status_cues));
   }
 
+  /// The user's "Connect directly in calls" (#127): off ends a direct path at once. A call started
+  /// without a [`DirectPathConfig`] stays on the SFU either way.
+  pub fn set_direct_connections(&self, does_allow: bool) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::DirectConnections(does_allow));
+  }
+
   /// What the call's video does now: every own and received track's counters, the encoders and
   /// the round trip to the SFU (stats for nerds, #938). `None` once the call ended.
   #[cfg(feature = "call-view")]
@@ -837,7 +853,12 @@ async fn run_call(
       ..VideoState::default()
     },
     cues: CuePlayer::new(config.status_cues),
+    direct: DirectSender::default(),
   };
+  let mut maybe_direct = config.maybe_direct.clone().map(DirectPath::new);
+  if let Some(direct) = &maybe_direct {
+    sinks.direct = direct.sender();
+  }
   let quic_jitter = config.jitter;
   sinks.use_transport(link.transport(), quic_jitter);
   let mut connection = CallConnection::new(&config, link, start);
@@ -865,7 +886,18 @@ async fn run_call(
           }
         },
         ConnectionEvent::Input(LinkInput::Datagram(datagram)) => {
-          engine.handle_datagram(&datagram.bytes, datagram.read_at);
+          // The other device's audio the direct path brings now isn't taken twice (#127).
+          if maybe_direct
+            .as_ref()
+            .is_none_or(|direct| direct.admits_relay(&datagram.bytes, datagram.read_at))
+          {
+            engine.handle_datagram(&datagram.bytes, datagram.read_at);
+          }
+        },
+        ConnectionEvent::Input(LinkInput::SessionSecret(secret)) => {
+          if let Some(direct) = maybe_direct.as_mut() {
+            direct.on_session_secret(secret, connection.reflect_target());
+          }
         },
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Closed)) => break Ok(()),
         ConnectionEvent::Input(LinkInput::Ended(LinkEnd::Lost)) => connection.lose(&mut engine, Instant::now()),
@@ -899,6 +931,19 @@ async fn run_call(
           connection.resume(&mut engine, link, ticket, Instant::now());
         },
         ConnectionEvent::AttemptFinished(Err(error)) => connection.on_failed_attempt(&error, Instant::now()),
+      },
+      maybe_input = next_direct(&mut maybe_direct) => {
+        let now = Instant::now();
+        if let Some(direct) = maybe_direct.as_mut() {
+          match maybe_input {
+            Some(input) => {
+              if let Some((bytes, read_at)) = direct.on_input(input, &mut engine, now) {
+                engine.handle_datagram(&bytes, read_at);
+              }
+            },
+            None => direct.on_timer(&mut engine, now),
+          }
+        }
       },
       maybe_samples = recv_capture(&mut devices.maybe_capture) => {
         if let Some(samples) = maybe_samples {
@@ -961,6 +1006,9 @@ async fn run_call(
           break Err(NativeCallError::ConnectionLost);
         }
         connection.watch_path(&mut engine, now);
+        if let Some(direct) = maybe_direct.as_mut() {
+          direct.on_timer(&mut engine, now);
+        }
         // A capture the system ended (the share stopped from the OS indicator or menu bar, a
         // camera unplugged) ends its track, and a screen share takes the computer's sound with
         // it: nothing keeps sending after the user saw the share end. The app hears about it, so
@@ -1045,8 +1093,19 @@ async fn run_call(
             let _ = done.send(result);
           },
           Some(Command::StopScreenAudio) => stop_screen_audio(&mut engine, &mut maybe_screen_audio),
-          Some(Command::NetworkChanged) => connection.on_network_changed(Instant::now()),
+          Some(Command::NetworkChanged) => {
+            let now = Instant::now();
+            connection.on_network_changed(now);
+            if let Some(direct) = maybe_direct.as_mut() {
+              direct.on_network_changed(&mut engine, now);
+            }
+          },
           Some(Command::SetStatusCues(status_cues)) => sinks.cues.set_setting(status_cues),
+          Some(Command::DirectConnections(does_allow)) => {
+            if let Some(direct) = maybe_direct.as_mut() {
+              direct.set_user_allows(does_allow, &mut engine, Instant::now());
+            }
+          },
           Some(Command::Recording(maybe_sink)) => {
             engine.set_recording(maybe_sink.is_some());
             maybe_recording = maybe_sink;
@@ -1060,6 +1119,7 @@ async fn run_call(
               .as_ref()
               .and_then(Link::rtt)
               .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX));
+            report.maybe_media_path = Some(media_path(maybe_direct.as_ref()));
             sinks.video.add_sender_stats(&mut report);
             sinks.video.remote.add_decoding_stats(&mut report);
             // The caller may have given up waiting.
@@ -1072,6 +1132,9 @@ async fn run_call(
           Some(Command::Leave) | None => break Ok(()),
         }
       },
+    }
+    if let Some(direct) = maybe_direct.as_mut() {
+      direct.sync(&mut engine, Instant::now());
     }
     if let Err(error) = sinks.flush(&mut engine, &mut capture, connection.sending_link()) {
       break Err(error);
@@ -1096,6 +1159,9 @@ async fn run_call(
 
   if let Some(mut screen_audio) = maybe_screen_audio {
     screen_audio.capture.stop();
+  }
+  if let Some(mut direct) = maybe_direct.take() {
+    direct.close();
   }
   // Left before a last sound plays: the SFU frees the slot, and the other side of a 1:1 call hears
   // of the end without waiting for it.
@@ -1266,6 +1332,9 @@ enum ConnectionEvent {
 enum LinkInput {
   Signal(CallServerMessage),
   Datagram(ReadDatagram),
+  /// The session's secret for a second connection (`audio_socket`): the direct path's `reflect`
+  /// names it too (#127).
+  SessionSecret(Base64Bytes),
   Ended(LinkEnd),
 }
 
@@ -1660,6 +1729,16 @@ impl CallConnection {
   }
 
   /// Leaves: the SFU frees the slot at once.
+  /// Where the direct path asks for its reflexive address: the SFU of the current QUIC link (#127).
+  fn reflect_target(&self) -> Option<ReflectTarget> {
+    let address = self.maybe_link.as_ref()?.maybe_quic_remote()?;
+    Some(ReflectTarget {
+      sfu_url: self.ticket.sfu_url.clone(),
+      address,
+      certificate_hashes: accepted_hashes(self.maybe_pinned_hash, &self.ticket.certificate_hashes),
+    })
+  }
+
   fn close(mut self) {
     if let Some(attempt) = self.maybe_attempt {
       attempt.abort();
@@ -1761,6 +1840,8 @@ async fn try_switch(
             early.push(datagram);
           }
         },
+        // The direct path reflects with the secret the SFU sends after the switch.
+        Some(LinkInput::SessionSecret(_)) => {},
         other => return other,
       }
     }
@@ -2464,6 +2545,8 @@ struct Sinks {
   video: VideoState,
   /// Status sounds, mixed into the playback (never sent).
   cues: CuePlayer,
+  /// The own audio's copies on a direct path of a 1:1 call (#127).
+  direct: DirectSender,
 }
 
 impl Sinks {
@@ -2547,6 +2630,7 @@ impl Sinks {
           if let Some(link) = maybe_link {
             link.send_datagram(&bytes);
           }
+          self.direct.send(&bytes);
         },
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
@@ -3265,6 +3349,9 @@ async fn read_signaling(
     match serde_json::from_slice::<CallServerMessage>(&body) {
       // The SFU offers the own audio a connection of its own (#2141): the session's, not the call's.
       Ok(CallServerMessage::AudioSocket { secret }) => {
+        if inputs.send(LinkInput::SessionSecret(secret.clone())).is_err() {
+          return;
+        }
         if let Some(voice) = voice.upgrade() {
           voice.attach(secret);
         }
@@ -3332,6 +3419,42 @@ async fn read_fallback(
   };
   // The call task may be gone.
   let _ = inputs.send(LinkInput::Ended(end));
+}
+
+/// What happened on the call's direct path, or `None` when one of its deadlines passed; never
+/// without a direct path. A deadline already past waits for the call's timer, which polls it too.
+async fn next_direct(maybe_direct: &mut Option<DirectPath>) -> Option<DirectInput> {
+  let Some(direct) = maybe_direct else {
+    return std::future::pending().await;
+  };
+  let maybe_deadline = direct
+    .next_deadline()
+    .filter(|deadline| *deadline > Instant::now());
+  tokio::select! {
+    input = direct.next_input() => Some(input),
+    () = sleep_until(maybe_deadline) => None,
+  }
+}
+
+async fn sleep_until(maybe_deadline: Option<Instant>) {
+  match maybe_deadline {
+    Some(deadline) => tokio::time::sleep_until(deadline.into()).await,
+    None => std::future::pending().await,
+  }
+}
+
+/// What the connection details say of the media's path (#127).
+#[cfg(feature = "call-view")]
+fn media_path(maybe_direct: Option<&DirectPath>) -> teamcraft_client_api::video_stats::MediaPath {
+  use teamcraft_client_api::video_stats::MediaPath;
+  match maybe_direct {
+    Some(direct) if direct.state() == crate::direct_path::PathState::Direct => MediaPath::Direct {
+      maybe_rtt_ms: direct
+        .rtt()
+        .map(|rtt| u32::try_from(rtt.as_millis()).unwrap_or(u32::MAX)),
+    },
+    _ => MediaPath::Relay,
+  }
 }
 
 async fn read_datagrams(connection: Connection, inputs: mpsc::UnboundedSender<LinkInput>) {

@@ -911,6 +911,31 @@ pub fn signed_membership(store: &impl LocalStore, user: UserId) -> SignedMembers
   }
 }
 
+/// The direct media policy this device verified (#127, admin.md §3.16). `None` before a workspace
+/// was verified or when the state can't be read: no evidence the policy allows it, so calls stay
+/// on the SFU.
+pub fn direct_media_policy(store: &impl LocalStore) -> Option<teamcraft_proto::DirectMediaPolicy> {
+  records::get_json::<WorkspaceState>(store, Table::Workspace, crate::client::WORKSPACE_KEY)
+    .ok()
+    .flatten()
+    .map(|state| state.policy.direct_media)
+}
+
+/// How `user` stands for direct media in a call (#127): a member of this instance by the verified
+/// roster ([`WorkspaceState::vouches_for_member`]) whose account is no guest or bot; anybody else,
+/// and anybody this device can't place, is an outsider. The server's word alone makes nobody a
+/// member.
+pub fn call_peer_standing(store: &impl LocalStore, user: UserId) -> teamcraft_proto::CallPeerStanding {
+  let is_vouched = matches!(signed_membership(store, user), SignedMembership::Member);
+  // An unreadable record counts as a guest: no standing without evidence.
+  let is_guest = crate::notetaker::is_guest_or_bot(store, user).unwrap_or(true);
+  if is_vouched && !is_guest {
+    teamcraft_proto::CallPeerStanding::Member
+  } else {
+    teamcraft_proto::CallPeerStanding::Outsider
+  }
+}
+
 /// How large screen shares may be under the verified policy (#565), for the share options.
 /// `None` before a workspace was verified or when the state can't be read: the default (4K
 /// offered), as for a policy signed before the setting.

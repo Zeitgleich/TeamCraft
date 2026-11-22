@@ -36,6 +36,24 @@ pub struct VideoStatsReport {
   pub maybe_downlink_probe: Option<LinkProbeStats>,
   #[serde(default)]
   pub tracks: Vec<VideoTrackStats>,
+  /// Which way the call's media takes (#127): through the SFU, or directly to the other device of
+  /// a 1:1 call. `None` where the driver has no direct path (the browser).
+  #[serde(default)]
+  pub maybe_media_path: Option<MediaPath>,
+}
+
+/// The way a call's media takes from this device (ARCHITECTURE.md §6.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "path", rename_all = "snake_case")]
+pub enum MediaPath {
+  /// Through the SFU.
+  Relay,
+  /// Directly to the other device: the audio; the video still goes through the SFU.
+  Direct {
+    /// The direct connection's round trip.
+    #[serde(default)]
+    maybe_rtt_ms: Option<u32>,
+  },
 }
 
 /// What a probe of a link at the start of a call showed.
@@ -452,8 +470,15 @@ mod tests {
           }),
         }),
       ],
+      maybe_media_path: Some(MediaPath::Direct {
+        maybe_rtt_ms: Some(9),
+      }),
     };
     let wire = serde_json::to_string(&report).unwrap();
+    assert!(
+      wire.contains(r#""maybe_media_path":{"path":"direct","maybe_rtt_ms":9}"#),
+      "{wire}"
+    );
     assert!(wire.contains(r#""side":"sent""#), "{wire}");
     assert!(wire.contains(r#""implementation":"hardware""#), "{wire}");
     assert_eq!(VideoStatsJson(wire).read(), Some(report));

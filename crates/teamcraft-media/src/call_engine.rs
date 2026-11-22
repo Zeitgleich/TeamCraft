@@ -24,6 +24,7 @@ use std::time::Duration;
 
 #[cfg(feature = "call-view")]
 use teamcraft_client_api::video_stats::VideoStatsReport;
+use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage,
   DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
@@ -66,6 +67,9 @@ use crate::voice_steps::{VoiceEncoding, VoiceStep, VoiceSteps};
 /// more departures than this is far beyond any meeting size, and an evicted key still needs its
 /// binding's time to pass the joiner check.
 const MAX_RETIRED_CALL_KEYS: usize = 4096;
+/// Direct path offers held for the driver (#127): it takes them after every message; the SFU's rate
+/// limit keeps far fewer coming.
+const MAX_HELD_DIRECT_OFFERS: usize = 8;
 /// RTP timestamp increment per 20 ms Opus frame at 48 kHz: what a packet that isn't valid Opus
 /// framing counts as.
 const OPUS_FRAME_TICKS: u32 = 960;
@@ -201,6 +205,10 @@ pub struct CallEngine {
   earlier_dave_stats: DaveFrameStats,
   maybe_trusted_roster: Option<BTreeSet<DeviceId>>,
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
+  /// The other device's direct path offers (#127), until the driver takes them.
+  direct_offers: Vec<(DeviceId, Base64Bytes)>,
+  /// What the driver says of its direct path; the SFU hears it again after every (re)join.
+  is_direct_path_active: bool,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
   verified_keys: HashMap<DeviceId, Vec<u8>>,
   /// DAVE keys of devices that left this call: never accepted again in it, so the SFU can't bring a
@@ -786,6 +794,8 @@ impl CallEngine {
       earlier_dave_stats: DaveFrameStats::default(),
       maybe_trusted_roster: None,
       maybe_authenticator: None,
+      direct_offers: Vec::new(),
+      is_direct_path_active: false,
       verified_keys: HashMap::new(),
       retired_keys: RetiredKeys::default(),
       keys_before_reconnect: HashMap::new(),
@@ -1377,6 +1387,61 @@ impl CallEngine {
   }
 
   /// Group-wide code for the current epoch, to compare out of band.
+  /// The call and the other device while this device is joined to a call of exactly two devices
+  /// (#127): the pair a direct path may connect. `None` otherwise.
+  pub fn direct_pair(&self) -> Option<(CallId, DeviceId)> {
+    let Phase::Joined { call_id, .. } = self.phase else {
+      return None;
+    };
+    let mut others = self.participants.keys();
+    match (others.next(), others.next()) {
+      (Some(peer), None) => Some((call_id, *peer)),
+      _ => None,
+    }
+  }
+
+  /// Devices in the call, this one included.
+  pub fn devices_in_call(&self) -> usize {
+    self.participants.len() + 1
+  }
+
+  /// The current DAVE epoch while the group's members are authenticated: when it changes, so does
+  /// the direct path's key. Cheap, unlike deriving the key.
+  pub fn direct_path_epoch(&self) -> Option<u64> {
+    self.maybe_authenticator.as_ref()?;
+    self.maybe_dave.as_ref()?.maybe_epoch().map(|epoch| epoch.0)
+  }
+
+  /// The key that seals direct path offers in the current DAVE epoch (e2ee.md §8.4), while the
+  /// group's members are authenticated: an engine without an authenticator (development tools)
+  /// lets anybody into the group and gets none.
+  pub fn direct_path_key(&self) -> Option<DirectPathKey> {
+    self.maybe_authenticator.as_ref()?;
+    self.maybe_dave.as_ref()?.maybe_direct_path_key()
+  }
+
+  /// The other device's offers that arrived since the last call (#127).
+  pub fn take_direct_offers(&mut self) -> Vec<(DeviceId, Base64Bytes)> {
+    std::mem::take(&mut self.direct_offers)
+  }
+
+  /// Sends this device's sealed offer to the other device, through the SFU.
+  pub fn send_direct_offer(&mut self, to_device_id: DeviceId, sealed: Base64Bytes) {
+    self.signal(CallClientMessage::DirectOffer { to_device_id, sealed });
+  }
+
+  /// Tells the SFU whether the direct path carries this device's media now; it hears it again
+  /// after every rejoin while it does (ARCHITECTURE.md §6.7, "Switching paths").
+  pub fn report_direct_path(&mut self, is_active: bool) {
+    if self.is_direct_path_active == is_active {
+      return;
+    }
+    self.is_direct_path_active = is_active;
+    if matches!(self.phase, Phase::Joined { .. }) {
+      self.signal(CallClientMessage::DirectPath { is_active });
+    }
+  }
+
   pub fn privacy_code(&self) -> Option<String> {
     self.maybe_dave.as_ref()?.maybe_privacy_code().map(str::to_owned)
   }
@@ -1425,6 +1490,8 @@ impl CallEngine {
       // The secret of a fallback session's audio connection (#1979): the fallback driver takes it
       // before it gets here.
       CallServerMessage::AudioSocket { .. } => Ok(()),
+      // Only the answer on a direct path socket's own connection to the SFU (#127).
+      CallServerMessage::Reflected { .. } => Ok(()),
       CallServerMessage::Unknown => {
         debug!("ignoring unknown signaling frame");
         Ok(())
@@ -1860,6 +1927,7 @@ impl CallEngine {
       maybe_uplink_probe: self.uplink_measurement().map(probe_stats),
       maybe_downlink_probe: self.downlink_measurement().map(probe_stats),
       tracks: sent.chain(received).collect(),
+      maybe_media_path: None,
     }
   }
 
@@ -2175,9 +2243,17 @@ impl CallEngine {
         }
         Ok(())
       },
-      // The engine takes no direct path yet (#127, ARCHITECTURE.md §6.7): an offer it ignores
-      // keeps the call on the SFU, as it was.
-      CallEvent::DirectOffer { .. } => Ok(()),
+      // The driver's direct path takes it (#127, ARCHITECTURE.md §6.7); one that has none (the
+      // browser, a call without the setting) never asks, and the call stays on the SFU.
+      CallEvent::DirectOffer {
+        from_device_id,
+        sealed,
+      } => {
+        if self.direct_offers.len() < MAX_HELD_DIRECT_OFFERS {
+          self.direct_offers.push((from_device_id, sealed));
+        }
+        Ok(())
+      },
       CallEvent::Unknown => Ok(()),
     }
   }
@@ -2211,6 +2287,7 @@ impl CallEngine {
       call_id,
       participants,
     });
+    self.announce_direct_path();
     // Publications asked for while joining go out now that the SFU said how many layers it takes.
     for pending in std::mem::take(&mut self.pending_publications) {
       if !pending.is_withdrawn {
@@ -2288,6 +2365,8 @@ impl CallEngine {
         maybe_max_layer: Some(max_layer),
       });
     }
+    // A new slot counts the direct path again only once it hears of it (#127).
+    self.announce_direct_path();
     self.event(CallEngineEvent::Reconnected);
     Ok(())
   }
@@ -3679,6 +3758,13 @@ impl CallEngine {
     if !self.has_reported_unauthenticated_keys {
       self.has_reported_unauthenticated_keys = true;
       self.event(CallEngineEvent::UnauthenticatedKeys);
+    }
+  }
+
+  /// Tells the SFU what the direct path does, if it carries the media (a new slot starts without).
+  fn announce_direct_path(&mut self) {
+    if self.is_direct_path_active {
+      self.signal(CallClientMessage::DirectPath { is_active: true });
     }
   }
 

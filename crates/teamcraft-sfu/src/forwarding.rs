@@ -284,6 +284,8 @@ struct ParticipantRoute {
   /// When its own voice (layer 0) last arrived, and when it came back after a pause.
   maybe_voice_at: Option<Instant>,
   maybe_voice_resumed_at: Option<Instant>,
+  /// It says its direct path to the other device of a 1:1 call carries its media (#127).
+  is_direct_path_active: bool,
 }
 
 #[derive(Debug)]
@@ -395,6 +397,27 @@ impl Forwarder {
     self.is_thin_voice_wanted
   }
 
+  /// What a participant says of its direct path to the other device of a 1:1 call (#127,
+  /// ARCHITECTURE.md §6.7). The two devices' audio stops going through the SFU to each other only
+  /// while both say it is active ([`Forwarder::is_direct_pair`]); neither can cut the other off.
+  pub fn set_direct_path(&mut self, device_id: DeviceId, is_active: bool) {
+    if let Some(participant) = self.participants.get_mut(&device_id) {
+      participant.is_direct_path_active = is_active;
+    }
+  }
+
+  /// Whether `sender` and `receiver` are the only two participants and both say their direct path
+  /// carries the media: then the SFU forwards neither one's audio to the other.
+  pub fn is_direct_pair(&self, sender: DeviceId, receiver: DeviceId) -> bool {
+    let is_active = |device: DeviceId| {
+      self
+        .participants
+        .get(&device)
+        .is_some_and(|route| route.is_direct_path_active && !route.is_suspended)
+    };
+    self.participants.len() == 2 && sender != receiver && is_active(sender) && is_active(receiver)
+  }
+
   pub fn add_participant(
     &mut self,
     device_id: DeviceId,
@@ -402,9 +425,11 @@ impl Forwarder {
     capabilities: MediaCapabilities,
     now: Instant,
   ) {
-    // A new session's voice numbers from scratch: the others start over with it.
+    // A new session's voice numbers from scratch: the others start over with it. A third device
+    // ends any direct path (#127): everyone gets the voices from the SFU again.
     for route in self.participants.values_mut() {
       route.voice_sequences.remove(&device_id);
+      route.is_direct_path_active = false;
     }
     let route = ParticipantRoute {
       audio_stream,
@@ -437,6 +462,7 @@ impl Forwarder {
       maybe_join_probe: self.new_join_probe(now),
       maybe_link_capacity_bps: None,
       maybe_allocation_logged_at: None,
+      is_direct_path_active: false,
     };
     self.participants.insert(device_id, route);
   }
@@ -448,6 +474,8 @@ impl Forwarder {
       return Vec::new();
     };
     participant.is_suspended = true;
+    // Its direct path counts again only once it says so on its new connection (#127).
+    participant.is_direct_path_active = false;
     participant.maybe_probe_request = None;
     let mut effects = Vec::new();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
@@ -502,6 +530,7 @@ impl Forwarder {
     participant.maybe_probe_request = None;
     participant.has_feedback = false;
     participant.is_suspended = false;
+    participant.is_direct_path_active = false;
     participant.retransmit_budget = RetransmitBudget::default();
     // Its new connection measures its own, if it does.
     participant.maybe_link_capacity_bps = None;
@@ -582,9 +611,11 @@ impl Forwarder {
       .participants
       .remove(&device_id)
       .and_then(|route| route.maybe_screen_audio);
-    // Its voice numbers from scratch if it comes back.
+    // Its voice numbers from scratch if it comes back. Whoever stays gets the voices from the
+    // SFU until it reports a direct path again (#127).
     for route in self.participants.values_mut() {
       route.voice_sequences.remove(&device_id);
+      route.is_direct_path_active = false;
     }
     let mut effects: Vec<Effect> = self.follow_thin_voice().into_iter().collect();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
@@ -1009,6 +1040,10 @@ impl Forwarder {
     };
     let is_voice = is_audio || is_screen_audio;
     for receiver in receivers {
+      // The two devices of a 1:1 call that both carry their audio directly (#127).
+      if is_voice && self.is_direct_pair(sender, receiver) {
+        continue;
+      }
       if let Some(target) = self.participants.get_mut(&receiver) {
         let maybe_voice_sequence = if is_audio {
           let wanted = target.wanted_voice_layer(&audio_layers, has_thin_voice, now);
@@ -2092,6 +2127,85 @@ mod tests {
           assert_eq!(header.maybe_transport_seq, Some(TransportSeq(expected)));
         }
       }
+    }
+  }
+
+  /// #127: the SFU stops forwarding the voices of a 1:1 call's two devices to each other only while
+  /// both say their direct path carries them.
+  mod direct_path {
+    use super::*;
+
+    #[test]
+    fn only_both_saying_so_stops_the_voices_and_either_one_resumes_them() {
+      let (mut forwarder, now) = room(2);
+      forwarder.set_direct_path(device(1), true);
+      assert_eq!(
+        delivered(&mut forwarder, 1, now),
+        1,
+        "one side alone cuts nothing"
+      );
+      forwarder.set_direct_path(device(2), true);
+      assert_eq!(delivered(&mut forwarder, 1, now), 0);
+      assert_eq!(delivered(&mut forwarder, 2, now), 0);
+      forwarder.set_direct_path(device(2), false);
+      assert_eq!(delivered(&mut forwarder, 1, now), 1);
+      assert_eq!(delivered(&mut forwarder, 2, now), 1);
+    }
+
+    #[test]
+    fn a_third_device_or_a_lost_connection_ends_it_until_reported_again() {
+      let (mut forwarder, now) = both_direct();
+      forwarder.add_participant(device(3), stream(3), MediaCapabilities::default(), now);
+      assert_eq!(
+        delivered(&mut forwarder, 1, now),
+        2,
+        "the third and the second get it"
+      );
+      forwarder.remove_participant(device(3), now);
+      assert_eq!(
+        delivered(&mut forwarder, 1, now),
+        1,
+        "back to two: reported anew first"
+      );
+
+      let (mut forwarder, now) = both_direct();
+      forwarder.suspend(device(2), now);
+      forwarder.resume(device(2), MediaCapabilities::default(), now);
+      assert_eq!(
+        delivered(&mut forwarder, 1, now),
+        1,
+        "a new connection reports anew"
+      );
+    }
+
+    #[test]
+    fn video_still_goes_through_the_sfu() {
+      let (mut forwarder, _) = room(2);
+      forwarder.set_direct_path(device(1), true);
+      forwarder.set_direct_path(device(2), true);
+      assert!(forwarder.is_direct_pair(device(1), device(2)));
+      assert!(!forwarder.is_direct_pair(device(1), device(1)));
+      let (mut three, _) = room(3);
+      for n in 1..=3 {
+        three.set_direct_path(device(n), true);
+      }
+      assert!(!three.is_direct_pair(device(1), device(2)), "only a 1:1 call");
+    }
+
+    fn both_direct() -> (Forwarder, Instant) {
+      let (mut forwarder, now) = room(2);
+      forwarder.set_direct_path(device(1), true);
+      forwarder.set_direct_path(device(2), true);
+      (forwarder, now)
+    }
+
+    /// How many receivers a loud voice of device `n` reaches.
+    fn delivered(forwarder: &mut Forwarder, n: u64, now: Instant) -> usize {
+      forwarder
+        .route(device(n), &audio(n, 10), now)
+        .unwrap()
+        .deliveries
+        .len()
     }
   }
 

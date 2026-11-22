@@ -168,6 +168,23 @@ impl DatagramHeader {
   }
 }
 
+impl DatagramHeader {
+  /// Copies a framed datagram without a transport sequence number: what a direct path between two
+  /// devices carries (#127), whose numbers would mix with the SFU's in the receiver's feedback.
+  pub fn unstamped(datagram: &[u8]) -> Result<Vec<u8>, DatagramError> {
+    let header = Self::parse(datagram)?;
+    let rtp = &datagram[header.encoded_len()..];
+    let bare = Self {
+      maybe_transport_seq: None,
+      ..header
+    };
+    let mut out = Vec::with_capacity(bare.encoded_len() + rtp.len());
+    bare.write_to(&mut out);
+    out.extend_from_slice(rtp);
+    Ok(out)
+  }
+}
+
 /// A padding datagram of `bytes` bytes with transport sequence number `seq`: zeros on
 /// [`PADDING_STREAM`], for probing a link (`crate::join_probe` at the start, `crate::rate_probe`
 /// before a step up).
@@ -258,6 +275,9 @@ mod tests {
         .maybe_transport_seq,
       Some(TransportSeq(6))
     );
+    let unstamped = DatagramHeader::unstamped(&restamped).unwrap();
+    assert_eq!(unstamped, plain, "the direct path's copy (#127)");
+    assert_eq!(DatagramHeader::unstamped(&plain).unwrap(), plain);
   }
 
   #[test]

@@ -11429,6 +11429,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "subtle",
+ "teamcraft-client-api",
  "teamcraft-crypto",
  "teamcraft-media",
  "teamcraft-ops",

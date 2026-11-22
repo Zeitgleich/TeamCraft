@@ -135,6 +135,7 @@ impl FakeCalls {
       | CallAction::SetTalking { .. }
       | CallAction::SelectCamera { .. }
       | CallAction::SetStatusSounds { .. }
+      | CallAction::SetDirectConnections { .. }
       | CallAction::SetCameraQuality { .. }
       | CallAction::SetVideoQuality { .. }
       | CallAction::RefreshDevices

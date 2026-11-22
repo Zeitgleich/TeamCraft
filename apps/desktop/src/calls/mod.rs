@@ -50,8 +50,8 @@ use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
 use teamcraft_media::call_native::{
-  DecodeReporter, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture,
-  TrustSource,
+  DecodeReporter, DirectPathConfig, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError,
+  TicketFuture, TrustFuture, TrustSource,
 };
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
@@ -171,6 +171,8 @@ struct CallState {
   push_to_talk: PushToTalk,
   /// Which call status sounds play (the user's setting).
   status_sounds: CallStatusSounds,
+  /// The user turned "Connect directly in calls" off (#127; on by default, as the setting).
+  is_direct_refused: bool,
   /// The highest quality the camera is sent at (the user's setting, #967).
   camera_quality: VideoQuality,
   /// This device's recording of the call and its take (e2ee.md §8.3).
@@ -198,6 +200,8 @@ enum Control {
   StartScreenAudio(Box<dyn SystemAudioCapture>, oneshot::Sender<Result<(), String>>),
   StopScreenAudio,
   StatusSounds(CallStatusSounds),
+  /// "Connect directly in calls" changed (#127).
+  DirectConnections(bool),
   NetworkChanged,
   /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
   Recording(Option<teamcraft_media::call_recording::RecordingSink>),
@@ -434,9 +438,17 @@ impl CallHost {
       device_id: own_device,
     };
     let ends_when_one_side_leaves = preparation.join.ends_when_one_side_leaves;
+    let maybe_direct_media = preparation.maybe_direct_media.clone();
     let mut config = native_config(preparation, microphone, speakers, page_decoders, &tickets)?;
     config.maybe_ticket_source = Some(tickets);
     config.status_cues = status_cues(lock(&self.state).status_sounds);
+    let does_user_allow = !lock(&self.state).is_direct_refused;
+    config.maybe_direct = maybe_direct_media.map(|inputs| DirectPathConfig {
+      policy: inputs.policy,
+      does_user_allow,
+      own: inputs.own,
+      standings: inputs.standings,
+    });
     // Push-to-talk: the microphone opens only while the key is held.
     let is_muted_at_start = is_muted || self.push_to_talk().is_enabled;
     config.is_muted_at_start = is_muted_at_start;
@@ -786,6 +798,12 @@ impl CallHost {
   pub async fn set_status_sounds(&self, sounds: CallStatusSounds) {
     lock(&self.state).status_sounds = sounds;
     self.control(Control::StatusSounds(sounds)).await;
+  }
+
+  /// Remembers "Connect directly in calls" for later calls and applies it to the running one (#127).
+  pub async fn set_direct_connections(&self, is_allowed: bool) {
+    lock(&self.state).is_direct_refused = !is_allowed;
+    self.control(Control::DirectConnections(is_allowed)).await;
   }
 
   /// Remembers the camera's quality setting (#967); a running camera, or the pre-join check's,
@@ -1539,6 +1557,7 @@ async fn run_media(
         // The asker may have given up waiting.
         Some(Control::VideoStats(done)) => drop(done.send(call.video_stats().await)),
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
+        Some(Control::DirectConnections(is_allowed)) => call.set_direct_connections(is_allowed),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Recording(maybe_sink)) => call.set_recording(maybe_sink),
         Some(Control::HangUp) => {

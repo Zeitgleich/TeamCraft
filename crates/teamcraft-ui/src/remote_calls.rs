@@ -516,6 +516,7 @@ impl RemoteCalls {
       | CallEvent::StartScreenShare { .. }
       | CallEvent::StopScreenShare
       | CallEvent::StatusSounds(_)
+      | CallEvent::DirectConnections(_)
       | CallEvent::CameraQuality(_)
       | CallEvent::VideoQuality { .. } => {},
     }

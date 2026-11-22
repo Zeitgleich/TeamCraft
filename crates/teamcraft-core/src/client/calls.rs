@@ -9,13 +9,14 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::{DeviceKeyPair, VerifiedDevice};
 use teamcraft_proto::{
-  CallId, CallJoinTokenResponse, CallRosterEntry, CallStateResponse, ConversationId, ConversationKind,
-  CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId, GatewayEvent, IdempotencyKey,
-  MoveCallRequest, NotetakerRequest, NotetakerScope, UserId,
+  CallId, CallJoinTokenResponse, CallPeerStanding, CallRosterEntry, CallStateResponse, ConversationId,
+  ConversationKind, CreateCallJoinTokenRequest, CreateInstantMeetingRequest, DeviceId, DirectMediaPolicy,
+  GatewayEvent, IdempotencyKey, MoveCallRequest, NotetakerRequest, NotetakerScope, UserId,
 };
 
 use super::Client;
 use crate::api::{ApiError, ServerApi};
+use crate::convert;
 use crate::error::CoreError;
 use crate::people_names::shown_name;
 use crate::records;
@@ -65,6 +66,18 @@ pub struct CallPreparation {
   pub signer: CallKeySigner,
   /// The conversation's devices (this one included) whose certificates verified.
   pub devices: Vec<VerifiedDevice>,
+  /// What a direct path of a 1:1 call goes by (#127); `None` keeps the call on the SFU.
+  pub maybe_direct_media: Option<DirectMediaInputs>,
+}
+
+/// What a native call's direct path goes by (#127, ARCHITECTURE.md §6.7, "Who may"): the policy
+/// this device verified, and how it places itself and the users of the call's verified devices.
+/// The user's own setting is the app's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DirectMediaInputs {
+  pub policy: DirectMediaPolicy,
+  pub own: CallPeerStanding,
+  pub standings: Vec<(DeviceId, CallPeerStanding)>,
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {
@@ -132,12 +145,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.ensure_call_group(conversation).await?;
     let join = self.call_join_token(conversation).await?;
     let devices = self.verified_call_devices(conversation).await?;
+    let maybe_direct_media = self.direct_media_inputs(&devices);
     Ok(CallPreparation {
       join,
       user_id: self.user_id(),
       device_id: self.device_id(),
       signer: self.call_key_signer(),
       devices,
+      maybe_direct_media,
+    })
+  }
+
+  /// What a direct path of a call among `devices` goes by (#127): `None` before a workspace was
+  /// verified. A device whose IDs don't convert is left out, and so stays unplaced (an outsider).
+  pub fn direct_media_inputs(&self, devices: &[VerifiedDevice]) -> Option<DirectMediaInputs> {
+    let store = self.store();
+    let policy = crate::workspace::direct_media_policy(store)?;
+    let standings = devices
+      .iter()
+      .filter_map(|device| {
+        let user = convert::user_from_crypto(device.user_id()).ok()?;
+        let device_id = convert::device_from_crypto(device.device_id()).ok()?;
+        Some((device_id, crate::workspace::call_peer_standing(store, user)))
+      })
+      .collect();
+    Some(DirectMediaInputs {
+      policy,
+      own: crate::workspace::call_peer_standing(store, self.user_id()),
+      standings,
     })
   }
 
