@@ -65,6 +65,41 @@ pub struct AttachmentDecryptor {
   chunk_size: usize,
 }
 
+/// Decrypts any chunks of a file, in any order, for playing a video while it streams (#200): a
+/// media player reads the file in ranges and jumps around when the user seeks. Every chunk still
+/// carries its position and whether it is the last one in its nonce, so a chunk from elsewhere in
+/// the file, a cut-short file or one that goes on past its end fails to decrypt like it does for
+/// [`AttachmentDecryptor`]; the file's key is its own, so no chunk of another file decrypts either.
+pub struct AttachmentRangeDecryptor {
+  stream: StreamBE32<XChaCha20Poly1305>,
+  header: [u8; HEADER_LEN],
+  layout: AttachmentLayout,
+}
+
+/// Where a file's chunks lie in its blob: worked out from the header's chunk size and the blob's
+/// length. The length comes from the server and is not trusted: a wrong one makes the chunk taken
+/// for the last fail to decrypt (it was encrypted as the last, or not).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachmentLayout {
+  chunk_size: u32,
+  ciphertext_len: u64,
+  chunk_count: u64,
+  plaintext_len: u64,
+}
+
+/// The whole chunks that hold a range of a file's plaintext ([`AttachmentLayout::span`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ChunkSpan {
+  pub first_chunk: u64,
+  /// The span's last chunk, included.
+  pub last_chunk: u64,
+  /// Where the span's ciphertext starts in the blob, and where it ends (excluded).
+  pub ciphertext_start: u64,
+  pub ciphertext_end: u64,
+  /// The plaintext offset of the span's first byte.
+  pub plaintext_start: u64,
+}
+
 /// Result of [`encrypt_attachment`]: the key for the message and the blob for S3.
 #[derive(Debug)]
 pub struct EncryptedAttachment {
@@ -554,6 +589,133 @@ impl fmt::Debug for AttachmentDecryptor {
   }
 }
 
+impl AttachmentRangeDecryptor {
+  /// Starts from the blob's first [`HEADER_LEN`] bytes and its length.
+  pub fn new(key: &AttachmentKey, header: &[u8], ciphertext_len: u64) -> Result<Self, AttachmentError> {
+    let (header, chunk_size, nonce_prefix) = decode_header(header)?;
+    let layout = AttachmentLayout::new(chunk_size, ciphertext_len)?;
+    let cipher = XChaCha20Poly1305::new(key.0.expose_secret().into());
+    Ok(Self {
+      stream: StreamBE32::from_aead(cipher, nonce_prefix.as_slice().into()),
+      header,
+      layout,
+    })
+  }
+
+  pub fn layout(&self) -> &AttachmentLayout {
+    &self.layout
+  }
+
+  /// Decrypts the chunks of `span` from exactly the blob's bytes it names, and hands back their
+  /// plaintext in order. Any chunk that doesn't decrypt at its position fails the whole span.
+  pub fn decrypt_span(&self, span: &ChunkSpan, ciphertext: &[u8]) -> Result<SecretBytes, AttachmentError> {
+    let expected = span.ciphertext_end - span.ciphertext_start;
+    if ciphertext.len() as u64 != expected {
+      return Err(AttachmentError::WrongChunkLength {
+        expected: usize::try_from(expected).unwrap_or(usize::MAX),
+        actual: ciphertext.len(),
+      });
+    }
+    let encrypted_chunk_len = self.layout.chunk_size as usize + TAG_LEN;
+    let aad = chunk_aad(&self.header);
+    let mut plaintext = Vec::with_capacity(ciphertext.len());
+    for (position, chunk) in (span.first_chunk..=span.last_chunk).zip(ciphertext.chunks(encrypted_chunk_len))
+    {
+      let is_last = position + 1 == self.layout.chunk_count;
+      // Invariant: the layout refuses files with more chunks than STREAM's u32 counter.
+      let position = u32::try_from(position).map_err(|_| AttachmentError::TooManyChunks)?;
+      let decrypted = self
+        .stream
+        .decrypt(
+          position,
+          is_last,
+          Payload {
+            msg: chunk,
+            aad: &aad,
+          },
+        )
+        .map_err(|_| AttachmentError::DecryptionFailed)?;
+      plaintext.extend_from_slice(&decrypted);
+      // Dropping it wipes the chunk's copy.
+      drop(SecretBytes::new(decrypted));
+    }
+    Ok(SecretBytes::new(plaintext))
+  }
+}
+
+impl fmt::Debug for AttachmentRangeDecryptor {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("AttachmentRangeDecryptor")
+      .field("layout", &self.layout)
+      .finish_non_exhaustive()
+  }
+}
+
+impl AttachmentLayout {
+  /// The layout of a blob of `ciphertext_len` bytes (the header included) in chunks of
+  /// `chunk_size`. Fails for a length no blob of this chunk size can have.
+  pub fn new(chunk_size: u32, ciphertext_len: u64) -> Result<Self, AttachmentError> {
+    validate_chunk_size(chunk_size)?;
+    let encrypted_chunk_len = u64::from(chunk_size) + TAG_LEN as u64;
+    // The final chunk always exists and has at least its tag.
+    let body = ciphertext_len
+      .checked_sub(HEADER_LEN as u64)
+      .filter(|body| *body >= TAG_LEN as u64)
+      .ok_or(AttachmentError::DecryptionFailed)?;
+    let full_chunks = (body - 1) / encrypted_chunk_len;
+    let last_len = body - full_chunks * encrypted_chunk_len;
+    if last_len < TAG_LEN as u64 {
+      return Err(AttachmentError::DecryptionFailed);
+    }
+    let chunk_count = full_chunks + 1;
+    if chunk_count > u64::from(u32::MAX) {
+      return Err(AttachmentError::TooManyChunks);
+    }
+    Ok(Self {
+      chunk_size,
+      ciphertext_len,
+      chunk_count,
+      plaintext_len: full_chunks * u64::from(chunk_size) + (last_len - TAG_LEN as u64),
+    })
+  }
+
+  pub fn chunk_size(&self) -> u32 {
+    self.chunk_size
+  }
+
+  /// Chunks in the file, the final (possibly short or empty) one included.
+  pub fn chunk_count(&self) -> u64 {
+    self.chunk_count
+  }
+
+  pub fn plaintext_len(&self) -> u64 {
+    self.plaintext_len
+  }
+
+  /// The whole chunks that hold plaintext bytes `start..end`; `None` when the range is empty or
+  /// starts at or past the end of the file. An `end` past the end is cut to it.
+  pub fn span(&self, start: u64, end: u64) -> Option<ChunkSpan> {
+    let end = end.min(self.plaintext_len);
+    if start >= end {
+      return None;
+    }
+    let chunk = u64::from(self.chunk_size);
+    let encrypted_chunk_len = chunk + TAG_LEN as u64;
+    let first_chunk = start / chunk;
+    let last_chunk = (end - 1) / chunk;
+    let ciphertext_start = HEADER_LEN as u64 + first_chunk * encrypted_chunk_len;
+    let ciphertext_end =
+      (HEADER_LEN as u64 + (last_chunk + 1) * encrypted_chunk_len).min(self.ciphertext_len);
+    Some(ChunkSpan {
+      first_chunk,
+      last_chunk,
+      ciphertext_start,
+      ciphertext_end,
+      plaintext_start: first_chunk * chunk,
+    })
+  }
+}
+
 fn validate_chunk_size(chunk_size: u32) -> Result<(), AttachmentError> {
   if (MIN_CHUNK_SIZE..=MAX_CHUNK_SIZE).contains(&chunk_size) {
     Ok(())
@@ -901,6 +1063,150 @@ mod tests {
         AttachmentEncryptor::new(&key, MAX_CHUNK_SIZE + 1, &mut OsRng),
         Err(AttachmentError::InvalidChunkSize(_))
       ));
+    }
+  }
+
+  mod ranges {
+    use super::*;
+
+    #[test]
+    fn the_layout_matches_every_blob_size() {
+      let chunk = CHUNK as usize;
+      for len in [0, 1, chunk - 1, chunk, chunk + 1, 3 * chunk, 3 * chunk + 7] {
+        let encrypted = encrypt_attachment(&sample(len), CHUNK, &mut OsRng).unwrap();
+        let layout = AttachmentLayout::new(CHUNK, encrypted.ciphertext.len() as u64).unwrap();
+        assert_eq!(layout.plaintext_len(), len as u64, "{len}");
+        assert_eq!(layout.chunk_count(), chunk_count(len as u64, CHUNK), "{len}");
+      }
+    }
+
+    #[test]
+    fn any_range_decrypts_to_the_same_bytes_as_the_whole_file() {
+      let chunk = CHUNK as usize;
+      let plaintext = sample(5 * chunk + 300);
+      let encrypted = encrypt_attachment(&plaintext, CHUNK, &mut OsRng).unwrap();
+      let decryptor = range_decryptor(&encrypted);
+      let len = plaintext.len() as u64;
+      for (start, end) in [
+        (0, 1),
+        (0, len),
+        (5, chunk as u64 + 9),
+        (len - 1, len),
+        (2 * chunk as u64, 3 * chunk as u64),
+        (100, len + 50),
+      ] {
+        let span = decryptor.layout().span(start, end).unwrap();
+        let ciphertext = &encrypted.ciphertext[span.ciphertext_start as usize..span.ciphertext_end as usize];
+        let decrypted = decryptor.decrypt_span(&span, ciphertext).unwrap();
+        let from = (start - span.plaintext_start) as usize;
+        let end = end.min(len);
+        assert_eq!(
+          &decrypted.expose_secret()[from..from + (end - start) as usize],
+          &plaintext[start as usize..end as usize],
+          "{start}..{end}"
+        );
+      }
+    }
+
+    #[test]
+    fn empty_and_past_the_end_ranges_have_no_span() {
+      let encrypted = encrypt_attachment(&sample(3000), CHUNK, &mut OsRng).unwrap();
+      let layout = *range_decryptor(&encrypted).layout();
+      assert_eq!(layout.span(10, 10), None);
+      assert_eq!(layout.span(3000, 4000), None);
+      let empty = encrypt_attachment(&[], CHUNK, &mut OsRng).unwrap();
+      assert_eq!(range_decryptor(&empty).layout().span(0, 1), None);
+    }
+
+    #[test]
+    fn a_chunk_from_another_position_fails() {
+      let chunk = CHUNK as usize;
+      let encrypted = encrypt_attachment(&sample(4 * chunk), CHUNK, &mut OsRng).unwrap();
+      let decryptor = range_decryptor(&encrypted);
+      let first = decryptor.layout().span(0, 1).unwrap();
+      let second = decryptor.layout().span(chunk as u64, chunk as u64 + 1).unwrap();
+      let second_bytes =
+        &encrypted.ciphertext[second.ciphertext_start as usize..second.ciphertext_end as usize];
+      assert!(matches!(
+        decryptor.decrypt_span(&first, second_bytes),
+        Err(AttachmentError::DecryptionFailed)
+      ));
+    }
+
+    #[test]
+    fn a_wrong_length_from_the_server_fails_at_the_last_chunk() {
+      let chunk = CHUNK as usize;
+      let encrypted = encrypt_attachment(&sample(3 * chunk + 10), CHUNK, &mut OsRng).unwrap();
+      let header = &encrypted.ciphertext[..HEADER_LEN];
+      let real_len = encrypted.ciphertext.len() as u64;
+      // Cut short by a chunk: the chunk now taken for the last was not encrypted as the last.
+      let short =
+        AttachmentRangeDecryptor::new(&encrypted.key, header, real_len - CHUNK as u64 - 16).unwrap();
+      let span = short
+        .layout()
+        .span(short.layout().plaintext_len() - 1, short.layout().plaintext_len())
+        .unwrap();
+      let bytes = &encrypted.ciphertext[span.ciphertext_start as usize..span.ciphertext_end as usize];
+      assert!(short.decrypt_span(&span, bytes).is_err());
+      // Made longer: the real last chunk is decrypted as one in the middle.
+      let long = AttachmentRangeDecryptor::new(&encrypted.key, header, real_len + CHUNK as u64 + 16).unwrap();
+      let last = long
+        .layout()
+        .span(3 * chunk as u64, 3 * chunk as u64 + 1)
+        .unwrap();
+      let available = &encrypted.ciphertext[last.ciphertext_start as usize..];
+      assert!(long.decrypt_span(&last, available).is_err());
+    }
+
+    #[test]
+    fn the_wrong_key_or_changed_bytes_fail() {
+      let encrypted = encrypt_attachment(&sample(5000), CHUNK, &mut OsRng).unwrap();
+      let header = &encrypted.ciphertext[..HEADER_LEN];
+      let len = encrypted.ciphertext.len() as u64;
+      let other_key = AttachmentKey::generate(&mut OsRng);
+      let wrong = AttachmentRangeDecryptor::new(&other_key, header, len).unwrap();
+      let span = wrong.layout().span(0, 10).unwrap();
+      let bytes = encrypted.ciphertext[span.ciphertext_start as usize..span.ciphertext_end as usize].to_vec();
+      assert!(wrong.decrypt_span(&span, &bytes).is_err());
+      let mut tampered = bytes.clone();
+      tampered[3] ^= 1;
+      assert!(
+        range_decryptor(&encrypted)
+          .decrypt_span(&span, &tampered)
+          .is_err()
+      );
+      assert!(matches!(
+        range_decryptor(&encrypted).decrypt_span(&span, &bytes[1..]),
+        Err(AttachmentError::WrongChunkLength { .. })
+      ));
+    }
+
+    #[test]
+    fn impossible_blob_lengths_are_refused() {
+      for len in [0, HEADER_LEN as u64, HEADER_LEN as u64 + 15] {
+        assert!(AttachmentLayout::new(CHUNK, len).is_err(), "{len}");
+      }
+      // A body whose last chunk would be shorter than its tag.
+      let one_full = HEADER_LEN as u64 + u64::from(CHUNK) + 16;
+      assert!(AttachmentLayout::new(CHUNK, one_full + 5).is_err());
+      assert!(AttachmentLayout::new(CHUNK, one_full + 16).is_ok());
+      assert!(matches!(
+        AttachmentLayout::new(MIN_CHUNK_SIZE, u64::MAX),
+        Err(AttachmentError::TooManyChunks)
+      ));
+      assert!(
+        AttachmentLayout::new(1, 1000).is_err(),
+        "chunk size outside the bounds"
+      );
+    }
+
+    fn range_decryptor(encrypted: &EncryptedAttachment) -> AttachmentRangeDecryptor {
+      AttachmentRangeDecryptor::new(
+        &encrypted.key,
+        &encrypted.ciphertext[..HEADER_LEN],
+        encrypted.ciphertext.len() as u64,
+      )
+      .unwrap()
     }
   }
 
