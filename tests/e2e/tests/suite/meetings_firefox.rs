@@ -8,6 +8,9 @@
 //! The guest's sound device runs at 44.1 kHz, as many headsets do: Firefox before 148 connects
 //! such a microphone only to an audio graph at that rate, and the join failed (#1721). Run with
 //! `FIREFOX=/path/to/firefox-140` to see that path; a current Firefox takes the 48 kHz graph.
+//!
+//! Needs a sound server (PipeWire or PulseAudio, a null output will do): without an audio backend
+//! Firefox runs no AudioContext and the guest sends no sound.
 use std::time::{Duration, Instant};
 
 use reqwest::StatusCode;
@@ -171,6 +174,8 @@ async fn a_guest_in_firefox_joins_a_meeting_by_its_link_and_shares_the_call() {
     is_secured,
     "the DAVE group with the Firefox guest was never established"
   );
+  // Firefox runs no AudioContext without a sound server ("Closed before resume completed" above):
+  // the machine needs one, a null output is enough (e2e.yml starts PulseAudio).
   assert!(stats.frames_received > 50, "the guest's audio: {stats:?}");
   assert!(has_guest_video, "the guest's camera never reached the call");
   let organizer_code = stats

@@ -48,10 +48,16 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           prefix-key: v1-rust
-      - name: System packages (ALSA for the native call client, libclang and cmake for the codecs)
+      - name: System packages (ALSA for the native call client, libclang and cmake for the codecs, a sound server)
         run: >
           sudo apt-get update && sudo apt-get install -y
-          libasound2-dev libclang-dev cmake pkg-config libssl-dev
+          libasound2-dev libclang-dev cmake pkg-config libssl-dev pulseaudio
+      - name: A sound server with a null output
+        # Firefox runs no AudioContext without an audio backend, so the guest of meetings_firefox.rs
+        # sent no sound (#1406). Without hardware PulseAudio plays into its automatic null sink.
+        run: |
+          pulseaudio --start --exit-idle-time=-1
+          pactl info
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: e2e-web
