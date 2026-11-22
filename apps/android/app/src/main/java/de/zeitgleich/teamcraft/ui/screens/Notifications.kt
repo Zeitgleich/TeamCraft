@@ -49,6 +49,7 @@ import de.zeitgleich.teamcraft.TeamCraftApplication
 import de.zeitgleich.teamcraft.notifications.BubblePrefs
 import de.zeitgleich.teamcraft.notifications.ChannelMentions
 import de.zeitgleich.teamcraft.notifications.DndRange
+import de.zeitgleich.teamcraft.notifications.NotificationChannels
 import de.zeitgleich.teamcraft.notifications.QuietHoursEditor
 import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
@@ -87,8 +88,10 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
   val bubbles = remember { BubblePrefs(context) }
   var isBubble by remember(conversationId) { mutableStateOf(bubbles.isEnabled(conversationId)) }
   var canBubble by remember(conversationId) { mutableStateOf(false) }
+  var isDirectConversation by remember(conversationId) { mutableStateOf(false) }
   LaunchedEffect(conversationId) {
-    canBubble = BubblePrefs.isSupported && viewModel.conversations().firstOrNull { it.id == conversationId }?.isDirect == true
+    isDirectConversation = viewModel.conversations().firstOrNull { it.id == conversationId }?.isDirect == true
+    canBubble = BubblePrefs.isSupported && isDirectConversation
     val loaded = viewModel.readChat { conversationNotifications(conversationId) } ?: ConversationNotificationSettings()
     settings = loaded
     quiet = QuietHoursEditor.from(loaded.quietHours)
@@ -170,6 +173,14 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
           OutlinedButton(onClick = { quiet = quiet.copy(ranges = quiet.ranges + DndRange.DEFAULT) }) {
             Text(stringResource(R.string.dnd_add_range))
           }
+        }
+        // How loud, its sound and whether it is a priority conversation: the system's own settings.
+        Text(stringResource(R.string.notify_system_settings_hint), style = MaterialTheme.typography.bodySmall)
+        TextButton(onClick = {
+          // Some vendors drop settings pages; then the dialog just stays.
+          runCatching { context.startActivity(NotificationChannels.conversationSettingsIntent(context, conversationId, isDirectConversation)) }
+        }) {
+          Text(stringResource(R.string.notify_system_settings))
         }
       }
     },

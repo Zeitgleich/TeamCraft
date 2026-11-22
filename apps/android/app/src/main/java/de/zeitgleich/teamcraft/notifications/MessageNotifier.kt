@@ -71,6 +71,8 @@ class MessageNotifier(
   private val elapsedNow: () -> Long = SystemClock::elapsedRealtime,
   /** Conversations the user opted in to show as bubbles (#591). */
   private val bubbles: BubblePrefs = BubblePrefs(context),
+  /** The pictures of photo and video messages. */
+  private val pictures: NotificationPictures = NotificationPictures(context),
 ) : ActionStatusSink {
   private val manager = NotificationManagerCompat.from(context)
   private val lock = Any()
@@ -648,6 +650,7 @@ class MessageNotifier(
       maybeLastSummary = null
       store.delete()
       manager.cancelAll()
+      pictures.clear()
       avatars.clear()
       sourcePictures.clear()
       runCatching { ShortcutManagerCompat.removeAllDynamicShortcuts(context) }
@@ -691,6 +694,9 @@ class MessageNotifier(
       isPlaceholder = isRetried || notification.maybeGap == NotificationGap.NOT_SHOWABLE,
       maybePayload = maybePayload?.takeIf { isRetried }?.let { Base64.getEncoder().encodeToString(it) },
       maybeArrivedAtMs = elapsedNow().takeIf { isRetried },
+      maybePicture = notification.maybePicture?.let { picture ->
+        pictures.keep(picture, labels().attachment(picture.kind, ""))
+      },
     )
   }
 
@@ -729,6 +735,7 @@ class MessageNotifier(
   private fun update(shown: ShownNotifications) {
     maybeShown = shown
     store.write(shown)
+    pictures.prune(shown)
   }
 
   private fun post(entry: ConversationNotification, alerting: NotificationAlerting) {
@@ -797,7 +804,13 @@ class MessageNotifier(
 
   private fun build(spec: MessageNotificationSpec, revision: Long): Notification {
     val isAlerting = spec.alerting == NotificationAlerting.ALERT
-    val builder = NotificationCompat.Builder(context, spec.channel)
+    // A conversation the user adjusted under the old channel keeps its own settings there.
+    val channel = if (spec.channel == NotificationChannels.MESSAGES) {
+      NotificationChannels.parentFor(context, spec.conversationId)
+    } else {
+      spec.channel
+    }
+    val builder = NotificationCompat.Builder(context, channel)
       .setSmallIcon(R.drawable.ic_notification)
       .setCategory(NotificationCompat.CATEGORY_MESSAGE)
       // Also with MessagingStyle: watch bridges that read only title and text show these.
@@ -818,7 +831,7 @@ class MessageNotifier(
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
       // The lock screen names the sender but not the text unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-      .setPublicVersion(publicVersion(spec.channel, spec.publicTitle, spec.publicText))
+      .setPublicVersion(publicVersion(channel, spec.publicTitle, spec.publicText))
     if (spec.messageCount > 1) builder.setNumber(spec.messageCount)
     spec.maybeConversation?.let { conversation -> builder.setStyle(messagingStyle(conversation, spec)) }
     showActionStatus(builder, spec)
@@ -903,7 +916,14 @@ class MessageNotifier(
       .setConversationTitle(conversation.maybeConversationTitle)
       .setGroupConversation(conversation.isGroupConversation)
     conversation.messages.forEach { message ->
-      style.addMessage(highlighted(message.text), message.sentAtMs, message.maybeSender?.let { person(it, spec.conversationId) })
+      val styled = NotificationCompat.MessagingStyle.Message(
+        highlighted(message.text),
+        message.sentAtMs,
+        message.maybeSender?.let { person(it, spec.conversationId) },
+      )
+      // Where the system shows no picture (Android Auto, some watches), the text stands for it.
+      message.maybePicture?.let { picture -> pictures.uri(picture)?.let { styled.setData(picture.mimeType, it) } }
+      style.addMessage(styled)
     }
     // The conversation layout (Android 11+) and Android Auto show no header text: a reply on its way
     // and a failed action are a line from the app, which the car also reads out (#1972). A running
@@ -979,7 +999,11 @@ class MessageNotifier(
         NotificationAttachmentKind.IMAGE -> context.getString(R.string.notification_photo)
         NotificationAttachmentKind.VIDEO -> context.getString(R.string.notification_video)
         NotificationAttachmentKind.AUDIO -> context.getString(R.string.notification_audio)
-        NotificationAttachmentKind.FILE -> context.getString(R.string.notification_file, fileName)
+        NotificationAttachmentKind.FILE -> if (fileName.isBlank()) {
+          context.getString(R.string.notification_file_unnamed)
+        } else {
+          context.getString(R.string.notification_file, fileName)
+        }
       }
     },
   )

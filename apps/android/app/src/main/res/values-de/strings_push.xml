@@ -163,6 +163,8 @@
   <string name="push_none">Kein Push-Dienst verfügbar. Installiere einen UnifiedPush-Distributor, um Benachrichtigungen bei geschlossener App zu erhalten.</string>
   <string name="push_registered">Benachrichtigungen sind eingerichtet.</string>
   <string name="notification_channel_messages">Kanalnachrichten</string>
+  <string name="notification_channel_messages_earlier">Kanalnachrichten (frühere Einstellungen)</string>
+  <string name="notification_channel_messages_earlier_description">Unterhaltungen, die du angepasst hast, bevor Kanalnachrichten so laut wurden wie Direktnachrichten. Ändere sie hier oder wähle die Unterhaltung unter „Unterhaltungen“.</string>
   <string name="notification_channel_mentions">Erwähnungen</string>
   <string name="notification_channel_direct_messages">Direktnachrichten</string>
   <string name="notification_channel_direct_messages_description">Nachrichten von Personen, mit denen du einzeln oder in kleinen Gruppen schreibst.</string>
@@ -180,6 +182,7 @@
   <string name="notification_new_message">Neue Nachricht</string>
   <string name="notification_added_you">Hat dich zur Unterhaltung hinzugefügt</string>
   <string name="notification_file">%1$s</string>
+  <string name="notification_file_unnamed">Datei</string>
   <string name="notification_reply">Antworten</string>
   <string name="notification_mark_read">Als gelesen markieren</string>
   <string name="notification_marking_read">Wird als gelesen markiert …</string>
@@ -190,4 +193,6 @@
   <string name="notification_reply_failed">Antwort nicht gesendet. Zum Wiederholen tippen</string>
   <string name="push_always">Push-Benachrichtigungen immer</string>
   <string name="push_away_only">Push-Benachrichtigungen nur, wenn ich nicht am Desktop bin</string>
+  <string name="notify_system_settings">Ton und Pop-up</string>
+  <string name="notify_system_settings_hint">Wie diese Unterhaltung klingt und ob sie auf dem Bildschirm, im Auto und auf der Uhr aufploppt, legst du in den Android-Einstellungen fest.</string>
 </resources>

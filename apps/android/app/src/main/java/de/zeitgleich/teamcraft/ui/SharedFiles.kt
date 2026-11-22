@@ -14,8 +14,9 @@ import java.io.File
 import java.io.IOException
 
 /**
- * The files the app hands to other apps through its FileProvider (issue #1761): decrypted downloads
- * and the diagnostics export. One place knows where they lie; `res/xml/shared_files.xml` must list
+ * The files the app hands to other apps through its FileProvider (issue #1761): decrypted downloads,
+ * the diagnostics export and the pictures of message notifications
+ * ([de.zeitgleich.teamcraft.notifications.NotificationPictures]). One place knows where they lie; `res/xml/shared_files.xml` must list
  * exactly [ROOTS] (`SharedFilesTest` reads the XML and compares), so the two can't drift.
  *
  * The core writes downloads to `<data dir>/downloads/<account>/`, and the data dir of a server is
@@ -31,6 +32,9 @@ object SharedFiles {
 
   /** The folder of the diagnostics export in the app cache. */
   const val DIAGNOSTICS_DIR = "diagnostics"
+
+  /** The pictures message notifications show, in the app cache. */
+  const val NOTIFICATION_PICTURES_DIR = "notification_pictures"
 
   /** The parent of every server's data dir, below `filesDir`. */
   const val STORE_DIR = "store"
@@ -48,9 +52,13 @@ object SharedFiles {
   val ROOTS = listOf(
     Root("files-path", "store", "$STORE_DIR/"),
     Root("cache-path", "diagnostics", "$DIAGNOSTICS_DIR/"),
+    Root("cache-path", "notification_pictures", "$NOTIFICATION_PICTURES_DIR/"),
   )
 
-  /** Whether [file] may go to another app: a download of any server, or the diagnostics export. */
+  /**
+   * Whether [file] may go to another app: a download of any server, the diagnostics export, or a
+   * notification's picture.
+   */
   fun isShareable(filesDir: File, cacheDir: File, file: File): Boolean {
     val canonical = try {
       file.canonicalFile
@@ -59,6 +67,8 @@ object SharedFiles {
     }
     val diagnostics = File(cacheDir, DIAGNOSTICS_DIR).canonicalFile
     if (canonical != diagnostics && canonical.startsWith(diagnostics)) return true
+    val pictures = File(cacheDir, NOTIFICATION_PICTURES_DIR).canonicalFile
+    if (canonical != pictures && canonical.startsWith(pictures)) return true
     // store/<server>/downloads/<something>
     val store = File(filesDir, STORE_DIR).canonicalFile
     if (!canonical.startsWith(store)) return false

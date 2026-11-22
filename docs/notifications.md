@@ -331,7 +331,7 @@ on real devices.
 | Retries              | A send that failed for a temporary reason (5xx, 429, timeout, connection) goes into a durable queue in the database and is tried again with exponential backoff and jitter, at least as long as the push service asked (`Retry-After`), until its TTL ends (at most `push.max_retries` times). While a provider is failing, new wake-ups are queued before the first attempt. Workers claim queued wake-ups with `FOR UPDATE SKIP LOCKED` and hold the row lock while sending: a restart or a killed server loses none and no two workers send one twice. A message read meanwhile, a revoked device or a refused or gone registration ends the retries; a withdrawal drops the queued wake-ups it covers; deleting a channel, a space or a direct conversation drops its queued wake-ups in the same transaction (a retry is never claimed once its conversation is marked deleted). |
 | Duplicates and order | The apps remember the message IDs they showed (per conversation) and ignore a second wake-up for the same message; MessagingStyle and iOS threads sort by the message time, not by arrival.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Badge                | The wake-up carries the user's unread count (conversations with unread mentions or DMs plus unread thread mentions); iOS sets it on the notification, Android on the notification (`setNumber`) and launcher.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| Android channels     | `direct_messages` (high), `mentions` (high), `messages` (default: channel messages), `incoming_calls` (high, full-screen intent, ringtone; importance can't be raised after creation, so the older `calls` stays the ongoing-call channel), `meetings` (high: reminders), `join_requests` (default: an admin asks to join a channel the user owns, posted by the app while it runs, admin.md §2.4.1), `other` (low: test pushes). Users change sound and importance in the system settings; the app links there.                                                                                                                                                                                           |
+| Android channels     | `direct_messages` (high), `mentions` (high), `channel_messages` (high; replaced `messages` at default importance, see "Android: how loud a message is"), `incoming_calls` (high, full-screen intent, ringtone; importance can't be raised after creation, so the older `calls` stays the ongoing-call channel), `meetings` (high: reminders), `join_requests` (default: an admin asks to join a channel the user owns, posted by the app while it runs, admin.md §2.4.1), `other` (low: test pushes). Users change sound and importance in the system settings; the app links there.                                                                                                                       |
 | Android extras       | MessagingStyle per conversation with long-lived conversation shortcuts and a group summary, inline reply, mark read and mute (8 hours, the server's per-conversation setting), battery state in the diagnostics (no exemption request; with UnifiedPush the distributor's), UnifiedPush distributor detection and choice. Senders show their profile picture (circle, fetched in the background through the core, cached; never from the push) or generated initials; bubbles follow in v1.0.5.                                                                                                                                                                                                            |
 | iOS extras           | Mutable-content alerts through the NSE as communication notifications, thread identifier per conversation, relevance score, time-sensitive for urgent, badge.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Diagnostics          | Mobile screen: test push (the server sends a sealed `test` wake-up end to end), provider, last push received, notification permission, battery optimisation, channel settings, DND state. Admins see per user and device how many pushes were sent, failed and suppressed (counts only).                                                                                                                                                                                                                                                                                                                                                                                                                   |
@@ -597,6 +597,38 @@ message and a loading line, until the store has the conversation and has caught 
 (the record then goes). A conversation the store doesn't know yet never shows "?": without a record
 the header reads "Loading the conversation…". On iOS a tap opens such a conversation only when a
 record exists. On the network the focused conversation's members come before its content (#1015).
+
+**Android: how loud a message is.** The user's own preferences decide: the server pushes only what
+the conversation's level lets through (all, mentions, nothing; mute, quiet hours, DND), so every
+message the phone shows is one the user asked to hear about, and a channel message at "All messages"
+is as loud as a direct message. All message channels are therefore high (sound and pop-up). Android
+Auto announces only notifications that pop up: on the default-importance `messages` channel of 1.0.41
+and before, channel messages showed on the phone but the car never read them out. How a single
+conversation sounds is Android's own conversation setting: the conversation's notification settings
+in the app link there ("Sound and pop-up", Android 11+ with `EXTRA_CONVERSATION_ID`), and the system
+keeps a channel of its own for a conversation the user changes (`setConversationId`, keyed by the
+conversation shortcut every message notification carries), which it picks for that conversation's
+notifications by itself. Upgrading: the first start creates `channel_messages` with what the user
+had changed on `messages` in the system settings (importance they set, sound, vibration, badge,
+lock-screen visibility); left alone, it is high. `messages` then goes once nothing shows on it; a
+conversation the user had adjusted under it keeps posting there with its own settings, and the
+channel stays, named "Channel messages (earlier settings)". The diagnostics export lists every
+channel with its importance and sound, the adjusted conversations (by ID) and where the app was
+installed from.
+
+**Pictures in notifications.** A photo or video message shows its picture: the sender's small
+preview (the attachment's thumbnail, inside the encrypted message) comes with the push preview when
+the text may show (`PushNotification.maybe_picture`; PNG or JPEG by its bytes, at most 256 KiB; the
+policy and the device setting drop it with the text). The text is the caption, or "Photo"/"Video".
+Android decodes it and encodes it again into the app's cache (`notification_pictures/`), so the
+system UI, Android Auto and watches never decode the sender's bytes, and attaches it to the
+MessagingStyle line as a content URI the system grants its notification UI and listeners; a caption
+follows the picture as a line of its own (the system shows a picture line without its text). The
+file goes when no shown line names it, and at sign-out. The lock screen's public version names the
+sender only. Android Auto reads the text. On iOS the extension decodes and encodes it the same way
+and attaches it (`UNNotificationAttachment`); the system deletes it with the notification and hides
+it on the lock screen as it hides the text. A picture sent without a file name says "Photo" too,
+never "New message".
 
 **Watches, bands and Android Auto (Android).** Watch and band bridges (Wear OS, Garmin, Mi Band apps)
 and Android Auto read what the phone posts. They must not get "New message" for a message that has

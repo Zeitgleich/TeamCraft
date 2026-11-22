@@ -170,6 +170,8 @@
   <string name="push_none">No push service available. Install a UnifiedPush distributor to get notifications while the app is closed.</string>
   <string name="push_registered">Notifications are set up.</string>
   <string name="notification_channel_messages">Channel messages</string>
+  <string name="notification_channel_messages_earlier">Channel messages (earlier settings)</string>
+  <string name="notification_channel_messages_earlier_description">Conversations you adjusted before channel messages became as loud as direct messages. Change them here, or pick the conversation under Conversations.</string>
   <string name="notification_channel_mentions">Mentions</string>
   <string name="notification_channel_direct_messages">Direct messages</string>
   <string name="notification_channel_direct_messages_description">Messages from people you chat with one to one or in small groups.</string>
@@ -187,6 +189,7 @@
   <string name="notification_new_message">New message</string>
   <string name="notification_added_you">Added you to the conversation</string>
   <string name="notification_file">%1$s</string>
+  <string name="notification_file_unnamed">File</string>
   <string name="notification_reply">Reply</string>
   <string name="notification_mark_read">Mark as read</string>
   <!-- The state of an action taken from a message notification (#1972). -->
@@ -198,4 +201,6 @@
   <string name="notification_reply_failed">Couldn\'t send your reply. Tap to retry</string>
   <string name="push_always">Push notifications always</string>
   <string name="push_away_only">Push notifications only when I\'m away from the desktop</string>
+  <string name="notify_system_settings">Sound and pop-up</string>
+  <string name="notify_system_settings_hint">How this conversation sounds and whether it pops up on screen, in the car and on your watch is set in Android\'s settings.</string>
 </resources>

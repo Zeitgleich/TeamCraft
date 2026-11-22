@@ -6,6 +6,7 @@ import android.os.Build
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.TeamCraftApplication
+import de.zeitgleich.teamcraft.notifications.NotificationSetup
 import de.zeitgleich.teamcraft.ui.SharedFiles
 import java.io.File
 import kotlinx.coroutines.Dispatchers
@@ -30,7 +31,11 @@ suspend fun exportDiagnostics(context: Context) {
     runCatching {
       val dir = File(context.cacheDir, DIAGNOSTICS_DIR).apply { mkdirs() }
       File(dir, "teamcraft-diagnostics.txt").apply {
-        writeText(diagnosticsText(BuildConfig.VERSION_NAME, osVersionLine()) + "\nNotification paths: $pushPaths\n")
+        writeText(
+          diagnosticsText(BuildConfig.VERSION_NAME, osVersionLine()) +
+            "\nNotification paths: $pushPaths\n" +
+            NotificationSetup.describe(context),
+        )
       }
     }
   }

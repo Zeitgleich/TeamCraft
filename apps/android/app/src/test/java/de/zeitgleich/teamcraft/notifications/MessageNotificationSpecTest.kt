@@ -52,6 +52,24 @@ class MessageNotificationSpecTest {
   }
 
   @Test
+  fun aPhotoShowsItsPictureAndItsCaptionFollows() {
+    val picture = LinePicture(fileName = "a.jpg", mimeType = "image/jpeg", label = "Photo")
+    val alice = NotificationSender("user-Alice", "Alice")
+    val bare = spec(direct(line("1000", "Alice", "Photo").copy(maybePicture = picture)))
+    assertEquals(listOf(StyleMessage("Photo", 1000, alice, picture)), bare.maybeConversation!!.messages)
+    assertEquals("Photo", bare.text)
+    val captioned = spec(direct(line("1000", "Alice", "look").copy(maybePicture = picture)))
+    assertEquals(
+      listOf(StyleMessage("Photo", 1000, alice, picture), StyleMessage("look", 1000, alice)),
+      captioned.maybeConversation!!.messages,
+    )
+    assertEquals("look", captioned.text)
+    // Hidden content hides the picture with the text.
+    val senderOnly = MessagePrivacy.of(NotificationContent.SENDER_ONLY, isAppLockOn = false, isVerified = true)
+    assertNull(build(direct(line("1000", "Alice", "look").copy(maybePicture = picture)), senderOnly)!!.maybeConversation)
+  }
+
+  @Test
   fun aPlaceholderStaysOnThePhoneUntilItHasItsText() {
     val placeholder = line("1000", "Alice", "New message").copy(isPlaceholder = true)
     assertTrue(spec(direct(placeholder)).isLocalOnly)
