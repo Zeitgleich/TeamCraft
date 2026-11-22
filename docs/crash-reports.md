@@ -210,7 +210,10 @@ account, the device or the instance, and it is rotated when the user turns repor
   value a client doesn't know: `organization`, the conservative reading). The notice names "the
   app developer" or "your organization"; where opting out is allowed it says so and offers a
   button to the settings, otherwise it only says that the reports hold no personal information and
-  never chat content. The settings hint names the same recipient.
+  never chat content. The settings hint names the same recipient. The notice closes by itself after
+  30 seconds (`NOTICE_TIMEOUT`, one value for all apps) and then counts as seen. It pauses while
+  held (web toast: pointer or focus), Android uses the system's "time to take action", and iOS
+  keeps it until dismissed while VoiceOver runs (WCAG 2.2.1); the Settings page keeps the switch.
 - **User:** Settings → Privacy → "Send crash reports" (on by default when the admin enabled them,
   unless the instance makes them mandatory), with a link to this page. Turning it off drops the
   queued reports at once and rotates the installation ID when turned on again.

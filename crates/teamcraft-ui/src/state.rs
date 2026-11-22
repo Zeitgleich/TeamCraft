@@ -1366,6 +1366,21 @@ impl AppState {
   /// Shows a toast with a button for the next step until the user closes it; a newer toast with
   /// the same action replaces it (the action carries out the newest offer).
   pub fn show_toast_with_action(&self, text: String, action: ToastAction) {
+    self.push_action_toast(text, action);
+  }
+
+  /// Shows an information toast that closes by itself after `duration` of countdown, which pauses
+  /// while the pointer is over it or it has focus (#367). With an `action`, like
+  /// [`Self::show_toast_with_action`].
+  pub fn show_toast_for(&self, text: String, maybe_action: Option<ToastAction>, duration: Duration) {
+    let id = match maybe_action {
+      Some(action) => self.push_action_toast(text, action),
+      None => self.push_toast(text, None),
+    };
+    self.close_toast_after(id, duration, || {});
+  }
+
+  fn push_action_toast(&self, text: String, action: ToastAction) -> u64 {
     let id = self.next_toast.get_value();
     self.next_toast.set_value(id + 1);
     self.toasts.update(|list| {
@@ -1381,6 +1396,7 @@ impl AppState {
         },
       );
     });
+    id
   }
 
   /// The user picked a microphone or speakers (an empty id: the system default), in the call or

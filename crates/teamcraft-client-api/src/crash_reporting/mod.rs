@@ -57,6 +57,10 @@ pub use transaction::{
 /// How long one send may take, connect to answer. A dead backend must never hold the app up;
 /// the report stays queued and goes with the next flush.
 pub const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long the first-start notice stays before it goes away by itself and counts as seen. One
+/// value for every app (web, desktop, Android, iOS); each pauses it while the notice is held or
+/// a screen reader needs more time (WCAG 2.2.1).
+pub const NOTICE_TIMEOUT: Duration = Duration::from_secs(30);
 /// The `Content-Type` of an envelope request.
 pub const ENVELOPE_CONTENT_TYPE: &str = "application/x-sentry-envelope";
 

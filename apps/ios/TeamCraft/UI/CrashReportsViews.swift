@@ -37,7 +37,14 @@ private struct CrashReportsNotice: ViewModifier {
   @State private var reports = CrashReports.shared
 
   func body(content: Content) -> some View {
-    content.alert(
+    content.task(id: reports.isNoticeDue) {
+      // Goes away by itself and counts as seen (the shared core value). With VoiceOver on it stays
+      // until dismissed, so nobody is cut off (WCAG 2.2.1); Settings keeps the switch either way.
+      guard reports.isNoticeDue, !UIAccessibility.isVoiceOverRunning else { return }
+      try? await Task.sleep(for: .milliseconds(Int(crashNoticeTimeoutMs())))
+      if !Task.isCancelled { reports.markNoticeSeen() }
+    }
+    .alert(
       "crash_reports_title",
       isPresented: Binding(get: { reports.isNoticeDue }, set: { if !$0 { reports.markNoticeSeen() } })
     ) {

@@ -9,15 +9,19 @@ import androidx.compose.material3.ListItemShapes
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalAccessibilityManager
 import androidx.compose.ui.res.stringResource
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.crash.CrashReports
 import de.zeitgleich.teamcraft.crash.CrashReportsStatus
+import kotlinx.coroutines.delay
+import uniffi.teamcraft_ffi.crashNoticeTimeoutMs
 
 /**
  * Settings → Privacy and security: "Send crash reports", only while the instance has them on
@@ -49,6 +53,14 @@ fun CrashReportsNotice(crashReports: CrashReports, onSettings: () -> Unit) {
   val close = {
     crashReports.markNoticeSeen()
     isDismissed = true
+  }
+  // Goes away by itself and counts as seen; the system's "time to take action" setting stretches
+  // it for people who need longer (WCAG 2.2.1), and the Settings page keeps the switch.
+  val accessibility = LocalAccessibilityManager.current
+  LaunchedEffect(Unit) {
+    val base = crashNoticeTimeoutMs().toLong()
+    delay(accessibility?.calculateRecommendedTimeoutMillis(base, containsIcons = true, containsText = true, containsControls = status.allowsOptOut) ?: base)
+    close()
   }
   AlertDialog(
     onDismissRequest = close,

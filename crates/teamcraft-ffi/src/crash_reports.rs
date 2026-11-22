@@ -62,6 +62,13 @@ pub fn crash_reports_config(response_json: String) -> Option<CrashReportsConfig>
   })
 }
 
+/// How long the first-start notice stays before it closes by itself and counts as seen, in
+/// milliseconds; the same value as on the web.
+#[uniffi::export]
+pub fn crash_notice_timeout_ms() -> u64 {
+  u64::try_from(teamcraft_client_api::crash_reporting::NOTICE_TIMEOUT.as_millis()).unwrap_or(u64::MAX)
+}
+
 /// What the mobile apps measure besides the SDK's own app start and screen loads (issue #1521),
 /// named as every app names it, so the backend shows one transaction per operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
@@ -132,6 +139,11 @@ mod tests {
     )))
     .expect("config");
     assert!(publisher.is_publisher_recipient);
+  }
+
+  #[test]
+  fn the_notice_stays_thirty_seconds() {
+    assert_eq!(crash_notice_timeout_ms(), 30_000);
   }
 
   #[test]
