@@ -26,10 +26,10 @@ use teamcraft_client_api::calls::{BackgroundEffect, CallsUnavailableReason};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_client_api::page_calls::{
   BrowserGraphics, EXPORT_ACT, EXPORT_CAMERA_VIEW, EXPORT_NETWORK_CHANGED, EXPORT_PICK_SCREEN,
-  EXPORT_PREVIEW_LEVEL, EXPORT_RECENT_LOG, EXPORT_RECORDING_FILE, EXPORT_RING, EXPORT_SCREEN_VIEW,
-  EXPORT_SCREEN_VIEW_HAS_PICTURE, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START, EXPORT_STOP,
-  EXPORT_UNWATCH_SCREEN, EXPORT_UNWATCH_VIDEO, EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO, MODULE_META,
-  PreparedCall, WORKLET_META, browser_effects_compositing,
+  EXPORT_PREVIEW_LEVEL, EXPORT_RECENT_LOG, EXPORT_RECORDING_FILE, EXPORT_RECORDING_SAVE_FILE, EXPORT_RING,
+  EXPORT_SCREEN_VIEW, EXPORT_SCREEN_VIEW_HAS_PICTURE, EXPORT_SHARE_SCREEN, EXPORT_SIGNAL, EXPORT_START,
+  EXPORT_STOP, EXPORT_UNWATCH_SCREEN, EXPORT_UNWATCH_VIDEO, EXPORT_VIDEO_STATS, EXPORT_WATCH_VIDEO,
+  MODULE_META, PreparedCall, WORKLET_META, browser_effects_compositing,
 };
 use teamcraft_client_api::remote::{CallAction, CallActionAnswer, CallSnapshot};
 use teamcraft_core::CallKeySigner;
@@ -305,6 +305,18 @@ pub async fn recording_file() -> Result<web_sys::Blob, ActionFailure> {
   let module = host.module().await.map_err(ActionFailure::other)?;
   module
     .call(EXPORT_RECORDING_FILE, &[])
+    .await?
+    .dyn_into::<web_sys::Blob>()
+    .map_err(|_| ActionFailure::other("the call module answered no file"))
+}
+
+/// The finished call recording decrypted, an Ogg file to download ("Save as file…", #2116). The
+/// take stays offered.
+pub async fn recording_save_file() -> Result<web_sys::Blob, ActionFailure> {
+  let host = current().ok_or_else(|| ActionFailure::other("calls aren't running in this tab"))?;
+  let module = host.module().await.map_err(ActionFailure::other)?;
+  module
+    .call(EXPORT_RECORDING_SAVE_FILE, &[])
     .await?
     .dyn_into::<web_sys::Blob>()
     .map_err(|_| ActionFailure::other("the call module answered no file"))

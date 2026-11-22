@@ -546,7 +546,7 @@ pub async fn core_data_export(
 
 /// Why the save dialog gave no place to save to, though the user didn't cancel it.
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
-enum SaveDialogError {
+pub(crate) enum SaveDialogError {
   /// The dialog never answered: it couldn't open, or it failed while open.
   #[error("the save dialog could not be opened")]
   NotOpened,
@@ -557,7 +557,7 @@ enum SaveDialogError {
 
 /// The path the user picks in the system's save dialog, starting in the downloads folder with
 /// `file_name`; `None` when cancelled.
-async fn ask_save_path(
+pub(crate) async fn ask_save_path(
   window: &tauri::WebviewWindow,
   file_name: &str,
 ) -> Result<Option<PathBuf>, SaveDialogError> {

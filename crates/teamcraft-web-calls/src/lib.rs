@@ -532,6 +532,14 @@ pub async fn recording_file() -> Result<web_sys::Blob, JsValue> {
   result.map_err(failure_value)
 }
 
+/// The finished call recording decrypted (a `Blob`, an Ogg file), for the page to download as a
+/// file the user keeps, unencrypted ("Save as file…", #2116). The take stays offered.
+#[wasm_bindgen]
+pub async fn recording_save_file() -> Result<web_sys::Blob, JsValue> {
+  let host = host()?;
+  host.recordings.file_for_save().await.map_err(failure_value)
+}
+
 impl Host {
   /// Joins the conversation's call with what the page's core prepared, leaving a running call, and
   /// starts the camera with it when chosen. A camera that can't start leaves the call running; the

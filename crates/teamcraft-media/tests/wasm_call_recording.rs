@@ -49,6 +49,32 @@ async fn played_frames_and_the_own_voice_make_one_file_of_the_played_length() {
   folder.clear().await;
 }
 
+/// "Save as file…" (#2116) decrypts a copy and keeps the take: it must decrypt again for posting,
+/// to the same file, and the copies must not replace each other.
+#[wasm_bindgen_test]
+async fn a_take_saved_as_a_file_still_decrypts_for_posting() {
+  let folder = RecordingFolder::new();
+  let recorder = WebCallRecorder::start(&folder, Duration::from_secs(60), Box::new(|| {}))
+    .await
+    .unwrap();
+  let sink = recorder.sink();
+  for index in 0..50 {
+    sink.push_playback(&tone(index, 440.0));
+    if index % 10 == 9 {
+      yield_now().await;
+    }
+  }
+  let take = recorder.finish().await.unwrap();
+  let saved = take.decrypt(&folder).await.unwrap();
+  let posted = take.decrypt(&folder).await.unwrap();
+  let (saved, posted) = (bytes_of(&saved).await, bytes_of(&posted).await);
+  assert_eq!(&saved[..4], b"OggS");
+  assert_eq!(saved.len() as u64, take.size_bytes);
+  assert_eq!(saved, posted);
+  take.delete().await;
+  folder.clear().await;
+}
+
 #[wasm_bindgen_test]
 async fn it_stops_at_its_maximum_length_and_says_so() {
   let folder = RecordingFolder::new();

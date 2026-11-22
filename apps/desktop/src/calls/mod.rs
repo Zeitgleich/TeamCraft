@@ -21,6 +21,8 @@ mod recording;
 mod self_view;
 pub(crate) mod video;
 
+pub use recording::RecordingKeys;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -134,6 +136,9 @@ pub struct MediaFiles {
   pub maybe_segmentation_model: Option<PathBuf>,
   /// The private folder call recordings are written to (e2ee.md §8.3), in the cache folder.
   pub recording_folder: PathBuf,
+  /// The recording key of the local secrets, which keeps a recording readable after a crash
+  /// (#2116); without it a crash loses the recording.
+  pub maybe_recording_keys: Option<Arc<dyn RecordingKeys>>,
 }
 
 #[derive(Default)]
@@ -302,7 +307,7 @@ impl CallHost {
       preview: tokio::sync::Mutex::default(),
       levels: LevelWatch::default(),
       screen_picker: OpenPicker::default(),
-      recording_folder: recording::RecordingFolder::new(files.recording_folder),
+      recording_folder: recording::RecordingFolder::new(files.recording_folder, files.maybe_recording_keys),
     }
   }
 
@@ -712,7 +717,10 @@ impl CallHost {
     if self.media.lock().await.is_none() {
       return Err("no call to record".to_owned());
     }
-    let sink = self.recording_folder.start(&self.state, max_secs, unix_ms())?;
+    let sink = self
+      .recording_folder
+      .start(&self.state, max_secs, unix_ms())
+      .await?;
     self.control(Control::Recording(Some(sink))).await;
     self.changed();
     Ok(())
@@ -731,6 +739,21 @@ impl CallHost {
   pub fn discard_recording(&self) {
     self.recording_folder.discard(&self.state);
     self.changed();
+  }
+
+  /// Offers what the app's last run left (#2116): a crash, a kill or a quit before posting.
+  pub async fn recover_recordings(&self) {
+    if self.recording_folder.recover(&self.state).await {
+      self.changed();
+    }
+  }
+
+  /// Saves an unencrypted copy of the take to `target`, which the user picked (#2116); the take
+  /// stays offered.
+  pub async fn save_recording(&self, target: PathBuf) -> Result<(), String> {
+    let saved = recording::save(&self.state, target).await;
+    self.changed();
+    saved
   }
 
   /// Decrypts the take into the core's upload `staging` folder; returns the path to post.
@@ -2661,6 +2684,7 @@ mod tests {
         maybe_segmentation_model: None,
         recording_folder: std::env::temp_dir()
           .join(format!("teamcraft-call-recordings-test-{}", std::process::id())),
+        maybe_recording_keys: None,
       },
     )
   }

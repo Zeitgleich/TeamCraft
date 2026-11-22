@@ -108,6 +108,10 @@ pub const EXPORT_STOP: &str = "stop";
 /// once it resolves; a rejection (`ActionFailure` wire text) leaves it offered. A module from
 /// before it has no such export (and offers no recording).
 pub const EXPORT_RECORDING_FILE: &str = "recording_file";
+/// `recording_save_file() -> Promise<Blob>`: the finished call recording decrypted, an Ogg file the
+/// page downloads for the user to keep, unencrypted ("Save as file…", #2116). The take stays
+/// offered. A module from before it has no such export: the page then can't save.
+pub const EXPORT_RECORDING_SAVE_FILE: &str = "recording_save_file";
 /// `pick_screen(ScreenContentMode JSON, has_sound, ScreenShareResolution JSON) -> Promise<MediaStream>`:
 /// opens the browser's screen picker at once (`getDisplayMedia`), offering the tab's or the
 /// system's sound with `has_sound` (#441; left out, no sound), for a share of the resolution

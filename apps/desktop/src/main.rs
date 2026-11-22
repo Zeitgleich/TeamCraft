@@ -205,6 +205,7 @@ fn main() -> anyhow::Result<()> {
         codec_directory: app.path().app_data_dir()?.join("codecs"),
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
         recording_folder: app.path().app_cache_dir()?.join("call-recordings"),
+        maybe_recording_keys: Some(Arc::clone(&vault) as Arc<dyn calls::RecordingKeys>),
       };
       let emitter = app.handle().clone();
       let report_failure: FailureReporter = Arc::new(move |failure| {
@@ -212,7 +213,12 @@ fn main() -> anyhow::Result<()> {
           tracing::debug!(%error, "could not tell the webview about a failure");
         }
       });
-      app.manage(Arc::new(CallHost::new(notify, report_failure, files)));
+      let call_host = Arc::new(CallHost::new(notify, report_failure, files));
+      // A call recording the last run left (a crash, a kill, a quit before posting, #2116) is
+      // offered again; reading it doesn't hold up the start.
+      let recovering = Arc::clone(&call_host);
+      tauri::async_runtime::spawn(async move { recovering.recover_recordings().await });
+      app.manage(call_host);
       app.manage(ShellPrefsState::load(app.handle()));
       app.manage(Arc::new(UpdateHost::load(app.handle())));
       UpdateHost::spawn(app.handle().clone());
@@ -388,6 +394,7 @@ fn main() -> anyhow::Result<()> {
       calls::commands::call_media_devices,
       calls::commands::call_action,
       calls::commands::call_recording_stage,
+      calls::commands::call_recording_save,
       calls::commands::call_watch_video,
       calls::commands::call_background_preview,
       calls::commands::call_unwatch_video,

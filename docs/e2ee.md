@@ -6867,10 +6867,11 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 **Who may record (signed policy).** The workspace policy (§11, admin.md §2.3) has a group
 `call_recording`, off by default:
 
-| Field         | Default | Meaning                                                                                  |
-|---------------|---------|------------------------------------------------------------------------------------------|
-| `recorders`   | `off`   | Who may record: `off`, `admins` (owners and admins of the verified roster) or `members`  |
-| `max_minutes` | `120`   | The longest recording; it stops by itself then (1 to 480)                                |
+| Field         | Default   | Meaning                                                                                   |
+|---------------|-----------|-------------------------------------------------------------------------------------------|
+| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins of the verified roster) or `members`   |
+| `max_minutes` | `120`     | The longest recording; it stops by itself then (1 to 480)                                 |
+| `local_files` | `allowed` | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`) |
 
 Guests never record, whatever the policy says. The recording app checks the verified policy and its
 user's role before it starts and offers the button only to those allowed (admin.md §1.1); the
@@ -6958,13 +6959,13 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
     (about 16 seconds of audio each) with a random 19-byte nonce prefix, every chunk with its own
     tag and the header as associated data, the last chunk marked. A chunk changed, swapped,
     dropped or appended, a file cut short, or a chunk from another file fails to decrypt.
-  - The key is 256 random bits per recording, drawn when it starts, and **held only in the memory
-    of the app's process** (zeroized when dropped, never logged, never written to disk, not in the
-    OS keystore). The writer holds at most one chunk of plaintext (64 KiB), overwritten once it is
-    encrypted and when the writer is dropped. The key travels with the take; nothing else can read
-    the file, the app included once the process ends. Copies of the audio elsewhere in the
-    process (the audio pipeline, the buffers of the copy when posting) are not wiped: the process's
-    memory is out of scope here, as it holds the call's media anyway.
+  - The key is 256 random bits per recording, drawn when it starts, held in the memory of the
+    app's process (zeroized when dropped, never logged, never in the clear on disk, not in the OS
+    keystore) and **kept next to the file sealed under the recording key of the local secrets**
+    (#2116, "Crash or quit" below). The writer holds at most one chunk of plaintext (64 KiB),
+    overwritten once it is encrypted and when the writer is dropped. Copies of the audio elsewhere
+    in the process (the audio pipeline, the buffers of the copy when posting) are not wiped: the
+    process's memory is out of scope here, as it holds the call's media anyway.
   - **Posting** decrypts the file, chunk by chunk, into the core's upload staging folder, which
     the core uploads with a fresh attachment key as below and empties once the upload is done (or,
     at start, when no pending upload names the copy). The sealed file is then deleted and its key
@@ -6973,11 +6974,48 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
     attachment the user sends (§4.5).
   - **Deleting** the take, a new recording replacing it, and sign-out delete the sealed file and
     drop its key.
-  - **Crash or quit:** the key dies with the process, so a recording a crash (or a quit before
-    posting) left behind can't be read by anybody. The folder is emptied at every start of the app.
-    Keeping such a recording for the user would mean keeping its key somewhere that outlives the
-    process (sealed with the device's local secrets, §9.7); that is decided with #2116, until then
-    a crash loses the recording.
+  - **Saving as a file** (#2116, where `local_files` allows it) decrypts a copy, chunk by chunk, to
+    where the user picks in the system's save dialog, after a warning that the file is then
+    unencrypted. The copy is written next to that place first and renamed over it once whole and
+    synced, so a full disk or a take that doesn't decrypt leaves no half file and keeps a file the
+    user chose to replace. The desktop shell checks the verified policy itself before it writes
+    (no verified workspace counts as not allowed). The take stays offered: posting or deleting
+    it is still up to the user, and the saved file is theirs (sign-out doesn't touch it).
+  - **Crash or quit (#2116):** so that a crash, a kill or a quit before posting doesn't lose the
+    recording, its key is kept next to the file (`recording-….key`), sealed with
+    `teamcraft-crypto::sealed_stream::SealedStreamKey::wrap` under the **recording key**, a random
+    256-bit key of the local secrets (`secrets.sealed`, §9.7, item `call-recording-key@device`,
+    made with the first recording, never in the keychain). The kept key's format is
+    `version (1) || nonce (24) || XChaCha20-Poly1305(key (32) || note) || tag (16)` with
+    `len(label) || label || version` as associated data, label `TeamCraft-v1 sealed stream key
+    wrap`; the note (at most 1 KiB, sealed too) holds the conversation and the start time, so the
+    disk shows neither the key nor which conversation was recorded. It is written to a temporary
+    file, synced and renamed, before the recording starts; a key that can't be written (a full
+    disk, local secrets that can't be read) is logged and the recording runs without it, as before.
+    - The next start lists the folder before anything is recorded. Without kept keys it deletes
+      what is there without touching the local secrets (no keychain dialog for nothing). With
+      them, it opens each kept key with the recording key and reads the recording once, chunk by
+      chunk, off the main thread, and offers each in turn: "A recording from … was not finished"
+      (or "… is waiting" for a take that was finished but not posted), with "Post to
+      conversation", "Save as file…" and "Delete", like any take.
+    - A finished take decrypts as before. An unfinished one (no final chunk) is read with
+      `SealedStreamReader::recovering`: every chunk that verifies, in order, up to the first that
+      doesn't or the end of the file; a chunk half written or cut short ends it. The writer writes
+      a chunk only once more follows, so what a crash loses is the chunk still in memory, at most
+      64 KiB (about 16 seconds). The Ogg stream in it is then cut at its last whole page whose
+      checksum matches (`ogg_opus::copy_whole_pages`), and that page is marked as the end, so
+      players see a finished file of the length kept.
+    - What can't be read is deleted: a recording without a kept key, a kept key that doesn't open
+      (another recording key, changed on disk), a key without a recording, a key half written, a
+      recording without a page of audio. A file the disk fails to read stays for the next start.
+      Local secrets that can't be read at start (a locked keychain) leave the files for the next
+      start; no recording key (it went with a sign-out) deletes them.
+    - Recovery can cut a recording short unnoticed, never change it: every chunk handed out
+      verified at its place, and the user is told it is unfinished. A process of the user that can
+      read the local secrets can read a waiting recording, as it could read the database; a disk
+      read alone (a backup, a stolen laptop) still gets nothing.
+    - **Sign-out** deletes the folder and forgets the recording key, so a kept key a deletion missed
+      doesn't open any more; the next recording makes a new one.
 
   A write that fails (a full disk) ends the recording: the others are told it stopped, and the
   recorder sees the error. What the recording device protects this way is the disk: anybody who
@@ -6997,6 +7035,16 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
     reloaded or discarded while recording (or with a take waiting) loses it: the key died with the
     page. The next call module of the origin deletes the folders whose lock nobody holds; without
     Web Locks it deletes none of other pages, as it can't tell whether they still run.
+  - **No recovery in the browser (#2116):** keeping the key for the next page would need a store
+    the disk doesn't show, and the browser has none: a key in IndexedDB, even a non-extractable
+    WebCrypto key, sits in the same profile folder as the sealed pieces, readable by whoever reads
+    that folder, which is exactly what the sealing protects against. The local store's own key
+    has the same limit (§9.1). So the browser keeps deleting what a closed page left, and the take
+    card tells the user that closing or reloading the tab loses the recording.
+  - **Saving as a file** (#2116, where `local_files` allows it) decrypts a copy into the page's
+    folder, like a copy for posting, and hands it to the browser as a download, after the same
+    warning as on the desktop; the take stays offered. The page's check of the policy is the
+    check, as for recording.
   - **Posting** decrypts the take, slice by slice, into a copy next to it, which the page hands the
     client core like a picked file (`FileSource::Picked`); the core keeps its own copy in IndexedDB
     for a reload, as for every picked attachment, and that copy is plaintext like the desktop's
@@ -7005,11 +7053,14 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
     is gone (the next sweep).
   - Signing out, and the app moving to another tab (the call module stops), cancel a running
     recording and delete the take.
-- **Afterwards:** the app offers "Post to the conversation" or "Delete". Posting sends the file as
+- **Afterwards:** the app offers "Post to the conversation", "Save as file…" (where the policy's
+  `local_files` allows it, #2116) or "Delete". Posting sends the file as
   an attachment into the call's conversation (§4.5): encrypted with a fresh key, which goes to the
   conversation's members through MLS like every message; retention applies to it like to any
-  message. The local file is deleted once it is posted or discarded (above). Saving it elsewhere as a plain
-  file is a later step (with a warning that the file is then unencrypted, #2116).
+  message. The local file is deleted once it is posted or discarded (above). A file saved with
+  "Save as file…" is plaintext wherever the user put it: the app warns before it writes it, and an
+  organization that doesn't want such copies sets `local_files` to `forbidden`. Video is a later
+  step (#2250).
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
 

@@ -380,6 +380,8 @@ enum Request {
   ),
   /// How long the user may record a call under the verified policy (`None`: not at all).
   CallRecordingAllowance(oneshot::Sender<Result<Option<u32>, String>>),
+  /// Whether the verified policy lets a recording be saved as a file (#2116).
+  CallRecordingAllowsFiles(oneshot::Sender<Result<bool, String>>),
   CallJoinToken(
     ConversationId,
     oneshot::Sender<Result<CallJoinTokenResponse, String>>,
@@ -805,6 +807,15 @@ impl CoreRuntime {
   pub async fn call_recording_allowance(&self) -> Result<Option<u32>, String> {
     self
       .ask(Request::CallRecordingAllowance)
+      .await
+      .unwrap_or_else(|| Err(stopped()))
+  }
+
+  /// Whether the verified policy lets the user save a recording as a file on this device (#2116).
+  /// The shell checks it before it writes one, whatever the page asked.
+  pub async fn call_recording_allows_files(&self) -> Result<bool, String> {
+    self
+      .ask(Request::CallRecordingAllowsFiles)
       .await
       .unwrap_or_else(|| Err(stopped()))
   }
@@ -1764,6 +1775,7 @@ impl Core {
       Request::PrepareCall(conversation, reply) => drop(reply.send(self.prepare_call(conversation).await)),
       Request::CallDevices(conversation, reply) => drop(reply.send(self.call_devices(conversation).await)),
       Request::CallRecordingAllowance(reply) => drop(reply.send(self.call_recording_allowance())),
+      Request::CallRecordingAllowsFiles(reply) => drop(reply.send(self.call_recording_allows_files())),
       Request::CallJoinToken(conversation, reply) => {
         drop(reply.send(self.call_join_token(conversation).await))
       },
@@ -1920,6 +1932,15 @@ impl Core {
       client.user_id(),
       SystemClock.now_ms(),
     ))
+  }
+
+  /// No verified workspace yet (or an unreadable one): no evidence the policy allows it.
+  fn call_recording_allows_files(&self) -> Result<bool, String> {
+    let client = self.client.as_ref().ok_or("this device is not set up yet")?;
+    Ok(
+      teamcraft_core::workspace::call_recording_policy(client.store())
+        .is_some_and(|policy| policy.allows_local_files()),
+    )
   }
 
   async fn prepare_call(&mut self, conversation: ConversationId) -> Result<CallPreparation, String> {

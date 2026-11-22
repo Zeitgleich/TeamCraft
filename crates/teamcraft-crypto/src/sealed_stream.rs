@@ -7,9 +7,10 @@
 //!   XChaCha20-Poly1305 in chunks of [`CHUNK_SIZE`] with a random nonce prefix, every chunk with its
 //!   own tag, the last one marked. Reordered, dropped, tampered or appended chunks and a file cut
 //!   short fail to decrypt.
-//! - The key is random per file and never leaves the process: it is not written to disk, not put
-//!   in the OS keystore, and zeroized when dropped. A file whose key is gone (the app quit or
-//!   crashed) can't be read by anybody, the app included; the app deletes it at its next start.
+//! - The key is random per file and zeroized when dropped. It is not written to disk in the clear
+//!   and not put in the OS keystore. An app that wants to read the file after a crash keeps it
+//!   sealed under a key of the device's local secrets ([`SealedStreamKey::wrap`], issue #2116);
+//!   without that, a file whose key is gone can't be read by anybody, the app included.
 //! - [`SealedStreamWriter`] holds at most one chunk of plaintext, so the file grows on disk chunk
 //!   by chunk and memory stays bounded however long the file gets. Its buffer is overwritten once
 //!   a chunk is encrypted and when the writer is dropped; [`SealedStreamReader`] overwrites each
@@ -19,6 +20,11 @@
 //! - [`SealedStreamReader`] decrypts chunk by chunk as it is read. A chunk is handed out only once
 //!   its tag verified, but truncation shows only at the end: what was read is trustworthy only once
 //!   the reader returned end of file without an error.
+//! - A file a crash left unfinished has no final chunk: [`SealedStreamReader::recovering`] reads
+//!   the chunks that verify, in order, up to the first that doesn't (a cut, a chunk half written),
+//!   and then ends; [`SealedStreamReader::is_complete`] says whether the final chunk was there.
+//!   Every chunk it hands out still verified and sits at its place, so a file can be cut short
+//!   unnoticed this way, never changed: the app tells its user that such a file is unfinished.
 
 use std::fmt;
 use std::io::{self, Read, Write};
@@ -26,14 +32,19 @@ use std::io::{self, Read, Write};
 use rand_core::CryptoRngCore;
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::aead::TAG_LEN;
+use crate::aead::{self, NONCE_LEN, TAG_LEN};
 use crate::attachment::{
   AttachmentDecryptor, AttachmentEncryptor, AttachmentError, AttachmentKey, HEADER_LEN,
 };
-use crate::secret::SecretBytes;
+use crate::domain::{self, SEALED_STREAM_KEY_WRAP};
+use crate::secret::{SYMMETRIC_KEY_LEN, SecretBytes, SymmetricKey};
 
 /// Plaintext per chunk: 64 KiB, about 16 seconds of a call recording (32 kbit/s).
 pub const CHUNK_SIZE: u32 = 64 * 1024;
+/// Version byte of a wrapped key ([`SealedStreamKey::wrap`]).
+const WRAP_VERSION: u8 = 1;
+/// The longest note sealed with a wrapped key: what the app needs to offer the file again.
+pub const MAX_WRAP_NOTE_LEN: usize = 1024;
 
 /// The key of one sealed file. Only in memory; zeroized on drop; no `Clone`.
 pub struct SealedStreamKey(AttachmentKey);
@@ -54,6 +65,11 @@ pub struct SealedStreamWriter<W: Write> {
 pub struct SealedStreamReader<R: Read> {
   inner: R,
   maybe_decryptor: Option<AttachmentDecryptor>,
+  /// Reads what verifies of an unfinished file instead of failing at its end
+  /// ([`Self::recovering`]).
+  is_recovering: bool,
+  /// The final chunk was read and verified.
+  is_complete: bool,
   /// The decrypted chunk being handed out, and how much of it was.
   plaintext: SecretBytes,
   position: usize,
@@ -61,9 +77,69 @@ pub struct SealedStreamReader<R: Read> {
   ciphertext: Vec<u8>,
 }
 
+/// A wrapped key that doesn't open: another device key, changed on disk, or not a wrapped key.
+#[derive(Debug, thiserror::Error)]
+pub enum KeyWrapError {
+  #[error("the kept key doesn't open: it was changed, or belongs to another device key")]
+  BadWrap,
+  #[error("the note kept with the key is too long")]
+  NoteTooLong,
+  #[error("encryption failed")]
+  Encrypt,
+}
+
 impl SealedStreamKey {
   pub fn generate(rng: &mut impl CryptoRngCore) -> Self {
     Self(AttachmentKey::generate(rng))
+  }
+
+  /// Seals this key and `note` (at most [`MAX_WRAP_NOTE_LEN`] bytes: what the app needs to offer
+  /// the file again) under `device_key`, a key of the device's local secrets, for a file that must
+  /// stay readable after a crash (e2ee.md §8.3, #2116).
+  ///
+  /// Layout: `version (1) || nonce (24) || XChaCha20-Poly1305(key (32) || note) || tag (16)`, a
+  /// fresh random nonce per call, the version bound in as associated data under its own label.
+  /// The note is sealed too: the disk shows neither the key nor what the note says.
+  pub fn wrap(
+    &self,
+    device_key: &SymmetricKey,
+    note: &[u8],
+    rng: &mut (impl CryptoRngCore + ?Sized),
+  ) -> Result<Vec<u8>, KeyWrapError> {
+    if note.len() > MAX_WRAP_NOTE_LEN {
+      return Err(KeyWrapError::NoteTooLong);
+    }
+    let mut plaintext = Zeroizing::new(Vec::with_capacity(SYMMETRIC_KEY_LEN + note.len()));
+    plaintext.extend_from_slice(self.0.as_key().expose_secret());
+    plaintext.extend_from_slice(note);
+    let (nonce, ciphertext) =
+      aead::seal(device_key, &wrap_aad(), &plaintext, rng).map_err(|_| KeyWrapError::Encrypt)?;
+    let mut wrapped = Vec::with_capacity(1 + NONCE_LEN + ciphertext.len());
+    wrapped.push(WRAP_VERSION);
+    wrapped.extend_from_slice(&nonce);
+    wrapped.extend_from_slice(&ciphertext);
+    Ok(wrapped)
+  }
+
+  /// Opens what [`Self::wrap`] sealed: the key and the note.
+  pub fn unwrap(device_key: &SymmetricKey, wrapped: &[u8]) -> Result<(Self, SecretBytes), KeyWrapError> {
+    let (&version, rest) = wrapped.split_first().ok_or(KeyWrapError::BadWrap)?;
+    if version != WRAP_VERSION
+      || rest.len() < NONCE_LEN + SYMMETRIC_KEY_LEN + TAG_LEN
+      || rest.len() > NONCE_LEN + SYMMETRIC_KEY_LEN + MAX_WRAP_NOTE_LEN + TAG_LEN
+    {
+      return Err(KeyWrapError::BadWrap);
+    }
+    let (nonce, ciphertext) = rest.split_at(NONCE_LEN);
+    let nonce: &[u8; NONCE_LEN] = nonce.try_into().map_err(|_| KeyWrapError::BadWrap)?;
+    let plaintext =
+      aead::open(device_key, nonce, &wrap_aad(), ciphertext).map_err(|_| KeyWrapError::BadWrap)?;
+    let (key, note) = plaintext.expose_secret().split_at(SYMMETRIC_KEY_LEN);
+    let key = SymmetricKey::from_slice(key).ok_or(KeyWrapError::BadWrap)?;
+    Ok((
+      Self(AttachmentKey::from_key(key)),
+      SecretBytes::new(note.to_vec()),
+    ))
   }
 }
 
@@ -140,7 +216,25 @@ impl<W: Write> fmt::Debug for SealedStreamWriter<W> {
 
 impl<R: Read> SealedStreamReader<R> {
   /// Reads the header from `inner`.
-  pub fn new(key: &SealedStreamKey, mut inner: R) -> io::Result<Self> {
+  pub fn new(key: &SealedStreamKey, inner: R) -> io::Result<Self> {
+    Self::open(key, inner, false)
+  }
+
+  /// Reads a file a crash may have left unfinished (e2ee.md §8.3, #2116): the chunks that verify,
+  /// in order, up to the first that doesn't or the end of the file, then end of file without an
+  /// error. A chunk cut short or half written ends it; so does a chunk changed on disk, which
+  /// can't be told apart. [`Self::is_complete`] says afterwards whether the file was finished.
+  /// The header must still verify: a file without one has nothing to recover.
+  pub fn recovering(key: &SealedStreamKey, inner: R) -> io::Result<Self> {
+    Self::open(key, inner, true)
+  }
+
+  /// Whether the final chunk was read and verified: the whole file, as its writer finished it.
+  pub fn is_complete(&self) -> bool {
+    self.is_complete
+  }
+
+  fn open(key: &SealedStreamKey, mut inner: R, is_recovering: bool) -> io::Result<Self> {
     let mut header = [0u8; HEADER_LEN];
     inner.read_exact(&mut header)?;
     let decryptor = AttachmentDecryptor::new(&key.0, &header).map_err(invalid)?;
@@ -148,6 +242,8 @@ impl<R: Read> SealedStreamReader<R> {
     Ok(Self {
       inner,
       maybe_decryptor: Some(decryptor),
+      is_recovering,
+      is_complete: false,
       plaintext: SecretBytes::new(Vec::new()),
       position: 0,
       ciphertext: Vec::with_capacity(capacity),
@@ -180,10 +276,19 @@ impl<R: Read> SealedStreamReader<R> {
     self.position = 0;
     if self.ciphertext.len() == wanted {
       // More follows: this chunk is not the last. Keep the byte read ahead.
-      self.plaintext = decryptor
-        .decrypt_chunk(&self.ciphertext[..chunk_len])
-        .map_err(invalid)?;
+      match decryptor.decrypt_chunk(&self.ciphertext[..chunk_len]) {
+        Ok(plaintext) => self.plaintext = plaintext,
+        Err(_) if self.is_recovering => {
+          self.end_recovery();
+          return Ok(());
+        },
+        Err(error) => return Err(invalid(error)),
+      }
       self.ciphertext.drain(..chunk_len);
+      return Ok(());
+    }
+    if self.is_recovering {
+      self.recover_end();
       return Ok(());
     }
     // End of the file: what is left must be the final chunk, else it was cut short.
@@ -192,8 +297,40 @@ impl<R: Read> SealedStreamReader<R> {
       return Err(invalid(AttachmentError::DecryptionFailed));
     }
     self.plaintext = decryptor.finish(&self.ciphertext).map_err(invalid)?;
+    self.is_complete = true;
     self.ciphertext.clear();
     Ok(())
+  }
+
+  /// The end of a file read with [`Self::recovering`]: what is left is the final chunk, a full
+  /// chunk the writer wrote just before a crash (it writes one only once more follows, so an
+  /// unfinished file mostly ends in one), or a chunk cut short, which is dropped.
+  fn recover_end(&mut self) {
+    self.plaintext = SecretBytes::new(Vec::new());
+    let Some(mut decryptor) = self.maybe_decryptor.take() else {
+      return;
+    };
+    // A full chunk is tried as a middle chunk first: a failed try leaves the decryptor's position
+    // as it was, so it can still be the final one (a file whose last chunk is exactly full).
+    if self.ciphertext.len() == decryptor.encrypted_chunk_len()
+      && let Ok(plaintext) = decryptor.decrypt_chunk(&self.ciphertext)
+    {
+      self.plaintext = plaintext;
+    } else if self.ciphertext.len() >= TAG_LEN
+      && let Ok(plaintext) = decryptor.finish(&self.ciphertext)
+    {
+      self.plaintext = plaintext;
+      self.is_complete = true;
+    }
+    self.ciphertext.clear();
+  }
+
+  /// Ends a file read with [`Self::recovering`] at a chunk that didn't verify: nothing after it
+  /// is read.
+  fn end_recovery(&mut self) {
+    self.plaintext = SecretBytes::new(Vec::new());
+    self.maybe_decryptor = None;
+    self.ciphertext.clear();
   }
 }
 
@@ -217,6 +354,10 @@ impl<R: Read> fmt::Debug for SealedStreamReader<R> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("SealedStreamReader").finish_non_exhaustive()
   }
+}
+
+fn wrap_aad() -> Vec<u8> {
+  domain::labeled(SEALED_STREAM_KEY_WRAP, &[WRAP_VERSION])
 }
 
 /// A file that doesn't decrypt (wrong key, tampered, reordered or cut short) reads as invalid data.
@@ -385,6 +526,97 @@ mod tests {
   }
 
   #[test]
+  fn recovering_reads_an_unfinished_file_up_to_its_last_whole_chunk() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let plaintext = sample(3 * CHUNK + 10);
+    let mut sealed = Vec::new();
+    {
+      let mut writer = SealedStreamWriter::new(&key, &mut sealed, &mut OsRng).unwrap();
+      writer.write_all(&plaintext).unwrap();
+      // Dropped without `finish`: a crash while recording. The last 10 bytes and one full chunk
+      // were still pending: the writer writes a chunk only once more follows.
+    }
+    assert_eq!(sealed.len(), HEADER_LEN + 3 * ENCRYPTED_CHUNK);
+    let (read, is_complete) = recover(&key, &sealed).unwrap();
+    assert_eq!(read, plaintext[..3 * CHUNK]);
+    assert!(!is_complete);
+  }
+
+  #[test]
+  fn recovering_drops_a_chunk_cut_short_or_damaged_and_everything_after_it() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let plaintext = sample(3 * CHUNK + 10);
+    let sealed = seal_in_pieces(&key, &plaintext, 4096);
+    // Cut inside the second chunk, inside the final chunk's tag, at a chunk boundary.
+    for (len, kept) in [
+      (HEADER_LEN + ENCRYPTED_CHUNK + 100, CHUNK),
+      (sealed.len() - 1, 3 * CHUNK),
+      (HEADER_LEN + 2 * ENCRYPTED_CHUNK, 2 * CHUNK),
+      (HEADER_LEN, 0),
+    ] {
+      let (read, is_complete) = recover(&key, &sealed[..len]).unwrap();
+      assert_eq!(read, plaintext[..kept], "cut at {len}");
+      assert!(!is_complete);
+    }
+    // A damaged middle chunk (a hole a power loss left) ends what is read.
+    let mut damaged = sealed.clone();
+    damaged[HEADER_LEN + ENCRYPTED_CHUNK + 7] ^= 1;
+    let (read, is_complete) = recover(&key, &damaged).unwrap();
+    assert_eq!(read, plaintext[..CHUNK]);
+    assert!(!is_complete);
+  }
+
+  #[test]
+  fn recovering_a_finished_file_reads_all_of_it() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    for len in [0, 10, CHUNK, 2 * CHUNK, 2 * CHUNK + 3] {
+      let plaintext = sample(len);
+      let sealed = seal_in_pieces(&key, &plaintext, 4096);
+      let (read, is_complete) = recover(&key, &sealed).unwrap();
+      assert_eq!(read, plaintext, "length {len}");
+      assert!(is_complete, "length {len}");
+    }
+  }
+
+  #[test]
+  fn recovering_still_needs_the_key_and_the_header() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let sealed = seal_in_pieces(&key, &sample(CHUNK + 10), 4096);
+    let other = SealedStreamKey::generate(&mut OsRng);
+    let (read, is_complete) = recover(&other, &sealed).unwrap();
+    assert!(read.is_empty() && !is_complete, "another key reads nothing");
+    assert!(SealedStreamReader::recovering(&key, Cursor::new(&sealed[..HEADER_LEN - 1])).is_err());
+  }
+
+  #[test]
+  fn a_wrapped_key_opens_with_its_note_under_the_same_device_key_only() {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let sealed = seal_in_pieces(&key, &sample(100), 100);
+    let device_key = SymmetricKey::generate(&mut OsRng);
+    let wrapped = key.wrap(&device_key, b"note", &mut OsRng).unwrap();
+    assert!(!wrapped.windows(4).any(|window| window == b"note"));
+    let (unwrapped, note) = SealedStreamKey::unwrap(&device_key, &wrapped).unwrap();
+    assert_eq!(note.expose_secret(), b"note");
+    assert_eq!(open(&unwrapped, &sealed).unwrap(), sample(100));
+    let other = SymmetricKey::generate(&mut OsRng);
+    assert!(SealedStreamKey::unwrap(&other, &wrapped).is_err());
+    for index in 0..wrapped.len() {
+      let mut changed = wrapped.clone();
+      changed[index] ^= 1;
+      assert!(
+        SealedStreamKey::unwrap(&device_key, &changed).is_err(),
+        "byte {index}"
+      );
+    }
+    assert!(SealedStreamKey::unwrap(&device_key, &wrapped[..wrapped.len() - 1]).is_err());
+    assert!(SealedStreamKey::unwrap(&device_key, &[]).is_err());
+    assert!(matches!(
+      key.wrap(&device_key, &[0; MAX_WRAP_NOTE_LEN + 1], &mut OsRng),
+      Err(KeyWrapError::NoteTooLong)
+    ));
+  }
+
+  #[test]
   fn the_key_never_prints() {
     let key = SealedStreamKey::generate(&mut OsRng);
     assert_eq!(format!("{key:?}"), "SealedStreamKey([redacted])");
@@ -410,6 +642,14 @@ mod tests {
       }
       plaintext.extend_from_slice(&buf[..read]);
     }
+  }
+
+  /// What [`SealedStreamReader::recovering`] reads, and whether the file was complete.
+  fn recover(key: &SealedStreamKey, sealed: &[u8]) -> io::Result<(Vec<u8>, bool)> {
+    let mut reader = SealedStreamReader::recovering(key, Cursor::new(sealed))?;
+    let mut plaintext = Vec::new();
+    reader.read_to_end(&mut plaintext)?;
+    Ok((plaintext, reader.is_complete()))
   }
 
   fn sample(len: usize) -> Vec<u8> {
