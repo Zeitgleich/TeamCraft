@@ -23,7 +23,8 @@
 }
 
 .sb-space-group.muted .sb-space-toggle {
-  opacity: 0.6;
+  /* A faded control fell to 3.58:1 in light mode (1.4.3); the dim colour holds 5.25:1. */
+  color: var(--sb-dim);
 }
 
 .sb-space-head .icon-btn[aria-pressed="true"] {

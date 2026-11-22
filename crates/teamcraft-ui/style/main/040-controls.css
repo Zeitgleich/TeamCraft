@@ -33,6 +33,9 @@
 .icon-btn-small {
   width: 22px;
   height: 22px;
+  /* WCAG 2.5.8: at least 24 px, also where no spacing around it helps. */
+  min-width: 24px;
+  min-height: 24px;
 }
 
 .icon-btn[aria-pressed="true"] .icon {

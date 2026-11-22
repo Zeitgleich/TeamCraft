@@ -383,6 +383,15 @@ pub fn Composer(
 ) -> impl IntoView {
   let conversation_name = StoredValue::new(conversation_name);
   let i18n = use_i18n();
+  let placeholder_text = move || {
+    let name = conversation_name.get_value();
+    // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
+    if name.is_empty() && placeholder_key == "composer-placeholder" {
+      i18n.t("composer-placeholder-untitled")
+    } else {
+      i18n.t_with(placeholder_key, &[("name", &name)])
+    }
+  };
   let state = use_app_state();
   let is_archived = state
     .read(|backend| backend.conversation(conversation))
@@ -469,7 +478,9 @@ pub fn Composer(
       })
       .collect::<Vec<(usize, String, Option<String>, bool)>>()
   };
-  // Thumbnails of files that were removed or sent free their object URL.
+  // Thumbnails of files that were removed free their object URL. Those of sent files were handed
+  // to their message's row (`local_previews`), which frees them.
+  let handed_over = StoredValue::new(Vec::<String>::new());
   Effect::new(move |previous: Option<Vec<String>>| {
     let current: Vec<String> = attachments.with(|list| {
       list
@@ -477,12 +488,21 @@ pub fn Composer(
         .filter_map(|file| file.maybe_preview_url.clone())
         .collect()
     });
-    for url in previous
+    let gone = previous
       .unwrap_or_default()
-      .iter()
-      .filter(|url| !current.contains(url))
-    {
-      drop(web_sys::Url::revoke_object_url(url));
+      .into_iter()
+      .filter(|url| !current.contains(url));
+    for url in gone {
+      let was_handed_over = handed_over
+        .try_update_value(|handed| {
+          let before = handed.len();
+          handed.retain(|kept| *kept != url);
+          handed.len() != before
+        })
+        .unwrap_or(false);
+      if !was_handed_over {
+        drop(web_sys::Url::revoke_object_url(&url));
+      }
     }
     current
   });
@@ -765,6 +785,13 @@ pub fn Composer(
       gone.extend(local.iter().map(|file| file.draft_id.clone()));
       gone.extend(others.iter().map(|item| item.id.clone()));
     });
+    // The row of the message shows the chips' pictures until its own are there (#2269).
+    for file in &local {
+      if let Some(url) = &file.maybe_preview_url {
+        crate::local_previews::offer(&file.draft_id, url.clone());
+        handed_over.update_value(|handed| handed.push(url.clone()));
+      }
+    }
     // The core takes the draft's upload where it has one, and reads the file named here otherwise.
     for file in local {
       if let Some(upload) = draft_upload(&file) {
@@ -2031,7 +2058,14 @@ pub fn Composer(
             contenteditable="true"
             role="textbox"
             aria-multiline="true"
-            aria-label=move || i18n.t("composer-label")
+            // The conversation switch focuses this field: its name says where the user landed (W-13).
+            aria-label=move || {
+              if conversation_name.with_value(|name| name.is_empty()) {
+                i18n.t("composer-label")
+              } else {
+                placeholder_text()
+              }
+            }
             aria-autocomplete="list"
             // Only while the list is there: an id that names nothing is invalid ARIA.
             aria-controls=move || (!suggestions.with(Vec::is_empty)).then(|| suggestions_id.get_value())
@@ -2041,15 +2075,7 @@ pub fn Composer(
             }
             spellcheck="true"
             translate="no"
-            data-placeholder=move || {
-              let name = conversation_name.get_value();
-              // Always with the argument: Fluent shows a missing one as "{$name}" (#699).
-              if name.is_empty() && placeholder_key == "composer-placeholder" {
-                i18n.t("composer-placeholder-untitled")
-              } else {
-                i18n.t_with(placeholder_key, &[("name", &name)])
-              }
-            }
+            data-placeholder=placeholder_text
             node_ref=editor
             on:keydown=on_keydown
             on:compositionend=on_composition_end

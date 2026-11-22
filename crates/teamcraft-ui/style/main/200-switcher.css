@@ -207,3 +207,10 @@
   }
 }
 
+
+/* The group wrapper of a named section adds no box of its own. */
+.switcher-section {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

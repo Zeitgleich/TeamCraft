@@ -127,7 +127,8 @@ textarea.canvas-input {
 }
 
 .canvas-input:focus-visible {
-  outline: none;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
   border-color: var(--accent);
   background: var(--surface);
 }
@@ -254,7 +255,8 @@ textarea.canvas-input {
 }
 
 .canvas-version:focus-visible {
-  outline: none;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
   border-color: var(--accent);
 }
 
@@ -364,7 +366,8 @@ textarea.canvas-input {
 }
 
 .canvas-page-tab:focus-visible {
-  outline: none;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
   border-color: var(--accent);
 }
 
@@ -477,6 +480,8 @@ textarea.canvas-input {
 }
 
 .canvas-embed:focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
   border-color: var(--accent);
 }
 
@@ -555,7 +560,8 @@ textarea.canvas-input {
 }
 
 .canvas-file-choice:focus-visible {
-  outline: none;
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: var(--focus-offset);
   border-color: var(--accent);
 }
 

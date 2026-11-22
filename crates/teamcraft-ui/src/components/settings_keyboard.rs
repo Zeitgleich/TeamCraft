@@ -10,7 +10,7 @@ use crate::components::settings_rows::row_id;
 use crate::i18n::{I18n, use_i18n};
 use crate::keys::{
   ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO, DECLINE_CALL, ENTER, ESCAPE, Key, Modifier, QUICK_SWITCHER, Shortcut,
-  ShortcutList, shortcut_text,
+  ShortcutList, UNDO, shortcut_text,
 };
 use crate::state::use_app_state;
 
@@ -134,6 +134,7 @@ pub fn shortcut_groups() -> Vec<ShortcutGroup> {
         (vec![Shortcut::primary(",")], "shortcut-settings"),
         (vec![Shortcut::primary("/")], "shortcut-shortcuts"),
         (vec![ESCAPE], "shortcut-close"),
+        (vec![UNDO], "shortcut-undo-delete"),
         (vec![ANSWER_CALL_AUDIO, ANSWER_CALL_VIDEO], "shortcut-answer-call"),
         (vec![DECLINE_CALL], "shortcut-decline-call"),
         (

@@ -121,6 +121,7 @@ release-too-old = This version of TeamCraft is no longer supported by the server
 release-reload = Reload now
 release-switch-failed = The new version has not started yet. Try again in a moment.
 undo = Undo
+undo-shortcut-hint = Undo with { $shortcut }
 tray-show = Show window
 tray-quit = Quit
 tray-tooltip-unread = { $name }: { $count } unread

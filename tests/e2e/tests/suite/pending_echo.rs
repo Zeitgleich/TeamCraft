@@ -5,7 +5,9 @@
 //!
 //! The first part measures, in the page: the time from the Enter key to the pending row in the
 //! DOM (`PENDING_ECHO_RUNS` sends, default 15), and the time from a click on a reaction to its
-//! chip while the start is still connecting (the reads of the connection held back for six seconds). `PENDING_ECHO_MEASURE_ONLY=1` stops after the measurement and asserts
+//! chip while the start is still connecting (the reads of the connection held back for six seconds).
+//! A message with a picture is measured the same way (`PENDING_ECHO_FILE_RUNS`, default 5, issue
+//! #2269): its row shows the picture the user picked, from the first frame. `PENDING_ECHO_MEASURE_ONLY=1` stops after the measurement and asserts
 //! nothing (to measure a build from before this change):
 //!
 //! ```sh
@@ -44,6 +46,30 @@ const REACTION_LIMIT: Duration = Duration::from_millis(2_000);
 /// How long the connection's reads are held back: the connection takes at least this long.
 const SYNC_HELD: Duration = Duration::from_secs(6);
 const WAIT: Duration = Duration::from_secs(60);
+
+/// One photo as a phone takes it (12 MP JPEG, a few MB of noise that doesn't compress away) into the
+/// composer's file input, as a picker does; its name is filled in. A small picture hides what a
+/// real one costs on the way to the row: reading it and making its thumbnail.
+const PICK_PICTURE: &str = r"(async name => {
+  const canvas = document.createElement('canvas');
+  canvas.width = 4032;
+  canvas.height = 3024;
+  const context = canvas.getContext('2d');
+  const image = context.createImageData(canvas.width, canvas.height);
+  const words = new Uint32Array(image.data.buffer);
+  let seed = 2269;
+  for (let index = 0; index < words.length; index++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    words[index] = seed | 0xff000000;
+  }
+  context.putImageData(image, 0, 0);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
+  const transfer = new DataTransfer();
+  transfer.items.add(new File([blob], name, { type: 'image/jpeg' }));
+  const input = document.querySelector('input[type=file][multiple]');
+  input.files = transfer.files;
+  input.dispatchEvent(new Event('change', { bubbles: true }));
+})";
 
 /// What the page notes of a send: when Enter went in and when the row with the text was added.
 const ECHO_PROBE: &str = r"(() => {
@@ -122,6 +148,7 @@ async fn own_changes_show_at_once_and_survive_a_lost_network() {
 
       let is_measure_only = std::env::var("PENDING_ECHO_MEASURE_ONLY").is_ok();
       measure_echo(&page, is_measure_only).await;
+      measure_file_echo(&page, is_measure_only).await;
       alice_ref.client.send_text(channel, None, TARGET).await.unwrap();
       wait_for_text(&page, TARGET).await;
       tokio::time::sleep(Duration::from_secs(2)).await;
@@ -168,6 +195,62 @@ async fn measure_echo(page: &Page, is_measure_only: bool) {
   );
   if !is_measure_only {
     assert!(p95 < ECHO_LIMIT_MS, "the row came {p95:.1} ms after Enter");
+  }
+}
+
+/// Sends pictures with a caption one after the other; prints the time from Enter to the row, which
+/// must show the picked picture itself (not a thumbnail) from its first frame.
+async fn measure_file_echo(page: &Page, is_measure_only: bool) {
+  let runs: usize = std::env::var("PENDING_ECHO_FILE_RUNS")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(5);
+  let mut millis = Vec::new();
+  for run in 0..runs {
+    let name = format!("photo-{run}.jpg");
+    page
+      .evaluate(format!("({PICK_PICTURE})({name:?})"))
+      .await
+      .unwrap();
+    wait_for_text(page, &name).await;
+    let text = format!(
+      "picture probe {run} {}",
+      teamcraft_proto::ClientMessageId::random().to_hex()
+    );
+    page
+      .evaluate(format!(
+        "window.__echo.expect = {text:?}; window.__echo.enter = null; window.__echo.shown = null;"
+      ))
+      .await
+      .unwrap();
+    let composer = type_into_composer(page, &text).await;
+    composer.press_key("Enter").await.unwrap();
+    millis.push(wait_for_echo(page).await);
+    let picture = page
+      .evaluate(format!(
+        "(() => {{ const row = [...document.querySelectorAll('[data-msg-id]')].find(r => r.innerText.includes({text:?})); const img = row && row.querySelector('.media-tile img'); if (!img) return 'none'; return img.classList.contains('is-preview') ? 'thumbnail' : 'picked'; }})()"
+      ))
+      .await
+      .ok()
+      .and_then(|result| result.into_value::<String>().ok())
+      .unwrap_or_default();
+    eprintln!("pending echo: picture run {run}: the row showed {picture:?}");
+    if !is_measure_only {
+      assert_eq!(picture, "picked", "the row shows the picked picture at once");
+    }
+    wait_until_sent(page, &text).await;
+  }
+  millis.sort_by(f64::total_cmp);
+  let median = millis[millis.len() / 2];
+  let p95 = millis[(millis.len() * 95 / 100).min(millis.len() - 1)];
+  eprintln!(
+    "pending echo: picture, Enter to the row in the DOM: median {median:.1} ms, p95 {p95:.1} ms, all {millis:.1?}"
+  );
+  if !is_measure_only {
+    assert!(
+      p95 < ECHO_LIMIT_MS,
+      "the picture's row came {p95:.1} ms after Enter"
+    );
   }
 }
 

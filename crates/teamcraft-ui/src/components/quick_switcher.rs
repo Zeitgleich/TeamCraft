@@ -290,6 +290,14 @@ pub fn QuickSwitcher() -> impl IntoView {
         />
       </div>
       <FilterChips chips=chips query=query input=input />
+      // Always in the page, so a screen reader announces the count as it changes (as the search does).
+      <p class="visually-hidden" role="status" aria-live="polite">
+        {move || {
+          let count: usize = groups
+            .with(|list| list.iter().flat_map(|group| &group.items).filter(|item| !matches!(item, SwitcherItem::AllMessages(_))).count());
+          if count == 0 { i18n.t("switcher-empty") } else { i18n.t_count("search-count", count) }
+        }}
+      </p>
       <ul id="switcher-results" class="switcher-results" role="listbox" aria-label=move || i18n.t("switcher-results")>
         {move || {
           let list = groups.get();
@@ -308,9 +316,15 @@ pub fn QuickSwitcher() -> impl IntoView {
                   row
                 })
                 .collect_view();
+              // A named group: a screen reader says "People" on entering it, not just a list of names.
+              let header_id = format!("switcher-group-{}", group.kind.label_key());
               view! {
-                <li role="presentation" class="switcher-group">{header}</li>
-                {rows}
+                <li role="presentation">
+                  <ul role="group" class="switcher-section" aria-labelledby=header_id>
+                    <li role="presentation" id=header_id.clone() class="switcher-group">{header}</li>
+                    {rows}
+                  </ul>
+                </li>
               }
             })
             .collect_view();
@@ -572,7 +586,10 @@ fn SwitcherRow(item: SwitcherItem, index: usize, selected: RwSignal<usize>) -> i
       <span class="switcher-lead" aria-hidden="true">{leading}</span>
       <span class="switcher-name" translate=if is_action { "yes" } else { "no" }>{name}</span>
       {(!context.is_empty()).then(|| view! { <span class="switcher-context" translate="no">{context}</span> })}
-      {is_unread.then(|| view! { <span class="unread-dot" aria-hidden="true"></span> })}
+      {is_unread.then(|| view! {
+        <span class="unread-dot" aria-hidden="true"></span>
+        <span class="visually-hidden">{move || i18n.t("switcher-unread")}</span>
+      })}
     </li>
   }
 }
