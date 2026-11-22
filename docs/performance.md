@@ -1058,8 +1058,63 @@ bytes (`teamcraft_sfu_forwarded_bytes_total`).
   it (its speaker selection and the voice guard watch it) and would forward it at once.
 - Video isn't part of this step (it stays on the SFU), so the SFU's saving in a call with cameras
   is the audio's share only.
-- Not measured yet: success per NAT type (only pasta's endpoint-independent mapping here), real
-  mobile networks.
+- Success per NAT type: below, "Direct media through NATs". Not measured yet: real mobile
+  networks.
+- Since the NAT work (#127, part 3) a dialing round starts over when the other device's offer
+  brings its reflexive address, so the voice goes direct about 2 s after the join instead of 9 s.
+
+### Direct media through NATs (issue #127)
+
+The same two native clients, each behind a router of its own in a rootless network namespace:
+`scripts/nat-matrix/nat-matrix.sh`. Between the routers a routed core with an ISP router per side
+(three hops from one NAT to the other), the SFU on the core with its second reflection port.
+
+- **The NATs.** Each router is nftables NAT with a home router's firewall (from the WAN only what
+  belongs to a connection), and the profile's mapping and filtering:
+  - full-cone, address-restricted and port-restricted keep the port (endpoint-independent);
+  - symmetric takes a random port per destination (`masquerade fully-random`);
+  - "symmetric + NAT-PMP" also answers NAT-PMP and maps ports with nftables;
+  - CGNAT is a port-restricted home router behind a carrier NAT in 100.64.0.0/10;
+  - "UDP only to the SFU" is a port-restricted router behind a firewall that drops UDP to
+    anyone but the SFU;
+  - "no firewall" is port-restricted without the router's own input firewall.
+- **The links.** Shaped as above: SFU 25 ± 3 ms, the other side 4 ± 1 ms, 0.1 % loss, a rate on a
+  random walk between 5 and 20 Mbit/s.
+- **The runs.** Five calls of 25 s per pair. "Direct after" is the second of the call (from the
+  join) by which both clients reported the direct path, median of the calls that got there.
+
+| Client A                     | Client B                     | Went direct | Direct after (median, range) | How                              |
+|------------------------------|------------------------------|-------------|------------------------------|----------------------------------|
+| full-cone                    | full-cone                    | 5/5         | 2 s (2–3 s)                  | simultaneous open                |
+| address-restricted           | address-restricted           | 5/5         | 2 s (2 s)                    | simultaneous open                |
+| port-restricted              | port-restricted              | 5/5         | 2 s (2 s)                    | simultaneous open                |
+| CGNAT                        | port-restricted              | 5/5         | 2 s (2–3 s)                  | simultaneous open                |
+| symmetric                    | full-cone                    | 5/5         | 2 s (2 s)                    | dialing (full cone takes anyone) |
+| symmetric                    | port-restricted              | 5/5         | 3 s (2–4 s)                  | birthday probing                 |
+| symmetric                    | port-restricted, no firewall | 5/5         | 2 s (2–3 s)                  | birthday probing (short TTL)     |
+| symmetric + NAT-PMP          | symmetric                    | 5/5         | 2 s (2 s)                    | the mapped port                  |
+| symmetric                    | symmetric                    | 0/5         | –                            | stays on the SFU                 |
+| UDP only to the SFU          | port-restricted              | 0/5         | –                            | stays on the SFU                 |
+| port-restricted, no firewall | port-restricted, no firewall | 1/5         | 2 s                          | see below                        |
+
+- **Voice.** 49 frames heard a second on average in every call, direct or not, with no second
+  below 40: the switch and the birthday round cost no audio.
+- **Birthday probing.** Every round in the matrix found a way in. The hit came 0.2–2.3 s into the
+  round (median 0.6 s), within the first few hundred probes, with 256 sockets against 64 512
+  ports. Against a full-cone NAT no probe is needed: the hard side's own dialing gets in.
+- **Two hard NATs, or no UDP between the two.** Those calls stay on the SFU, as designed.
+- **Without the router's own firewall.** A Linux NAT that lets unsolicited packets reach the
+  router keeps a connection-tracking entry for each simultaneous-open Initial that arrives before
+  the own one went out. It then gives the own one another source port, which the other NAT
+  drops. Two such routers rarely connect (1/5). Home routers drop those packets before they are
+  tracked, so they don't do this. Birthday punches avoid it with a TTL of 3.
+- **Not covered by the matrix:**
+  - a firewall that blocks all UDP: the call takes the WebSocket fallback, which needs TLS for a
+    host that isn't loopback;
+  - UPnP-IGD and PCP routers (no such router in the namespaces; both have tests against fakes);
+  - real mobile networks.
+- **The SFU without its second port.** Without `TEAMCRAFT_SFU_REFLECT_BIND`, the hard-NAT rows
+  stay on the SFU: no device knows that its NAT is hard.
 
 ## Clients
 

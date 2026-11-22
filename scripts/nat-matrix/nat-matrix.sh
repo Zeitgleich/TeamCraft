@@ -19,7 +19,10 @@
 #   symmetric           endpoint-dependent mapping (a new random port per destination)
 #   symmetric_pmp       symmetric, with a router that maps ports on request (NAT-PMP)
 #   cgnat               a port-restricted home router behind a carrier NAT (100.64.0.0/10)
-#   udp_blocked         a firewall that drops all UDP (the call takes the WebSocket fallback)
+#   udp_blocked         port_restricted behind a firewall that lets UDP through to the SFU only
+#                       (an allowlist, as in company networks); a firewall that blocks all UDP
+#                       sends the call to the WebSocket fallback, which needs TLS to a host that
+#                       isn't loopback, so the matrix can't run it
 set -euo pipefail
 
 if [[ "${NAT_MATRIX_INSIDE:-}" != 1 ]]; then
@@ -173,7 +176,7 @@ nat_rules() {
   table inet firewall {
     chain forward {
       type filter hook forward priority 0;
-      meta l4proto udp drop;
+      meta l4proto udp ip daddr != $SFU_IP ip saddr != $SFU_IP drop;
     }
   }"
   fi
