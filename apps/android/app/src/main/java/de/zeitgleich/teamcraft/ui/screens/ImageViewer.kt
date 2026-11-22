@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -12,8 +13,6 @@ import android.view.WindowManager
 import android.widget.Toast
 import androidx.annotation.RequiresApi
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -274,7 +273,7 @@ fun ImageViewer(
           )
         }
       }
-      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
+      AnimatedVisibility(visible = isBarShown, enter = LocalMotion.current.fadeIn, exit = LocalMotion.current.fadeOut, modifier = Modifier.align(Alignment.TopCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
         TopBar(
           maybeFile = state.currentFile,
           snapshot = snapshot,
@@ -283,7 +282,7 @@ fun ImageViewer(
           onDismiss = onDismiss,
         )
       }
-      AnimatedVisibility(visible = isBarShown, enter = fadeIn(), exit = fadeOut(), modifier = Modifier.align(Alignment.BottomCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
+      AnimatedVisibility(visible = isBarShown, enter = LocalMotion.current.fadeIn, exit = LocalMotion.current.fadeOut, modifier = Modifier.align(Alignment.BottomCenter).graphicsLayer { alpha = 1f - dismissal.progress }) {
         BottomBar(
           maybeFile = state.currentFile,
           maybeScope = state.scope.takeIf { state.canSwitchScope },

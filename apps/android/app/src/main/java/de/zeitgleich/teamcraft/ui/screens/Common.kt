@@ -1,5 +1,6 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.heading
 import androidx.compose.material.icons.Icons
@@ -219,7 +220,7 @@ fun SyncingLine(isCatchingUp: Boolean) {
     if (isSyncing) delay(SYNCING_LINE_DELAY_MILLIS)
     value = isSyncing
   }
-  val alpha by animateFloatAsState(if (isShown) 1f else 0f, label = "syncing line")
+  val alpha by animateFloatAsState(if (isShown) 1f else 0f, if (isShown) LocalMotion.current.fast() else LocalMotion.current.exit(), label = "syncing line")
   val description = stringResource(R.string.syncing_updates)
   Box(Modifier.fillMaxWidth().height(SYNCING_LINE_HEIGHT)) {
     if (alpha > 0f) {
@@ -272,7 +273,7 @@ fun FirstSyncBar(progress: FirstSyncItem) {
     }
     val maybeFraction = progress.maybeFraction
     if (maybeFraction != null) {
-      val shown by animateFloatAsState(maybeFraction, label = "first sync progress")
+      val shown by animateFloatAsState(maybeFraction, LocalMotion.current.base(), label = "first sync progress")
       LinearProgressIndicator(progress = { shown }, modifier = Modifier.fillMaxWidth())
     } else {
       LinearProgressIndicator(modifier = Modifier.fillMaxWidth())

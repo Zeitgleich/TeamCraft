@@ -33,8 +33,8 @@ Nothing in the first pass was feel-breaking; #639 later found two HIGH faults in
 | Sidebar entries       | `.sb-entries-toggle` chevron, `motion-fade-in`       | transform transition, opacity (#703)        | low        |
 | Incoming call         | `.incoming-ring`                                     | looping keyframes                           | rare       |
 | Loader hand-over      | `loader.js`, `style/loader.css`                      | WAAPI, `.is-gone` before removal            | once       |
-| iOS                   | `LoadingMarkView.swift`, `ChatPane.swift`            | Canvas timeline, `withAnimation`            | once, high |
-| Android               | none (Compose has no custom motion)                  | -                                           | -          |
+| iOS                   | `Design/Motion.swift`, `LoadingMarkView.swift`       | `Motion` tokens, keyframe pop, Canvas mark  | high       |
+| Android               | `ui/theme/Motion.kt`, `ScreenTransitions.kt`         | `LocalMotion` specs, `MotionScheme` springs | high       |
 
 ## Findings
 
@@ -110,7 +110,39 @@ no exit, the composer's focus ring blinking along, and rows of the menu drawn ov
   motion checks `prefers_reduced_motion()` (`toast_motion.rs`).
 - #514: ghosts get `.is-gone` and leave two frames later (`motion.rs`), the loader does the same
   (`loader.js`); `will-change` stays limited to the list in `scripts/check-css.py`.
-- Android: no custom animation code.
+- Android and iOS: the tokens are mirrored (`MotionTokens`, `Motion`); see "Phones (#302)".
+
+## Phones (#302)
+
+The apps use the same tokens as the web, so a pop or a fade feels the same everywhere:
+
+| Token                    | Web                 | Android (`ui/theme/Motion.kt`) | iOS (`Design/Motion.swift`)  |
+| ------------------------ | ------------------- | ------------------------------ | ---------------------------- |
+| 120 / 180 / 260 / 100 ms | `--dur-*`           | `MotionTokens.*_MS`            | `Motion.*Duration`           |
+| Standard curve           | `--ease-standard`   | `MotionTokens.Standard`        | `Motion.fast`, `Motion.base` |
+| Emphasized curve         | `--ease-emphasized` | `MotionTokens.Emphasized`      | `Motion.slow`                |
+| Exit curve               | `--ease-exit`       | `MotionTokens.Exit`            | `Motion.exit`                |
+| Pop (from 0.7)           | `motion-pop`        | `Modifier.popOnChange`         | `View.popOnChange`           |
+
+- **Where:** reactions pop when their count or the own reaction changes (Android also when one is
+  added while the message is on screen), unread badges in the chat list and on the tab bar pop when
+  their number changes, jump buttons grow in from 0.95, new messages rise with the emphasized curve,
+  list rows make room with the standard curve, overlays (picture bars, day pill, link preview) only
+  fade. Screen transitions stay on Material's `MotionScheme` springs (Android, #454) and the system's
+  navigation (iOS); chrome that slides (call bar, call controls) uses one critically damped spring.
+- **Predictive back:** Android's screens and settings pages seek the back gesture (#454,
+  `SeekablePages`); Material's sheets and dialogs bring their own. Externally opened chats sit
+  directly above the list (#2244) and go back to it. iOS has the interactive pop.
+- **Haptics:** long press (message menu, a reaction's people, send options) and reaction toggles
+  are felt on both platforms (Android `HapticFeedbackType`, iOS `.sensoryFeedback(.impact(weight:
+  .light))`; the message menu's long press is the system context menu's own).
+- **Reduced motion:** Android reads "Remove animations" in one place (`rememberMotionReduced`,
+  provided as `LocalMotion`); with it fades stay, slides, scales and pops snap, and the recording
+  dot stands still. iOS passes `accessibilityReduceMotion` to every `Motion` helper; forms scroll to
+  the first error without animation.
+- **Cost:** pops are a scale on the drawing layer (`graphicsLayer`, `scaleEffect`): no layout pass,
+  nothing runs while they rest. No infinite animation runs off screen.
+- **Open:** the Swift side is not compiled on the Linux host; check it with the next iOS build.
 
 ## Missed opportunities
 

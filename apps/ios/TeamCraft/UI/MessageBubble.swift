@@ -443,7 +443,7 @@ struct MessageBodyView: View {
         .task(id: pictureKey) { await loadPictures() }
       if isLong {
         Button {
-          withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isExpanded.toggle() }
+          withAnimation(Motion.base(reduceMotion)) { isExpanded.toggle() }
         } label: {
           Text(isExpanded ? "message_show_less" : "message_show_more")
             .font(.app(.subheadline).weight(.semibold))
@@ -762,27 +762,41 @@ struct ReactionPill: View {
   /// Without the right to react the count stays readable and the long press still lists people.
   var isEnabled = true
   let action: () -> Void
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @State private var showsPeople = false
+  /// Counts the user's toggles, so each one is felt (the store's answer may take a moment).
+  @State private var toggles = 0
 
   var body: some View {
     Button {
-      if isEnabled { action() }
+      guard isEnabled else { return }
+      toggles += 1
+      action()
     } label: {
       pillLabel
         .font(.app(.caption))
         .padding(.horizontal, 8).padding(.vertical, 4)
         .background(reaction.reactedByMe ? Theme.accentSoft : Theme.surface, in: Capsule())
         .overlay(Capsule().stroke(reaction.reactedByMe ? Theme.accent : Theme.border))
+        // The count or the own reaction changing pops the pill, as `motion-pop` does on the web.
+        .popOnChange(of: PopKey(count: reaction.count, isMine: reaction.reactedByMe), reduceMotion: reduceMotion)
     }
     .buttonStyle(.plain)
+    .sensoryFeedback(.impact(weight: .light), trigger: toggles)
     .onLongPressGesture(minimumDuration: 0.4) {
-      UIImpactFeedbackGenerator(style: .medium).impactOccurred()
       showsPeople = true
     }
+    .sensoryFeedback(.impact(weight: .light), trigger: showsPeople) { _, isShown in isShown }
     .accessibilityLabel(peopleSummary.map { Text(verbatim: $0) } ?? Text(verbatim: "\(reaction.emoji) \(reaction.count)"))
     .accessibilityAddTraits(reaction.reactedByMe ? .isSelected : [])
     .accessibilityAction(named: Text("reaction_show_people")) { showsPeople = true }
     .sheet(isPresented: $showsPeople) { ReactionPeopleSheet(reaction: reaction).presentationDetents([.medium, .large]) }
+  }
+
+  /// What makes the pill pop when it changes.
+  private struct PopKey: Equatable {
+    let count: UInt32
+    let isMine: Bool
   }
 
   /// "Alex, Sam and you" for VoiceOver; nil when no name is known (the count alone then).

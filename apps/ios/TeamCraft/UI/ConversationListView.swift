@@ -3,6 +3,7 @@ import SwiftUI
 /// The chats: sidebar of conversations (split view on iPad, stack on iPhone), search, settings.
 struct ConversationListView: View {
   @Environment(AppModel.self) private var model
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   let account: Account
 
   @State private var conversations: [ConversationItem] = []
@@ -501,7 +502,7 @@ struct ConversationListView: View {
     .environment(\.editMode, $editMode)
     // With fewer than two favorites there is nothing to move, and no "Done" button left to end it.
     .onChange(of: shownFavorites.count) { _, count in if count < 2 { editMode = .inactive } }
-    .animation(.snappy(duration: 0.25), value: collapsedRaw)
+    .animation(Motion.base(reduceMotion), value: collapsedRaw)
   }
 
   @ViewBuilder
@@ -544,7 +545,7 @@ struct ConversationListView: View {
         label,
         systemImage: isShowingAllRecent ? "chevron.up" : "chevron.down"
       ) {
-        withAnimation(.snappy(duration: 0.25)) { isShowingAllRecent.toggle() }
+        withAnimation(Motion.base(reduceMotion)) { isShowingAllRecent.toggle() }
       }
     }
   }
@@ -1078,7 +1079,7 @@ struct ConversationListView: View {
 
   private func moveFavorite(_ id: String, among rows: [ConversationItem], up: Bool) {
     guard let next = FavoriteOrder.moved(rows.map(\.id), id: id, up: up) else { return }
-    withAnimation(.snappy(duration: 0.25)) { favoriteOrderRaw = FavoriteOrder.raw(next) }
+    withAnimation(Motion.base(reduceMotion)) { favoriteOrderRaw = FavoriteOrder.raw(next) }
   }
 
   /// The "Reorder" / "Done" button of the Favorites header; one place to move needs two favorites.
@@ -1086,7 +1087,7 @@ struct ConversationListView: View {
   private func reorderButton(_ section: ConversationSection) -> some View {
     if section.title == .favorites && section.conversations.count > 1 {
       Button(editMode.isEditing ? "done" : "favorites_reorder") {
-        withAnimation(.snappy(duration: 0.25)) { editMode = editMode.isEditing ? .inactive : .active }
+        withAnimation(Motion.base(reduceMotion)) { editMode = editMode.isEditing ? .inactive : .active }
       }
       .font(.app(.footnote))
       .textCase(nil)

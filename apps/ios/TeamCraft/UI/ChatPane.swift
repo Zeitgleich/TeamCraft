@@ -366,7 +366,7 @@ struct ChatPane: View {
           if isCopiedShown {
             CopiedPill()
               .padding(.top, 8)
-              .transition(reduceMotion ? .opacity : .move(edge: .top).combined(with: .opacity))
+              .transition(Motion.slide(from: .top, reduceMotion))
           }
         }
         .environment(\.openPicture, OpenPictureAction { file in maybeViewing = PictureTarget(file: file) })
@@ -600,7 +600,7 @@ struct ChatPane: View {
     VStack(alignment: .trailing, spacing: 12) {
       if threadId == nil, unseenReactions.count > 0, !unseenReactions.messages.isEmpty {
         ReactionJumpButton(count: unseenReactions.count) { jumpToReaction() }
-          .transition(reduceMotion ? .opacity : .scale(scale: 0.9).combined(with: .opacity))
+          .transition(Motion.enter(reduceMotion))
       }
       if !isAtBottom {
         JumpDownButton(count: newBelowCount) {
@@ -609,7 +609,7 @@ struct ChatPane: View {
         }
       }
     }
-    .animation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0), value: unseenReactions.count > 0)
+    .animation(Motion.base(reduceMotion), value: unseenReactions.count > 0)
   }
 
   /// The rows above the oldest message: the skeleton before the first read, older history on its
@@ -860,7 +860,7 @@ struct ChatPane: View {
       .font(.system(size: 22))
       .foregroundStyle(isPicked ? Theme.accent : Theme.textMuted)
       .padding(.trailing, 12)
-      .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: isPicked)
+      .animation(Motion.fast, value: isPicked)
       .allowsHitTesting(false)
   }
 
@@ -1537,7 +1537,7 @@ struct ChatPane: View {
     listController.scrollTo(focus, place: .center, animated: !reduceMotion)
     Task {
       try? await Task.sleep(for: .seconds(2.5))
-      withAnimation { maybeHighlighted = nil }
+      withAnimation(Motion.slow(reduceMotion)) { maybeHighlighted = nil }
     }
   }
 
@@ -1571,7 +1571,7 @@ struct ChatPane: View {
     listController.scrollTo(target, place: .center, animated: !reduceMotion)
     Task {
       try? await Task.sleep(for: .seconds(2.5))
-      if maybeHighlighted == target { withAnimation { maybeHighlighted = nil } }
+      if maybeHighlighted == target { withAnimation(Motion.slow(reduceMotion)) { maybeHighlighted = nil } }
     }
   }
 
@@ -1744,10 +1744,10 @@ struct ChatPane: View {
   /// Says a copy worked: a success tap and a short "Copied" pill, as iOS has nothing of its own for it.
   private func confirmCopy() {
     UINotificationFeedbackGenerator().notificationOccurred(.success)
-    withAnimation(reduceMotion ? nil : .spring(duration: 0.3, bounce: 0)) { isCopiedShown = true }
+    withAnimation(Motion.base(reduceMotion)) { isCopiedShown = true }
     Task {
       try? await Task.sleep(for: .seconds(1.5))
-      withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { isCopiedShown = false }
+      withAnimation(Motion.exit) { isCopiedShown = false }
     }
   }
 
@@ -1892,7 +1892,7 @@ struct ChatPane: View {
   private func reloadLinkPreview() async {
     let read = await model.composerLinkPreview(conversationId: conversation.id, threadId: threadId)
     guard read != linkPreview else { return }
-    withAnimation(reduceMotion ? .easeOut(duration: 0.15) : .snappy(duration: 0.25)) { linkPreview = read }
+    withAnimation(Motion.base(reduceMotion)) { linkPreview = read }
   }
 
   private func reloadDraftFiles() async {

@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import de.zeitgleich.teamcraft.ui.theme.popOnChange
+import de.zeitgleich.teamcraft.ui.theme.LocalMotion
+import de.zeitgleich.teamcraft.ui.theme.rowMotion
 import de.zeitgleich.teamcraft.ui.PresenceDot
 import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
 import de.zeitgleich.teamcraft.ui.presenceLabel
@@ -8,7 +11,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
-import de.zeitgleich.teamcraft.ui.rememberReducedMotion
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.KeyboardArrowDown
@@ -981,7 +984,7 @@ private fun LazyListScope.collapsibleRows(
     val maybeEmptySpaceId = section.spaceId().takeIf { section.conversations.isEmpty() && !isCollapsed }
     if (maybeEmptySpaceId != null) {
       item(key = "empty-${section.title}", contentType = "empty") {
-        Column(Modifier.animateItem()) {
+        Column(rowMotion()) {
           EmptyHint(stringResource(R.string.space_no_channels))
           // Home of the spaces layout has the same entry right below.
           if (canBrowse && section.title is SectionTitle.Space) {
@@ -1010,7 +1013,7 @@ private fun LazyListScope.collapsibleRows(
         } else {
           null
         },
-        modifier = Modifier.animateItem(),
+        modifier = rowMotion(),
       )
     }
   }
@@ -1032,7 +1035,7 @@ private fun CollapsibleHeader(section: Section, list: ListState, isCollapsed: Bo
   // A quarter turn, short and without overshoot: it follows the tap, it doesn't perform.
   val rotation by animateFloatAsState(
     targetValue = if (isCollapsed) -90f else 0f,
-    animationSpec = spring(stiffness = Spring.StiffnessMediumLow),
+    animationSpec = LocalMotion.current.base(),
     label = "chevron",
   )
   val toggleLabel = stringResource(if (isCollapsed) R.string.section_expand else R.string.section_collapse, name)
@@ -1444,7 +1447,7 @@ private fun SwipeableConversationRow(
   // A dragged row is placed by the drag, not by the list's own move animation.
   val isDragging = maybeReorder?.state?.isDragging == true
   // Lifted a little while dragged; with motion reduced it just snaps.
-  val isReduced = rememberReducedMotion()
+  val isReduced = rememberMotionReduced()
   val lift by animateFloatAsState(
     targetValue = if (isDragging) LIFT_SCALE else 1f,
     animationSpec = if (isReduced) snap() else spring(stiffness = Spring.StiffnessMedium),
@@ -1915,6 +1918,8 @@ internal fun RowCount(badge: RowBadge, isMuted: Boolean) {
     modifier = Modifier
       .padding(start = 8.dp)
       .widthIn(min = 24.dp)
+      // A count that changes while the row is on screen pops, as the web's badges do (#302).
+      .popOnChange(badge.count)
       .semantics { contentDescription = description },
   ) {
     Text(badge.label, maxLines = 1, style = MaterialTheme.typography.labelSmall)

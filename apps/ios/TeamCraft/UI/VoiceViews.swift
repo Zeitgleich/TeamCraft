@@ -306,7 +306,7 @@ struct VoiceRecorderBar: View {
         EmptyView()
       }
     }
-    .animation(.easeOut(duration: 0.2), value: recorder.phase(for: owner))
+    .animation(Motion.fast, value: recorder.phase(for: owner))
   }
 
   private var recordingRow: some View {

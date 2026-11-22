@@ -97,7 +97,7 @@ struct RootView: View {
         // The call screen was put away: a bar at the top leads back to it (#2066).
         .safeAreaInset(edge: .top, spacing: 0) {
           if let call = model.calls.activeCall, model.calls.isMinimised {
-            CallReturnBar(call: call).transition(.move(edge: .top).combined(with: .opacity))
+            CallReturnBar(call: call).transition(Motion.slide(from: .top, reduceMotion))
           }
         }
         .animation(callBarAnimation, value: model.calls.isMinimised && model.calls.activeCall != nil)
@@ -159,7 +159,7 @@ struct RootView: View {
   }
 
   private var callBarAnimation: Animation {
-    reduceMotion ? .easeInOut(duration: 0.2) : .spring(response: 0.35, dampingFraction: 1)
+    Motion.spring(reduceMotion)
   }
 }
 

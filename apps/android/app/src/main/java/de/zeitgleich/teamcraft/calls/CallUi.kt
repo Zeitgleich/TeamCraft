@@ -1,8 +1,8 @@
 package de.zeitgleich.teamcraft.calls
 
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import android.graphics.Bitmap
 import android.os.SystemClock
-import android.provider.Settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
@@ -119,7 +119,6 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
@@ -385,7 +384,7 @@ internal fun InCallContent(
   banner: @Composable () -> Unit = {},
   selfView: (@Composable (Modifier) -> Unit)? = null,
 ) {
-  val reduceMotion = rememberReducedMotion()
+  val reduceMotion = rememberMotionReduced()
   val layout = stageLayout(ui)
   val status = callStatus(ui)
   val density = LocalDensity.current
@@ -1530,15 +1529,6 @@ private fun SelfViewHeldNote(modifier: Modifier) {
 /** The self-view's note shows while connected and the own video waits for the voice. */
 internal fun isSelfViewHeldForVoice(maybePhase: CallPhase?, isVideoHeldForVoice: Boolean): Boolean =
   maybePhase == CallPhase.CONNECTED && isVideoHeldForVoice
-
-/** Animations are off when the user turned them off (accessibility or developer settings). */
-@Composable
-private fun rememberReducedMotion(): Boolean {
-  val resolver = LocalContext.current.contentResolver
-  return remember(resolver) {
-    Settings.Global.getFloat(resolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
-  }
-}
 
 internal fun formatDuration(seconds: Long): String {
   val hours = seconds / SECONDS_PER_HOUR

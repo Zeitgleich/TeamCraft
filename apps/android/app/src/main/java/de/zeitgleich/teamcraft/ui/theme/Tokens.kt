@@ -24,7 +24,7 @@ object Spacing {
  * large one for cards.
  */
 object Radius {
-  val small = 5.dp
+  val small = 6.dp
   val medium = 8.dp
   val large = 12.dp
 }

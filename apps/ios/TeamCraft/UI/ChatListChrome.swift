@@ -3,6 +3,7 @@ import SwiftUI
 /// The chats screen's one search field (#1786), under the header on every tab: names first, then
 /// messages. The search filters open from the button inside it, filled while some are set.
 struct ChatSearchField: View {
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
   @Binding var text: String
   let hasFilters: Bool
   let onFilters: () -> Void
@@ -53,10 +54,10 @@ struct ChatSearchField: View {
           isFocused = false
         }
         .frame(minHeight: 44)
-        .transition(.move(edge: .trailing).combined(with: .opacity))
+        .transition(Motion.slide(from: .trailing, reduceMotion))
       }
     }
-    .animation(.snappy(duration: 0.2), value: isFocused)
+    .animation(Motion.base(reduceMotion), value: isFocused)
     .onChange(of: focusRequest) { _, _ in isFocused = true }
   }
 }
@@ -224,6 +225,7 @@ struct OwnAvatarButton: View {
 struct TabBadgeMark: View {
   let count: Int
   let hasNew: Bool
+  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   var body: some View {
     if count > 0 {
@@ -232,7 +234,9 @@ struct TabBadgeMark: View {
         .foregroundStyle(.white)
         .padding(.horizontal, 5)
         .frame(minWidth: 18, minHeight: 18)
-        .background(.red, in: .capsule)
+        .background(Theme.badge, in: .capsule)
+        // A count that changes pops, as the web's and Android's badges do (#302).
+        .popOnChange(of: count, reduceMotion: reduceMotion)
         .offset(x: 12, y: -6)
         .accessibilityHidden(true)
     } else if hasNew {
