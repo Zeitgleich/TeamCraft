@@ -216,6 +216,29 @@ async fn permalinks_resolve_for_members_and_unread_marks_sync() {
   assert_eq!(bob_ui.first_unread(channel), None);
 }
 
+/// A read while the client is busy (the web app's connect) clears the badge at once; the read
+/// position follows with the command once the client is free (issue #778).
+#[tokio::test]
+async fn a_read_clears_the_badge_before_the_client_is_free() {
+  let (_server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  for text in ["one", "two"] {
+    alice_ui.post_message(channel, None, text);
+  }
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert!(bob_ui.conversation(channel).unwrap().unread_count > 0);
+
+  bob_ui.show_read_now(channel);
+  assert_eq!(bob_ui.conversation(channel).unwrap().unread_count, 0);
+
+  bob_ui.mark_read(channel);
+  run_commands(&mut bob, &bob_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(bob_ui.conversation(channel).unwrap().unread_count, 0);
+  assert_eq!(bob_ui.first_unread(channel), None);
+}
+
 #[tokio::test]
 async fn linked_messages_preview_for_members_and_follow_edits_and_deletes() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;

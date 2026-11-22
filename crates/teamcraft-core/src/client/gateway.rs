@@ -10,13 +10,14 @@ use std::time::Duration;
 use futures_util::FutureExt;
 use futures_util::future::{Either, select};
 use teamcraft_proto::{
-  DeviceActivity, ErrorBody, ErrorCode, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
+  ConversationId, DeviceActivity, ErrorBody, ErrorCode, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
   GatewayServerMessage, MlsMessageKind, UserPresence,
 };
 use tracing::Instrument as _;
 
 use super::Client;
 use super::groups::MlsProgress;
+use super::heads::{LiveEntry, LiveHeads};
 use super::live_catch_up::LiveDuringCatchUp;
 use crate::api::{ApiError, GatewayConnection, ServerApi};
 use crate::error::CoreError;
@@ -320,6 +321,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // The first reads wait for `ready`: a change between a read and the new session would reach
     // neither (#714).
+    // Events of a new session follow a gap: they move no head until its full sync caught up.
+    self.live_heads = LiveHeads::Paused;
     let token = self.api.gateway_token().await?;
     let identify = GatewayClientMessage::Identify {
       maybe_dpop_proof: self.api.first_frame_proof(GATEWAY_PATH, &token).await?,
@@ -572,7 +575,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// One event: applied, the session's sequence number moved on and kept.
   async fn apply_event(&mut self, seq: u64, event: GatewayEvent) -> Result<(), CoreError> {
+    let maybe_entry = live_entry(&event);
     self.handle_event(event).await?;
+    if let Some((conversation, entry)) = maybe_entry {
+      self.note_live_entry(conversation, entry)?;
+    }
     self.apply_pending_changes().await?;
     let now = self.now_ms();
     if let Some(session) = &mut self.sync.maybe_gateway_session {
@@ -926,6 +933,19 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::Unknown => Ok(()),
     }
+  }
+}
+
+/// The conversation entry an event brings, which moves the conversation's remembered head once
+/// applied (issue #778).
+fn live_entry(event: &GatewayEvent) -> Option<(ConversationId, LiveEntry)> {
+  match event {
+    GatewayEvent::MessageCreate { message } => {
+      Some((message.conversation_id, LiveEntry::Message(message.id)))
+    },
+    // Also a welcome to another device: the server's head counts welcomes to all the user's devices.
+    GatewayEvent::MlsMessage { message } => Some((message.conversation_id, LiveEntry::Mls(message.id))),
+    _ => None,
   }
 }
 

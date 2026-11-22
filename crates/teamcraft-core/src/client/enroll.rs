@@ -264,6 +264,7 @@ impl PendingEnrollment {
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),
       maybe_heads: None,
+      live_heads: Default::default(),
       read_ahead: Default::default(),
       #[cfg(feature = "ui")]
       is_scheduled_list_stale: false,

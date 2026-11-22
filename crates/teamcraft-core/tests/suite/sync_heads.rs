@@ -114,6 +114,87 @@ async fn an_older_server_without_heads_still_syncs_everything() {
   );
 }
 
+mod live_heads {
+  use super::*;
+
+  /// People kept writing while this device was connected: the next fresh session doesn't read the
+  /// conversation again, the events already brought it (issue #778).
+  #[tokio::test]
+  async fn a_conversation_the_events_kept_current_is_not_read_again() {
+    let (server, mut alice, mut carol, channels) = workspace().await;
+    carol.client.full_sync().await.unwrap();
+    let unchanged = sync_cost(&server, &mut carol).await;
+
+    for index in 0..3 {
+      alice
+        .client
+        .send_text(channels[2], None, &format!("live {index}"))
+        .await
+        .unwrap();
+    }
+    settle(&mut [&mut alice, &mut carol]).await;
+
+    assert_eq!(sync_cost(&server, &mut carol).await, unchanged);
+    assert!(carol.texts(channels[2]).contains(&"live 2".to_string()));
+  }
+
+  /// What the events moved is kept: after a restart the conversation isn't read again either.
+  #[tokio::test]
+  async fn the_moved_heads_survive_a_restart() {
+    let (server, mut alice, mut carol, channels) = workspace().await;
+    carol.client.full_sync().await.unwrap();
+    let unchanged = sync_cost(&server, &mut carol).await;
+
+    alice
+      .client
+      .send_text(channels[4], None, "before the restart")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut carol]).await;
+    carol.client = Client::open(carol.api.clone(), carol.store.clone(), clock(), settings())
+      .unwrap()
+      .unwrap();
+
+    assert_eq!(sync_cost(&server, &mut carol).await, unchanged);
+  }
+
+  /// A message that didn't come as an event (the connection was down) is still read: the head
+  /// the events left is older than the server's.
+  #[tokio::test]
+  async fn a_message_missed_while_away_is_still_read() {
+    let (server, mut alice, mut carol, channels) = workspace().await;
+    carol.client.full_sync().await.unwrap();
+    let unchanged = sync_cost(&server, &mut carol).await;
+    alice
+      .client
+      .send_text(channels[1], None, "seen live")
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut carol]).await;
+
+    server.expire_sessions();
+    server.drop_gateways(carol.client.user_id());
+    alice.client.send_text(channels[1], None, "missed").await.unwrap();
+    let before = server.rest_call_count(carol.client.user_id());
+    let (gateway, _) = carol.client.connect_gateway().await.unwrap();
+    carol.gateway = gateway;
+    let cost = server.rest_call_count(carol.client.user_id()) - before;
+
+    assert!(carol.texts(channels[1]).contains(&"missed".to_string()));
+    assert!(
+      cost > unchanged,
+      "a fresh session cost {cost}, an unchanged sync {unchanged}"
+    );
+  }
+
+  /// The requests a full sync costs now.
+  async fn sync_cost(server: &FakeServer, peer: &mut Peer) -> u64 {
+    let before = server.rest_call_count(peer.client.user_id());
+    peer.client.full_sync().await.unwrap();
+    server.rest_call_count(peer.client.user_id()) - before
+  }
+}
+
 async fn workspace() -> (FakeServer, Peer, Peer, Vec<ConversationId>) {
   workspace_of(CHANNELS).await
 }

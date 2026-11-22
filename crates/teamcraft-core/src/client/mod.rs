@@ -649,6 +649,8 @@ pub struct Client<A, S> {
   sync_trace: sync_trace::SyncTrace,
   /// The heads of the full sync in progress, to skip what didn't change (issue #714).
   maybe_heads: Option<heads::HeadsInSync>,
+  /// The heads the gateway's events move between full syncs (issue #778).
+  live_heads: heads::LiveHeads,
   /// The first reads of a gateway connection, read at once and waiting for their steps (#714).
   read_ahead: read_ahead::ReadAhead,
   /// The gateway said the list of scheduled messages changed: the upkeep reads it, paced, so a burst
@@ -877,6 +879,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       is_welcome_cursor_held: false,
       sync_trace: Default::default(),
       maybe_heads: None,
+      live_heads: Default::default(),
       read_ahead: Default::default(),
       #[cfg(feature = "ui")]
       is_scheduled_list_stale: false,
@@ -1124,6 +1127,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .store
       .delete(Table::SyncState, &groups::group_info_published_key(conversation))?;
     self.mls_current.remove(&conversation);
+    self.stop_following(conversation)?;
     self.save_mls_storage()
   }
 

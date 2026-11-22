@@ -1648,9 +1648,18 @@ get worse either: before, the core also started only after `GET /me`.
   in, so a start stays at one keychain read (e2ee.md §9.7). `CoreHost::start` doesn't wait for a token
   until the account is confirmed. Covered by tests (`token_expiry::cached_account`), not measured
   in the app.
-- **Left of #778:** live events don't move the remembered sync heads (a head moved by an event says
-  nothing about what came before it, so it needs proof that the connection had no gap). The rest is in
-  the next section.
+- **Live events move the remembered sync heads** (the last part of #778's list). An event's entry
+  says nothing about the entries before it, so only conversations whose heads equalled the server's
+  when the last full sync ended are followed; from then on every event reached the device, also
+  across a resume (the server refuses one with a gap) and a restart (what is followed is kept with
+  the heads, each moved head in a record of its own). A new session pauses it until its sync is done.
+  A busy conversation the device was connected to costs no request at the next fresh session
+  (`sync_heads::live_heads::*`: as many requests as an unchanged workspace, also after a restart; a
+  message missed while the connection was down is still read). `sync_perf.rs` (above) measures it:
+  three channels that got a message while Carol was connected cost a fresh session 19 requests,
+  37 ms locally and 197 ms at 30 ms RTT, the same as the unchanged workspace (19, 38 ms, 213 ms);
+  before, they cost what channels changed while away still cost (25 requests, 46 ms, 239 ms). Debug
+  build, local machine, November 2026, one run. The rest is in the next section.
 
 #### Web start on phones (issue #1465)
 
@@ -1758,7 +1767,7 @@ requests of this local test server, so read it as the shape of the problem, not 
 A sent message reached the UI's mirror only after the core had answered, and then after two more
 round trips (what changed, the page of messages): a request and an answer through the shell on
 desktop, through the core's loop in the page on the web. On the web an edit, a delete, a reaction or
-a pin waited for the end of a connection that was being made, and read markers still do.
+a pin waited for the end of a connection that was being made, and so did read markers.
 
 Now the UI picks the message's ID (`OutgoingMessage::maybe_client_message_id`), puts the row into the
 feed in the same call (`RemoteChat::show_pending`), and the core keeps that ID, so its answer
@@ -1799,9 +1808,16 @@ is the framework's work.
   numbered finds its target by one keyed read instead of reading the conversation. Nothing else on
   the send path changed, so the other budgets (channel switch, memory, idle) are as measured above;
   `perf.rs` was not run for this change.
-- **Left:** read markers during a connection (they need the client's account data), reactions and
-  edits still read the conversation to find their target and its reactions (a keyed lookup for
-  reactions needs an index of them), files show with the core's answer, and live events still don't move the sync heads. Covered by tests: `chosen_ids::*` (core),
+- **Read markers:** the badge counted from the read position in the server's record of the
+  conversation, so it went only once the server had the position and the record was read again,
+  never offline. Now the stored record's position moves at once (never back) and the server's
+  record replaces it later. During a connection on the web the store is moved in the same task
+  (`CoreChatBackend::show_read_now`); the read position itself, which needs the client's account
+  data (an unread mark the user set), goes out once the connection is done
+  (`a_read_clears_the_badge_before_the_client_is_free`). Live events move the sync heads now (see
+  "Starting from the cached account").
+- **Left:** reactions and edits still read the conversation to find their target and its reactions
+  (a keyed lookup for reactions needs an index of them), and files show with the core's answer. Covered by tests: `chosen_ids::*` (core),
   `pending_rows::*` (UI mirror), `changes_that_live_in_the_outbox_answer_before_the_network`
   (client API) and the browser test above, which also sends offline, reloads the page with the
   message queued and checks that it goes out once when the network is back.
