@@ -1001,6 +1001,33 @@ pub enum ChatAction {
   DeleteCustomEmoji {
     id: teamcraft_proto::CustomEmojiId,
   },
+  /// The UI needs the sticker packs (issue #2132).
+  WantStickerPacks,
+  /// Sends a sticker (issue #2132).
+  PostSticker {
+    conversation: ConversationId,
+    #[serde(rename = "thread", default, skip_serializing_if = "Option::is_none")]
+    maybe_thread: Option<ThreadId>,
+    sticker: teamcraft_proto::StickerRef,
+    fallback: String,
+  },
+  /// Admins: sticker packs (issue #2132), signed by the host's core.
+  CreateStickerPack {
+    name: String,
+  },
+  AddSticker {
+    pack: teamcraft_proto::StickerPackKey,
+    name: String,
+    alt: String,
+    picture: Base64Bytes,
+  },
+  ChangeStickerPack {
+    pack: teamcraft_proto::StickerPackKey,
+    change: teamcraft_proto::StickerPackChange,
+  },
+  DeleteStickerPack {
+    pack: teamcraft_proto::StickerPackKey,
+  },
   MarkUnread {
     conversation: ConversationId,
     from: MessageId,
@@ -1423,6 +1450,7 @@ impl ChatAction {
         | Self::ForwardMessage { .. }
         | Self::SetPinned { .. }
         | Self::PostPoll { .. }
+        | Self::PostSticker { .. }
         | Self::VoteInPoll { .. }
         | Self::ClosePoll { .. }
     )
@@ -1566,6 +1594,22 @@ impl ChatAction {
       Self::AddCustomEmoji { shortcode, picture } => backend.add_custom_emoji(&shortcode, picture.into_vec()),
       Self::RenameCustomEmoji { id, shortcode } => backend.rename_custom_emoji(id, &shortcode),
       Self::DeleteCustomEmoji { id } => backend.delete_custom_emoji(id),
+      Self::WantStickerPacks => backend.want_sticker_packs(),
+      Self::PostSticker {
+        conversation,
+        maybe_thread,
+        sticker,
+        fallback,
+      } => backend.post_sticker(conversation, maybe_thread, sticker, fallback),
+      Self::CreateStickerPack { name } => backend.create_sticker_pack(&name),
+      Self::AddSticker {
+        pack,
+        name,
+        alt,
+        picture,
+      } => backend.add_sticker(pack, &name, &alt, picture.into_vec()),
+      Self::ChangeStickerPack { pack, change } => backend.change_sticker_pack(pack, change),
+      Self::DeleteStickerPack { pack } => backend.delete_sticker_pack(pack),
       Self::MarkUnread { conversation, from } => backend.mark_unread(conversation, from),
       Self::SetDraft {
         conversation,
@@ -1878,6 +1922,10 @@ pub enum ChatQuery {
   CustomEmojiPicture {
     sha256: teamcraft_proto::CustomEmojiHash,
   },
+  StickerPacks,
+  StickerPicture {
+    sha256: teamcraft_proto::CustomEmojiHash,
+  },
   Permalink {
     conversation: ConversationId,
     message: MessageId,
@@ -2170,6 +2218,13 @@ pub enum ChatAnswer {
     #[serde(rename = "picture", default)]
     maybe_picture: Option<teamcraft_proto::Base64Bytes>,
   },
+  StickerPacks {
+    set: teamcraft_proto::StickerSet,
+  },
+  StickerPicture {
+    #[serde(rename = "picture", default)]
+    maybe_picture: Option<teamcraft_proto::Base64Bytes>,
+  },
   Link {
     maybe_link: Option<String>,
   },
@@ -2385,6 +2440,14 @@ impl ChatQuery {
       Self::CustomEmojiPicture { sha256 } => ChatAnswer::CustomEmojiPicture {
         maybe_picture: backend
           .custom_emoji_picture(sha256)
+          .map(teamcraft_proto::Base64Bytes::new),
+      },
+      Self::StickerPacks => ChatAnswer::StickerPacks {
+        set: backend.sticker_packs(),
+      },
+      Self::StickerPicture { sha256 } => ChatAnswer::StickerPicture {
+        maybe_picture: backend
+          .sticker_picture(sha256)
           .map(teamcraft_proto::Base64Bytes::new),
       },
       Self::Permalink {

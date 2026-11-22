@@ -996,6 +996,7 @@ impl ChatBackend for MockBackend {
     let id = id_from_raw::<MessageId>(state.next_message_id);
     state.next_message_id += 1;
     let message = Message {
+      maybe_sticker: None,
       id,
       conversation,
       author: me(),
@@ -1560,6 +1561,7 @@ impl State {
         _ => SENTENCES[rng.below(SENTENCES.len())].to_owned(),
       };
       let mut message = Message {
+        maybe_sticker: None,
         id,
         conversation,
         author,
@@ -1611,6 +1613,7 @@ impl State {
               SENTENCES[rng.below(SENTENCES.len())].to_owned()
             };
             replies.push(Message {
+              maybe_sticker: None,
               id: id_from_raw::<MessageId>(raw_id(id) * 100 + reply_index as u64 + 1),
               conversation,
               author: replier,
@@ -1685,6 +1688,7 @@ fn log_line(conversation: ConversationId, index: usize, total: usize, now: Times
   let service = LOG_SERVICES[rng.below(LOG_SERVICES.len())];
   let text = texts[rng.below(texts.len())];
   Message {
+    maybe_sticker: None,
     id: id_from_raw::<MessageId>(raw_id(conversation) * 1_000_000 + index as u64 + 1),
     conversation,
     author: bot(),

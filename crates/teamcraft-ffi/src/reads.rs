@@ -2189,6 +2189,7 @@ mod tests {
 
   fn row(id: u64, kind: MessageKind) -> MessageView {
     MessageView {
+      maybe_sticker: None,
       id: id_from_raw(id),
       conversation: id_from_raw(5),
       author: id_from_raw(3),

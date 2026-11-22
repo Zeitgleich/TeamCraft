@@ -302,6 +302,30 @@ pub trait ServerApi {
     &self,
     emoji: teamcraft_proto::CustomEmojiId,
   ) -> impl Future<Output = Result<teamcraft_proto::CustomEmojiDownloadResponse, ApiError>>;
+  /// The workspace's sticker packs with their signed documents (`GET /sticker-packs`, issue #2132).
+  fn list_sticker_packs(
+    &self,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListStickerPacksResponse, ApiError>>;
+  /// Admins: uploads a picture for packs.
+  fn upload_sticker_picture(
+    &self,
+    request: &teamcraft_proto::UploadStickerPictureRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPictureResponse, ApiError>>;
+  /// Admins: creates a pack or saves a newer version this device signed.
+  fn save_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    request: &teamcraft_proto::SaveStickerPackRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPackResponse, ApiError>>;
+  fn delete_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Where to fetch a sticker's picture.
+  fn download_sticker_picture(
+    &self,
+    sha256: teamcraft_proto::CustomEmojiHash,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPictureDownloadResponse, ApiError>>;
   fn conversation(
     &self,
     conversation: ConversationId,

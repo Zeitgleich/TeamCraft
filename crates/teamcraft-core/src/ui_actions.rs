@@ -428,6 +428,19 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.enqueue(conversation, None, content);
   }
 
+  /// Sends a sticker (issue #2132, e2ee.md §4.14): a text message whose text is the fallback that
+  /// versions before stickers and push previews show, with the sticker inside the ciphertext.
+  pub(crate) fn ui_post_sticker(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    sticker: teamcraft_proto::StickerRef,
+    fallback: String,
+  ) {
+    let content = crate::client::sticker_message(sticker, &fallback);
+    self.enqueue(conversation, maybe_thread, content);
+  }
+
   /// The people besides a poll's sender whose close counts in `conversation`: its moderators and
   /// admins by the signed role log this device verified, not the server's list (issue #2120).
   pub(crate) fn poll_moderators(&self, conversation: ConversationId) -> std::collections::BTreeSet<UserId> {

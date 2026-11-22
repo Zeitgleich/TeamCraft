@@ -116,12 +116,11 @@ pub(crate) fn store_set(store: &impl LocalStore, set: &CustomEmojiSet) -> Result
 
 /// A picture this device holds, checked against its hash when it was kept.
 pub fn picture(store: &impl LocalStore, sha256: CustomEmojiHash) -> Result<Option<Vec<u8>>, CoreError> {
-  let maybe_picture: Option<Base64Bytes> = records::get_json(store, Table::Workspace, &picture_key(sha256))?;
-  Ok(maybe_picture.map(Base64Bytes::into_vec))
+  EMOJI_PICTURES.get(store, sha256)
 }
 
 pub(crate) fn has_picture(store: &impl LocalStore, sha256: CustomEmojiHash) -> Result<bool, CoreError> {
-  Ok(store.get(Table::Workspace, &picture_key(sha256))?.is_some())
+  EMOJI_PICTURES.has(store, sha256)
 }
 
 /// Keeps a downloaded picture if it is the one `sha256` names, and forgets the pictures of emoji
@@ -132,30 +131,81 @@ pub(crate) fn keep_picture(
   sha256: CustomEmojiHash,
   bytes: Vec<u8>,
 ) -> Result<bool, CoreError> {
-  let actual = CustomEmojiHash::from_bytes(teamcraft_crypto::attachment::content_sha256(&bytes));
-  if actual != sha256 {
-    return Ok(false);
+  EMOJI_PICTURES.keep(store, |hash| set.by_hash(hash).is_some(), sha256, bytes)
+}
+
+/// Pictures of workspace assets kept by hash in [`Table::Workspace`]: custom emoji, sticker packs
+/// (issue #2132). Those no longer in their set stay for earlier messages, up to
+/// [`MAX_KEPT_REMOVED_PICTURES`].
+pub(crate) struct PictureCache {
+  /// The hashes held, oldest use first.
+  list_key: &'static str,
+  /// Each picture's key: this and its hash in hex.
+  prefix: &'static str,
+}
+
+const EMOJI_PICTURES: PictureCache = PictureCache {
+  list_key: PICTURES_KEY,
+  prefix: PICTURE_PREFIX,
+};
+
+impl PictureCache {
+  pub(crate) const fn new(list_key: &'static str, prefix: &'static str) -> Self {
+    Self { list_key, prefix }
   }
-  let mut held: Vec<CustomEmojiHash> =
-    records::get_json(store, Table::Workspace, PICTURES_KEY)?.unwrap_or_default();
-  held.retain(|known| *known != sha256);
-  held.push(sha256);
-  let removed = |hash: &CustomEmojiHash| set.by_hash(*hash).is_none();
-  while held.iter().filter(|hash| removed(hash)).count() > MAX_KEPT_REMOVED_PICTURES {
-    let Some(at) = held.iter().position(removed) else {
-      break;
-    };
-    let oldest = held.remove(at);
-    store.delete(Table::Workspace, &picture_key(oldest))?;
+
+  pub(crate) fn get(
+    &self,
+    store: &impl LocalStore,
+    sha256: CustomEmojiHash,
+  ) -> Result<Option<Vec<u8>>, CoreError> {
+    let maybe_picture: Option<Base64Bytes> = records::get_json(store, Table::Workspace, &self.key(sha256))?;
+    Ok(maybe_picture.map(Base64Bytes::into_vec))
   }
-  records::put_json(
-    store,
-    Table::Workspace,
-    &picture_key(sha256),
-    &Base64Bytes::new(bytes),
-  )?;
-  records::put_json(store, Table::Workspace, PICTURES_KEY, &held)?;
-  Ok(true)
+
+  pub(crate) fn has(&self, store: &impl LocalStore, sha256: CustomEmojiHash) -> Result<bool, CoreError> {
+    Ok(store.get(Table::Workspace, &self.key(sha256))?.is_some())
+  }
+
+  /// Keeps a downloaded picture if it is the one `sha256` names, and forgets pictures for which
+  /// `is_current` is false beyond [`MAX_KEPT_REMOVED_PICTURES`], oldest first. Returns whether it
+  /// was kept.
+  pub(crate) fn keep(
+    &self,
+    store: &impl LocalStore,
+    is_current: impl Fn(CustomEmojiHash) -> bool,
+    sha256: CustomEmojiHash,
+    bytes: Vec<u8>,
+  ) -> Result<bool, CoreError> {
+    let actual = CustomEmojiHash::from_bytes(teamcraft_crypto::attachment::content_sha256(&bytes));
+    if actual != sha256 {
+      return Ok(false);
+    }
+    let mut held: Vec<CustomEmojiHash> =
+      records::get_json(store, Table::Workspace, self.list_key)?.unwrap_or_default();
+    held.retain(|known| *known != sha256);
+    held.push(sha256);
+    let removed = |hash: &CustomEmojiHash| !is_current(*hash);
+    while held.iter().filter(|hash| removed(hash)).count() > MAX_KEPT_REMOVED_PICTURES {
+      let Some(at) = held.iter().position(removed) else {
+        break;
+      };
+      let oldest = held.remove(at);
+      store.delete(Table::Workspace, &self.key(oldest))?;
+    }
+    records::put_json(
+      store,
+      Table::Workspace,
+      &self.key(sha256),
+      &Base64Bytes::new(bytes),
+    )?;
+    records::put_json(store, Table::Workspace, self.list_key, &held)?;
+    Ok(true)
+  }
+
+  fn key(&self, sha256: CustomEmojiHash) -> String {
+    format!("{}{}", self.prefix, sha256.to_hex())
+  }
 }
 
 /// The signature's "version": when the document was signed.
@@ -165,7 +215,7 @@ fn version_of(document: &CustomEmojiDocument) -> u64 {
 
 /// The identity keys `user` held as an owner or admin of the verified roster at `at_ms`: the one
 /// on the roster now, and those of tenures that cover that time.
-fn admin_keys(
+pub(crate) fn admin_keys(
   workspace: &WorkspaceState,
   user: teamcraft_proto::UserId,
   at_ms: i64,
@@ -204,12 +254,8 @@ fn admin_keys(
     .collect()
 }
 
-fn picture_key(sha256: CustomEmojiHash) -> String {
-  format!("{PICTURE_PREFIX}{}", sha256.to_hex())
-}
-
 /// One identity key, for one verification.
-struct OneKey(crypto::UserId, IdentityPublicKey);
+pub(crate) struct OneKey(pub(crate) crypto::UserId, pub(crate) IdentityPublicKey);
 
 impl IdentityDirectory for OneKey {
   fn pinned_identity(&self, user_id: crypto::UserId) -> Option<IdentityPublicKey> {

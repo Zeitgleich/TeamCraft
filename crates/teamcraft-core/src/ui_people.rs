@@ -43,6 +43,8 @@ pub(crate) struct RequestLog {
   maybe_own_devices: Option<i64>,
   /// When the custom emoji were last asked for, and the change mark they were asked for at.
   maybe_custom_emoji: Option<(i64, u64)>,
+  /// Likewise the sticker packs.
+  maybe_sticker_packs: Option<(i64, u64)>,
   /// Member lists asked for because a member list had none, bounded like the searches.
   members: HashMap<ConversationId, i64>,
   /// Channels whose anchor was verified again for the marks, bounded like the searches.
@@ -83,6 +85,24 @@ impl<S: LocalStore> CoreChatBackend<S> {
       log.maybe_custom_emoji = Some((now, mark));
       drop(log);
       self.command(CoreCommand::RefreshCustomEmoji);
+    }
+  }
+
+  /// The UI needs the sticker packs (issue #2132): read them unless asked for within a minute and
+  /// nothing changed since (`LiveMarks::sticker_packs`).
+  pub(crate) fn ui_want_sticker_packs(&self) {
+    let mark = self
+      .read(crate::read_state::marks(self.store_ref()))
+      .sticker_packs;
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .maybe_sticker_packs
+      .is_none_or(|(requested, asked_at)| asked_at != mark || now - requested > FRESH_FOR_MS);
+    if is_due {
+      log.maybe_sticker_packs = Some((now, mark));
+      drop(log);
+      self.command(CoreCommand::RefreshStickerPacks);
     }
   }
 

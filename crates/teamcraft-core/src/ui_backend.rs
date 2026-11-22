@@ -204,6 +204,25 @@ pub enum CoreCommand {
   DeleteCustomEmoji {
     id: teamcraft_proto::CustomEmojiId,
   },
+  /// Reads the workspace's sticker packs and fetches pictures this device lacks (issue #2132).
+  RefreshStickerPacks,
+  /// Sticker packs (admins; each version is signed on this device, issue #2132).
+  CreateStickerPack {
+    name: String,
+  },
+  AddSticker {
+    pack: teamcraft_proto::StickerPackKey,
+    name: String,
+    alt: String,
+    picture: Vec<u8>,
+  },
+  ChangeStickerPack {
+    pack: teamcraft_proto::StickerPackKey,
+    change: teamcraft_proto::StickerPackChange,
+  },
+  DeleteStickerPack {
+    pack: teamcraft_proto::StickerPackKey,
+  },
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
     conversation: ConversationId,
@@ -653,13 +672,18 @@ impl CoreCommand {
       | Self::RevokeSpaceInvite { .. }
       | Self::ResendSpaceInvite { .. }
       | Self::AddSpaceMembers { .. }
-      | Self::RefreshCustomEmoji => CommandPart::Workspace,
+      | Self::RefreshCustomEmoji
+      | Self::RefreshStickerPacks => CommandPart::Workspace,
       Self::AddOrgBackground { .. }
       | Self::DeleteOrgBackground { .. }
       | Self::SetOrgBackgroundRule { .. }
       | Self::AddCustomEmoji { .. }
       | Self::RenameCustomEmoji { .. }
-      | Self::DeleteCustomEmoji { .. } => CommandPart::Admin,
+      | Self::DeleteCustomEmoji { .. }
+      | Self::CreateStickerPack { .. }
+      | Self::AddSticker { .. }
+      | Self::ChangeStickerPack { .. }
+      | Self::DeleteStickerPack { .. } => CommandPart::Admin,
       Self::RefreshOwnDevices
       | Self::RevokeOwnDevice { .. }
       | Self::RenameOwnDevice { .. }
@@ -2101,6 +2125,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
           self.now_ms(),
         ))
       }),
+      maybe_sticker: shown_sticker(&stored.content),
     }
   }
 
@@ -3089,6 +3114,55 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn delete_custom_emoji(&self, id: teamcraft_proto::CustomEmojiId) {
     self.command(CoreCommand::DeleteCustomEmoji { id });
+  }
+
+  fn sticker_packs(&self) -> teamcraft_proto::StickerSet {
+    self.read(crate::stickers::stored_set(&self.store))
+  }
+
+  fn sticker_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    self.read(crate::stickers::picture(&self.store, sha256))
+  }
+
+  fn want_sticker_packs(&self) {
+    self.ui_want_sticker_packs();
+  }
+
+  fn post_sticker(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    sticker: teamcraft_proto::StickerRef,
+    fallback: String,
+  ) {
+    self.ui_post_sticker(conversation, maybe_thread, sticker, fallback);
+  }
+
+  fn create_sticker_pack(&self, name: &str) {
+    self.command(CoreCommand::CreateStickerPack {
+      name: name.to_owned(),
+    });
+  }
+
+  fn add_sticker(&self, pack: teamcraft_proto::StickerPackKey, name: &str, alt: &str, picture: Vec<u8>) {
+    self.command(CoreCommand::AddSticker {
+      pack,
+      name: name.to_owned(),
+      alt: alt.to_owned(),
+      picture,
+    });
+  }
+
+  fn change_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    change: teamcraft_proto::StickerPackChange,
+  ) {
+    self.command(CoreCommand::ChangeStickerPack { pack, change });
+  }
+
+  fn delete_sticker_pack(&self, pack: teamcraft_proto::StickerPackKey) {
+    self.command(CoreCommand::DeleteStickerPack { pack });
   }
 
   fn draft(&self, conversation: ConversationId, maybe_thread: Option<ThreadId>) -> Option<String> {
@@ -4869,6 +4943,14 @@ fn shown_custom_emoji(content: &MessageContent) -> Vec<teamcraft_proto::CustomEm
   match content {
     MessageContent::Text { meta, .. } => meta.custom_emoji.to_vec(),
     _ => Vec::new(),
+  }
+}
+
+/// A sent sticker (issue #2132); the UI shows it while this device holds its picture.
+fn shown_sticker(content: &MessageContent) -> Option<Box<teamcraft_proto::StickerRef>> {
+  match content {
+    MessageContent::Text { meta, .. } => meta.maybe_sticker.clone(),
+    _ => None,
   }
 }
 

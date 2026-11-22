@@ -292,6 +292,41 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.refused("download_custom_emoji")
   }
 
+  fn list_sticker_packs(
+    &self,
+  ) -> impl Future<Output = Result<teamcraft_proto::ListStickerPacksResponse, ApiError>> {
+    self.inner.list_sticker_packs()
+  }
+
+  fn upload_sticker_picture(
+    &self,
+    _request: &teamcraft_proto::UploadStickerPictureRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPictureResponse, ApiError>> {
+    self.refused("upload_sticker_picture")
+  }
+
+  fn save_sticker_pack(
+    &self,
+    _pack: teamcraft_proto::StickerPackKey,
+    _request: &teamcraft_proto::SaveStickerPackRequest,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPackResponse, ApiError>> {
+    self.refused("save_sticker_pack")
+  }
+
+  fn delete_sticker_pack(
+    &self,
+    _pack: teamcraft_proto::StickerPackKey,
+  ) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("delete_sticker_pack")
+  }
+
+  fn download_sticker_picture(
+    &self,
+    sha256: teamcraft_proto::CustomEmojiHash,
+  ) -> impl Future<Output = Result<teamcraft_proto::StickerPictureDownloadResponse, ApiError>> {
+    self.inner.download_sticker_picture(sha256)
+  }
+
   fn conversation(
     &self,
     conversation: ConversationId,

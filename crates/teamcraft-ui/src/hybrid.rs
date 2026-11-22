@@ -619,6 +619,50 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.delete_custom_emoji(id);
   }
 
+  fn sticker_packs(&self) -> teamcraft_proto::StickerSet {
+    self.chat.sticker_packs()
+  }
+
+  fn sticker_picture(&self, sha256: teamcraft_proto::CustomEmojiHash) -> Option<Vec<u8>> {
+    self.chat.sticker_picture(sha256)
+  }
+
+  fn want_sticker_packs(&self) {
+    self.chat.want_sticker_packs();
+  }
+
+  fn post_sticker(
+    &self,
+    conversation: ConversationId,
+    maybe_thread: Option<ThreadId>,
+    sticker: teamcraft_proto::StickerRef,
+    fallback: String,
+  ) {
+    self
+      .chat
+      .post_sticker(conversation, maybe_thread, sticker, fallback);
+  }
+
+  fn create_sticker_pack(&self, name: &str) {
+    self.chat.create_sticker_pack(name);
+  }
+
+  fn add_sticker(&self, pack: teamcraft_proto::StickerPackKey, name: &str, alt: &str, picture: Vec<u8>) {
+    self.chat.add_sticker(pack, name, alt, picture);
+  }
+
+  fn change_sticker_pack(
+    &self,
+    pack: teamcraft_proto::StickerPackKey,
+    change: teamcraft_proto::StickerPackChange,
+  ) {
+    self.chat.change_sticker_pack(pack, change);
+  }
+
+  fn delete_sticker_pack(&self, pack: teamcraft_proto::StickerPackKey) {
+    self.chat.delete_sticker_pack(pack);
+  }
+
   fn permalink(&self, conversation: ConversationId, message: MessageId) -> Option<String> {
     self.chat.permalink(conversation, message)
   }

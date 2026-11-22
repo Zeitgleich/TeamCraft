@@ -382,6 +382,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         is_guest,
       } => self.add_space_members(space, &users, is_guest).await,
       CoreCommand::RefreshCustomEmoji => Box::pin(self.refresh_custom_emoji()).await,
+      CoreCommand::RefreshStickerPacks => Box::pin(self.refresh_sticker_packs()).await,
       other => Err(runs_elsewhere(&other)),
     }
   }
@@ -404,6 +405,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Box::pin(self.rename_custom_emoji(id, shortcode)).await
       },
       CoreCommand::DeleteCustomEmoji { id } => Box::pin(self.delete_custom_emoji(id)).await,
+      CoreCommand::CreateStickerPack { name } => Box::pin(self.create_sticker_pack(name)).await.map(|_| ()),
+      CoreCommand::AddSticker {
+        pack,
+        name,
+        alt,
+        picture,
+      } => Box::pin(self.add_sticker(pack, name, alt, picture)).await,
+      CoreCommand::ChangeStickerPack { pack, change } => {
+        Box::pin(self.change_sticker_pack(pack, change)).await
+      },
+      CoreCommand::DeleteStickerPack { pack } => Box::pin(self.delete_sticker_pack(pack)).await,
       other => Err(runs_elsewhere(&other)),
     }
   }

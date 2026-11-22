@@ -317,6 +317,7 @@ mod tests {
 
   fn message(raw: u64, author: u64, sent_at: TimestampMs) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw(raw),
       conversation: id_from_raw(10),
       author: id_from_raw(author),

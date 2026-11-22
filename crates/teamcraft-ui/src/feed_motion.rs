@@ -353,6 +353,7 @@ mod tests {
 
   fn with_reactions(raw: u64, reactions: &[(&str, u32)]) -> Message {
     Message {
+      maybe_sticker: None,
       id: id_from_raw(raw),
       reactions: reactions
         .iter()

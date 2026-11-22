@@ -73,6 +73,7 @@ pub mod search;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod search_index;
 pub mod search_scope;
+pub mod stickers;
 pub mod store;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod svg_thumbnail;

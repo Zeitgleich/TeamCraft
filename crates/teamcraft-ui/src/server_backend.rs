@@ -417,6 +417,7 @@ impl ChatBackend for RestChat {
     };
     let author = self.snapshot.borrow().me.id;
     let message = Message {
+      maybe_sticker: None,
       id: id_from_raw::<MessageId>(raw_id(conversation) * 1_000 + sequence),
       conversation,
       author,
