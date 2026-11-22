@@ -19,9 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckBox
-import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -235,11 +233,11 @@ private fun CheckRow(block: CanvasBlockItem) {
   val scheme = MaterialTheme.colorScheme
   val state = stringResource(if (block.isChecked) R.string.channel_notes_checked else R.string.channel_notes_unchecked)
   Row(verticalAlignment = Alignment.Top) {
-    Icon(
-      if (block.isChecked) Icons.Filled.CheckBox else Icons.Filled.CheckBoxOutlineBlank,
-      contentDescription = state,
-      tint = if (block.isChecked) scheme.primary else scheme.onSurfaceVariant,
-      modifier = Modifier.padding(end = Spacing.s, top = 2.dp).size(20.dp),
+    // Read-only here: no change handler, so it shows the mark and takes no taps.
+    Checkbox(
+      checked = block.isChecked,
+      onCheckedChange = null,
+      modifier = Modifier.padding(end = Spacing.s).size(20.dp).semantics { contentDescription = state },
     )
     val style = MaterialTheme.typography.bodyLarge
     BlockText(block, if (block.isChecked) style.copy(color = scheme.onSurfaceVariant) else style)
