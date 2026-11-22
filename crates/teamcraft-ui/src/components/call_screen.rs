@@ -611,7 +611,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               }}
             </div>
           </div>
-          <div class="filmstrip filmstrip-side">{self_tile(false)} {strip}</div>
+          <div class="filmstrip filmstrip-side" role="group" tabindex="0" aria-label=move || i18n.t("call-filmstrip")>{self_tile(false)} {strip}</div>
         </div>
       }
       .into_any();
@@ -656,7 +656,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
                 None => self_tile(true).into_any(),
               }}
             </div>
-            <div class="filmstrip">
+            <div class="filmstrip" role="group" tabindex="0" aria-label=move || i18n.t("call-filmstrip")>
               {strip}
               {self_tile(false)}
             </div>

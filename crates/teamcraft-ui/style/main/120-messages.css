@@ -269,6 +269,15 @@
   color: var(--accent-strong);
 }
 
+/* A permalink chip is a button: without a reset it keeps the browser's grey button face, which
+   the accent text fails on in dark (#2287). It reads as a link in the text. */
+button.permalink-chip {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  text-align: start;
+}
+
 .mention {
   padding: 0 3px;
   border-radius: 3px;

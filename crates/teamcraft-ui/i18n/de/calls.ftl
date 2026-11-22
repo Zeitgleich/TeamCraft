@@ -496,3 +496,5 @@ call-announce-recording-by = { $names } hat die Aufzeichnung gestartet
 call-announce-recording-by-many = { $count } Personen haben die Aufzeichnung gestartet
 call-announce-recording-own = Du hast die Aufzeichnung gestartet
 call-announce-recording-stopped = Aufzeichnung beendet
+# The row of participant tiles; focusable so a keyboard can scroll it (#2287).
+call-filmstrip = Teilnehmende
