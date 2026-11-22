@@ -60,6 +60,7 @@
 
 use std::io::Write;
 use std::net::SocketAddr;
+use std::ops::RangeInclusive;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -70,6 +71,7 @@ use teamcraft_media::retransmit::RetransmitConfig;
 use teamcraft_media::voice_guard::VoiceGuardConfig;
 use teamcraft_ops::metrics::{bind_metrics, spawn_metrics_endpoint};
 use teamcraft_ops::{DEFAULT_TIMEOUT, probe, probe_target, shutdown_signal};
+use teamcraft_proto::UplinkFloor;
 use teamcraft_sfu::{
   auth::{DevTokenVerifier, JoinTokenVerifier, JwtJoinTokenConfig, JwtJoinTokenVerifier, RejectAllVerifier},
   config::{FallbackConfig, QuicCongestion, SfuConfig, parse_trusted_proxies},
@@ -96,6 +98,14 @@ const MAX_UPLINK_REPAIR_REQUESTS: u8 = 10;
 const MAX_PROBE_BYTES: u32 = 100_000;
 /// Upper bound for `TEAMCRAFT_SFU_DAVE_TRANSITION_DEADLINE_MS`, below the clients' 5 s fallback.
 const MAX_DAVE_TRANSITION_DEADLINE: Duration = Duration::from_secs(4);
+/// What `TEAMCRAFT_SFU_UPLINK_AUDIO_RESERVE_KBPS` may be: from the thinnest voice step with its
+/// overhead up to a reserve that leaves a phone's uplink no video at all.
+const UPLINK_AUDIO_RESERVE_KBPS: RangeInclusive<u32> = 16..=256;
+/// What `TEAMCRAFT_SFU_DOWNLINK_AUDIO_RESERVE_KBPS` may be: one thin voice up to many full ones.
+const DOWNLINK_AUDIO_RESERVE_KBPS: RangeInclusive<u32> = 16..=1024;
+/// Upper bound for `TEAMCRAFT_SFU_UPLINK_CAMERA_PAUSE_HOLD_MS`: longer, a camera above a thin
+/// uplink keeps the voice in its queue.
+const MAX_CAMERA_PAUSE_HOLD: Duration = Duration::from_secs(30);
 /// The longest DAVE resume grace: a member away keeps its leaf, and with it the media key, no
 /// longer than this (clients stop asking to resume after 30 s anyway; e2ee.md §8).
 const MAX_DAVE_RESUME_GRACE: Duration = Duration::from_secs(30);
@@ -207,6 +217,10 @@ async fn run() -> anyhow::Result<()> {
   apply_retransmit_env(&mut config.forwarding.retransmit)?;
   apply_uplink_repair_env(&mut config.forwarding.uplink_repair)?;
   apply_voice_guard_env(&mut config.forwarding.voice_guard)?;
+  apply_voice_floor_env(
+    &mut config.forwarding.uplink_floor,
+    &mut config.forwarding.layers.audio_reserve_bps,
+  )?;
   apply_fallback_env(&mut config.fallback)?;
 
   let identity = load_identity().await?;
@@ -473,6 +487,54 @@ fn apply_voice_guard_env(guard: &mut VoiceGuardConfig) -> anyhow::Result<()> {
   Ok(())
 }
 
+/// Where video gives way to the voice (#1891): what the clients keep free for their microphone
+/// on the uplink and how long their camera rides out a cut below it, and what the SFU keeps free
+/// for the voices on each receiver's downlink.
+fn apply_voice_floor_env(uplink: &mut UplinkFloor, downlink_reserve_bps: &mut u32) -> anyhow::Result<()> {
+  if let Some(reserve_bps) = env_kbps(
+    "TEAMCRAFT_SFU_UPLINK_AUDIO_RESERVE_KBPS",
+    UPLINK_AUDIO_RESERVE_KBPS,
+  )? {
+    uplink.audio_reserve_bps = reserve_bps;
+  }
+  if let Some(hold) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_CAMERA_PAUSE_HOLD_MS")? {
+    anyhow::ensure!(
+      hold <= MAX_CAMERA_PAUSE_HOLD,
+      "TEAMCRAFT_SFU_UPLINK_CAMERA_PAUSE_HOLD_MS must be at most {}",
+      MAX_CAMERA_PAUSE_HOLD.as_millis()
+    );
+    uplink.camera_pause_hold_ms = u32::try_from(hold.as_millis()).unwrap_or(u32::MAX);
+  }
+  if let Some(reserve_bps) = env_kbps(
+    "TEAMCRAFT_SFU_DOWNLINK_AUDIO_RESERVE_KBPS",
+    DOWNLINK_AUDIO_RESERVE_KBPS,
+  )? {
+    *downlink_reserve_bps = reserve_bps;
+  }
+  Ok(())
+}
+
+/// A bitrate in kbit/s within `range`, in bits per second.
+fn env_kbps(name: &str, range: RangeInclusive<u32>) -> anyhow::Result<Option<u32>> {
+  match std::env::var(name) {
+    Ok(value) => kbps_within(name, &value, range).map(Some),
+    Err(_) => Ok(None),
+  }
+}
+
+fn kbps_within(name: &str, value: &str, range: RangeInclusive<u32>) -> anyhow::Result<u32> {
+  let kbps: u32 = value
+    .parse()
+    .with_context(|| format!("{name} is not a number of kbit/s"))?;
+  anyhow::ensure!(
+    range.contains(&kbps),
+    "{name} must be {} to {}",
+    range.start(),
+    range.end()
+  );
+  Ok(kbps * 1000)
+}
+
 fn env_count(name: &str) -> anyhow::Result<Option<usize>> {
   match std::env::var(name) {
     Ok(value) => {
@@ -512,6 +574,14 @@ mod tests {
 
   fn addr(text: &str) -> SocketAddr {
     text.parse().unwrap()
+  }
+
+  #[test]
+  fn audio_reserves_are_kbps_within_their_range() {
+    assert_eq!(kbps_within("X", "64", UPLINK_AUDIO_RESERVE_KBPS).unwrap(), 64_000);
+    assert!(kbps_within("X", "8", UPLINK_AUDIO_RESERVE_KBPS).is_err());
+    assert!(kbps_within("X", "2000", DOWNLINK_AUDIO_RESERVE_KBPS).is_err());
+    assert!(kbps_within("X", "fast", UPLINK_AUDIO_RESERVE_KBPS).is_err());
   }
 
   #[test]

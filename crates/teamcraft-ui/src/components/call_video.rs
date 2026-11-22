@@ -283,6 +283,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
     }),
     (VideoSource::Remote(_), None) | (VideoSource::OwnCamera | VideoSource::OwnScreen, _) => false,
   });
+  // #1891: this device's own camera waits for its voice (lost on the uplink, or the uplink below
+  // the audio-only floor); its tile says so like the viewers' tiles. The status line announces
+  // it, so the tile's note isn't a second live region.
+  let is_own_held_for_voice = Memo::new(move |_| match (source, maybe_state) {
+    (VideoSource::OwnCamera, Some(state)) => state.read(|backend| {
+      backend
+        .active_call()
+        .is_some_and(|active| active.is_video_held_for_voice && !active.is_reconnecting)
+    }),
+    (VideoSource::OwnCamera, None) | (VideoSource::Remote(_) | VideoSource::OwnScreen, _) => false,
+  });
   Effect::new(move |_| {
     let Some(element) = host.get() else {
       return;
@@ -388,8 +399,17 @@ pub fn LiveVideo(source: VideoSource, #[prop(into)] is_mirrored: Signal<bool>) -
             when=move || is_paused_by_publisher.get()
             fallback=move || {
               view! {
-                <Show when=move || is_stalled.get() fallback=|| ()>
-                  <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+                <Show
+                  when=move || is_own_held_for_voice.get()
+                  fallback=move || {
+                    view! {
+                      <Show when=move || is_stalled.get() fallback=|| ()>
+                        <span class="video-stalled" role="status">{move || i18n.t(stalled_key)}</span>
+                      </Show>
+                    }
+                  }
+                >
+                  <span class="video-stalled" aria-hidden="true">{move || i18n.t("video-held-for-voice")}</span>
                 </Show>
               }
             }

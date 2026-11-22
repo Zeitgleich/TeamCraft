@@ -10161,6 +10161,22 @@
         }
       }
     },
+    "call_self_view_held_for_voice": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video paused for your voice"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Video pausiert für deine Stimme"
+          }
+        }
+      }
+    },
     "call_video_paused_by_publisher": {
       "localizations": {
         "en": {

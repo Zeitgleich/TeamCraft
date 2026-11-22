@@ -1421,6 +1421,7 @@ impl RoomState {
         maybe_screen_share_taken_over: self.screen_shares_taken_over.get(&participant_id).copied(),
         maybe_retransmit_window_ms: self.forwarder.retransmit_window_ms(),
         maybe_probe_bytes: self.forwarder.probe_bytes(),
+        maybe_uplink_floor: Some(self.forwarder.uplink_floor()),
       },
     );
     // Right after `joined`: a device that rejoins with a group held takes anything else as "not

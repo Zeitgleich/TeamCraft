@@ -127,6 +127,7 @@ tile-co-host = Co-host
 video-stalled = Video paused: weak connection
 video-undecodable = This video can't be shown here: it comes in a format this device doesn't play
 video-paused-by-publisher = Video paused: their connection is weak, their voice comes first
+video-held-for-voice = Video paused for your voice
 
 ## Video quality (#967): how sharp another person's video comes, like a video player's menu
 video-quality = Video quality

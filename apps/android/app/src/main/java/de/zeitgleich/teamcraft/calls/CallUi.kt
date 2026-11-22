@@ -125,6 +125,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.onClick
@@ -436,7 +437,10 @@ internal fun InCallContent(
           ControlBar(ui, actions, Modifier.onSizeChanged { controlsPx = it.height })
         }
       }
-      if (selfView != null) SelfViewCorner(selfView, chrome, reduceMotion)
+      if (selfView != null) {
+        val isHeld = isSelfViewHeldForVoice(ui.maybeState?.phase, ui.maybeState?.isVideoHeldForVoice == true)
+        SelfViewCorner(selfView, chrome, reduceMotion, isHeld)
+      }
     }
   }
 }
@@ -1445,7 +1449,12 @@ private fun HangUpButton(onHangUp: () -> Unit, maybeOnEndForEveryone: (() -> Uni
  * controls: drag it and it springs to the nearest corner, which it keeps.
  */
 @Composable
-private fun SelfViewCorner(selfView: @Composable (Modifier) -> Unit, chrome: ChromeRoom, reduceMotion: Boolean) {
+private fun SelfViewCorner(
+  selfView: @Composable (Modifier) -> Unit,
+  chrome: ChromeRoom,
+  reduceMotion: Boolean,
+  isHeldForVoice: Boolean,
+) {
   val scope = rememberCoroutineScope()
   var corner by rememberSaveable { mutableIntStateOf(TOP_END_CORNER) }
   BoxWithConstraints(Modifier.fillMaxSize().safeDrawingPadding()) {
@@ -1464,7 +1473,7 @@ private fun SelfViewCorner(selfView: @Composable (Modifier) -> Unit, chrome: Chr
     )
     val position = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
     LaunchedEffect(area, top, bottom) { position.snapTo(corners[corner]) }
-    selfView(
+    Box(
       Modifier
         .offset { IntOffset(position.value.x.roundToInt(), position.value.y.roundToInt()) }
         .size(SELF_VIEW_WIDTH, SELF_VIEW_HEIGHT)
@@ -1491,9 +1500,36 @@ private fun SelfViewCorner(selfView: @Composable (Modifier) -> Unit, chrome: Chr
             },
           )
         },
-    )
+    ) {
+      selfView(Modifier.matchParentSize())
+      if (isHeldForVoice) SelfViewHeldNote(Modifier.align(Alignment.BottomCenter))
+    }
   }
 }
+
+/**
+ * #1891: the own camera waits for the own voice (lost on the uplink, or the uplink below the
+ * audio-only floor). The preview still shows the camera, so the self-view says the others don't
+ * see it now. The status pill announces it; this is the visual note on the tile.
+ */
+@Composable
+private fun SelfViewHeldNote(modifier: Modifier) {
+  Text(
+    stringResource(R.string.call_self_view_held_for_voice),
+    modifier
+      .fillMaxWidth()
+      .background(Color.Black.copy(alpha = 0.6f))
+      .padding(horizontal = 6.dp, vertical = 4.dp)
+      .clearAndSetSemantics {},
+    color = Color.White,
+    style = MaterialTheme.typography.labelSmall,
+    textAlign = TextAlign.Center,
+  )
+}
+
+/** The self-view's note shows while connected and the own video waits for the voice. */
+internal fun isSelfViewHeldForVoice(maybePhase: CallPhase?, isVideoHeldForVoice: Boolean): Boolean =
+  maybePhase == CallPhase.CONNECTED && isVideoHeldForVoice
 
 /** Animations are off when the user turned them off (accessibility or developer settings). */
 @Composable

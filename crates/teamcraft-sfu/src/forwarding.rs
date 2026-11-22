@@ -55,12 +55,13 @@ use teamcraft_media::{
   join_probe::{JoinProbe, JoinProbeConfig, LinkMeasurement},
   rate_probe::{ProbeOutcome, RateProbe, RateProbeConfig},
   rtp::{AudioLevel, RtpError, RtpHeader},
+  uplink_layers::UplinkPolicy,
   voice_guard::{ArrivingVoice, VoiceGuard, VoiceGuardConfig},
 };
 use teamcraft_proto::{
   AudioFeature, DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrack, VideoTrackKind,
+  MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UplinkFloor, VideoCodec,
+  VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, info};
@@ -131,6 +132,8 @@ pub struct ForwardingConfig {
   pub probe_bytes: u32,
   /// Which receivers get the thin copies of the voices (#1893).
   pub audio_layers: AudioLayerConfig,
+  /// The audio-only floor of the clients' uplinks, told in `joined` (#1891).
+  pub uplink_floor: UplinkFloor,
 }
 
 /// How often publishers are asked for keyframes. Keyframes are large: a receiver that keeps
@@ -360,6 +363,7 @@ impl Default for ForwardingConfig {
       voice_guard: VoiceGuardConfig::default(),
       probe_bytes: 15_000,
       audio_layers: AudioLayerConfig::default(),
+      uplink_floor: UplinkPolicy::default().floor(),
     }
   }
 }
@@ -1198,6 +1202,11 @@ impl Forwarder {
       .values()
       .map(|route| route.track.clone())
       .collect()
+  }
+
+  /// The audio-only floor of the clients' uplinks (`joined`, #1891).
+  pub fn uplink_floor(&self) -> UplinkFloor {
+    self.config.uplink_floor
   }
 
   /// How many bytes of padding a client may send to probe its uplink (`joined`); `None` when

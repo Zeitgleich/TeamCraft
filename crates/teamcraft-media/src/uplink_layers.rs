@@ -25,7 +25,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use teamcraft_proto::{VideoLayerInfo, VideoTrackKind};
+use teamcraft_proto::{UplinkFloor, VideoLayerInfo, VideoTrackKind};
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
 
@@ -182,6 +182,25 @@ impl Default for UplinkPolicy {
   }
 }
 
+impl UplinkPolicy {
+  /// The audio-only floor in this policy, as an SFU tells it to its clients (#1891).
+  pub fn floor(&self) -> UplinkFloor {
+    UplinkFloor {
+      audio_reserve_bps: self.audio_reserve_bps,
+      camera_pause_hold_ms: u32::try_from(self.camera_pause_hold.as_millis()).unwrap_or(u32::MAX),
+    }
+  }
+
+  /// This policy with the audio-only floor an SFU told (#1891); the rest stays.
+  pub fn with_floor(self, floor: UplinkFloor) -> Self {
+    Self {
+      audio_reserve_bps: floor.audio_reserve_bps,
+      camera_pause_hold: Duration::from_millis(u64::from(floor.camera_pause_hold_ms)),
+      ..self
+    }
+  }
+}
+
 impl UplinkLayers {
   /// `start_bps`: the estimator's start value; falling below it is the first cut.
   pub fn new(start_bps: u32) -> Self {
@@ -273,6 +292,11 @@ impl UplinkLayers {
       None => true,
       Some(maybe_top) => maybe_top.is_some_and(|top| layer <= top),
     }
+  }
+
+  /// Whether the uplink carries none of `stream`'s layers now: the track stopped for the voice.
+  pub fn is_paused(&self, stream: StreamId) -> bool {
+    matches!(self.top_layers.get(&stream), Some(None))
   }
 
   /// Whether layers of `tracks` are held back for the uplink (or sent at a share of their
