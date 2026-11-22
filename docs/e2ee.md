@@ -3434,8 +3434,19 @@ independent crypto review of these points is still asked for before any app swit
   into its fork (tested).
 - **The capability** is announced only with the `strict-channels` feature (always in the crate's own
   tests). An app turns it on once it implements stopping, the ready step and the welcome check.
-- **Still open** in the crypto part: a strict channel's renames and moves by its admins (§4.6.5, D5)
-  still follow §4.6.5's member rule.
+- **Renames and moves** (§4.6.5, D5, #1924): in a strict channel the properties verdict reads the
+  context too. An admin of the context whose signing device has a leaf signs as `channel_admin`,
+  judged under the key the context names, so every member decides alike; such an admin also moves the
+  channel. Otherwise only a workspace signer of a fresh roster renames or moves it; a roster this
+  device can't judge yet is a retry (`PropertiesChangeError::RosterNeeded`, `is_strict_retry`), not a
+  refusal, so it doesn't stop the device. A strict channel's plain members, moderators and guests
+  rename nothing into the anchor; the server's name is then stale, as for any change the anchor
+  doesn't hold. Outside a strict channel nothing changes.
+- **The ready answer** (#1924): a device signs `StrictReady` (the conversation, the ask's random ID,
+  its own user and device, the strict format it implements) with its device key under `TeamCraft-v1
+  strict ready`; `ConversationGroup::verify_strict_ready` checks it against the signature key of that
+  device's leaf, so neither the server nor another member answers for a device. The ask (`StrictAsk`)
+  is unsigned: it asks for answers only, and apps answer only an asker the roster names (below).
 
 **The app and server part** (#1896, first part; `strict-channels` still off). In `teamcraft-core`
 (`client/strict_channels.rs`) and `teamcraft-server`:
@@ -3477,11 +3488,54 @@ independent crypto review of these points is still asked for before any app swit
   next welcome. A further device of the user, never in the group, joins as before.
 - **Answering rejoin requests**: in a strict group, members who are neither its admins nor workspace
   admins answer only after `strict_rejoin_wait`.
-- **Not yet**: the ready and leaf refresh steps (2 and 3), a workspace signer outside the group
-  (the server's hint of the current version and hash), the welcome's tree diff as a timeline line, a
-  role log "off" as permission for a welcome without the extension, key package stock replacement on
-  update, the server's early refusal and UI hint, and D5's admin class for renames. Until they are in,
-  the feature stays off and no channel turns strict.
+
+**The opt-in and the rest** (#1924, `strict-channels` still off). In `teamcraft-core`
+(`client/strict_opt_in.rs`) and `teamcraft-server`:
+
+- **The ready step** (step 2): `ask_strict_ready` posts a `StrictAsk` (proposal magic `TCSA`) from a
+  workspace owner or admin of a fresh roster (D3) whose device is in the group of a private channel.
+  A device of this version takes the ask only if the asker is such an admin on its roster (read again
+  once if not) and the asker's signed device list names the device that posted it; the newest ask
+  wins and its answers start over. It answers once with a `SignedStrictReady` (`TCSY`), and counts
+  every answer that names the newest ask and verifies against the answering device's leaf. Nothing
+  answers unless this build's leaves announce strict channels (`announces_strict_roles`), so a device
+  that doesn't implement the rule never says it is ready. Older apps pass over both entries.
+  `strict_readiness` lists the devices whose leaf lacks the capability and that haven't answered
+  (`waiting`, D6), those that answered and haven't refreshed (`refreshing`) and whether every leaf
+  announces it (`is_ready`); `remove_strict_blocker` removes a waiting device with a signed
+  `RemoveDevice`, judged like any. Only devices in the group read the queue, so the list is a
+  member's; a workspace admin outside the group asks, but sees the answers only through a member.
+- **The leaf refresh** (step 3): once every device whose leaf lacks the capability answered, each of
+  them commits `commit_leaf_refresh`, ranked by device ID among them (`device_add_stagger` apart,
+  at most `device_add_max_rank`), so they rarely take the same epoch; one that loses the epoch catches
+  up and tries again a stagger later. It is re-judged after every merged commit, so removing a
+  waiting device lets the others go on. Never before every such device answered, since older apps
+  refuse an empty commit; never while the device is stopped (D4).
+- **A workspace signer outside the group**: `set_strict_roles` without a group reads
+  `GET …/mls/strict` (the group's epoch and the hint below; members and holders of `manage_members`),
+  signs the change as a workspace signer at the newest roster's version on the hint's version and hash
+  (turning on: one above the hint's version, zero `prev_hash`) for the hint's epoch, and posts it as a
+  proposal (`TCSP`). Members keep it and commit it after their rank among the group's devices
+  (`device_add_stagger`), dropping it once the group holds that version or it is past its 32 epochs; a
+  roster to read first or a leaf still lacking the capability keeps it for later. A wrong hint only
+  gets the change refused.
+- **The hint**: a roles commit carries `strict` (`is_strict`, the change's `version` and chain
+  `hash`) in `POST …/mls/commits`; the server stores it on the conversation in the commit's transaction
+  (migration `0110`), shows it as `strict` in the conversation and tells the members
+  (`ConversationUpdate`). The server refuses to make a channel public while the hint says strict
+  (409), as the apps do; a rewind never carries one. Nothing decides on it: the context alone switches
+  strict.
+- **Key package stock**: a device whose leaves announce strict channels and whose stock on the server
+  was made before (or never noted) uploads a whole new stock with `replaces_stock` once; the server
+  drops the device's unused regular packages in the same transaction. Packages claimed before stay
+  with their claimers. An older server ignores the field.
+- **Not yet** (#1924's follow-up): a role log "off" as permission for a welcome without the
+  extension, the held welcome's tree diff as timeline lines after an add-back, the server's early
+  refusal from the commit's authenticated data, end-to-end tests that need a modified client's commit
+  in the core suite (a plain member's signed removal refused alike, race and rewind convergence,
+  mixed versions) and the withheld-roster retry ending in an admin's welcome, the UI (#1897), and the
+  independent crypto review asked for above. Until then the feature stays off and no channel turns
+  strict.
 
 ### 4.6.3 Noticing a withheld channel role change (issue #876)
 
@@ -3971,7 +4025,9 @@ else, and the signer may:
 - **A rename** (D5): any member with a leaf, as anybody in the group may add people (§4.6); in a strict channel only
   its admins; workspace owners and admins of a fresh roster, also from outside the group. A workspace signer's
   class is `workspace` even when they are also a member; `founder` is set only by the founding (a founder's later
-  rename is a member's or a workspace signer's, until a strict channel's admin class exists). A member's rename counts
+  rename is a member's or a workspace signer's, or in a strict channel its admin's). A strict channel's admin of the
+  context signs as `channel_admin` even when also a workspace signer: the context decides that alike on every
+  member, the roster doesn't (#1924). A member's rename counts
   for what the channel is called, and is shown with their name. It doesn't count for a purge: a name lets a
   deletion purge at once only when `name_set_by` is the founder, a strict channel's admin or a workspace signer.
   A name a member set (`member`) is **stale for deletions**, which take the retention; otherwise a member and the

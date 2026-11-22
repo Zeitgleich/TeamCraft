@@ -5,12 +5,13 @@ use std::collections::HashSet;
 
 use teamcraft_db::{
   CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindBounds, RewindOutcome, StoredMlsMessage,
+  StrictHint,
 };
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, Id, ListMlsMessagesQuery,
   ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
-  Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutMlsGroupInfoRequest,
-  Snowflake, UserId,
+  MlsStrictHintResponse, Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutMlsGroupInfoRequest, Snowflake, StrictChannelHint, UserId,
 };
 
 use super::access::{load_conversation, require};
@@ -30,6 +31,7 @@ pub async fn post_commit(
     return Err(ApiError::Forbidden("only members can commit".into()));
   }
   let checked = check_commit(state, caller, conversation, &request).await?;
+  let maybe_strict = request.maybe_strict.as_ref().map(stored_hint).transpose()?;
   let (commit, welcomes) = checked.messages(&request);
   let outcome = state
     .database
@@ -40,13 +42,14 @@ pub async fn post_commit(
       &commit,
       &welcomes,
       checked.maybe_group_info(&request),
+      maybe_strict.as_ref(),
     )
     .await?;
   let new_epoch = match outcome {
     CommitOutcome::Accepted { new_epoch } => new_epoch,
     CommitOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
   };
-  Ok(publish_commit(
+  let response = publish_commit(
     state,
     conversation,
     &request,
@@ -54,7 +57,57 @@ pub async fn post_commit(
     &commit,
     &welcomes,
     new_epoch,
-  ))
+  );
+  if maybe_strict.is_some() {
+    // The UI shows whether the channel is strict from the conversation.
+    state.hub.publish(
+      checked.members.iter().copied(),
+      &GatewayEvent::ConversationUpdate {
+        conversation_id: conversation,
+      },
+    );
+  }
+  Ok(response)
+}
+
+/// The group's epoch and what its members told the server about its strict roles (e2ee.md §4.6.2),
+/// for a workspace owner or admin outside the group who signs the next roles change. Members read
+/// it, and so do those who may post an admin's proposal into the group (`manage_members`).
+pub async fn strict_hint(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+) -> Result<MlsStrictHintResponse, ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  if access.view.conversation.kind != ConversationKind::Channel {
+    return Err(ApiError::InvalidRequest("only a channel can be strict".into()));
+  }
+  if !access.is_member() {
+    require(state, caller, Permission::ManageMembers, &access.target())?;
+  }
+  let epoch = state.database.current_epoch(conversation).await?;
+  Ok(MlsStrictHintResponse {
+    epoch,
+    maybe_strict: access
+      .view
+      .conversation
+      .maybe_strict
+      .as_ref()
+      .map(super::convert::strict_hint),
+  })
+}
+
+/// A commit's strict hint as stored: a 32-byte hash and a version the database holds. The server
+/// can't check it against the commit, and doesn't need to: no decision reads it.
+fn stored_hint(hint: &StrictChannelHint) -> Result<StrictHint, ApiError> {
+  if hint.hash.len() != 32 || i64::try_from(hint.version).is_err() {
+    return Err(ApiError::InvalidRequest("a malformed strict hint".into()));
+  }
+  Ok(StrictHint {
+    is_strict: hint.is_strict,
+    version: hint.version,
+    hash: hint.hash.as_slice().to_vec(),
+  })
 }
 
 /// Continues a strict channel's group from the last good epoch (e2ee.md §4.6.2, "A commit that

@@ -432,7 +432,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None => self.api.key_package_status(self.account.device_id).await?,
     };
     self.last_key_package_check_ms = self.now_ms();
-    let missing = if status.available < self.settings.key_package_low_water {
+    // Packages that announce something new replace the whole stock (e2ee.md §4.6.2).
+    let replaces_stock = self.is_stock_outdated()?;
+    let missing = if replaces_stock {
+      self.settings.key_package_target
+    } else if status.available < self.settings.key_package_low_water {
       self.settings.key_package_target.saturating_sub(status.available)
     } else {
       0
@@ -455,7 +459,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     // A last-resort package close to expiry is reported as missing: it is rotated, the server
     // replaces the old one.
-    let maybe_last_resort = if status.has_last_resort {
+    let maybe_last_resort = if status.has_last_resort && !replaces_stock {
       None
     } else {
       Some(Base64Bytes::new(create_last_resort_key_package(
@@ -470,11 +474,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let request = UploadKeyPackagesRequest {
       key_packages,
       maybe_last_resort,
+      replaces_stock,
     };
     self
       .api
       .upload_key_packages(self.account.device_id, &request)
       .await?;
+    if replaces_stock {
+      self.note_stock_replaced()?;
+      tracing::info!("replaced the key package stock with packages that announce strict channels");
+    }
     self.clean_up_key_packages(request.maybe_last_resort.as_ref(), now_unix_secs);
     tracing::info!(
       uploaded = missing,
@@ -772,6 +781,7 @@ mod tests {
 
   fn conversation(raw: i64, kind: ConversationKind) -> ConversationResponse {
     ConversationResponse {
+      maybe_strict: None,
       id: ConversationId::from_snowflake(Snowflake::new(raw).unwrap()),
       maybe_space_id: None,
       kind,

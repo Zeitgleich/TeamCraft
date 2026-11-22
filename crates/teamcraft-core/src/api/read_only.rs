@@ -846,6 +846,13 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.list_welcomes(device, query)
   }
 
+  fn mls_strict_hint(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::MlsStrictHintResponse, ApiError>> {
+    self.inner.mls_strict_hint(conversation)
+  }
+
   fn mls_group_info(
     &self,
     conversation: ConversationId,

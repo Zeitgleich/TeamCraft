@@ -85,6 +85,7 @@ impl Database {
   ///
   /// The epoch counter is advanced with a conditional UPDATE in the same transaction as the insert,
   /// so of several commits for one epoch exactly one succeeds.
+  #[allow(clippy::too_many_arguments)]
   pub async fn post_mls_commit(
     &self,
     conversation: ConversationId,
@@ -93,6 +94,7 @@ impl Database {
     commit: &NewMlsMessage<'_>,
     welcomes: &[NewMlsMessage<'_>],
     maybe_group_info: Option<&[u8]>,
+    maybe_strict: Option<&crate::StrictHint>,
   ) -> Result<CommitOutcome, DbError> {
     let epoch_db = epoch_to_db(epoch)?;
     let mut tx = self.pool().begin().await?;
@@ -117,6 +119,17 @@ impl Database {
     }
     if let Some(group_info) = maybe_group_info {
       store_group_info(&mut tx, conversation, new_epoch, group_info).await?;
+    }
+    if let Some(hint) = maybe_strict {
+      sqlx::query!(
+        "UPDATE conversations SET is_strict = $2, strict_roles_version = $3, strict_roles_hash = $4 WHERE id = $1",
+        to_db(conversation),
+        hint.is_strict,
+        i64::try_from(hint.version).unwrap_or(i64::MAX),
+        &hint.hash,
+      )
+      .execute(&mut *tx)
+      .await?;
     }
     tx.commit().await?;
     Ok(CommitOutcome::Accepted {

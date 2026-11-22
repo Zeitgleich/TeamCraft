@@ -50,11 +50,50 @@ impl Database {
     max_available: usize,
     now: OffsetDateTime,
   ) -> Result<AddPackagesOutcome, DbError> {
+    self
+      .store_key_packages(device, regular, maybe_last_resort, max_available, now, false)
+      .await
+  }
+
+  /// [`Self::add_key_packages`] that first drops the device's unused regular packages, in the same
+  /// transaction: the device's packages start announcing something new (e2ee.md §4.6.2, "Older
+  /// clients"), and one made before must not be handed out any more. Packages claimed already stay
+  /// with their claimers.
+  pub async fn replace_key_packages(
+    &self,
+    device: DeviceId,
+    regular: &[NewKeyPackage<'_>],
+    maybe_last_resort: Option<NewKeyPackage<'_>>,
+    max_available: usize,
+    now: OffsetDateTime,
+  ) -> Result<AddPackagesOutcome, DbError> {
+    self
+      .store_key_packages(device, regular, maybe_last_resort, max_available, now, true)
+      .await
+  }
+
+  async fn store_key_packages(
+    &self,
+    device: DeviceId,
+    regular: &[NewKeyPackage<'_>],
+    maybe_last_resort: Option<NewKeyPackage<'_>>,
+    max_available: usize,
+    now: OffsetDateTime,
+    replaces_stock: bool,
+  ) -> Result<AddPackagesOutcome, DbError> {
     let mut tx = self.pool().begin().await?;
     // Serialize concurrent uploads of one device so the limit check stays exact.
     sqlx::query!("SELECT id FROM devices WHERE id = $1 FOR UPDATE", to_db(device))
       .fetch_one(&mut *tx)
       .await?;
+    if replaces_stock {
+      sqlx::query!(
+        "DELETE FROM key_packages WHERE device_id = $1 AND consumed_at IS NULL AND NOT is_last_resort",
+        to_db(device),
+      )
+      .execute(&mut *tx)
+      .await?;
+    }
     let current = sqlx::query_scalar!(
       r#"SELECT count(*) AS "count!" FROM key_packages
          WHERE device_id = $1 AND consumed_at IS NULL AND NOT is_last_resort AND expires_at > $2"#,

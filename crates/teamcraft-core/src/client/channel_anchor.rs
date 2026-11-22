@@ -13,6 +13,7 @@ use teamcraft_crypto::channel_anchor::{
 };
 use teamcraft_crypto::membership::IdentityDirectory;
 use teamcraft_crypto::mls::{ConversationGroup, MlsError};
+use teamcraft_crypto::strict_roles::StrictRoleKind;
 use teamcraft_proto::{ConversationId, ConversationKind, ConversationResponse, MeetingId, SpaceId, UserId};
 
 use super::Client;
@@ -511,8 +512,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         return Ok(());
       }
       let is_move = target.maybe_space_id != current.maybe_space_id;
-      let (class, roster_version) = self.properties_signer_class()?;
-      if is_move && class != NameAuthority::Workspace {
+      let Some((class, roster_version)) = self.properties_signer_class(conversation)? else {
+        tracing::info!(conversation_id = %conversation, "only a strict channel's admins rename it; the name stays stale");
+        return Ok(());
+      };
+      // A move (D4): workspace signers, and a strict channel's admins (D5).
+      if is_move && !matches!(class, NameAuthority::Workspace | NameAuthority::ChannelAdmin) {
         tracing::info!(conversation_id = %conversation, "only a workspace signer moves an anchored channel; the space stays stale");
         return Ok(());
       }
@@ -643,15 +648,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// This user's role for a move or rename: a workspace signer with the roster's version, else a
-  /// member.
-  fn properties_signer_class(&self) -> Result<(NameAuthority, u64), CoreError> {
+  /// This user's role for a move or rename (e2ee.md §4.6.5, D4, D5), as the members will judge
+  /// it: in a strict channel an admin of its context (`channel_admin`, decided on the context
+  /// alone), else a workspace signer, else nobody; elsewhere a workspace signer with the roster's
+  /// version, else a member.
+  fn properties_signer_class(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<(NameAuthority, u64)>, CoreError> {
     let workspace = self.workspace()?;
     let (admins, roster) = self.fresh_admins(&workspace, self.now_ms());
-    Ok(if admins.contains(&self.user_id()) {
-      (NameAuthority::Workspace, roster.version)
+    let is_workspace_signer = admins.contains(&self.user_id());
+    let maybe_strict = self.group_or_error(conversation)?.strict_roles()?;
+    let Some(strict) = maybe_strict else {
+      return Ok(Some(if is_workspace_signer {
+        (NameAuthority::Workspace, roster.version)
+      } else {
+        (NameAuthority::Member, 0)
+      }));
+    };
+    let own_key = self.account.identity_public_key();
+    let is_strict_admin = strict
+      .role_of(convert::user(self.user_id()))
+      .is_some_and(|role| role.role == StrictRoleKind::Admin && role.identity_key == own_key);
+    Ok(if is_strict_admin {
+      Some((NameAuthority::ChannelAdmin, 0))
+    } else if is_workspace_signer {
+      Some((NameAuthority::Workspace, roster.version))
     } else {
-      (NameAuthority::Member, 0)
+      None
     })
   }
 

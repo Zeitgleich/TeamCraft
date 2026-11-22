@@ -26,6 +26,7 @@ use crate::domain;
 use crate::identity::{DeviceKeyPair, IdentityPublicKey, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, MeetingId, SpaceId, UserId};
 use crate::membership::{IdentityDirectory, MembershipAuthority};
+use crate::strict_roles::{StrictRoleKind, StrictRoles, StrictSigner, TreeLeaf};
 use crate::workspace::{WorkspaceLog, WorkspaceLogError, claimed_signer, sign_log_entry, verify_log_entry};
 
 /// The private-use group context extension type of the anchor (RFC 9420 §17.3). TeamCraft's are
@@ -332,6 +333,11 @@ pub enum AnchorError {
 /// Why a move or rename commit is refused (e2ee.md §4.6.5, "Moves and renames").
 #[derive(Debug, thiserror::Error)]
 pub enum PropertiesChangeError {
+  /// A strict channel's change whose signer only a roster this device can't verify yet could
+  /// allow: hold the commit back and read the roster again; it isn't refused for that (e2ee.md
+  /// §4.6.2, "Workspace signers").
+  #[error("{0} signed as a workspace admin; the roster has to be read first")]
+  RosterNeeded(UserId),
   #[error("change for conversation {0}, not this one")]
   WrongConversation(ConversationId),
   #[error("change for another founding")]
@@ -351,6 +357,15 @@ pub enum PropertiesChangeError {
   DeviceNotListed(UserId),
   #[error("the name's setter doesn't match the signer")]
   WrongNameSetter,
+}
+
+/// A strict channel's roles and tree (e2ee.md §4.6.2), for who may move or rename it (§4.6.5,
+/// D5): its admins with a leaf, judged under the identity keys the context names, so every member
+/// decides alike; and workspace owners and admins of a fresh roster. Its other members don't.
+#[derive(Clone, Copy, Debug)]
+pub struct StrictContext<'a> {
+  pub roles: &'a StrictRoles,
+  pub leaves: &'a [TreeLeaf],
 }
 
 impl ChannelAnchor {
@@ -504,6 +519,20 @@ impl ChannelAnchor {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<VerifiedAnchor, AnchorError> {
+    self.verify_in(expected, epoch, tree_users, None, directory, authority)
+  }
+
+  /// [`Self::verify`] for a group that may be strict: with `maybe_strict`, the last change's
+  /// signer is judged as a strict channel's (§4.6.5, D5).
+  pub fn verify_in(
+    &self,
+    expected: &AnchorExpectation,
+    epoch: u64,
+    tree_users: &BTreeSet<UserId>,
+    maybe_strict: Option<StrictContext<'_>>,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<VerifiedAnchor, AnchorError> {
     if self.format != ANCHOR_FORMAT {
       return Err(AnchorError::MustUpdate);
     }
@@ -513,7 +542,14 @@ impl ChannelAnchor {
     self.check_workspace_signer(epoch, authority, judged)?;
     self.check_founding_properties()?;
     let founding_hash = self.founding_hash()?;
-    let (space, name) = self.last_change_confidence(founding_hash, epoch, tree_users, directory, authority);
+    let (space, name) = self.last_change_confidence(
+      founding_hash,
+      epoch,
+      tree_users,
+      maybe_strict,
+      directory,
+      authority,
+    );
     Ok(VerifiedAnchor {
       properties_hash: self.properties().hash()?,
       anchor: self.clone(),
@@ -532,6 +568,21 @@ impl ChannelAnchor {
     signed: &SignedPropertiesChange,
     epoch: u64,
     tree_users: &BTreeSet<UserId>,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<NameAuthority, PropertiesChangeError> {
+    self.check_change_in(signed, epoch, tree_users, None, directory, authority)
+  }
+
+  /// [`Self::check_change`] for a group that may be strict (e2ee.md §4.6.5, D5): in a strict
+  /// channel only its admins with a leaf (class `channel_admin`) and workspace signers move or
+  /// rename it; a plain member's change is refused.
+  pub fn check_change_in(
+    &self,
+    signed: &SignedPropertiesChange,
+    epoch: u64,
+    tree_users: &BTreeSet<UserId>,
+    maybe_strict: Option<StrictContext<'_>>,
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<NameAuthority, PropertiesChangeError> {
@@ -565,24 +616,31 @@ impl ChannelAnchor {
         current_epoch: epoch,
       });
     }
-    let device = signed
-      .verify_signature(directory)
-      .map_err(PropertiesChangeError::Signature)?;
-    let signer = device.user_id();
-    if !is_listed_signer(&device, directory) {
-      return Err(PropertiesChangeError::DeviceNotListed(signer));
-    }
-    let class = signer_class(
-      signer,
-      change.roster_version,
-      Judged::Newest,
-      tree_users,
-      directory,
-      authority,
-    )
-    .ok_or(PropertiesChangeError::NotAllowed(signer))?;
+    let (signer, class) = match maybe_strict {
+      Some(strict) => strict_signer_class(signed, strict, directory, authority)?,
+      None => {
+        let device = signed
+          .verify_signature(directory)
+          .map_err(PropertiesChangeError::Signature)?;
+        let signer = device.user_id();
+        if !is_listed_signer(&device, directory) {
+          return Err(PropertiesChangeError::DeviceNotListed(signer));
+        }
+        let class = signer_class(
+          signer,
+          change.roster_version,
+          Judged::Newest,
+          tree_users,
+          directory,
+          authority,
+        )
+        .ok_or(PropertiesChangeError::NotAllowed(signer))?;
+        (signer, class)
+      },
+    };
     let is_move = change.properties.maybe_space_id != current.maybe_space_id;
-    if is_move && class != NameAuthority::Workspace {
+    // A move (D4): workspace signers, and a strict channel's admins (D5).
+    if is_move && !matches!(class, NameAuthority::Workspace | NameAuthority::ChannelAdmin) {
       return Err(PropertiesChangeError::NotAllowed(signer));
     }
     let expected_setter = if change.properties.name_hash == current.name_hash {
@@ -736,6 +794,7 @@ impl ChannelAnchor {
     founding_hash: AnchorHash,
     epoch: u64,
     tree_users: &BTreeSet<UserId>,
+    maybe_strict: Option<StrictContext<'_>>,
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> (Confidence, Confidence) {
@@ -758,6 +817,14 @@ impl ChannelAnchor {
     } else {
       Judged::AsNamed
     };
+    // A strict channel's admin of the current context (D5) moves and renames like a workspace
+    // signer. Judged on the context as it is now: one demoted since counts for nothing here.
+    let is_strict_admin = is_ours
+      && maybe_strict.is_some_and(|strict| strict_admin_signed(signed, strict).is_some())
+      && change.properties.name_set_by.authority == NameAuthority::ChannelAdmin;
+    if is_strict_admin {
+      return (Confidence::Confirmed, Confidence::Confirmed);
+    }
     let maybe_class = signed
       .verify_signature(directory)
       .ok()
@@ -1122,8 +1189,8 @@ pub fn name_hash(name: &str) -> AnchorHash {
 
 /// The user's role for a properties change: a workspace owner or admin (of a roster judged as
 /// `judged`) first, else a member with a leaf; `None` for anybody else, a meeting guest included
-/// (a guest manages nothing in a group, §4.6, "Meeting guests"). Strict channels' admins (§4.6.2)
-/// join once #1197's extension exists.
+/// (a guest manages nothing in a group, §4.6, "Meeting guests"). A strict channel's signers are
+/// [`strict_signer_class`]'s.
 fn signer_class(
   signer: UserId,
   roster_version: u64,
@@ -1140,6 +1207,63 @@ fn signer_class(
     Some(NameAuthority::Member)
   } else {
     None
+  }
+}
+
+/// The signer of a strict channel's move or rename and their class (e2ee.md §4.6.5, D5): an admin
+/// of the context whose signing device has a leaf (`channel_admin`, decided on the context alone,
+/// alike on every member, even when they are also a workspace signer), otherwise a workspace owner
+/// or admin of a fresh roster on the newest signed device list. Nobody else: a strict channel's
+/// members, moderators and guests don't rename it.
+fn strict_signer_class(
+  signed: &SignedPropertiesChange,
+  strict: StrictContext<'_>,
+  directory: &impl IdentityDirectory,
+  authority: &impl MembershipAuthority,
+) -> Result<(UserId, NameAuthority), PropertiesChangeError> {
+  if let Some(signer) = strict_admin_signed(signed, strict) {
+    return Ok((signer, NameAuthority::ChannelAdmin));
+  }
+  let device = signed
+    .verify_signature(directory)
+    .map_err(PropertiesChangeError::Signature)?;
+  let signer = device.user_id();
+  if !is_listed_signer(&device, directory) {
+    return Err(PropertiesChangeError::DeviceNotListed(signer));
+  }
+  match authority.workspace_signer(signer, signed.change.roster_version, Judged::Newest) {
+    Standing::Confirmed => Ok((signer, NameAuthority::Workspace)),
+    Standing::Unknown => Err(PropertiesChangeError::RosterNeeded(signer)),
+    Standing::Refused => Err(PropertiesChangeError::NotAllowed(signer)),
+  }
+}
+
+/// The signer, if the change is signed by an admin of the strict context: under the identity key
+/// the context names for them, by a device with a leaf in the tree (§4.6.2, "A role counts only
+/// with a leaf").
+fn strict_admin_signed(signed: &SignedPropertiesChange, strict: StrictContext<'_>) -> Option<UserId> {
+  let claimed = claimed_signer(signed.entry.as_slice()).ok()?;
+  let role = strict
+    .roles
+    .role_of(claimed)
+    .filter(|role| role.role == StrictRoleKind::Admin)?;
+  let context_key = ContextKey {
+    user_id: claimed,
+    identity_key: role.identity_key,
+  };
+  let device = signed.verify_signature(&context_key).ok()?;
+  (strict.roles.signer_class(&device, strict.leaves) == StrictSigner::ChannelAdmin).then_some(claimed)
+}
+
+/// The one identity key a strict context names for a user, as a directory.
+struct ContextKey {
+  user_id: UserId,
+  identity_key: IdentityPublicKey,
+}
+
+impl IdentityDirectory for ContextKey {
+  fn pinned_identity(&self, user_id: UserId) -> Option<IdentityPublicKey> {
+    (user_id == self.user_id).then_some(self.identity_key)
   }
 }
 

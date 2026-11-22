@@ -709,6 +709,13 @@ pub trait ServerApi {
     device: DeviceId,
     query: &ListMlsMessagesQuery,
   ) -> impl Future<Output = Result<ListMlsMessagesResponse, ApiError>>;
+  /// The group's epoch and what its members told the server about its strict roles
+  /// (`GET /conversations/{id}/mls/strict`, e2ee.md §4.6.2): for a workspace admin outside the
+  /// group who signs a roles change. A hint, never a decision.
+  fn mls_strict_hint(
+    &self,
+    conversation: ConversationId,
+  ) -> impl Future<Output = Result<teamcraft_proto::MlsStrictHintResponse, ApiError>>;
   /// The group information for the group's current epoch (a new device joins with it).
   fn mls_group_info(
     &self,

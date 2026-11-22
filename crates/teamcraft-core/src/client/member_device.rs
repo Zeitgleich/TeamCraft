@@ -222,6 +222,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .filter(|info| info.len() <= self.settings.max_group_info_bytes)
       .map(Base64Bytes::new);
     let request = PostMlsCommitRequest {
+      maybe_strict: None,
       device_id: self.account.device_id,
       epoch,
       commit: Base64Bytes::new(output.commit),

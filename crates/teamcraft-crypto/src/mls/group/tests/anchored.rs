@@ -314,6 +314,204 @@ mod changes {
 /// openmls refuses a leaf that doesn't announce what `required_capabilities` names, on every path
 /// (e2ee.md §4.6.5, "Who can be in an anchored group"). Each test builds the path with openmls
 /// directly where TeamCraft's own checks would stop it first.
+/// A strict channel's moves and renames (e2ee.md §4.6.5, D5, issue #1924): its admins rename and
+/// move it, workspace signers too, its other members neither.
+mod strict {
+  use super::*;
+  use crate::strict_roles::{StrictHash, StrictRole, StrictRoleKind, StrictRolesChange, StrictSignerRole};
+
+  #[test]
+  fn a_strict_admin_renames_and_moves_and_every_member_holds_it() {
+    let mut world = AnchoredWorld::new();
+    world.turn_strict(CAROL);
+    let signed = world.carol_change(NameAuthority::ChannelAdmin, Some(OTHER_SPACE), "renamed");
+    let output = world.carol_commits_change(&signed).unwrap();
+    let event = world
+      .alice_group
+      .process_message(
+        &world.alice.provider,
+        &output.commit,
+        &world.directory,
+        &world.authority,
+      )
+      .unwrap();
+    let GroupEvent::MembershipChanged(update) = event else {
+      panic!("expected a commit")
+    };
+    assert_eq!(update.maybe_properties_change.as_deref(), Some(&signed));
+    for group in [&world.alice_group, &world.carol_group] {
+      let verified = group
+        .verified_anchor(&expectation(), &world.directory, &world.authority)
+        .unwrap()
+        .unwrap();
+      assert_eq!(verified.properties().maybe_space_id, Some(OTHER_SPACE));
+      assert_eq!(
+        verified.properties().name_set_by,
+        NameSetter {
+          authority: NameAuthority::ChannelAdmin,
+          user_id: UserId::new(CAROL),
+        }
+      );
+      assert_eq!(
+        verified.space_confidence(),
+        crate::channel_anchor::Confidence::Confirmed
+      );
+      assert_eq!(
+        verified.name_confidence(),
+        crate::channel_anchor::Confidence::Confirmed
+      );
+    }
+  }
+
+  #[test]
+  fn a_strict_channels_member_neither_renames_nor_moves() {
+    let mut world = AnchoredWorld::new();
+    world.turn_strict(ALICE);
+    for (authority, maybe_space) in [
+      (NameAuthority::Member, Some(SPACE)),
+      (NameAuthority::Member, Some(OTHER_SPACE)),
+      (NameAuthority::ChannelAdmin, Some(SPACE)),
+    ] {
+      let signed = world.carol_change(authority, maybe_space, "renamed");
+      let error = world.carol_commits_change(&signed).unwrap_err();
+      assert!(
+        matches!(
+          error,
+          MlsError::PropertiesChange(PropertiesChangeError::NotAllowed(user)) if user == UserId::new(CAROL)
+        ),
+        "unexpected error: {error}"
+      );
+    }
+  }
+
+  #[test]
+  fn a_workspace_signers_rename_waits_for_the_roster_not_refused() {
+    let mut world = AnchoredWorld::new();
+    world.turn_strict(CAROL);
+    let signed = world.alice_change(Some(SPACE), "renamed");
+    let output = world.alice_commits_change(&signed);
+    let error = world
+      .carol_group
+      .process_message(
+        &world.carol.provider,
+        &output.commit,
+        &world.directory,
+        &UnreadRoster,
+      )
+      .unwrap_err();
+    assert!(
+      matches!(error, MlsError::PropertiesChange(PropertiesChangeError::RosterNeeded(user)) if user == UserId::new(ALICE)),
+      "unexpected error: {error}"
+    );
+    assert!(error.is_strict_retry());
+  }
+
+  /// Outside a strict channel the strict admin class is nobody's: an admin of an earlier strict
+  /// context renames as a member there.
+  #[test]
+  fn the_strict_class_counts_only_in_a_strict_channel() {
+    let mut world = AnchoredWorld::new();
+    let signed = world.carol_change(NameAuthority::ChannelAdmin, Some(SPACE), "renamed");
+    assert!(matches!(
+      world.carol_commits_change(&signed),
+      Err(MlsError::PropertiesChange(PropertiesChangeError::WrongNameSetter))
+    ));
+  }
+
+  impl AnchoredWorld {
+    /// Alice, a workspace signer, turns the channel strict with `admin` as its admin; Carol merges.
+    fn turn_strict(&mut self, admin: u64) {
+      let user = if admin == CAROL {
+        &self.carol.user
+      } else {
+        &self.alice.user
+      };
+      let signed = StrictRolesChange {
+        conversation_id: CONVERSATION,
+        version: 1,
+        prev_hash: StrictHash::ZERO,
+        signed_for_epoch: self.alice_group.epoch(),
+        signer_role: StrictSignerRole::Workspace,
+        roster_version: 1,
+        role_log_version: 1,
+        role_log_hash: StrictHash::ZERO,
+        roles: vec![StrictRole {
+          user_id: user.user_id,
+          role: StrictRoleKind::Admin,
+          identity_key: user.identity.public_key(),
+        }],
+      }
+      .sign(&self.alice.user.device, &self.alice.user.certificate)
+      .unwrap();
+      let output = self
+        .alice_group
+        .commit_strict_roles(
+          &self.alice.provider,
+          &self.alice.user.device,
+          &signed,
+          &self.directory,
+          &self.authority,
+        )
+        .unwrap();
+      self.alice_group.confirm_commit(&self.alice.provider).unwrap();
+      self
+        .carol_group
+        .process_message(
+          &self.carol.provider,
+          &output.commit,
+          &self.directory,
+          &self.authority,
+        )
+        .unwrap();
+      assert!(self.carol_group.is_strict());
+    }
+
+    fn carol_change(
+      &self,
+      authority: NameAuthority,
+      maybe_space_id: Option<SpaceId>,
+      name: &str,
+    ) -> SignedPropertiesChange {
+      self
+        .current_anchor()
+        .sign_change(
+          &self.carol.user.device,
+          &self.carol.user.certificate,
+          authority,
+          &PropertiesTarget { maybe_space_id, name },
+          self.carol_group.epoch(),
+          0,
+        )
+        .unwrap()
+    }
+
+    fn carol_commits_change(&mut self, signed: &SignedPropertiesChange) -> Result<CommitOutput, MlsError> {
+      let output = self.carol_group.commit_properties_change(
+        &self.carol.provider,
+        &self.carol.user.device,
+        signed,
+        &self.directory,
+        &self.authority,
+      )?;
+      self.carol_group.confirm_commit(&self.carol.provider).unwrap();
+      Ok(output)
+    }
+  }
+
+  /// A roster this device hasn't read yet.
+  struct UnreadRoster;
+
+  impl MembershipAuthority for UnreadRoster {
+    fn is_authorized(&self, _: UserId, _: ConversationId, _: &MembershipAction) -> bool {
+      true
+    }
+
+    fn workspace_signer(&self, _: UserId, _: u64, _: Judged) -> Standing {
+      Standing::Unknown
+    }
+  }
+}
+
 mod required_capabilities {
   use super::*;
 

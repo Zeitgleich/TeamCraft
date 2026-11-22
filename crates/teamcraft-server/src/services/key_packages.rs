@@ -55,16 +55,31 @@ pub async fn upload_key_packages(
     Some(package) => Some(new_package(state, package, true, valid_until)?),
     None => None,
   };
-  let outcome = state
-    .database
-    .add_key_packages(
-      device,
-      &regular,
-      last_resort,
-      limits.max_key_packages_per_device,
-      now,
-    )
-    .await?;
+  // A device replacing its stock (its packages announce something new, e2ee.md §4.6.2) drops the
+  // unused ones it uploaded before, in the same transaction.
+  let outcome = if request.replaces_stock {
+    state
+      .database
+      .replace_key_packages(
+        device,
+        &regular,
+        last_resort,
+        limits.max_key_packages_per_device,
+        now,
+      )
+      .await?
+  } else {
+    state
+      .database
+      .add_key_packages(
+        device,
+        &regular,
+        last_resort,
+        limits.max_key_packages_per_device,
+        now,
+      )
+      .await?
+  };
   if outcome == AddPackagesOutcome::OverLimit {
     return Err(ApiError::Conflict(format!(
       "a device keeps at most {} unused key packages",

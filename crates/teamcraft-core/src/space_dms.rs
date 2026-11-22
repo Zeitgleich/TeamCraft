@@ -425,6 +425,7 @@ mod tests {
 
     fn conversation(raw: i64, kind: ConversationKind, participants: &[i64]) -> ConversationResponse {
       ConversationResponse {
+        maybe_strict: None,
         id: conversation_id(raw),
         maybe_space_id: None,
         kind,

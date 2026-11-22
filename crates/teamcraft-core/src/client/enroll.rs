@@ -238,6 +238,8 @@ impl PendingEnrollment {
       mls_current: Default::default(),
       #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
       maybe_strict_rewind: None,
+      #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
+      maybe_strict_hint: None,
       maybe_backlog_reads: None,
       thread_turn_began_ms: i64::MIN,
       maybe_replay_left: None,

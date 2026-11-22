@@ -902,6 +902,90 @@ mod role_changes {
 
 /// Finding 2 of §4.6.2: a device that refused a commit must not be brought back by the one who
 /// made it, with the refused change in its tree.
+/// The ready step (e2ee.md §4.6.2, "Turning it on", step 2, issue #1924): only a device itself
+/// answers for its leaf.
+mod ready {
+  use super::*;
+  use crate::mls::{SignedStrictReady, StrictAsk};
+
+  #[test]
+  fn an_answer_verifies_against_the_devices_own_leaf() {
+    let world = StrictWorld::unstrict(&[BOB]);
+    let ask = StrictAsk::new(CONVERSATION, UserId::new(ALICE), &mut OsRng);
+    let parsed = StrictAsk::from_bytes(&ask.to_bytes().unwrap(), CONVERSATION).unwrap();
+    assert_eq!(parsed, ask);
+    let answer = ask.answer(&world.user(BOB).device);
+    let answer = SignedStrictReady::from_bytes(&answer.to_bytes().unwrap()).unwrap();
+
+    for id in [ALICE, CAROL, DAVE] {
+      let ready = world.group(id).verify_strict_ready(&answer).unwrap();
+      assert_eq!(ready.ask_id(), ask.ask_id());
+      assert_eq!(
+        ready.device(),
+        GroupMember {
+          user_id: UserId::new(BOB),
+          device_id: world.user(BOB).device.device_id(),
+        }
+      );
+    }
+  }
+
+  #[test]
+  fn nobody_answers_for_another_device() {
+    let world = StrictWorld::unstrict(&[BOB]);
+    let ask = StrictAsk::new(CONVERSATION, UserId::new(ALICE), &mut OsRng);
+    // Dave's answer, with Bob's device named in it: the signature doesn't verify under Bob's leaf.
+    let mut bytes = ask.answer(&world.user(DAVE).device).to_bytes().unwrap();
+    let bob = GroupMember {
+      user_id: UserId::new(BOB),
+      device_id: world.user(BOB).device.device_id(),
+    };
+    // version (1) ‖ conversation (8) ‖ ask ID (16), then the device.
+    let device_at = 1 + 8 + 16;
+    let encoded_bob = bob.tls_serialize_detached().unwrap();
+    bytes[device_at..device_at + encoded_bob.len()].copy_from_slice(&encoded_bob);
+    let forged = SignedStrictReady::from_bytes(&bytes).unwrap();
+    assert_eq!(forged.unverified().device(), bob);
+    assert!(matches!(
+      world.group(ALICE).verify_strict_ready(&forged),
+      Err(MlsError::Membership(MembershipError::InvalidSignature))
+    ));
+  }
+
+  #[test]
+  fn a_device_without_a_leaf_or_another_channels_ask_counts_for_nothing() {
+    let world = StrictWorld::unstrict(&[BOB]);
+    let ask = StrictAsk::new(CONVERSATION, UserId::new(ALICE), &mut OsRng);
+    let eve = ask.answer(&world.user(EVE).device);
+    assert!(matches!(
+      world.group(ALICE).verify_strict_ready(&eve),
+      Err(MlsError::UnexpectedMessage(_))
+    ));
+    let other = StrictAsk::new(ConversationId::new(43), UserId::new(ALICE), &mut OsRng);
+    assert!(StrictAsk::from_bytes(&other.to_bytes().unwrap(), CONVERSATION).is_err());
+    let elsewhere = other.answer(&world.user(BOB).device);
+    assert!(matches!(
+      world.group(ALICE).verify_strict_ready(&elsewhere),
+      Err(MlsError::WrongConversation { .. })
+    ));
+  }
+
+  #[test]
+  fn malformed_asks_and_answers_are_refused() {
+    assert!(StrictAsk::from_bytes(&[], CONVERSATION).is_err());
+    assert!(StrictAsk::from_bytes(&[1; 600], CONVERSATION).is_err());
+    assert!(SignedStrictReady::from_bytes(&[]).is_err());
+    assert!(SignedStrictReady::from_bytes(&[1; 600]).is_err());
+    let world = StrictWorld::unstrict(&[]);
+    let ask = StrictAsk::new(CONVERSATION, UserId::new(ALICE), &mut OsRng);
+    let bytes = ask.answer(&world.user(BOB).device).to_bytes().unwrap();
+    assert!(SignedStrictReady::from_bytes(&bytes[..bytes.len() - 1]).is_err());
+    let mut newer = ask.to_bytes().unwrap();
+    newer[0] = 2;
+    assert!(StrictAsk::from_bytes(&newer, CONVERSATION).is_err());
+  }
+}
+
 mod falling_out {
   use super::*;
 

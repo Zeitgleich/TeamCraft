@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\",\n                m.sees_imported_history AS \"sees_imported_history?\",\n                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS \"reactions_seen_message_ids?\",\n                m.channel_mentions AS \"channel_mentions?\", m.quiet_hours\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE c.deleted_at IS NULL\n           AND ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)\n                           AND c.archived_at IS NULL AND m.user_id IS NULL))\n         ORDER BY c.id",
+  "query": "SELECT c.id, c.space_id, c.kind, c.name, c.topic, c.description, c.visibility, c.history_policy,\n                c.category_id, c.archived_at IS NOT NULL AS \"is_archived!\", c.is_integration, c.member_denied, c.guest_denied,\n                c.image_key, c.image_version, c.image_size_bytes, c.importer_user_id, c.imported_through_message_id,\n                c.is_strict, c.strict_roles_version, c.strict_roles_hash,\n                m.role AS \"role?\", m.notification_level AS \"notification_level?\",\n                m.is_favorite AS \"is_favorite?\", m.last_read_message_id, m.muted_until,\n                NOT m.notification_overridden AS \"is_inherited?\",\n                tc_snowflake_floor(m.joined_at) AS \"joined_floor?\",\n                m.sees_imported_history AS \"sees_imported_history?\",\n                m.reactions_seen_through_message_id, m.reactions_seen_message_ids AS \"reactions_seen_message_ids?\",\n                m.channel_mentions AS \"channel_mentions?\", m.quiet_hours\n         FROM conversations c\n         LEFT JOIN memberships m ON m.conversation_id = c.id AND m.user_id = $1\n         WHERE c.deleted_at IS NULL\n           AND ($2::bigint IS NULL OR c.id = $2)\n           AND ($3::bigint IS NULL OR c.space_id = $3)\n           AND (NOT $4 OR m.user_id IS NOT NULL)\n           AND (NOT $5 OR (c.kind = 'channel' AND (c.visibility = 'public' OR $6)\n                           AND c.archived_at IS NULL AND m.user_id IS NULL))\n         ORDER BY c.id",
   "describe": {
     "columns": [
       {
@@ -198,6 +198,39 @@
       },
       {
         "ordinal": 18,
+        "name": "is_strict",
+        "type_info": "Bool",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "is_strict"
+          }
+        }
+      },
+      {
+        "ordinal": 19,
+        "name": "strict_roles_version",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "strict_roles_version"
+          }
+        }
+      },
+      {
+        "ordinal": 20,
+        "name": "strict_roles_hash",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "conversations",
+            "name": "strict_roles_hash"
+          }
+        }
+      },
+      {
+        "ordinal": 21,
         "name": "role?",
         "type_info": "Text",
         "origin": {
@@ -208,7 +241,7 @@
         }
       },
       {
-        "ordinal": 19,
+        "ordinal": 22,
         "name": "notification_level?",
         "type_info": "Text",
         "origin": {
@@ -219,7 +252,7 @@
         }
       },
       {
-        "ordinal": 20,
+        "ordinal": 23,
         "name": "is_favorite?",
         "type_info": "Bool",
         "origin": {
@@ -230,7 +263,7 @@
         }
       },
       {
-        "ordinal": 21,
+        "ordinal": 24,
         "name": "last_read_message_id",
         "type_info": "Int8",
         "origin": {
@@ -241,7 +274,7 @@
         }
       },
       {
-        "ordinal": 22,
+        "ordinal": 25,
         "name": "muted_until",
         "type_info": "Timestamptz",
         "origin": {
@@ -252,19 +285,19 @@
         }
       },
       {
-        "ordinal": 23,
+        "ordinal": 26,
         "name": "is_inherited?",
         "type_info": "Bool",
         "origin": "Expression"
       },
       {
-        "ordinal": 24,
+        "ordinal": 27,
         "name": "joined_floor?",
         "type_info": "Int8",
         "origin": "Expression"
       },
       {
-        "ordinal": 25,
+        "ordinal": 28,
         "name": "sees_imported_history?",
         "type_info": "Bool",
         "origin": {
@@ -275,7 +308,7 @@
         }
       },
       {
-        "ordinal": 26,
+        "ordinal": 29,
         "name": "reactions_seen_through_message_id",
         "type_info": "Int8",
         "origin": {
@@ -286,7 +319,7 @@
         }
       },
       {
-        "ordinal": 27,
+        "ordinal": 30,
         "name": "reactions_seen_message_ids?",
         "type_info": "Int8Array",
         "origin": {
@@ -297,7 +330,7 @@
         }
       },
       {
-        "ordinal": 28,
+        "ordinal": 31,
         "name": "channel_mentions?",
         "type_info": "Text",
         "origin": {
@@ -308,7 +341,7 @@
         }
       },
       {
-        "ordinal": 29,
+        "ordinal": 32,
         "name": "quiet_hours",
         "type_info": "Text",
         "origin": {
@@ -349,6 +382,9 @@
       true,
       true,
       false,
+      true,
+      true,
+      false,
       false,
       false,
       true,
@@ -362,5 +398,5 @@
       true
     ]
   },
-  "hash": "18ebc61bfdd1e8632cecdf7b67a92a5925bd0064851848a3729566149e30b998"
+  "hash": "53adc4e04432c58e28604ef5aabc003bf3b2ff6ab1d1c36dbbb3e8d265e7ec37"
 }

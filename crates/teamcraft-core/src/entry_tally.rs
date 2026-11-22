@@ -1450,6 +1450,7 @@ mod tests {
       let (store, _dir) = sealed_store();
       let fixture = Fixture::new(store);
       let direct = ConversationResponse {
+        maybe_strict: None,
         kind: teamcraft_proto::ConversationKind::Dm,
         ..response()
       };
@@ -1867,6 +1868,7 @@ mod tests {
 
   fn response() -> ConversationResponse {
     ConversationResponse {
+      maybe_strict: None,
       id: conversation(),
       maybe_space_id: None,
       kind: teamcraft_proto::ConversationKind::Channel,

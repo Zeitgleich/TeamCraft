@@ -140,12 +140,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     roles: &[(UserId, StrictRoleKind)],
   ) -> Result<(), CoreError> {
     let _step = crate::timing::step("set_strict_roles");
-    if !roles.is_empty() {
-      self.ensure_strict_capable(conversation)?;
-    }
     let mut roles = roles.to_vec();
     roles.sort_by_key(|(user, _)| *user);
     roles.dedup_by_key(|(user, _)| *user);
+    if !self.has_group(conversation)? {
+      // A workspace owner or admin outside the group: the members commit it (e2ee.md §4.6.2). The
+      // channel's kind is read from the server, which this device has no copy of.
+      return self.post_strict_roles_from_outside(conversation, &roles).await;
+    }
+    if !roles.is_empty() {
+      self.ensure_strict_capable(conversation)?;
+    }
     let me = self.account.user_id;
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
@@ -220,6 +225,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &directory,
         &authority,
       )?;
+      self.hint_strict_roles(conversation, &signed)?;
       if self.post_commit(conversation, output, &[]).await?.is_some() {
         self.note_known_strict_roles(conversation)?;
         return Ok(());
@@ -358,6 +364,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Keeps the roles of the conversation's group in the account data when they changed (e2ee.md
   /// §4.6.2, "Falling out in a strict channel"); a group that was never strict leaves nothing.
   pub(super) fn note_known_strict_roles(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    if !self.has_group(conversation)? {
+      return Ok(());
+    }
+    // The tree changed: a device that blocked the opt-in may have refreshed or gone (step 3).
+    self.schedule_strict_refresh(conversation)?;
     let Some(group) = self.group(conversation)? else {
       return Ok(());
     };
@@ -511,7 +522,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The channel role log's head this device accepted (§4.6.1), mirrored into a roles change:
   /// shown, never decided on.
-  fn role_log_mirror(&self, conversation: ConversationId) -> Result<(u64, StrictHash), CoreError> {
+  pub(super) fn role_log_mirror(&self, conversation: ConversationId) -> Result<(u64, StrictHash), CoreError> {
     let Some(head) = self.channel_role_state(conversation)?.head() else {
       return Ok((0, StrictHash::ZERO));
     };

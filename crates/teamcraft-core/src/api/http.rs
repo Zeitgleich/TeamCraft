@@ -1345,6 +1345,15 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
     self.get(&format!("/devices/{device}/welcomes{parameters}")).await
   }
 
+  async fn mls_strict_hint(
+    &self,
+    conversation: ConversationId,
+  ) -> Result<teamcraft_proto::MlsStrictHintResponse, ApiError> {
+    self
+      .get(&format!("/conversations/{conversation}/mls/strict"))
+      .await
+  }
+
   async fn mls_group_info(
     &self,
     conversation: ConversationId,

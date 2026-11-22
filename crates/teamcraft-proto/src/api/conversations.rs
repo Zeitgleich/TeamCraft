@@ -132,6 +132,10 @@ pub struct ConversationResponse {
   /// the channel (`manage_channel_properties`), and only while there is something to say.
   #[serde(rename = "inactivity", default, skip_serializing_if = "Option::is_none")]
   pub maybe_inactivity: Option<crate::ChannelInactivityStatus>,
+  /// Whether the channel is strict, as its members told the server (e2ee.md §4.6.2): for the UI
+  /// only; the group context decides. Absent while nobody did, and from older servers.
+  #[serde(rename = "strict", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_strict: Option<crate::StrictChannelHint>,
 }
 
 impl ConversationResponse {
@@ -430,11 +434,13 @@ mod tests {
     // Without the server's word, anything not archived offers posting.
     assert!(older.may_post());
     let archived = ConversationResponse {
+      maybe_strict: None,
       is_archived: true,
       ..older.clone()
     };
     assert!(!archived.may_post());
     let announcement = ConversationResponse {
+      maybe_strict: None,
       maybe_my_permissions: Some(vec![Permission::AddReaction]),
       maybe_importer_user_id: None,
       maybe_imported_through: None,
@@ -485,6 +491,7 @@ mod tests {
       })
       .collect();
     ConversationResponse {
+      maybe_strict: None,
       id: ConversationId::from_snowflake(Snowflake::new(9).unwrap()),
       maybe_space_id: None,
       kind,

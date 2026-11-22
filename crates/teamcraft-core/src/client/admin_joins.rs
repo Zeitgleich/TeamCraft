@@ -298,6 +298,7 @@ mod tests {
     is_archived: bool,
   ) -> ConversationResponse {
     ConversationResponse {
+      maybe_strict: None,
       id: ConversationId::from_snowflake(Snowflake::new(9).unwrap()),
       maybe_space_id: None,
       kind,

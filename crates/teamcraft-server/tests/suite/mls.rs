@@ -649,6 +649,119 @@ mod delivery_over_the_gateway {
 }
 
 /// A strict channel's admin continues its group from the last good epoch (e2ee.md §4.6.2, D4).
+/// A strict channel's hint (e2ee.md §4.6.2, issue #1924): told with a roles commit, shown with the
+/// conversation and to a workspace admin outside the group, never decided on; it keeps the channel
+/// private.
+mod strict_hint {
+  use super::*;
+
+  fn hint(is_strict: bool, version: u64) -> Value {
+    use base64::Engine;
+    let hash = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+    json!({"is_strict": is_strict, "version": version, "hash": hash})
+  }
+
+  async fn roles_commit(app: &TestApp, g: &Group, epoch: u64, strict: Value) -> Reply {
+    app
+      .post(
+        &g.carol,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.carol_device, "epoch": epoch, "commit": b64(&format!("commit-{epoch}")), "strict": strict}),
+      )
+      .await
+  }
+
+  #[tokio::test]
+  async fn a_roles_commit_tells_the_server_and_admins_outside_read_it() {
+    let app = app!();
+    let g = group(&app).await;
+    let before = app
+      .get(&g.carol, &format!("/conversations/{}/mls/strict", g.channel))
+      .await;
+    assert_eq!(before.status, StatusCode::OK, "{}", before.body);
+    assert_eq!(before.body, json!({"epoch": 0}));
+
+    let reply = roles_commit(&app, &g, 0, hint(true, 1)).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    let conversation = app.get(&g.dave, &format!("/conversations/{}", g.channel)).await;
+    assert_eq!(
+      conversation.body["strict"],
+      hint(true, 1),
+      "{}",
+      conversation.body
+    );
+    // A workspace admin with no device in the group reads the epoch and the hint.
+    let outside = app
+      .get(&admin(), &format!("/conversations/{}/mls/strict", g.channel))
+      .await;
+    assert_eq!(outside.status, StatusCode::OK, "{}", outside.body);
+    assert_eq!(outside.body, json!({"epoch": 1, "strict": hint(true, 1)}));
+    // A commit without a hint leaves it as it was.
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 1, json!([])).await;
+    let conversation = app.get(&g.dave, &format!("/conversations/{}", g.channel)).await;
+    assert_eq!(conversation.body["strict"], hint(true, 1));
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_strict_channel_is_made_public_only_after_strict_is_off() {
+    let app = app!();
+    let g = group(&app).await;
+    roles_commit(&app, &g, 0, hint(true, 1)).await;
+    let path = format!("/conversations/{}", g.channel);
+
+    let refused = app.patch(&owner(), &path, json!({"visibility": "public"})).await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+    let refused = app
+      .put(
+        &owner(),
+        &format!("/conversations/{}/visibility", g.channel),
+        json!({"visibility": "public"}),
+      )
+      .await;
+    assert_eq!(refused.status, StatusCode::CONFLICT, "{}", refused.body);
+
+    roles_commit(&app, &g, 1, hint(false, 2)).await;
+    let made_public = app.patch(&owner(), &path, json!({"visibility": "public"})).await;
+    assert_eq!(made_public.status, StatusCode::OK, "{}", made_public.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn a_malformed_hint_is_refused_with_its_commit() {
+    let app = app!();
+    let g = group(&app).await;
+    let reply = roles_commit(
+      &app,
+      &g,
+      0,
+      json!({"is_strict": true, "version": 1, "hash": b64("short")}),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    let backlog = app
+      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+      .await;
+    assert_eq!(backlog.body["current_epoch"], 0);
+    app.stop().await;
+  }
+
+  /// A member of the workspace with no device in the group and no admin role reads nothing.
+  #[tokio::test]
+  async fn somebody_outside_without_manage_members_reads_nothing() {
+    let app = app!();
+    let g = group(&app).await;
+    let erin = member("erin");
+    user_id(&app, &erin).await;
+    let reply = app
+      .get(&erin, &format!("/conversations/{}/mls/strict", g.channel))
+      .await;
+    assert!(reply.status.is_client_error(), "{}", reply.body);
+    app.stop().await;
+  }
+}
+
 mod rewind {
   use super::*;
 

@@ -207,6 +207,7 @@ mod tests {
 
   fn channel(has_picture: bool) -> ConversationResponse {
     ConversationResponse {
+      maybe_strict: None,
       id: id(1),
       maybe_space_id: Some(id(3)),
       kind: ConversationKind::Channel,

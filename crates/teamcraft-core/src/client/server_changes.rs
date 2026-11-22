@@ -769,6 +769,7 @@ mod tests {
     maybe_space_id: Option<SpaceId>,
   ) -> ConversationResponse {
     ConversationResponse {
+      maybe_strict: None,
       id: conversation(),
       maybe_space_id,
       kind: ConversationKind::Channel,

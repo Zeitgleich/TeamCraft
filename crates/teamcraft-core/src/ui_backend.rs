@@ -5782,6 +5782,7 @@ mod tests {
       is_deleted: false,
     };
     let direct = ConversationResponse {
+      maybe_strict: None,
       id: id(10),
       maybe_space_id: None,
       kind: ConversationKindProto::Dm,
@@ -5816,6 +5817,7 @@ mod tests {
       ..participant(3, "Deleted user")
     };
     let with_deleted = ConversationResponse {
+      maybe_strict: None,
       id: id(11),
       kind: ConversationKindProto::Group,
       participants: vec![
@@ -6630,6 +6632,7 @@ mod tests {
       let backend = backend_with_importer(Some(IMPORTER));
       let stored = imported_message(IMPORTER, ImportedAuthor::Deleted, Vec::new());
       let conversation = ConversationResponse {
+        maybe_strict: None,
         id: id(10),
         maybe_space_id: None,
         kind: ConversationKindProto::Channel,
@@ -7063,6 +7066,7 @@ mod tests {
       let backend = CoreChatBackend::new(MemoryStore::new(), id(1), Box::new(ManualClock::new(0)));
       let channel = id::<ConversationId>(10);
       let conversation = ConversationResponse {
+        maybe_strict: None,
         id: channel,
         maybe_space_id: None,
         kind: ConversationKindProto::Channel,
