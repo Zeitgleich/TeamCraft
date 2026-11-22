@@ -285,6 +285,20 @@ data class SecuritySnapshot(
   val backup: KeyBackup? = null,
   /** Voice messages under the verified workspace policy (#204); absent: on, up to 10 minutes. */
   @SerialName("voice_message_policy") val voiceMessagePolicy: VoiceMessagePolicy = VoiceMessagePolicy(),
+  /** The legal holds of the verified workspace policy (#211); empty before one was verified. */
+  @SerialName("legal_holds") val legalHolds: List<LegalHold> = emptyList(),
+) {
+  /** The hold on [conversation], if the verified policy holds it: its members read a banner. */
+  fun legalHold(conversation: String): LegalHold? = legalHolds.firstOrNull { it.conversationId == conversation }
+}
+
+/** One held conversation (docs/data-export.md §4.2): the organization's case reference, shown to every member. */
+@Serializable
+data class LegalHold(
+  @SerialName("conversation_id") val conversationId: String,
+  val reference: String,
+  /** When an owner placed it (epoch milliseconds, the owner's clock): shown, never decisive. */
+  @SerialName("placed_at") val placedAt: Long = 0,
 )
 
 /** What the verified roster says about this user; the console reads the rest (owners, problems). */

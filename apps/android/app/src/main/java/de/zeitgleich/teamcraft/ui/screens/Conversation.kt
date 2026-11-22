@@ -471,6 +471,7 @@ fun ConversationScreen(
     InactivityNoticeBanner(rights.maybeInactivityNotice) {
       viewModel.act(ChatActions.snoozeChannelInactivity(conversationId))
     }
+    LegalHoldBanner(snapshot?.security?.legalHold(conversationId))
     if (isChannel) ChannelUnreachableBanner(viewModel, conversationId)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())

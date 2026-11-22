@@ -133,6 +133,8 @@ struct ChatPane: View {
   @State private var maybePreJoin: PreJoinNotice?
   /// Whether voice messages may be recorded here and how long (#204).
   @State private var voicePolicy = VoiceMessagePolicy.fallback
+  /// The legal hold on this conversation under the verified policy (#211): its banner.
+  @State private var maybeLegalHold: LegalHold?
   /// What the channel shows of its anchor (e2ee.md §4.6.5, #1842): "Name not confirmed" in the header.
   @State private var maybeAnchorMarks: ChannelAnchorMarksItem?
   @AppStorage("share_typing") private var isSharingTyping = true
@@ -162,6 +164,7 @@ struct ChatPane: View {
         if threadId == nil, let notice = conversation.maybeInactivityNotice {
           InactivityNoticeBanner(conversationId: conversation.id, notice: notice)
         }
+        if threadId == nil, let hold = maybeLegalHold { LegalHoldBanner(hold: hold) }
       }
     }
     .onAppear {
@@ -190,6 +193,7 @@ struct ChatPane: View {
       await reloadDraftFiles()
       await reloadLinkPreview()
       if isChannel { maybeAnchorMarks = await model.channelAnchorMarks(conversation.id) }
+      if threadId == nil { maybeLegalHold = await model.legalHold(on: conversation.id) }
       runningCallCount = await model.runningCalls()[conversation.id] ?? 0
       mentionableGroups = await model.mentionableGroups(conversation.id)
       (mentionPeople, memberCount) = await model.mentionMembers(conversation.id)

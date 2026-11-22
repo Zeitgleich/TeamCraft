@@ -2099,6 +2099,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.CallEncryptionPending -> R.string.error_call_encryption_pending
       is TeamCraftException.CallDeviceLimit -> R.string.error_call_device_limit
       is TeamCraftException.TooLarge -> R.string.error_too_large
+      is TeamCraftException.LegalHold -> R.string.error_legal_hold
       is TeamCraftException.LinkCodeInvalid -> R.string.link_code_invalid
       is TeamCraftException.LinkCodeForNewDevice -> R.string.link_code_for_new_device
       is TeamCraftException.LinkCodeForSignedInDevice -> R.string.link_code_for_signed_in_device

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="legal_hold_notice">Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, %1$s). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, und das Gespräch kann nicht gelöscht werden, bis die Anordnung aufgehoben ist.</string>
+  <string name="error_legal_hold">Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold). Es kann erst gelöscht werden, wenn ein Inhaber sie aufhebt.</string>
+</resources>

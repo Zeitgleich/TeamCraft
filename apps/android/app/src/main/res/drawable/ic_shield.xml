@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A shield outline, drawn for the app on a 24 dp grid (the legal hold banner, as desktop's Shield icon). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+  android:width="24dp"
+  android:height="24dp"
+  android:viewportWidth="24"
+  android:viewportHeight="24">
+  <path
+    android:fillColor="#FF000000"
+    android:fillType="evenOdd"
+    android:pathData="M12,2 L4,5 V11 C4,16 7.4,20.7 12,22 C16.6,20.7 20,16 20,11 V5 Z M12,4.2 L6,6.5 V11 C6,14.9 8.5,18.5 12,19.8 C15.5,18.5 18,14.9 18,11 V6.5 Z" />
+</vector>

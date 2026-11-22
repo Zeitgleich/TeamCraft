@@ -577,6 +577,38 @@
         }
       }
     },
+    "legal_hold_notice %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation is under legal hold (%@). Retention doesn't delete its messages and files, and it can't be deleted until the hold is released."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, %@). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, und das Gespräch kann nicht gelöscht werden, bis die Anordnung aufgehoben ist."
+          }
+        }
+      }
+    },
+    "error_legal_hold": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This conversation is under legal hold. It can be deleted once an owner releases the hold."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold). Es kann erst gelöscht werden, wenn ein Inhaber sie aufhebt."
+          }
+        }
+      }
+    },
     "read_only_archived": {
       "localizations": {
         "en": {

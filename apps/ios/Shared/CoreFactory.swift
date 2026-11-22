@@ -155,6 +155,9 @@ enum CoreFailure: Equatable {
   case callDeviceLimit
   /// The server refused it as too large (a scheduled message over its cap): say it is too long.
   case tooLarge
+  /// The conversation (or a channel of the space) is under legal hold and can't be deleted until an
+  /// owner releases the hold (docs/data-export.md §4.2).
+  case legalHold
   /// The call needs the conversation's encryption group, which this device is not in yet: try again shortly.
   case callEncryptionPending
   /// The call that rang is over: answering started nothing, the call screen says the call ended.
@@ -197,6 +200,8 @@ enum CoreFailure: Equatable {
       self = .callDeviceLimit
     } else if name.hasPrefix("toolarge") {
       self = .tooLarge
+    } else if name.hasPrefix("legalhold") {
+      self = .legalHold
     } else if name.hasPrefix("linkcoderejected") {
       self = .linkCodeRejected
     } else if name.hasPrefix("linkattemptended") {

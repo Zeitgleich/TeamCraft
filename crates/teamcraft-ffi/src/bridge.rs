@@ -3,7 +3,7 @@
 //! mobile apps reuse the core's chat logic instead of growing their own. The app mirrors the view
 //! models as plain data classes.
 
-use teamcraft_client_api::backend::ChatBackend as _;
+use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::User;
 use teamcraft_client_api::remote::{
   ChatAction, ChatQuery, ChatSnapshot, ContactKeys, MessageTail, MessageWindow, SecuritySnapshot,
@@ -124,7 +124,11 @@ impl Reads {
 
   /// An action that only needs the backend ([`needs_client`]): its local half.
   pub(crate) fn apply_action(&self, action: ChatAction) -> Result<(), TeamCraftError> {
-    match action.apply_to(self.backend()?) {
+    let backend = self.backend()?;
+    if let Some(refused) = legal_hold_refusal(backend, &action) {
+      return Err(refused);
+    }
+    match action.apply_to(backend) {
       Some(unhandled) => Err(TeamCraftError::InvalidInput(format!(
         "unsupported action: {unhandled:?}"
       ))),
@@ -207,6 +211,45 @@ impl Reads {
       }),
     })
   }
+}
+
+/// The refusal of a deletion the verified policy forbids (data-export.md §4.2): a held channel, or
+/// a space with a held channel, can't be deleted until an owner releases the hold. The server
+/// refuses it too (`legal_hold`); this tells the user at once, where the core's queued commands
+/// have no way to answer. `None` for every other action, and for a hold this device hasn't
+/// verified yet (the server decides then).
+fn legal_hold_refusal(backend: &impl ChatBackend, action: &ChatAction) -> Option<TeamCraftError> {
+  deletion_refused_by_hold(
+    action,
+    |conversation| backend.legal_hold(conversation).is_some(),
+    |space| {
+      backend
+        .space_deletion_preview(space)
+        .map(|preview| {
+          preview
+            .channels
+            .into_iter()
+            .map(|channel| channel.conversation)
+            .collect()
+        })
+        .unwrap_or_default()
+    },
+  )
+}
+
+/// [`legal_hold_refusal`] for a policy that says whether a conversation `is_held` and a space's
+/// channels.
+fn deletion_refused_by_hold(
+  action: &ChatAction,
+  is_held: impl Fn(ConversationId) -> bool,
+  channels_of: impl Fn(teamcraft_proto::SpaceId) -> Vec<ConversationId>,
+) -> Option<TeamCraftError> {
+  let is_refused = match action {
+    ChatAction::DeleteChannel { conversation } => is_held(*conversation),
+    ChatAction::DeleteSpace { space } => channels_of(*space).into_iter().any(is_held),
+    _ => false,
+  };
+  is_refused.then(|| TeamCraftError::LegalHold("the conversation is under legal hold".into()))
 }
 
 /// Whether an action takes the client (encryption groups, keys) or the engine, and so runs there;
@@ -608,5 +651,80 @@ mod avatar_tests {
   #[test]
   fn refuses_garbage() {
     assert!(avatar_location("<html>login</html>", false).is_err());
+  }
+}
+
+#[cfg(test)]
+mod legal_hold_tests {
+  use teamcraft_client_api::model::id_from_raw;
+
+  use super::*;
+
+  fn held(conversation: ConversationId) -> bool {
+    conversation == id_from_raw(7)
+  }
+
+  fn channels(_: teamcraft_proto::SpaceId) -> Vec<ConversationId> {
+    vec![id_from_raw(3), id_from_raw(7)]
+  }
+
+  #[test]
+  fn a_held_channel_is_not_deleted() {
+    let delete = |raw| ChatAction::DeleteChannel {
+      conversation: id_from_raw(raw),
+    };
+    assert!(matches!(
+      deletion_refused_by_hold(&delete(7), held, channels),
+      Some(TeamCraftError::LegalHold(_))
+    ));
+    assert!(deletion_refused_by_hold(&delete(3), held, channels).is_none());
+  }
+
+  #[test]
+  fn a_space_with_a_held_channel_is_not_deleted() {
+    let delete = ChatAction::DeleteSpace {
+      space: id_from_raw(1),
+    };
+    assert!(matches!(
+      deletion_refused_by_hold(&delete, held, channels),
+      Some(TeamCraftError::LegalHold(_))
+    ));
+    assert!(deletion_refused_by_hold(&delete, |_| false, channels).is_none());
+    // No preview yet: nothing to check, the server decides.
+    assert!(deletion_refused_by_hold(&delete, held, |_| Vec::new()).is_none());
+  }
+
+  /// The apps decode this shape (`SecuritySnapshot.legalHolds` in Wire.kt, `LegalHoldSnapshot` in
+  /// LegalHold.swift): the snapshot's security part carries the verified holds.
+  #[test]
+  fn the_snapshot_carries_the_holds_the_apps_read() {
+    let security = SecuritySnapshot {
+      legal_holds: vec![teamcraft_proto::LegalHold {
+        conversation_id: id_from_raw(5),
+        reference: "Case 2026-14".into(),
+        placed_at: teamcraft_proto::UnixMillis(1_700_000_000_000),
+      }],
+      ..SecuritySnapshot::default()
+    };
+    let json = serde_json::to_value(&security).unwrap();
+    assert_eq!(
+      json["legal_holds"],
+      serde_json::json!([{
+        "conversation_id": "5",
+        "reference": "Case 2026-14",
+        "placed_at": 1_700_000_000_000_i64,
+      }])
+    );
+    let none = serde_json::to_value(SecuritySnapshot::default()).unwrap();
+    assert!(none.get("legal_holds").is_none(), "absent without holds");
+  }
+
+  #[test]
+  fn other_actions_are_never_refused() {
+    let leave = ChatAction::LeaveChannel {
+      conversation: id_from_raw(7),
+      deletes_if_last: true,
+    };
+    assert!(deletion_refused_by_hold(&leave, held, channels).is_none());
   }
 }

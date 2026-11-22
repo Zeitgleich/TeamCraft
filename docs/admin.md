@@ -1347,7 +1347,7 @@ Retention → Legal hold.
   case number, never a person's name or the reason.
 - **Members are told:** a held channel shows "This conversation is under legal hold" with the reference
   to every member, from the verified policy: the server can't fake it, though like any policy update
-  it can delay or withhold a newer one. Desktop and web show it; Android and iOS follow.
+  it can delay or withhold a newer one. Desktop, web, Android and iOS show it.
 - **Audit:** placing and releasing a hold are audit entries with the owner who signed it.
 - **Limits:** a hold keeps what is on the server against the routine deletions; members can still
   delete their own messages, and holds on people or direct messages are later steps
