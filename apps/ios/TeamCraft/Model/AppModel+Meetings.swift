@@ -24,6 +24,33 @@ extension AppModel {
     try await core().meetingLink(meetingId: meetingId)
   }
 
+  /// The meetings screen's read (#1905): the upcoming meetings through the core's upkeep, and the
+  /// lobbies of the live meetings the user hosts where somebody waits, by meeting. One list request
+  /// for both; nil if unread.
+  func meetingsWithLobbies() async -> (meetings: [Meeting], lobbies: [String: MeetingLobby])? {
+    guard let read = try? await core().meetingsWithLobbies(),
+      let list = Wire.decode(MeetingList.self, from: read.meetingsJson)
+    else { return nil }
+    let lobbies = Dictionary(read.lobbies.map { ($0.meetingId, $0) }, uniquingKeysWith: { first, _ in first })
+    return (upcomingMeetings(list.meetings, nowMs: Int64(Date().timeIntervalSince1970 * 1000)), lobbies)
+  }
+
+  /// "Invite guests": a one-time link with the organizer's key fingerprint as this device pinned
+  /// it (e2ee.md §4.6); throws when this device can't verify it.
+  func meetingGuestLink(meetingId: String) async throws -> MeetingGuestLink {
+    try await core().meetingGuestLink(meetingId: meetingId)
+  }
+
+  /// "Make a new link" (organizer only): the current one stops working, invitees get the new one.
+  func renewMeetingLink(meetingId: String) async throws {
+    try await core().renewMeetingLink(meetingId: meetingId)
+  }
+
+  /// The organizer's code guests see on their page; nil while this device can't pin the key.
+  func meetingOrganizerCode(meetingId: String) async -> String? {
+    try? await core().meetingOrganizerCode(meetingId: meetingId)
+  }
+
   /// Takes a cancellation back: the meeting's, or of a series this occurrence's.
   func restoreMeeting(_ meeting: Meeting) async throws {
     let maybeOccurrence = meeting.isOccurrenceCancelled == true ? meeting.startsAt : nil

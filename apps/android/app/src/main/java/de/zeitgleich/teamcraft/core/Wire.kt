@@ -933,6 +933,8 @@ data class Meeting(
   @SerialName("is_occurrence_cancelled") val isOccurrenceCancelled: Boolean = false,
   /** Of a series that skips public holidays: this occurrence is left out as one. */
   @SerialName("is_occurrence_holiday") val isOccurrenceHoliday: Boolean = false,
+  /** Whom the organizer made co-hosts (#1720): they invite guests and decide in the lobby too. */
+  @SerialName("co_host_user_ids") val coHostUserIds: List<String> = emptyList(),
 ) {
   val isRepeating: Boolean get() = maybeRecurrence != null
 }

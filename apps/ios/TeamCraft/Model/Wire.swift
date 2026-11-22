@@ -874,6 +874,8 @@ struct Meeting: Decodable, Equatable, Identifiable, Sendable {
   var isOccurrenceCancelled: Bool?
   /// Of a series that skips public holidays: this occurrence is left out as one.
   var isOccurrenceHoliday: Bool?
+  /// Whom the organizer made co-hosts (#1720): they invite guests and decide in the lobby too.
+  var coHostUserIds: [String]?
 
   var isRepeating: Bool { recurrence != nil }
 

@@ -10,6 +10,9 @@ use crate::model::{TimestampMs, UserId};
 pub const PAST_LOOKBACK_MS: i64 = 30 * 24 * 60 * 60_000;
 /// The server's own maximum: a month of daily series still fits.
 pub const PAST_LIST_LIMIT: u32 = 500;
+/// Join is the main action from this long before a meeting starts (dialling in early is normal).
+/// From then on its hosts see its lobby on the meeting list too.
+pub const JOIN_LEAD_MS: i64 = 15 * 60_000;
 
 /// The actions of a meeting's row for one user at one time.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -23,12 +26,20 @@ pub struct MeetingActions {
   pub can_restore: bool,
   /// "Remove" a cancelled meeting from the lists: its organizer, for a whole cancelled meeting.
   pub can_hide: bool,
+  /// "Invite guests" (a one-time guest link, the organizer's code): its organizer and co-hosts,
+  /// while it is still to come or runs.
+  pub can_invite_guests: bool,
+  /// "New meeting link" (the old one stops working): its organizer, while it is still to come or
+  /// runs. The server refuses everybody else.
+  pub can_renew_link: bool,
 }
 
 /// What [`MeetingActions`] are decided from: the facts of a row as an app has them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RowFacts {
   pub is_organizer: bool,
+  /// The organizer made the user a co-host (#1720).
+  pub is_co_host: bool,
   pub is_cancelled: bool,
   /// Only this occurrence of a series is cancelled (or left out as a holiday).
   pub is_occurrence_cancelled: bool,
@@ -37,11 +48,18 @@ pub struct RowFacts {
   pub ends_at: TimestampMs,
 }
 
+/// Whether Join is the meeting's main action at `now`: from [`JOIN_LEAD_MS`] before its start
+/// until it is over.
+pub fn is_joinable(meeting: &MeetingResponse, now: TimestampMs) -> bool {
+  !is_over(meeting, now) && meeting.starts_at.0 - JOIN_LEAD_MS <= now
+}
+
 impl MeetingActions {
   pub fn of(meeting: &MeetingResponse, me: UserId, now: TimestampMs) -> Self {
     Self::from_facts(
       RowFacts {
         is_organizer: meeting.organizer_user_id == me,
+        is_co_host: meeting.co_host_user_ids.contains(&me),
         is_cancelled: meeting.status == MeetingStatus::Cancelled,
         is_occurrence_cancelled: meeting.is_occurrence_cancelled,
         is_over: is_over(meeting, now),
@@ -57,6 +75,8 @@ impl MeetingActions {
       can_change: facts.is_organizer && !facts.is_over,
       can_restore: facts.is_organizer && facts.is_cancelled && facts.ends_at > now,
       can_hide: facts.is_organizer && facts.is_cancelled && !facts.is_occurrence_cancelled,
+      can_invite_guests: (facts.is_organizer || facts.is_co_host) && !facts.is_over,
+      can_renew_link: facts.is_organizer && !facts.is_over,
     }
   }
 }
@@ -93,10 +113,13 @@ mod tests {
         can_change: true,
         can_restore: false,
         can_hide: false,
+        can_invite_guests: true,
+        can_renew_link: true,
       }
     );
     let invited = MeetingActions::of(&upcoming, id(2), NOW);
     assert!(invited.can_copy_link && !invited.can_change);
+    assert!(!invited.can_invite_guests && !invited.can_renew_link);
     let mut cancelled = upcoming.clone();
     cancelled.status = MeetingStatus::Cancelled;
     let actions = MeetingActions::of(&cancelled, organizer, NOW);
@@ -129,6 +152,32 @@ mod tests {
     let later = meeting(organizer, NOW - 2 * HOUR);
     let past = past_meetings(&[earlier.clone(), running, later.clone()], NOW);
     assert_eq!(past, vec![later, earlier]);
+  }
+
+  #[test]
+  fn co_hosts_invite_guests_but_only_the_organizer_renews_the_link() {
+    let mut upcoming = meeting(id(1), NOW + HOUR);
+    upcoming.co_host_user_ids = vec![id(2)];
+    let co_host = MeetingActions::of(&upcoming, id(2), NOW);
+    assert!(co_host.can_invite_guests);
+    assert!(!co_host.can_renew_link && !co_host.can_change);
+    let over = MeetingActions::of(&upcoming, id(2), NOW + 2 * HOUR);
+    assert!(
+      !over.can_invite_guests,
+      "nobody invites to a meeting that is over"
+    );
+    let mut cancelled = upcoming;
+    cancelled.status = MeetingStatus::Cancelled;
+    let organizer = MeetingActions::of(&cancelled, id(1), NOW);
+    assert!(!organizer.can_invite_guests && !organizer.can_renew_link);
+  }
+
+  #[test]
+  fn join_leads_a_quarter_hour_early_until_the_end() {
+    let upcoming = meeting(id(1), NOW + JOIN_LEAD_MS);
+    assert!(is_joinable(&upcoming, NOW));
+    assert!(!is_joinable(&upcoming, NOW - 1));
+    assert!(!is_joinable(&upcoming, NOW + JOIN_LEAD_MS + HOUR), "over");
   }
 
   fn id<T: Id>(raw: i64) -> T {

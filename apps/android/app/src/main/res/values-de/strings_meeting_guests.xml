@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="meeting_invite_guests">Gäste einladen</string>
+  <string name="meeting_guest_link_make">Einmal-Link erstellen</string>
+  <string name="meeting_guest_link_label">Einmal-Link</string>
+  <string name="meeting_guest_link_hint">Persönlicher Link, funktioniert einmal. Schicke ihn einem Gast.</string>
+  <string name="meeting_guest_link_failed">Der Einmal-Link konnte nicht erstellt werden. Versuche es erneut.</string>
+  <string name="meeting_organizer_code">Dein Code für Gäste</string>
+  <string name="meeting_organizer_code_hint">Gäste sehen diesen Code auf ihrer Seite und können ihn mit dir vergleichen.</string>
+  <string name="meeting_new_link">Neuen Link erstellen</string>
+  <string name="meeting_new_link_hint">Der bisherige Link funktioniert sofort nicht mehr. Eingeladene bekommen den neuen per E-Mail.</string>
+  <string name="meeting_new_link_confirm_title">Neuen Meeting-Link erstellen?</string>
+  <string name="meeting_new_link_confirm">Neuen Link erstellen</string>
+  <string name="meeting_new_link_keep">Link behalten</string>
+  <string name="meeting_link_renewed">Neuer Link erstellt: Der alte funktioniert nicht mehr.</string>
+  <string name="meeting_new_link_failed">Der neue Link konnte nicht erstellt werden. Versuche es erneut.</string>
+</resources>
