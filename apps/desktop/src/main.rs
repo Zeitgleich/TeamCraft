@@ -5,6 +5,8 @@
 // Hides the console window on Windows release builds; harmless on macOS and Linux.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod allocator_trim;
 #[cfg(target_os = "macos")]
 mod app_menu;
 #[cfg(target_os = "linux")]
@@ -271,6 +273,8 @@ fn main() -> anyhow::Result<()> {
       }
       if matches!(event, WindowEvent::Focused(false)) && window.label() == tray::MAIN_WINDOW {
         draft_flush::persist(window);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        allocator_trim::trim_in_background();
       }
       // The small call window shows while the main window is away during a call (#2077).
       if let WindowEvent::Focused(is_focused) = event
@@ -292,6 +296,8 @@ fn main() -> anyhow::Result<()> {
           if let Err(error) = window.hide() {
             tracing::debug!(%error, "could not hide the window");
           }
+          #[cfg(all(target_os = "linux", target_env = "gnu"))]
+          allocator_trim::trim_in_background();
         } else if draft_flush::hold_close(window) {
           api.prevent_close();
         }

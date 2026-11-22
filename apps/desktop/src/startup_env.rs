@@ -20,6 +20,12 @@
 //!   the allocator"; #1708).
 //!   Two arenas and a fixed threshold give freed memory back. Not set when the user set them or
 //!   `GLIBC_TUNABLES`.
+//! - `JSC_numberOfWasmCompilerThreads=4`, on machines with more than five hardware threads:
+//!   JavaScriptCore compiles WebAssembly on one thread per hardware thread but one, and each keeps
+//!   some of what it compiled with: on 24 threads 12 to 16 MiB more for the app's modules in
+//!   `jsc`, 6 MiB of the web process in `desktop_perf.rs`. Four compile the app's main module in
+//!   40 instead of 23 ms (docs/performance.md, "Desktop on Linux: where the memory is"; #1708). Not
+//!   set when the user set it.
 
 use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
@@ -38,6 +44,12 @@ const ARENA_MAX: &str = "2";
 /// glibc's default of 128 KiB, but fixed: set, glibc no longer raises it (up to 64 MiB) after a
 /// large block is freed, and allocations from 128 KiB up keep their own mapping, returned on free.
 const TRIM_THRESHOLD_BYTES: &str = "131072";
+/// JavaScriptCore's option for its WebAssembly compiler threads (JSC reads `JSC_<option>`).
+const WASM_COMPILER_THREADS_VARIABLE: &str = "JSC_numberOfWasmCompilerThreads";
+/// Compiler threads the app's WebAssembly gets: JavaScriptCore's default is one per hardware
+/// thread but one, so the variable is set only where that is more.
+const WASM_COMPILER_THREADS: usize = 4;
+const WASM_COMPILER_THREADS_VALUE: &str = "4";
 
 /// What the start found in its environment.
 struct StartEnvironment<'a> {
@@ -46,6 +58,10 @@ struct StartEnvironment<'a> {
   maybe_dmabuf_choice: Option<&'a OsStr>,
   /// The user tunes glibc's allocator: `GLIBC_TUNABLES` or one of our two variables is set.
   is_allocator_tuned: bool,
+  /// The user chose JavaScriptCore's WebAssembly compiler threads.
+  is_wasm_compiler_tuned: bool,
+  /// Hardware threads the process may run on.
+  available_threads: usize,
   is_flatpak: bool,
 }
 
@@ -63,6 +79,8 @@ pub fn ensure_startup_environment() {
     is_allocator_tuned: [TUNABLES_VARIABLE, ARENA_MAX_VARIABLE, TRIM_THRESHOLD_VARIABLE]
       .iter()
       .any(|name| std::env::var_os(name).is_some()),
+    is_wasm_compiler_tuned: std::env::var_os(WASM_COMPILER_THREADS_VARIABLE).is_some(),
+    available_threads: std::thread::available_parallelism().map_or(1, usize::from),
     is_flatpak: std::env::var_os("FLATPAK_ID").is_some(),
   });
   if missing.is_empty() {
@@ -81,7 +99,8 @@ pub fn ensure_startup_environment() {
 
 /// The variables to set before GTK starts: none the user set themselves, the portal outside
 /// Flatpak, the DMABUF switch only when the user chose the compatible renderer, and the
-/// allocator's unless the user tunes it.
+/// allocator's unless the user tunes it, and fewer WebAssembly compiler threads on a machine where
+/// JavaScriptCore would start more.
 fn missing_variables(start: &StartEnvironment<'_>) -> Vec<(&'static str, &'static str)> {
   let mut missing = Vec::new();
   if start.maybe_portal.is_none() && !start.is_flatpak {
@@ -94,6 +113,10 @@ fn missing_variables(start: &StartEnvironment<'_>) -> Vec<(&'static str, &'stati
   if !start.is_allocator_tuned {
     missing.push((ARENA_MAX_VARIABLE, ARENA_MAX));
     missing.push((TRIM_THRESHOLD_VARIABLE, TRIM_THRESHOLD_BYTES));
+  }
+  let default_wasm_compiler_threads = start.available_threads.saturating_sub(1);
+  if !start.is_wasm_compiler_tuned && default_wasm_compiler_threads > WASM_COMPILER_THREADS {
+    missing.push((WASM_COMPILER_THREADS_VARIABLE, WASM_COMPILER_THREADS_VALUE));
   }
   missing
 }
@@ -144,6 +167,25 @@ mod tests {
     assert!(missing_variables(&start(None, None, Some(OsStr::new("1")), true, true)).is_empty());
   }
 
+  #[test]
+  fn many_hardware_threads_get_fewer_wasm_compiler_threads() {
+    let wasm = (WASM_COMPILER_THREADS_VARIABLE, WASM_COMPILER_THREADS_VALUE);
+    let on = |available_threads| StartEnvironment {
+      available_threads,
+      ..start(None, None, None, true, true)
+    };
+    assert_eq!(missing_variables(&on(24)), vec![wasm]);
+    assert_eq!(missing_variables(&on(6)), vec![wasm]);
+    // JavaScriptCore's own default is four threads or fewer here.
+    assert!(missing_variables(&on(5)).is_empty());
+    assert!(missing_variables(&on(1)).is_empty());
+    let tuned = StartEnvironment {
+      is_wasm_compiler_tuned: true,
+      ..on(24)
+    };
+    assert!(missing_variables(&tuned).is_empty());
+  }
+
   fn start<'a>(
     maybe_portal: Option<&'a OsStr>,
     maybe_dmabuf: Option<&'a OsStr>,
@@ -156,6 +198,8 @@ mod tests {
       maybe_dmabuf,
       maybe_dmabuf_choice,
       is_allocator_tuned,
+      is_wasm_compiler_tuned: false,
+      available_threads: 4,
       is_flatpak,
     }
   }

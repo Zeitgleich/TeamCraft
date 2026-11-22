@@ -2310,6 +2310,74 @@ about 240 MiB anonymous that WebKit doesn't release, which with CPU painting und
 backing stores a GPU keeps in VRAM. The release build on a GPU with the same workspace is the
 number the budget is about; it is the open part of #1708.
 
+### Desktop on Linux: where the memory is (issue #1708)
+
+Same harness, workspace and machine as the two sections above (`desktop_perf.rs`, large workspace,
+40 channel switches, debug shell with the release web client, Xvfb), measured 2026-11-22 on main
+after #2252, WebKitGTK 2.54.2, AMD Ryzen 9 5900X (24 hardware threads). The page was taken apart
+while the app was held after the switches (`PERF_DESKTOP_HOLD_SECS`), over the inspector (`Memory`,
+`Heap.snapshot`, `LayerTree`) and from `/proc/<pid>/smaps`; the cost of a compiled module was
+measured with WebKitGTK's own `jsc` shell on the release build's `.wasm` files.
+
+Under Xvfb the page paints on the CPU (eight `SkiaCPUWorker` threads) but composites on the
+machine's GPU through its render node: 118 MiB of VRAM, which isn't in the PSS. With the
+memory pressure settings of #1713 WebKit already gives back what it can: a forced
+`WTF::releaseFastMallocFreeMemory` in the held page freed nothing, so what is left is in use.
+
+| The page's anonymous memory (235 MiB), large workspace      | Value       | Whose                                                   |
+|-------------------------------------------------------------|-------------|---------------------------------------------------------|
+| JavaScript heap (inspector `Memory`, `javascript`)          | 49 MiB      | of it 22 MiB wasm memory                                |
+| Live JavaScript objects (`Heap.snapshot`)                   | 25 MiB      | 22 MiB of it two `ArrayBuffer`s: the UI's wasm memories |
+| Compiled WebAssembly: 37 instances (the app, its parts)     | ≈ 45–60 MiB | JavaScriptCore, about 4.4 times the bytes of a module   |
+| Composited layers (`LayerTree`, WebKit's estimate)          | 37 MiB      | 30.5 MiB the message list's scroller, 4.5 MiB the root  |
+| glibc heap (`[heap]`: fontconfig, GTK, Mesa)                | 21 MiB      | the libraries                                           |
+| JIT code (anonymous executable mappings)                    | 11 MiB      | JavaScriptCore                                          |
+| The rest (DOM of 672 nodes, 3,449 style rules, fonts, Skia) | ≈ 50 MiB    | WebKit                                                  |
+
+The largest single holder is the compiled WebAssembly: compiling the app's main module (7.6 MB) once
+more in the held page took 36.5 MiB, and in `jsc` the module alone takes 33 MiB with one compiler
+thread and 46 MiB with JavaScriptCore's default of one per hardware thread but one; the app's
+module with 30 of its parts takes 67 MiB on 24 threads and 51 MiB on two. The per-thread part is
+what the threads keep; the rest grows with the code the app loads (it is built with
+`opt-level = "z"` already and has no name section) and has no JavaScriptCore option: neither
+switching off BBQ and OMG nor the in-place interpreter changed it.
+
+What changed:
+
+- **Four WebAssembly compiler threads.** The start sets `JSC_numberOfWasmCompilerThreads=4` where
+  JavaScriptCore would start more (more than five hardware threads), unless the user set it
+  (`startup_env.rs`; the web process inherits the variable). The main module compiles in 40 instead
+  of 23 ms (`jsc`: 111 ms on one thread, 62 on two, 28 on eight); the start to the first channel
+  stayed at 1.8–1.9 s.
+- **The shell's heap goes back when the window does.** glibc returns only the top of its heap; pages
+  freed in the middle stay with the process. `malloc_trim` in the held shell gave 14 of its 82 MiB
+  back. The shell now trims, on a thread of its own and at most once a minute, when the main window
+  loses the focus or hides to the tray (`allocator_trim.rs`, `teamcraft-desktop-native`).
+
+Both builds side by side on the same Xvfb (each its own stack and session), anonymous memory by
+process; the PSS of the two runs splits the shared libraries between them, so the totals compare by
+their anonymous part:
+
+| Large workspace, anonymous memory | Before, shown | After, shown | Before, hidden | After, hidden |
+|-----------------------------------|---------------|--------------|----------------|---------------|
+| Page (`WebKitWebProcess`)         | 236.2 MiB     | 229.8 MiB    | 236.2 MiB      | 230.0 MiB     |
+| Shell and core                    | 84.7 MiB      | 88.7 MiB     | 84.7 MiB       | 67.0 MiB      |
+| Network process                   | 12.6 MiB      | 12.7 MiB     | 12.6 MiB       | 12.7 MiB      |
+| Whole app                         | 333.5 MiB     | 331.2 MiB    | 333.5 MiB      | 309.7 MiB     |
+| Idle CPU, whole app               | 0.18 %        | 0.26 %       | 0.17 %         | 0.31 %        |
+| Channel switch p50 / p95          | 107 / 175 ms  | 111 / 175 ms | -              | -             |
+
+The window shown and focused keeps its heap (nothing in the harness takes the focus away); hidden,
+the app is 24 MiB smaller. Run alone, the whole app was 530 MiB PSS shown before the change (the
+shell 191, of it 78 MiB the debug binary's mapped files; the page 316; the network process 23).
+
+Still above the budget in this measurement. What is left, by size: the compiled WebAssembly, which
+only less code loaded at the start would shrink; the JavaScript heap, half of it the UI's wasm
+memory, which never shrinks once grown; the message list's composited scroller, painted on the CPU
+here, where a GPU that paints keeps its tiles in VRAM; and the debug binary's mapped files (about
+34 MiB more than a release binary's). The release build on a GPU remains the number the budget is
+about.
+
 ### Coming back and bad networks, end to end (issue #972)
 
 `tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the

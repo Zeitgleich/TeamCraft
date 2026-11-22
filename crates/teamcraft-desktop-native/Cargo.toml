@@ -47,7 +47,7 @@ undocumented_unsafe_blocks = "deny"
 default = ["shell"]
 # The desktop shell's OS calls (the table in lib.rs). Off for teamcraft-media, which needs only
 # `openh264` and must not pull WebKitGTK, WebView2 or AppKit into every native build.
-shell = ["dep:block2", "dep:objc2", "dep:objc2-user-notifications", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:webkit2gtk-sys", "dep:windows", "dep:webview2-com"]
+shell = ["dep:block2", "dep:objc2", "dep:objc2-user-notifications", "dep:objc2-app-kit", "dep:objc2-foundation", "dep:webkit2gtk-sys", "dep:libc", "dep:windows", "dep:webview2-com"]
 # OpenH264's `SetOption` for the native video encoders' in-place rate changes (#1781): the
 # `openh264` crate offers it only through its raw API.
 openh264 = ["dep:openh264", "dep:openh264-sys2"]
@@ -74,6 +74,8 @@ objc2-foundation = { version = "0.3.2", optional = true, default-features = fals
 # Linux: the WebKitGTK version at run time (MIT; the version wry uses, so already in the tree).
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk-sys = { version = "2.0.2", optional = true }
+# Linux (glibc): `malloc_trim` (MIT/Apache-2.0; already in the tree, the shell uses it).
+libc = { version = "0.2", optional = true }
 
 # Windows: PowerRegisterSuspendResumeNotification and NotifyNetworkConnectivityHintChange
 # (MIT/Apache-2.0; the version the shell uses).

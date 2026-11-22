@@ -11126,6 +11126,7 @@ version = "1.0.41"
 dependencies = [
  "block2",
  "jni-sys 0.4.1",
+ "libc",
  "ndk-context",
  "objc2",
  "objc2-app-kit",
