@@ -38,6 +38,9 @@ pub struct CrashReportsConfig {
   pub allows_opt_out: bool,
   /// Say once, on the first start with reports on, that the app sends them.
   pub shows_notice: bool,
+  /// The publisher's service receives the reports (the notice says "the app developer"); else the
+  /// organization does, which an older server and an unknown value also count as.
+  pub is_publisher_recipient: bool,
 }
 
 /// The crash reports setting in a `GET /api/v1/server-info` answer (`response_json`, status 200).
@@ -55,7 +58,15 @@ pub fn crash_reports_config(response_json: String) -> Option<CrashReportsConfig>
     environment: config.environment.as_str().to_owned(),
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
+    is_publisher_recipient: config.recipient.is_publisher(),
   })
+}
+
+/// How long the first-start notice stays before it closes by itself and counts as seen, in
+/// milliseconds; the same value as on the web.
+#[uniffi::export]
+pub fn crash_notice_timeout_ms() -> u64 {
+  u64::try_from(teamcraft_client_api::crash_reporting::NOTICE_TIMEOUT.as_millis()).unwrap_or(u64::MAX)
 }
 
 /// What the mobile apps measure besides the SDK's own app start and screen loads (issue #1521),
@@ -121,6 +132,18 @@ mod tests {
     assert_eq!(config.environment, "production");
     assert!(!config.allows_opt_out);
     assert!(config.shows_notice);
+    // An older server doesn't say who receives them: the organization.
+    assert!(!config.is_publisher_recipient);
+    let publisher = crash_reports_config(answer(&format!(
+      r#"{{"dsn":"{DSN}","sample_percent":25,"environment":"production","recipient":"publisher"}}"#
+    )))
+    .expect("config");
+    assert!(publisher.is_publisher_recipient);
+  }
+
+  #[test]
+  fn the_notice_stays_thirty_seconds() {
+    assert_eq!(crash_notice_timeout_ms(), 30_000);
   }
 
   #[test]

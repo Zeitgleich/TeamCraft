@@ -90,6 +90,30 @@ pub struct CrashReportsInfo {
   pub allows_opt_out: bool,
   #[serde(default = "is_on")]
   pub shows_notice: bool,
+  /// Who receives the reports, so the apps can say it. Absent (an older server): the
+  /// organization, the conservative reading.
+  #[serde(default)]
+  pub recipient: CrashReportsRecipient,
+}
+
+wire_enum! {
+  /// Who receives an instance's crash reports, as the apps tell people on the first start.
+  #[derive(Default)]
+  pub enum CrashReportsRecipient {
+    /// The publisher's service: the developer of the app (and the server).
+    Publisher => "publisher",
+    /// The instance's own backend: the organization running it. Also what an older server or a
+    /// value this client doesn't know counts as.
+    #[default]
+    Organization => "organization",
+  }
+}
+
+impl CrashReportsRecipient {
+  /// The publisher, or else the organization: an unknown value is read conservatively.
+  pub fn is_publisher(&self) -> bool {
+    matches!(self, Self::Publisher)
+  }
 }
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -200,6 +224,10 @@ impl CrashReportSettings {
       environment: self.environment.clone(),
       allows_opt_out: self.allows_opt_out,
       shows_notice: self.shows_notice,
+      recipient: match self.mode {
+        CrashReportsMode::Publisher => CrashReportsRecipient::Publisher,
+        _ => CrashReportsRecipient::Organization,
+      },
     })
   }
 }
@@ -349,6 +377,7 @@ mod tests {
         environment: "production".to_owned(),
         allows_opt_out: true,
         shows_notice: true,
+        recipient: CrashReportsRecipient::Publisher,
       })
     );
     // A build without a publisher service sends nothing by default.
@@ -368,6 +397,7 @@ mod tests {
     settings.sample_percent = 25;
     let info = settings.info(Some(&publisher)).unwrap();
     assert_eq!(info.dsn, "https://abc@errors.example.com/2");
+    assert_eq!(info.recipient, CrashReportsRecipient::Organization);
     assert_eq!(info.sample_percent, 25);
     settings.mode = CrashReportsMode::Off;
     assert_eq!(settings.info(Some(&publisher)), None);
@@ -427,6 +457,38 @@ mod tests {
     );
     assert_eq!(row.call_reports_per_call, DEFAULT_CALL_REPORTS_PER_CALL);
     assert_eq!(info.call_reports_per_call, DEFAULT_CALL_REPORTS_PER_CALL);
+  }
+
+  #[test]
+  fn the_recipient_keeps_its_wire_names_and_reads_conservatively() {
+    let info_json = |recipient: Option<&str>| {
+      let mut value = serde_json::json!({
+        "dsn": "https://pub@crashes.example.com/1", "sample_percent": 10, "environment": "production",
+      });
+      if let Some(recipient) = recipient {
+        value["recipient"] = recipient.into();
+      }
+      value
+    };
+    let parse = |recipient| serde_json::from_value::<CrashReportsInfo>(info_json(recipient)).unwrap();
+    assert_eq!(
+      parse(Some("publisher")).recipient,
+      CrashReportsRecipient::Publisher
+    );
+    assert_eq!(
+      parse(Some("organization")).recipient,
+      CrashReportsRecipient::Organization
+    );
+    // An older server leaves it out.
+    assert_eq!(parse(None).recipient, CrashReportsRecipient::Organization);
+    // A newer server's value this client doesn't know is not the publisher.
+    let unknown = parse(Some("partner")).recipient;
+    assert_eq!(unknown, CrashReportsRecipient::Unknown("partner".to_owned()));
+    assert!(!unknown.is_publisher());
+    assert_eq!(
+      serde_json::to_value(CrashReportsRecipient::Publisher).unwrap(),
+      serde_json::json!("publisher")
+    );
   }
 
   #[test]

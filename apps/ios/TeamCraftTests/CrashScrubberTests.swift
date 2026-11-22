@@ -89,5 +89,21 @@ final class CrashScrubberTests: XCTestCase {
     let older = #"{"dsn":"https://key@errors.example.com/1","sampleRate":0.5,"environment":"production","allowsOptOut":true,"showsNotice":true}"#
     let config = try JSONDecoder().decode(CrashConfig.self, from: Data(older.utf8))
     XCTAssertEqual(config.traceRate, 0)
+    // It doesn't say who receives the reports: the organization.
+    XCTAssertFalse(config.isPublisherRecipient)
+  }
+
+  func testTheNoticeFollowsTheRecipientAndTheOptOut() {
+    func status(publisher: Bool, optOut: Bool) -> CrashReportsStatus {
+      CrashReportsStatus(
+        CrashConfig(
+          dsn: "https://key@errors.example.com/1", sampleRate: 0.1, environment: "production",
+          allowsOptOut: optOut, showsNotice: true, isPublisherRecipient: publisher))
+    }
+    XCTAssertEqual(status(publisher: true, optOut: true).noticeKey, "crash_reports_notice_publisher_optional")
+    XCTAssertEqual(status(publisher: true, optOut: false).noticeKey, "crash_reports_notice_publisher_required")
+    XCTAssertEqual(status(publisher: false, optOut: true).noticeKey, "crash_reports_notice_organization_optional")
+    XCTAssertEqual(status(publisher: false, optOut: false).noticeKey, "crash_reports_notice_organization_required")
+    XCTAssertEqual(status(publisher: false, optOut: false).hintKey, "crash_reports_required_hint_organization")
   }
 }
