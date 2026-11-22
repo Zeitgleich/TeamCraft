@@ -416,37 +416,15 @@ jobs:
       - name: Sign the app (inside out) and verify the signature
         if: ${{ !inputs.warm-cache }}
         run: apps/desktop/packaging/macos/sign-app.sh "$APP"
-      - name: Notarize the app (optional)
-        if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
-        env:
-          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
-          APP_STORE_CONNECT_KEY_ID: ${{ vars.APP_STORE_CONNECT_KEY_ID }}
-          APP_STORE_CONNECT_ISSUER_ID: ${{ vars.APP_STORE_CONNECT_ISSUER_ID }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
-        run: |
-          apps/desktop/packaging/macos/notarize.sh "$APP"
-          MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
+      # One notarization per architecture: the signed dmg is submitted, which covers the app in it
+      # (docs/release.md). The update archive is packed after it, from the stapled app.
       - name: Build the dmg and verify the app inside it
         if: ${{ !inputs.warm-cache }}
         run: |
           version="$(scripts/check-versions.sh)"
           mkdir -p target/dmg
           apps/desktop/packaging/macos/make-dmg.sh "$APP" "target/dmg/TeamCraft_${version}_${{ matrix.arch }}.dmg"
-      # The updater replaces the whole app with this archive of the signed (and, with the secrets,
-      # notarized and stapled) app. No AppleDouble files: they would break the seal.
-      - name: Update archive of the app, signed for the updater (optional)
-        if: ${{ !inputs.warm-cache }}
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          version="$(scripts/check-versions.sh)"
-          archive="target/dmg/TeamCraft_${version}_${{ matrix.arch }}.app.tar.gz"
-          COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
-          apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
-      - name: Notarize the dmg (optional)
+      - name: Notarize the dmg once, staple it and the app (optional)
         if: ${{ !inputs.warm-cache && env.MACOS_SIGNING_IDENTITY != '' }}
         env:
           APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
@@ -459,6 +437,24 @@ jobs:
           dmg="$(ls target/dmg/*.dmg)"
           apps/desktop/packaging/macos/notarize.sh "$dmg"
           spctl --assess -vvv --type open --context context:primary-signature "$dmg"
+          # Notarizing the dmg registers a ticket for every signed item in it, the app included, so
+          # the app needs no submission of its own: staple its ticket (fetched by the app's hash)
+          # onto the app on disk. That is the app the update archive below packs. The copy inside
+          # the dmg stays as signed (changing it would change the dmg and void its ticket).
+          xcrun stapler staple "$APP"
+          MACOS_REQUIRE_NOTARIZED=1 apps/desktop/packaging/macos/verify-app.sh "$APP"
+      # The updater replaces the whole app with this archive of the signed (and, with the secrets,
+      # notarized and stapled by the step above) app. No AppleDouble files: they would break the seal.
+      - name: Update archive of the app, signed for the updater (optional)
+        if: ${{ !inputs.warm-cache }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        run: |
+          version="$(scripts/check-versions.sh)"
+          archive="target/dmg/TeamCraft_${version}_${{ matrix.arch }}.app.tar.gz"
+          COPYFILE_DISABLE=1 tar --no-mac-metadata -C "$(dirname "$APP")" -czf "$archive" "$(basename "$APP")"
+          apps/desktop/packaging/sign-update.sh "$TEAMCRAFT_RELEASE_VERSION" "$archive"
       - name: Keep the dSYM privately (optional)
         if: ${{ !inputs.warm-cache }}
         env:

@@ -283,8 +283,8 @@ ad-hoc signature gets the normal "could not verify" prompt instead.
 
 With the secrets `APPLE_CERTIFICATE` (the *Developer ID Application* certificate with its private
 key as base64 .p12) and `APPLE_CERTIFICATE_PASSWORD`, the same job signs with the Developer ID, with
-hardened runtime and timestamp, notarizes and staples the app and the dmg (`notarize.sh`), and
-requires Gatekeeper to accept them. Notarization uses the App Store Connect API key of the iOS
+hardened runtime and timestamp, notarizes the dmg once (`notarize.sh`; the ticket covers the app in it), staples the dmg and the app
+(the update archive packs the stapled app), and requires Gatekeeper to accept them. Notarization uses the App Store Connect API key of the iOS
 release (secret `APP_STORE_CONNECT_API_KEY`, variables `APP_STORE_CONNECT_KEY_ID`,
 `APP_STORE_CONNECT_ISSUER_ID`, below), or without it `APPLE_ID`, `APPLE_PASSWORD` (an app-specific
 password) and `APPLE_TEAM_ID`. The signing identity is read from the certificate;
