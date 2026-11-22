@@ -38,6 +38,7 @@ use crate::components::lightbox::prefers_reduced_motion;
 use crate::components::lightbox_controls::small_still_frame;
 use crate::components::live_photo::{LiveBadge, LiveMotion, LiveVideo};
 use crate::components::message_actions::{copy_to_clipboard, reply_to_file};
+use crate::components::progress_ring::{LoadPhase, LoadRing, ProgressRing};
 use crate::components::sheet::PopoverBackdrop;
 use crate::components::sliding_indicator::SlidingIndicator;
 use crate::i18n::{I18n, use_i18n};
@@ -173,12 +174,7 @@ fn UploadControl(
     ),
     Some(UploadPill::Failed { reason }) => i18n.t(stall_key(reason)),
   };
-  // The ring's share as a dash offset: 0 is full, 100 empty (the circle's path length is 100).
-  let offset = move || {
-    let fraction = upload.get().and_then(UploadPill::fraction).unwrap_or(0.0);
-    format!("{:.2}", 100.0 - fraction * 100.0)
-  };
-  let is_turning = move || upload.get().is_some_and(|pill| pill.fraction().is_none());
+  let maybe_fraction = Signal::derive(move || upload.get().and_then(UploadPill::fraction));
   let going_up = move || {
     view! {
       <button
@@ -191,10 +187,7 @@ fn UploadControl(
           actions.cancel();
         }
       >
-        <svg class="upload-ring" class:is-turning=is_turning viewBox="0 0 36 36" aria-hidden="true">
-          <circle class="upload-ring-track" cx="18" cy="18" r="16" />
-          <circle class="upload-ring-fill" cx="18" cy="18" r="16" pathLength="100" stroke-dashoffset=offset />
-        </svg>
+        <ProgressRing maybe_fraction=maybe_fraction />
         <span class="upload-stop-square" aria-hidden="true"></span>
       </button>
       <span class="upload-pill-text" role="status">{label}</span>
@@ -491,6 +484,11 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
   let has_thumbnail = thumbnail_src.is_some();
   // Revoked when the row leaves the screen.
   StoredValue::new_local(thumbnail);
+  // The lightbox opened from here knows the file while its own list doesn't have it yet; held as
+  // long as the tile is.
+  let shown = Rc::new(file.clone());
+  media_cache::remember_shown(key, &shown);
+  StoredValue::new_local(shown);
   let loads = loads_inline(kind, file.size_bytes);
   // Nothing to show and nothing to load (a format this platform may not decode, too large to fetch
   // by itself): a file card instead of a grey box (issue #337). Videos keep their tile and play in
@@ -621,6 +619,27 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
     });
   });
   let is_coming = move || plays() && is_loading.get();
+  // The full picture coming down behind the thumbnail: the upload's ring over it, filling once the
+  // core says how far it got; a retry once it failed. Animations say it on their play button.
+  let maybe_progress = match file.transfer {
+    FileTransfer::Downloading {
+      done_bytes,
+      total_bytes,
+    } => Some((done_bytes, total_bytes)),
+    _ => None,
+  };
+  let load_ring = Memo::new(move |_| {
+    let phase = match (full.with(Option::is_some), is_loading.get(), is_unavailable.get()) {
+      (true, ..) => LoadPhase::Ready,
+      (false, true, _) => LoadPhase::Loading,
+      (false, false, true) => LoadPhase::Failed,
+      (false, false, false) => LoadPhase::Idle,
+    };
+    match kind {
+      MediaKind::Image => LoadRing::of(phase, maybe_progress),
+      MediaKind::Animated | MediaKind::Video => LoadRing::Hidden,
+    }
+  });
   // Not loaded (the storage is down, the network gone) and nothing else to show: asked for again
   // with the app's other pictures, without waiting for a click. The button is a shortcut.
   if let Some(retries) = inline.maybe_retries {
@@ -833,7 +852,12 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
             }}
           </button>
         })}
-        // Not loaded (offline, server trouble) and nothing else to show: try again on demand.
+        {move || load_ring.get().is_shown().then(|| view! {
+          <span class="media-loading" aria-hidden="true">
+            <ProgressRing maybe_fraction=Signal::derive(move || load_ring.get().maybe_fraction()) />
+          </span>
+        })}
+        // Not loaded (offline, server trouble): try again on demand.
         {move || is_unavailable.get().then(|| view! {
           <button
             class="btn btn-small media-retry"
@@ -848,7 +872,7 @@ fn MediaTile(file: FileInfo, layout: TileLayout) -> impl IntoView {
           </button>
         })}
         {downloading.map(|(done, total)| view! {
-          <span class="upload-state">
+          <span class="upload-state" class:is-hidden=move || load_ring.get().is_shown()>
             <TransferRing done_bytes=done total_bytes=total />
             <span class="upload-label" role="status">{transfer_label(i18n, done, total)}</span>
           </span>
@@ -1081,7 +1105,7 @@ struct InlineLoad {
   full: RwSignal<Option<Rc<ObjectUrl>>, LocalStorage>,
   /// This platform can't decode it: shown as a file card from then on.
   is_broken: RwSignal<bool>,
-  /// Not loaded and no thumbnail to show instead: the tile offers "Try again".
+  /// Not loaded (offline, server trouble): the tile offers "Try again".
   is_unavailable: RwSignal<bool>,
   is_loading: RwSignal<bool>,
   /// The last load failed; an animation doesn't try again until the user asks.
@@ -1135,11 +1159,12 @@ impl InlineLoad {
           drop(full.try_set(Some(url)));
         },
         Ok(None) => {},
-        // With a thumbnail it stays; the lightbox shows the error and a retry.
+        // Not decodable with a thumbnail: the thumbnail stays and the lightbox explains. Not loaded:
+        // the tile offers a retry over whatever it shows, so the ring never just stops.
         Err(error) => {
           tracing::debug!(%error, conversation_id = %conversation, "inline picture not loaded");
           match error {
-            _ if has_thumbnail => {},
+            FetchError::Undecodable(_) if has_thumbnail => {},
             FetchError::Undecodable(_) => {
               is_broken.try_set(true);
             },

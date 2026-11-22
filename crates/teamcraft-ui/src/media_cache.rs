@@ -15,16 +15,20 @@
 //! - A file is downloaded and decrypted once at a time ([`InFlight`]): the lightbox opened while the
 //!   inline preview still loads, or the same picture asked for twice, waits for the load under way
 //!   instead of starting another one.
+//! - The files the conversation shows right now ([`remember_shown`]): the lightbox opened on one
+//!   of them knows it, with its thumbnail, before its own list of the conversation's pictures has
+//!   it (a picture that just arrived), instead of taking it for gone.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::hash::Hash;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::thread::LocalKey;
 
 use futures_channel::oneshot;
 
+use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::remote::AttachmentPriority;
 
 use crate::lightbox::MediaKey;
@@ -57,6 +61,8 @@ thread_local! {
   /// Videos this webview couldn't play (#804): the lightbox says so at once instead of trying
   /// again. Only failures go in, and a newly installed codec needs a restart anyway.
   static UNPLAYABLE: RefCell<HashSet<MediaKey>> = RefCell::new(HashSet::new());
+  /// The files the conversation's tiles show, held by the tiles: an entry dies with its tile.
+  static SHOWN: RefCell<HashMap<MediaKey, Weak<FileInfo>>> = RefCell::new(HashMap::new());
 }
 
 type UrlResult = Result<Rc<ObjectUrl>, FetchError>;
@@ -265,6 +271,25 @@ fn persist(persisted_key: CacheKey, url: &ObjectUrl) {
 /// The image if it is in the cache (and marks it as just used).
 pub fn cached(key: MediaKey, rendition: Rendition) -> Option<Rc<ObjectUrl>> {
   CACHE.with_borrow_mut(|cache| cache.get(&(key, rendition)))
+}
+
+/// Remembers that a tile shows `file` as long as the tile holds it. Entries of tiles that went
+/// away are dropped here, so the table stays as large as what is on screen.
+pub fn remember_shown(key: MediaKey, file: &Rc<FileInfo>) {
+  SHOWN.with_borrow_mut(|shown| {
+    shown.retain(|_, file| file.strong_count() > 0);
+    shown.insert(key, Rc::downgrade(file));
+  });
+}
+
+/// The file `key` as a tile of the conversation shows it now, if one does.
+pub fn shown_file(key: MediaKey) -> Option<FileInfo> {
+  SHOWN.with_borrow(|shown| {
+    shown
+      .get(&key)
+      .and_then(Weak::upgrade)
+      .map(|file| (*file).clone())
+  })
 }
 
 /// Remembers that the webview couldn't play the video `key` in this session.

@@ -1,14 +1,17 @@
 //! Attachment downloads beside a host's loop (issue #491): the web and desktop cores start them
 //! with the client and then let them run, so a large file doesn't hold up reads, sends or gateway
 //! frames. At most a few run at once; the rest wait their turn in order, except what the user opened
-//! (the image viewer), which goes first. Saves to disk that failed on the network come back when
+//! (the image viewer), which goes first. A file asked for while it already comes down for somebody
+//! else (the viewer opened on a picture whose preview is loading) is downloaded once for both. Saves to disk that failed on the network come back when
 //! their retry is due, and those an app left running when it stopped continue once it starts
 //! again (issue #153, `client::disk_downloads`).
 
+use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::rc::Rc;
 
 use futures_util::future::{AbortHandle, Abortable};
 use futures_util::stream::FuturesUnordered;
@@ -35,6 +38,9 @@ pub struct Downloads {
   limit: usize,
   waiting: VecDeque<Job>,
   running: FuturesUnordered<Pin<Box<dyn Future<Output = Finished>>>>,
+  /// Files coming down for a view right now, by file and the most bytes read of it, with whoever
+  /// else asked for them since they started: they get the same bytes instead of a second download.
+  viewing: Rc<RefCell<Viewing>>,
   /// Files being saved, with what stops their transfer: one transfer per file, so two never write
   /// the same partial file.
   saving: HashMap<AttachmentId, AbortHandle>,
@@ -99,6 +105,9 @@ pub type Deliver = Box<dyn FnOnce(Result<SecretBytes, String>)>;
 /// closed). A file nobody wants isn't started.
 pub type IsWanted = Box<dyn Fn() -> bool>;
 
+/// Files coming down for a view, by file and the most bytes read of it, with who else waits.
+type Viewing = HashMap<(AttachmentId, u64), Vec<Waiter>>;
+
 /// One who asked for a file.
 struct Waiter {
   deliver: Deliver,
@@ -138,6 +147,7 @@ impl Downloads {
       limit: limit.max(1),
       waiting: VecDeque::new(),
       running: FuturesUnordered::new(),
+      viewing: Rc::default(),
       saving: HashMap::new(),
       controls: Vec::new(),
       opens: Vec::new(),
@@ -176,6 +186,14 @@ impl Downloads {
     deliver: Deliver,
     is_wanted: IsWanted,
   ) {
+    if let Some(joined) = self
+      .viewing
+      .borrow_mut()
+      .get_mut(&(reference.attachment_id, max_bytes))
+    {
+      joined.push(Waiter { deliver, is_wanted });
+      return;
+    }
     let maybe_index = self
       .waiting
       .iter()
@@ -301,10 +319,16 @@ impl Downloads {
             continue;
           }
           match client.start_capped_viewer_download(&reference, max_bytes).await {
-            Ok(download) => self.running.push(Box::pin(async move {
-              deliver_all(delivers, download.open().await);
-              Finished::Viewed
-            })),
+            Ok(download) => {
+              let running = (reference.attachment_id, max_bytes);
+              self.viewing.borrow_mut().insert(running, delivers);
+              let viewing = Rc::clone(&self.viewing);
+              self.running.push(Box::pin(async move {
+                let opened = download.open().await;
+                deliver_all(viewing.borrow_mut().remove(&running).unwrap_or_default(), opened);
+                Finished::Viewed
+              }));
+            },
             Err(error) => deliver_all(delivers, Err(error)),
           }
         },
@@ -543,9 +567,6 @@ impl Default for Downloads {
 
 #[cfg(test)]
 mod tests {
-  use std::cell::RefCell;
-  use std::rc::Rc;
-
   use teamcraft_proto::{Base64Bytes, Id, Snowflake};
 
   use super::*;
@@ -580,6 +601,39 @@ mod tests {
     };
     deliver_all(delivers, Ok(SecretBytes::new(b"picture".to_vec())));
     assert_eq!(*delivered.borrow(), 2, "everybody who asked got it");
+  }
+
+  #[test]
+  fn a_file_asked_for_while_it_comes_down_is_downloaded_once() {
+    let mut downloads = Downloads::new(2);
+    let delivered = Rc::new(RefCell::new(0));
+    let running = (file(5).attachment_id, crate::MAX_VIEWER_BYTES);
+    downloads.viewing.borrow_mut().insert(running, Vec::new());
+    let count = delivered.clone();
+    downloads.view(
+      file(5),
+      DownloadPriority::Now,
+      Box::new(move |_| *count.borrow_mut() += 1),
+    );
+    assert!(waiting(&downloads).is_empty(), "no second download is queued");
+    let joined = downloads
+      .viewing
+      .borrow_mut()
+      .remove(&running)
+      .unwrap_or_default();
+    deliver_all(joined, Ok(SecretBytes::new(b"picture".to_vec())));
+    assert_eq!(*delivered.borrow(), 1, "the viewer got the preview's bytes");
+  }
+
+  #[test]
+  fn a_file_with_another_cap_is_not_joined() {
+    let mut downloads = Downloads::new(2);
+    downloads
+      .viewing
+      .borrow_mut()
+      .insert((file(5).attachment_id, 1024), Vec::new());
+    downloads.view(file(5), DownloadPriority::Now, ignore());
+    assert_eq!(waiting(&downloads), [5]);
   }
 
   #[test]
