@@ -222,6 +222,23 @@ impl Endpoint<endpoint_side::Client> {
         })
     }
 
+    /// Constructs a *client* endpoint on an existing QUIC endpoint, which keeps its socket and any
+    /// server configuration of its own; the configuration's bind address and endpoint settings are
+    /// not used.
+    ///
+    /// Useful when one socket carries both WebTransport and plain QUIC connections, e.g. a
+    /// peer-to-peer endpoint that also asks a WebTransport server for its reflexive address.
+    pub fn client_on_endpoint(client_config: ClientConfig, mut endpoint: quinn::Endpoint) -> Self {
+        endpoint.set_default_client_config(client_config.quic_config);
+
+        Self {
+            endpoint,
+            side: endpoint_side::Client {
+                dns_resolver: client_config.dns_resolver,
+            },
+        }
+    }
+
     /// Switches the endpoint to a new UDP socket.
     ///
     /// All connections of this endpoint continue on the new socket: QUIC connection migration

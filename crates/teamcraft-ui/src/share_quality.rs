@@ -1046,6 +1046,7 @@ mod tests {
       maybe_uplink_probe: None,
       maybe_downlink_probe: None,
       tracks,
+      maybe_media_path: None,
     }
   }
 

@@ -19,7 +19,7 @@
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
-use std::{fmt, num::NonZeroU16};
+use std::{fmt, net::SocketAddr, num::NonZeroU16};
 
 use serde::{Deserialize, Serialize};
 
@@ -296,6 +296,22 @@ pub enum CallClientMessage {
     to_device_id: DeviceId,
     sealed: Base64Bytes,
   },
+  /// Whether this device's direct path to the other device of a 1:1 call carries its media now
+  /// (#127, ARCHITECTURE.md §6.7). The SFU stops forwarding the two devices' audio to each other only
+  /// while both say `true` and the room has exactly these two; `false`, a third device, or either
+  /// one's lost connection forwards it again at once. Sent after every change and again after every
+  /// join or switch. Older SFUs ignore it and keep forwarding.
+  DirectPath {
+    is_active: bool,
+  },
+  /// First message of a short QUIC connection from this device's direct path socket (#127): `secret`
+  /// is the session's [`CallServerMessage::AudioSocket`] secret. The SFU answers
+  /// [`CallServerMessage::Reflected`] with the address the connection came from (the device's
+  /// reflexive candidate) and closes, or refuses an unknown secret. An SFU from before answers that
+  /// it expected a join.
+  Reflect {
+    secret: Base64Bytes,
+  },
   #[serde(other)]
   Unknown,
 }
@@ -332,6 +348,11 @@ pub enum CallServerMessage {
   /// none, and clients from before ignore it.
   AudioSocket {
     secret: Base64Bytes,
+  },
+  /// Answer to [`CallClientMessage::Reflect`] (#127): the address and port the reflecting
+  /// connection's packets came from, as the SFU saw them (IPv4 peers in their IPv4 form).
+  Reflected {
+    address: SocketAddr,
   },
   #[serde(other)]
   Unknown,
@@ -779,6 +800,11 @@ impl fmt::Debug for CallClientMessage {
         .field("to_device_id", to_device_id)
         .field("sealed_bytes", &sealed.len())
         .finish(),
+      Self::DirectPath { is_active } => f
+        .debug_struct("DirectPath")
+        .field("is_active", is_active)
+        .finish(),
+      Self::Reflect { .. } => f.debug_struct("Reflect").field("secret", &"[redacted]").finish(),
       Self::Unknown => f.write_str("Unknown"),
     }
   }
@@ -1464,6 +1490,32 @@ mod tests {
       r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw=="}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), relayed);
+  }
+
+  /// #127: the direct path's report and the reflexive address. The secret never shows in a debug
+  /// print.
+  #[test]
+  fn direct_path_and_reflect_wire_format() {
+    let report = CallClientMessage::DirectPath { is_active: true };
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(json, r#"{"type":"direct_path","is_active":true}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), report);
+    let reflect = CallClientMessage::Reflect {
+      secret: Base64Bytes::new(vec![1, 2]),
+    };
+    let json = serde_json::to_string(&reflect).unwrap();
+    assert_eq!(json, r#"{"type":"reflect","secret":"AQI="}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), reflect);
+    assert!(!format!("{reflect:?}").contains("AQI="), "the secret is redacted");
+    let reflected = CallServerMessage::Reflected {
+      address: "[2001:db8::5]:61000".parse().unwrap(),
+    };
+    let json = serde_json::to_string(&reflected).unwrap();
+    assert_eq!(json, r#"{"type":"reflected","address":"[2001:db8::5]:61000"}"#);
+    assert_eq!(
+      serde_json::from_str::<CallServerMessage>(&json).unwrap(),
+      reflected
+    );
   }
 
   /// #1891: why a picture stopped, for the viewer.

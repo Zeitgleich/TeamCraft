@@ -96,6 +96,8 @@ const PRE_JOIN_LIMIT: u32 = 0x4803;
 /// The close of an audio connection (#2141): refused, replaced, or its session ended. Not to be
 /// retried: a session that runs on hands its client a new secret when it gets a new connection.
 const AUDIO_CONNECTION_CLOSE: u32 = 0;
+/// How long a reflecting connection (#127) waits for its client to close after the answer.
+const REFLECT_LINGER: Duration = Duration::from_secs(2);
 /// Rosters never go out more often than this, whatever the configuration says.
 const MIN_ROSTER_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -516,6 +518,11 @@ async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<()
     attach_audio(shared, &connection, send, secret.as_slice(), prejoin_slot).await;
     return Ok(());
   }
+  if let CallClientMessage::Reflect { secret } = &first {
+    reflect(shared, &connection, send, secret.as_slice()).await;
+    drop(prejoin_slot);
+    return Ok(());
+  }
 
   let (signal_tx, signal_rx) = mpsc::channel(shared.config.signaling_queue_len.max(1));
   let handle = ParticipantHandle {
@@ -781,6 +788,32 @@ async fn attach_audio(
   debug!(call_id = %target.grant.call_id, participant_id = %target.grant.device_id, "audio connection attached");
   forward_audio(&target, number, connection).await;
   connection.close(AUDIO_CONNECTION_CLOSE.into(), b"closing");
+}
+
+/// A short connection from a device's direct path socket (#127, ARCHITECTURE.md §6.7, "Endpoint
+/// discovery"): `secret` must be one of a session that runs now. The SFU answers with the address
+/// the connection came from, which the device offers the other device of its 1:1 call as its
+/// reflexive candidate, then waits briefly for the client to close and closes itself. Neither the
+/// address nor the secret is logged.
+async fn reflect(shared: &Shared, connection: &Connection, mut send: SendStream, secret: &[u8]) {
+  let Some(target) = shared.audio_sockets.find(secret) else {
+    debug!("reflect refused: no running session has this secret");
+    let error = ErrorBody::new(ErrorCode::InvalidJoinToken, "no session for this reflection");
+    reject(&mut send, CallServerMessage::Error { error }).await;
+    connection.close(AUDIO_CONNECTION_CLOSE.into(), b"refused");
+    return;
+  };
+  let remote = connection.remote_address();
+  let address = SocketAddr::new(remote.ip().to_canonical(), remote.port());
+  debug!(call_id = %target.grant.call_id, participant_id = %target.grant.device_id, "reflected a direct path socket");
+  if write_message(&mut send, &CallServerMessage::Reflected { address })
+    .await
+    .is_ok()
+  {
+    // Ignoring the result: the client closes once it read the answer, or the wait ends.
+    let _ = tokio::time::timeout(REFLECT_LINGER, connection.closed()).await;
+  }
+  connection.close(AUDIO_CONNECTION_CLOSE.into(), b"reflected");
 }
 
 /// Hands the audio connection's datagrams to its session, for as long as it is the session's.

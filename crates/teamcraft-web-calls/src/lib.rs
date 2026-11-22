@@ -788,6 +788,8 @@ impl Host {
         self.state.borrow_mut().status_sounds = sounds;
         self.control(Control::StatusSounds(sounds));
       },
+      // Browser calls always go through the SFU (ARCHITECTURE.md §6.7, "When").
+      CallAction::SetDirectConnections { .. } => {},
       CallAction::SetCameraQuality { quality } => {
         let previous = std::mem::replace(&mut self.state.borrow_mut().camera_quality, quality);
         if previous.max_lines() != quality.max_lines() {

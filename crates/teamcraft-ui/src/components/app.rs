@@ -1348,6 +1348,7 @@ pub(crate) fn connect_calls(state: AppState) {
       },
       CallEvent::StopScreenShare => backend.stop_screen_share(),
       CallEvent::StatusSounds(sounds) => backend.set_call_status_sounds(sounds),
+      CallEvent::DirectConnections(is_allowed) => backend.set_call_direct_connections(is_allowed),
       CallEvent::CameraQuality(quality) => backend.set_camera_quality(quality),
       CallEvent::VideoQuality { stream_id, quality } => backend.set_video_quality(stream_id, quality),
     });
@@ -1360,6 +1361,14 @@ pub(crate) fn connect_calls(state: AppState) {
       call.emit(CallEvent::StatusSounds(sounds));
     }
     sounds
+  });
+  // "Connect directly in calls" likewise (#127): at start and on every change.
+  Effect::new(move |previous: Option<bool>| {
+    let is_allowed = state.settings.prefs.with(|prefs| prefs.calls.direct_connections);
+    if previous != Some(is_allowed) {
+      call.emit(CallEvent::DirectConnections(is_allowed));
+    }
+    is_allowed
   });
   // The camera's quality setting likewise (#967): at start and on every change.
   Effect::new(move |previous: Option<VideoQuality>| {

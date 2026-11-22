@@ -1780,6 +1780,12 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn set_call_direct_connections(&self, is_allowed: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetDirectConnections { is_allowed });
+    }
+  }
+
   fn set_camera_quality(&self, quality: VideoQuality) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::SetCameraQuality { quality });

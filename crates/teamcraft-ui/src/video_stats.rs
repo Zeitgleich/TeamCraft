@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use teamcraft_client_api::video_stats::{
-  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, LinkProbeStats,
+  CameraLimitsStats, DecodeOverload, EncoderImplementation, EncoderOverload, LinkProbeStats, MediaPath,
   ReceivedVideoStats, SentVideoStats, ShareEncoderKind, ShareLimitsStats, VideoSize, VideoStatsReport,
 };
 use teamcraft_proto::{MediaStreamId, VideoCodec, VideoTrackKind};
@@ -288,6 +288,7 @@ fn sent_rows(
       ),
     ),
   ];
+  rows.extend(path_row(report, words));
   if let Some(limits) = &sent.maybe_camera_limits {
     rows.push(row("stats-limits", camera_limits_text(limits, words)));
   }
@@ -483,6 +484,23 @@ fn received_rows(
     ),
     row("stats-decoding", decoding_text(received, words)),
   ]
+  .into_iter()
+  .chain(path_row(report, words))
+  .collect()
+}
+
+/// Which way the call's audio takes (#127): directly to the other device of a 1:1 call, or
+/// through the server. Video still always goes through the server. No row where the driver has
+/// no direct path (the browser).
+fn path_row(report: &VideoStatsReport, words: Words<'_>) -> Option<StatsRow> {
+  let value = match report.maybe_media_path? {
+    MediaPath::Relay => words("stats-value-path-relay", &[]),
+    MediaPath::Direct { maybe_rtt_ms } => words(
+      "stats-value-path-direct",
+      &[("rtt", &or_missing(maybe_rtt_ms.map(|rtt| format!("{rtt} ms"))))],
+    ),
+  };
+  Some(row("stats-audio-path", value))
 }
 
 /// The decoder's queue, and whether this device holds the track back for its own load (#1762):
@@ -783,6 +801,34 @@ mod tests {
     }
   }
 
+  /// #127: which way the audio takes, where the driver can tell.
+  mod media_path {
+    use super::*;
+
+    #[test]
+    fn the_audio_path_shows_direct_or_through_the_server_and_nothing_in_the_browser() {
+      let sent = || sent_camera(5, [(30, 3_000), (30, 9_000), (0, 0)], 30);
+      let mut window = StatsWindow::default();
+      window.push(report(1_000, sent(), None));
+      let rows = english(&window, StatsTarget::OwnCamera);
+      assert!(rows.iter().all(|row| row.label_key != "stats-audio-path"));
+
+      let mut direct = report(2_000, sent(), None);
+      direct.maybe_media_path = Some(MediaPath::Direct {
+        maybe_rtt_ms: Some(12),
+      });
+      window.push(direct);
+      let rows = english(&window, StatsTarget::OwnCamera);
+      assert_eq!(value(&rows, "stats-audio-path"), "Direct · RTT 12 ms");
+
+      let mut relay = report(3_000, sent(), None);
+      relay.maybe_media_path = Some(MediaPath::Relay);
+      window.push(relay);
+      let rows = english(&window, StatsTarget::OwnCamera);
+      assert_eq!(value(&rows, "stats-audio-path"), "Through the server");
+    }
+  }
+
   mod text {
     use super::*;
 
@@ -980,6 +1026,7 @@ mod tests {
         .into_iter()
         .chain(maybe_received.map(VideoTrackStats::Received))
         .collect(),
+      maybe_media_path: None,
     }
   }
 

@@ -149,7 +149,9 @@ pub use actions::{
 };
 pub use attachments::{BlobDownload, MAX_VIEWER_BYTES, OutgoingFile};
 pub use attested::{AttestationSettings, JwksSource};
-pub use calls::{CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, call_move_announcement};
+pub use calls::{
+  CallEventSink, CallKeySigner, CallMoveRecord, CallPreparation, DirectMediaInputs, call_move_announcement,
+};
 pub(crate) use catch_up::CATCHING_UP_PREFIX;
 pub use catch_up::{CatchUpFocus, SyncStopRequest, is_catching_up};
 pub use channel_anchor::{channel_anchor_marks, is_anchor_refused};

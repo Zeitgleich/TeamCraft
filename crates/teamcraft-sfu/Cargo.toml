@@ -59,6 +59,8 @@ teamcraft-media = { path = "../teamcraft-media", features = ["native", "openh264
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect"] }
 # Device identities for the clients' call key bindings.
 teamcraft-crypto.workspace = true
+# The native client's connection details (which way the media takes, #127).
+teamcraft-client-api = { path = "../teamcraft-client-api" }
 # A stand-in for the server's internal endpoints in the reporting test.
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "json"] }
 # Its quinn, for a raw QUIC client that cuts HTTP/3 frames where a test wants them cut.

@@ -63,6 +63,8 @@ pub enum CallEvent {
   },
   StopScreenShare,
   StatusSounds(CallStatusSounds),
+  /// The user's "Connect directly in calls" (#127).
+  DirectConnections(bool),
   /// The highest quality the own camera is sent at (the setting, #967).
   CameraQuality(VideoQuality),
   /// How sharp another device's video comes (its tile's quality menu, #967).

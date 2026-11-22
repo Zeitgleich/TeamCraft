@@ -1376,6 +1376,10 @@ pub trait CallBackend {
   fn leave_call_everywhere(&self, _conversation: ConversationId) {}
   /// Which call status sounds play on this device, for this and later calls.
   fn set_call_status_sounds(&self, _sounds: CallStatusSounds) {}
+  /// Whether calls of this device may connect directly to the other device of a 1:1 call (#127,
+  /// the setting "Connect directly in calls"), for this and later calls. Apps whose calls always go
+  /// through the SFU (the browser) ignore it.
+  fn set_call_direct_connections(&self, _is_allowed: bool) {}
   /// The highest quality the own camera is sent at, for this and later calls (#967); a running
   /// camera restarts with it.
   fn set_camera_quality(&self, _quality: crate::calls::VideoQuality) {}

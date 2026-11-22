@@ -1336,6 +1336,7 @@ mod tests {
       ],
       maybe_uplink_probe: None,
       maybe_downlink_probe: None,
+      maybe_media_path: None,
     }
   }
 }

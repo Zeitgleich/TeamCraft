@@ -418,6 +418,7 @@ pub async fn call_action(
     },
     CallAction::SetTalking { is_talking } => calls.set_talking(is_talking).await,
     CallAction::SetStatusSounds { sounds } => calls.set_status_sounds(sounds).await,
+    CallAction::SetDirectConnections { is_allowed } => calls.set_direct_connections(is_allowed).await,
     CallAction::SetCameraQuality { quality } => calls.set_camera_quality(quality).await?,
     CallAction::SetVideoQuality { stream_id, quality } => calls.set_video_quality(stream_id, quality).await,
     CallAction::RefreshDevices => drop(calls.refresh_devices().await?),
