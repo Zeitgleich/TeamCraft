@@ -101,6 +101,9 @@ jobs:
     # bundle, so it starts at once and only the last steps wait for it.
     if: ${{ !inputs.warm-cache }}
     runs-on: ubuntu-latest
+    env:
+      # Not the echo cancellation build of the desktop jobs: the conversion tool needs no meson.
+      RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Release version
