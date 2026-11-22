@@ -1142,7 +1142,9 @@ The message list shows the encrypted thumbnail at once. On web and desktop it th
 picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,
 raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
-platform; bigger files are only saved, except videos, which stream (below). The page holds the plaintext only as `blob:` URLs in a session
+platform; bigger files are only saved, except videos, which stream (below). A file is downloaded
+once even when the lightbox asks for it while the preview's download runs: both get the same bytes.
+While it comes down, the thumbnail carries the upload's progress ring. The page holds the plaintext only as `blob:` URLs in a session
 cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown.
 The full file is never written to disk unless the user saves it; only the inline rendition of a still
 picture (at most 960 pixels a side) is also kept in the persistent media cache (§9.6), sealed like the

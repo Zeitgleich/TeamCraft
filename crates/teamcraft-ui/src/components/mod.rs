@@ -146,6 +146,7 @@ pub mod picture_editor;
 pub mod poll_card;
 pub mod poll_dialog;
 pub mod profile_views;
+pub mod progress_ring;
 pub mod quick_switcher;
 pub mod rail;
 pub mod rail_menus;

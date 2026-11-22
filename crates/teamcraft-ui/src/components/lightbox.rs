@@ -28,7 +28,7 @@ use std::rc::Rc;
 use leptos::html;
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::actions::{FileInfo, MAX_VIEWER_BYTES, MediaAnchor};
+use teamcraft_client_api::actions::{FileInfo, FileTransfer, MAX_VIEWER_BYTES, MediaAnchor};
 // How many messages a page has and how close to an end the next one is read (#274).
 use teamcraft_client_api::media_viewer::{PAGE_MARGIN, PAGE_MESSAGES};
 use wasm_bindgen::JsCast;
@@ -45,14 +45,15 @@ use crate::components::live_photo::LiveMotion;
 use crate::components::message_row::shown_author;
 use crate::components::modal::Modal;
 use crate::components::pending_button::PendingButton;
+use crate::components::progress_ring::{LoadPhase, LoadRing, ProgressRing};
 use crate::components::thread_panel::ThreadPanel;
 use crate::components::video_player::{VideoPlayer, run_player_command};
 use crate::feedback::{ActionFailure, FailureKind, PendingAction};
 use crate::i18n::use_i18n;
 use crate::lightbox::{
   Arrival, Command, Direction, Gesture, LightboxScope, MediaKey, MediaKind, MediaPages, ModifierStyle,
-  Picture, Point, Pointers, Release, Size, Viewport, album_len, fitted_layout, images_in_scope, neighbor,
-  player_command_for_video, position, wheel_zoom_factor,
+  Picture, Point, Pointers, Release, Size, Viewport, album_len, file_on_screen, fitted_layout,
+  images_in_scope, lists, neighbor, player_command_for_video, position, wheel_zoom_factor,
 };
 use crate::media_cache::{self, Rendition};
 use crate::media_stream::{self, StreamUrl};
@@ -113,12 +114,19 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     })
   };
   let pages = RwSignal::new(untrack(read_first).map(MediaPages::first));
+  // Read again on the change notification while the page doesn't list the opened file: a picture
+  // that just arrived is in the conversation before the core's page has it.
   Effect::new(move |_| {
-    if pages.with_untracked(Option::is_some) {
+    if pages.with_untracked(|pages| pages.as_ref().is_some_and(|pages| lists(pages.files(), start))) {
       // Read: nothing tracked, so this doesn't run again.
       return;
     }
-    if let Some(first) = read_first() {
+    let Some(first) = read_first() else {
+      return;
+    };
+    let is_new =
+      pages.with_untracked(|pages| pages.as_ref().is_none_or(|pages| pages.files() != first.files));
+    if is_new {
       pages.set(Some(MediaPages::first(first)));
     }
   });
@@ -142,9 +150,11 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     })
   });
   let current = RwSignal::new(start);
+  // A file the list doesn't have yet comes from the tile it was opened on, so a picture that just
+  // arrived opens like any other instead of being taken for gone.
   let current_file = Memo::new(move |_| {
     let key = current.get();
-    images.with(|images| images.iter().find(|file| key.matches(file)).cloned())
+    images.with(|images| file_on_screen(images, key, || media_cache::shown_file(key)))
   });
   let at = Memo::new(move |_| images.with(|images| position(images, current.get())));
   // Near an end of what is loaded (in the whole conversation, not one message's album), the next
@@ -175,6 +185,22 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
     }
   });
   let full = RwSignal::new_local(FullMedia::Loading);
+  // How far the full file came down, while it loads: the core's transfer of the file on screen.
+  let maybe_progress = Signal::derive(move || {
+    if !full.with(|full| matches!(full, FullMedia::Loading)) {
+      return None;
+    }
+    let key = current.get();
+    let file_id = key.attachment.to_string();
+    let maybe_file = state.read(|backend| backend.conversation_file(conversation, key.message, &file_id));
+    match maybe_file?.transfer {
+      FileTransfer::Downloading {
+        done_bytes,
+        total_bytes,
+      } => Some((done_bytes, total_bytes)),
+      _ => None,
+    }
+  });
   // A WebP or PNG turns out to move once it is loaded (animated WebP, APNG): it can be paused then.
   let kind = Memo::new(move |_| {
     let declared = current_file.with(|file| file.as_ref().and_then(|file| MediaKind::of(&file.media_type)));
@@ -487,7 +513,7 @@ pub fn Lightbox(conversation: ConversationId, start: MediaKey) -> impl IntoView 
             >
               <Icon name=IconName::ChevronRight />
             </button>
-            <Status full=full retries=retries actions=actions />
+            <Status full=full maybe_progress=maybe_progress retries=retries actions=actions />
           </div>
           <ThumbnailStrip images=images current=current />
           <Controls actions=actions modifier=modifier on_toggle_thread=hide_thread />
@@ -1115,15 +1141,19 @@ fn still_frame_of(
 #[component]
 fn Status(
   full: RwSignal<FullMedia, LocalStorage>,
+  maybe_progress: Signal<Option<(u64, u64)>>,
   retries: RwSignal<u32>,
   actions: MediaActions,
 ) -> impl IntoView {
   let i18n = use_i18n();
   move || match full.get() {
-    // The thumbnail is already on screen: only a small spinner says the full file is coming.
+    // The thumbnail is already on screen: the chat's ring over it says the full file is coming,
+    // filling once the core says how far it got.
     FullMedia::Loading => view! {
       <div class="lightbox-loading" role="status" aria-label=move || i18n.t("lightbox-loading")>
-        <span class="spinner" aria-hidden="true"></span>
+        <ProgressRing maybe_fraction=Signal::derive(move || {
+          LoadRing::of(LoadPhase::Loading, maybe_progress.get()).maybe_fraction()
+        }) />
       </div>
     }
     .into_any(),
