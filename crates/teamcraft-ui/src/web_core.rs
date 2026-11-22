@@ -51,6 +51,7 @@ use teamcraft_core::clock::{Clock, SystemClock, rewound, sleep_ms_until};
 use teamcraft_core::connection::{ConnectionSettings, ConnectionStatus, ConnectionSupervisor};
 use teamcraft_core::downloads::{Downloads, Finished};
 use teamcraft_core::export::{ExportError, ExportJob, ExportStep};
+use teamcraft_core::media_stream::{MediaStreamToken, OpenedStream, StreamPart};
 use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{MINUTES_PLACEHOLDER, NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
@@ -132,6 +133,10 @@ const STORE_READY_PREFIX: &str = "teamcraft.store_ready.";
 const PUSH_CHECK_RETRY: Duration = Duration::from_secs(60);
 /// What the service worker posts when the browser changed the push subscription.
 const SUBSCRIPTION_CHANGED: &str = "push_subscription_changed";
+/// The service worker reads a stream for the page's player (`sw.js`, `streamFromPage`).
+const MEDIA_READ: &str = "media_read";
+/// The worker answers it with 204 when it streams (`sw.js`, `MEDIA_STREAM_READY`).
+const MEDIA_STREAM_READY_PATH: &str = "/media-stream/ready";
 /// Session storage key (this tab, survives a reload) naming the user this tab was active for, so a
 /// reload of the active tab doesn't ask "use here?" (#744).
 const ACTIVE_TAB_KEY: &str = "teamcraft.active_tab_user";
@@ -856,6 +861,121 @@ async fn ask_attachment(
   .await?
 }
 
+/// Opens a video of a message to play while it streams (#200). Only the tab that runs the core
+/// streams, and only while the service worker controls the page (it answers the player's requests
+/// with what this page reads, `sw.js`); anywhere else the caller opens the file whole.
+pub async fn open_media_stream(
+  conversation: ConversationId,
+  message: MessageId,
+  file_id: String,
+) -> Result<OpenedStream, String> {
+  if current_follower().is_some() {
+    return Err("only the tab that runs the core streams".to_owned());
+  }
+  if !does_worker_stream().await {
+    return Err("no service worker that streams controls the page".to_owned());
+  }
+  ask(|reply| Request::OpenStream {
+    conversation,
+    message,
+    file_id,
+    reply,
+  })
+  .await?
+}
+
+/// Whether the worker that controls the page answers streams: an older one lets the request
+/// through to the server. Asked once per page; a page without a worker asks again later (the
+/// worker of a first visit takes over after the page loaded).
+async fn does_worker_stream() -> bool {
+  thread_local! {
+    static DOES_STREAM: Cell<bool> = const { Cell::new(false) };
+  }
+  if DOES_STREAM.with(Cell::get) {
+    return true;
+  }
+  let Some(window) = web_sys::window() else {
+    return false;
+  };
+  if window.navigator().service_worker().controller().is_none() {
+    return false;
+  }
+  let answer = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(MEDIA_STREAM_READY_PATH)).await;
+  let does_stream = answer
+    .ok()
+    .and_then(|response| response.dyn_into::<web_sys::Response>().ok())
+    .is_some_and(|response| response.status() == 204);
+  DOES_STREAM.with(|known| known.set(does_stream));
+  does_stream
+}
+
+/// Closes a stream the page no longer plays.
+pub fn close_media_stream(token: MediaStreamToken) {
+  // A core that stopped has no streams left to close.
+  drop(send(Request::CloseStream(token)));
+}
+
+/// Answers the service worker's read of a stream (`media_read`, from the player's range request)
+/// through the port it sent: `{ bytes, start, total, type }` or `{ error }`.
+fn answer_media_read(event: &web_sys::MessageEvent) {
+  let data = event.data();
+  let field = |name: &str| js_sys::Reflect::get(&data, &name.into()).ok();
+  let maybe_token = field("token")
+    .and_then(|token| token.as_string())
+    .and_then(|token| MediaStreamToken::parse(&token));
+  let maybe_start = field("start")
+    .and_then(|start| start.as_f64())
+    .filter(|start| *start >= 0.0);
+  let Some(port) = event.ports().get(0).dyn_into::<web_sys::MessagePort>().ok() else {
+    return;
+  };
+  let (Some(token), Some(start)) = (maybe_token, maybe_start) else {
+    post_media_error(&port, "malformed read");
+    return;
+  };
+  wasm_bindgen_futures::spawn_local(async move {
+    // Invariant: a JavaScript number the worker parsed from a header is a whole offset.
+    let start = start as u64;
+    let answer = match ask(|reply| Request::ReadStream { token, start, reply }).await {
+      Ok(answer) => answer,
+      Err(error) => Err(error),
+    };
+    match answer {
+      Ok(part) => {
+        let reply = js_sys::Object::new();
+        let bytes = js_sys::Uint8Array::from(part.bytes.expose_secret());
+        let buffer = bytes.buffer();
+        let set = |name: &str, value: &wasm_bindgen::JsValue| {
+          // Deliberately ignored: setting a field of a fresh plain object can't fail.
+          let _ = js_sys::Reflect::set(&reply, &name.into(), value);
+        };
+        set("bytes", &buffer);
+        set("start", &(part.start as f64).into());
+        set("total", &(part.total_bytes as f64).into());
+        set("type", &part.media_type.into());
+        // The buffer moves to the worker: no second copy of the plaintext stays in the page.
+        let transfer = js_sys::Array::of1(&buffer);
+        if let Err(error) = port.post_message_with_transferable(&reply, &transfer) {
+          tracing::debug!(?error, "could not answer a streamed read");
+        }
+      },
+      Err(error) => {
+        tracing::debug!(%error, "could not read a streamed video");
+        post_media_error(&port, &error);
+      },
+    }
+  });
+}
+
+fn post_media_error(port: &web_sys::MessagePort, error: &str) {
+  let reply = js_sys::Object::new();
+  // Deliberately ignored: setting a field of a fresh plain object can't fail.
+  let _ = js_sys::Reflect::set(&reply, &"error".into(), &error.into());
+  if let Err(failure) = port.post_message(&reply) {
+    tracing::debug!(?failure, "could not answer a streamed read");
+  }
+}
+
 /// Runs a command the UI adapter queued: the shared ones here, the others in the split module of
 /// the place of the app they come from (`CommandPart`, `areas.rs`, #1413). Their engine code then
 /// loads with that place, not with every page; it is there already when the place asks.
@@ -1329,6 +1449,19 @@ enum Request {
     priority: AttachmentPriority,
     reply: oneshot::Sender<Result<SecretBytes, String>>,
   },
+  /// A video to play while it streams (#200, `teamcraft_core::media_stream`).
+  OpenStream {
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: String,
+    reply: oneshot::Sender<Result<OpenedStream, String>>,
+  },
+  ReadStream {
+    token: MediaStreamToken,
+    start: u64,
+    reply: oneshot::Sender<Result<StreamPart, String>>,
+  },
+  CloseStream(MediaStreamToken),
   LinkStart {
     device_name: String,
     reply: oneshot::Sender<Result<(), String>>,
@@ -2230,6 +2363,18 @@ impl Core {
         priority,
         reply,
       } => self.queue_attachment(conversation, message, &file_id, priority, reply),
+      Request::OpenStream {
+        conversation,
+        message,
+        file_id,
+        reply,
+      } => self.queue_stream_open(conversation, message, &file_id, reply),
+      Request::ReadStream { token, start, reply } => {
+        self
+          .downloads
+          .read_stream(token, start, Box::new(move |part| drop(reply.send(part))))
+      },
+      Request::CloseStream(token) => self.downloads.close_stream(&token),
       Request::Thread {
         conversation,
         thread,
@@ -3006,6 +3151,27 @@ impl Core {
       Box::new(deliver),
       Box::new(is_wanted),
     );
+  }
+
+  /// Queues opening a video to stream; it is answered once the blob's header arrived.
+  fn queue_stream_open(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    file_id: &str,
+    reply: oneshot::Sender<Result<OpenedStream, String>>,
+  ) {
+    let maybe_reference = self
+      .backend
+      .as_ref()
+      .and_then(|backend| backend.attachment_ref(conversation, message, file_id));
+    let Some(reference) = maybe_reference else {
+      drop(reply.send(Err("no such file in this conversation".to_owned())));
+      return;
+    };
+    self
+      .downloads
+      .open_stream(reference, Box::new(move |opened| drop(reply.send(opened))));
   }
 
   /// Starts the downloads that may run now.
@@ -3896,7 +4062,8 @@ fn watch_page_lifecycle(store: &Rc<IndexedDbStore>) {
   }
 }
 
-/// Passes the service worker's "subscription changed" on to the core (once per page).
+/// Passes the service worker's "subscription changed" on to the core, and answers its reads of
+/// streamed videos (once per page).
 fn watch_worker() {
   if IS_WATCHING_WORKER.with(|is_watching| is_watching.replace(true)) {
     return;
@@ -3910,6 +4077,10 @@ fn watch_worker() {
       // Follower tabs get the message too; only the owner has a core to tell.
       if kind.as_deref() == Some(SUBSCRIPTION_CHANGED) && current_follower().is_none() {
         drop(send(Request::CheckPush));
+      }
+      // The worker asks only the page whose player made the request.
+      if kind.as_deref() == Some(MEDIA_READ) {
+        answer_media_read(&event);
       }
     },
   );

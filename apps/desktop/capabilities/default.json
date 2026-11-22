@@ -66,6 +66,8 @@
     "allow-core-action",
     "allow-core-query",
     "allow-core-attachment",
+    "allow-core-open-media-stream",
+    "allow-core-close-media-stream",
     "allow-core-save-attachment",
     "allow-core-save-attachments",
     "allow-core-data-export",

@@ -151,6 +151,8 @@ fn main() -> anyhow::Result<()> {
         .build(),
     )
     .manage(service.clone())
+    // Videos that play while they stream (#200): the loopback server starts with the first one.
+    .manage(core::media_stream::MediaServer::default())
     .manage(refresh_now)
     .manage(attention::OsProbe::default())
     .manage(notifications::ShownNotifications::default())
@@ -363,6 +365,8 @@ fn main() -> anyhow::Result<()> {
       core::commands::core_action,
       core::commands::core_query,
       core::commands::core_attachment,
+      core::media_stream::core_open_media_stream,
+      core::media_stream::core_close_media_stream,
       core::commands::core_save_attachment,
       core::commands::core_save_attachments,
       core::commands::core_data_export,

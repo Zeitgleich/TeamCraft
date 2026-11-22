@@ -10,6 +10,7 @@
 pub mod commands;
 mod data_export;
 pub mod media;
+pub mod media_stream;
 mod runtime;
 mod saved_files;
 mod staging;

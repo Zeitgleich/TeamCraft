@@ -50,7 +50,7 @@ pub struct MediaStreams {
   running_reads: Rc<Cell<usize>>,
 }
 
-/// Names one open stream in the URL the player loads (`tcmedia://localhost/<token>` on the desktop,
+/// Names one open stream in the URL the player loads (`http://127.0.0.1:<port>/<token>` on the desktop,
 /// `/media-stream/<token>` in the browser). Random, so no other page can guess it, and no file's ID.
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub struct MediaStreamToken(String);
@@ -70,6 +70,8 @@ pub struct StreamPart {
   pub start: u64,
   pub bytes: SecretBytes,
   pub total_bytes: u64,
+  /// One of [`streamable_type`]'s, as the stream opened with it.
+  pub media_type: &'static str,
 }
 
 pub type DeliverOpened = Box<dyn FnOnce(Result<OpenedStream, String>)>;
@@ -85,6 +87,7 @@ struct OpenStream {
 
 struct StreamState {
   reference: AttachmentRef,
+  media_type: &'static str,
   maybe_location: Option<Location>,
   maybe_decryptor: Option<Rc<AttachmentRangeDecryptor>>,
 }
@@ -221,6 +224,7 @@ impl MediaStreams {
     let token = MediaStreamToken::generate();
     let state = Rc::new(RefCell::new(StreamState {
       reference,
+      media_type,
       maybe_location: Some(location.clone()),
       maybe_decryptor: None,
     }));
@@ -274,6 +278,7 @@ impl MediaStreams {
       return None;
     };
     let total_bytes = decryptor.layout().plaintext_len();
+    let media_type = state.borrow().media_type;
     let Some(span) = decryptor
       .layout()
       .span(start, start.saturating_add(MAX_READ_BYTES))
@@ -282,6 +287,7 @@ impl MediaStreams {
         start,
         bytes: SecretBytes::new(Vec::new()),
         total_bytes,
+        media_type,
       }));
       return None;
     };
@@ -311,6 +317,7 @@ impl MediaStreams {
               start,
               bytes: SecretBytes::new(plaintext.expose_secret()[from..to].to_vec()),
               total_bytes,
+              media_type,
             }
           }),
         Err(error) => {

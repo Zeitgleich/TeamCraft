@@ -33,7 +33,7 @@ web-sys = { version = "0.3", features = [
   "HtmlCollection", "FontFace", "FontFaceDescriptors", "FontFaceSet", "KeyboardEvent", "MediaQueryList", "CssStyleDeclaration", "Node", "NodeList", "Storage", "Window",
   "DomTokenList", "ScrollToOptions", "ScrollBehavior", "ScrollIntoViewOptions", "ScrollLogicalPosition", "FocusOptions", "File", "FileList", "FilePropertyBag", "Navigator", "ServiceWorkerContainer", "ServiceWorker", "MessageEvent", "ServiceWorkerRegistration", "Location", "History",
   "Blob", "BlobPropertyBag", "Cache", "CacheStorage", "ReadableStream", "Url", "DragEvent", "DataTransfer", "DataTransferItemList", "DataTransferItem", "ClipboardEvent", "Request", "RequestInit", "RequestMode", "RequestRedirect", "RequestCache", "Response", "Headers", "UrlSearchParams", "ResizeObserver", "DomRect",
-  "BroadcastChannel", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
+  "BroadcastChannel", "MediaError", "MessagePort", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "ImageData", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
   "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",

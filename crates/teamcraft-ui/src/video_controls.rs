@@ -22,6 +22,9 @@ pub const PLAYBACK_SPEEDS: [f64; 6] = [1.0, 1.25, 1.5, 2.0, 0.5, 0.75];
 /// it does both within a moment. WebKitGTK without a decoder fires no error: it either never gets
 /// that far, or it reports the length with a picture size of zero ([`PlaybackState::lacks_picture`]).
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(8);
+/// [`STALL_TIMEOUT`] for a video that streams (#200): its bytes still come over the network, a
+/// read of a range at a time, so on a slow link the length or the first frame take longer.
+pub const STREAMED_STALL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// What the player waits for, checked [`STALL_TIMEOUT`] after it began waiting.
 #[derive(Clone, Copy, Debug, PartialEq)]

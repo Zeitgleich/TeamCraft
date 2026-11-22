@@ -80,6 +80,11 @@ let releases = { clients: {}, retired: [] };
 const NEW_CLIENT_GRACE_MS = 60 * 1000;
 // How long after a page's navigation started the pages that left are counted again.
 const PRUNE_AFTER_NAVIGATION_MS = 3 * 1000;
+// Where a page's video player reads a stream (#200, `streamFromPage`), and how long a read of a
+// range may take: a slow link reads 2 MiB in that time, a page that is gone doesn't answer.
+const MEDIA_STREAM_PREFIX = '/media-stream/';
+const MEDIA_STREAM_READY = 'ready';
+const MEDIA_READ_TIMEOUT_MS = 60 * 1000;
 // A worker the browser stopped and started again has forgotten what it verified; the result is kept
 // in a cache and read back before the first request is answered.
 const restored = restoreStatus();
@@ -140,6 +145,11 @@ self.addEventListener('message', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
+  // Videos that play while they stream (#200): also in a development build.
+  if (isMediaStream(event.request)) {
+    event.respondWith(streamFromPage(event));
+    return;
+  }
   // Before everything else: a development build (no pinned key) takes shares too.
   if (isShare(event.request)) {
     event.respondWith(receiveShare(event.request));
@@ -158,6 +168,102 @@ self.addEventListener('fetch', (event) => {
     restored.then(() => (status.state === 'verified' ? fromVerifiedCache(event, url) : fetch(request))),
   );
 });
+
+// A video's player in a page loads `/media-stream/<token>` and reads it in ranges as from a web
+// server. The page's core reads each range from the encrypted blob and decrypts it (web_core.rs,
+// `answer_media_read`); this worker only carries the bytes between the two, keeps nothing, and
+// asks only the page whose player made the request. The token is random and names a stream that
+// page opened; any other page, and any other address, gets nothing.
+function isMediaStream(request) {
+  const url = new URL(request.url);
+  return request.method === 'GET' && url.origin === self.location.origin && url.pathname.startsWith(MEDIA_STREAM_PREFIX);
+}
+
+async function streamFromPage(event) {
+  const token = new URL(event.request.url).pathname.slice(MEDIA_STREAM_PREFIX.length);
+  // The page asks once whether this worker streams (an older one lets the request through).
+  if (token === MEDIA_STREAM_READY) return new Response(null, { status: 204 });
+  const range = requestedRange(event.request.headers.get('range'));
+  if (!range) return new Response(null, { status: 416 });
+  if (!/^[0-9a-f]{32}$/.test(token) || !event.clientId) return new Response(null, { status: 404 });
+  const client = await self.clients.get(event.clientId);
+  if (!client) return new Response(null, { status: 404 });
+  const first = await askPage(client, { type: 'media_read', token, start: range.start });
+  if (!isPart(first)) return new Response(null, { status: 502 });
+  if (first.bytes.byteLength === 0 || first.start >= first.total) {
+    return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${first.total}` } });
+  }
+  // The whole range asked for, one read of the page after the other as the player takes them: a
+  // player may not ask again after a short answer. A seek cancels the body, and no read follows.
+  const last = range.end === null ? first.total - 1 : Math.min(range.end, first.total - 1);
+  let at = first.start;
+  let pending = first;
+  const body = new ReadableStream(
+    {
+      async pull(controller) {
+        const part = pending || (await askPage(client, { type: 'media_read', token, start: at }));
+        pending = null;
+        if (!isPart(part) || part.bytes.byteLength === 0 || part.start !== at) {
+          controller.error(new Error('a read of the stream failed'));
+          return;
+        }
+        const length = Math.min(part.bytes.byteLength, last - at + 1);
+        controller.enqueue(new Uint8Array(part.bytes, 0, length));
+        at += length;
+        if (at > last) controller.close();
+      },
+    },
+    { highWaterMark: 1 },
+  );
+  return new Response(body, {
+    status: 206,
+    headers: {
+      'Content-Type': first.type,
+      'Content-Length': String(last - first.start + 1),
+      'Content-Range': `bytes ${first.start}-${last}/${first.total}`,
+      'Accept-Ranges': 'bytes',
+      'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
+    },
+  });
+}
+
+// A page's answer to a read: { bytes, start, total, type }.
+function isPart(answer) {
+  return (
+    !!answer &&
+    !answer.error &&
+    answer.bytes instanceof ArrayBuffer &&
+    Number.isSafeInteger(answer.start) &&
+    Number.isSafeInteger(answer.total) &&
+    typeof answer.type === 'string'
+  );
+}
+
+// `Range: bytes=<start>-[<end>]` as { start, end } (end included, or null); no header is the file from
+// its start. Several ranges or a range from the end (players send neither) are refused.
+function requestedRange(header) {
+  if (header === null) return { start: 0, end: null };
+  const match = /^\s*bytes=(\d+)-(\d*)\s*$/.exec(header);
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = match[2] === '' ? null : Number(match[2]);
+  if (!Number.isSafeInteger(start) || (end !== null && (!Number.isSafeInteger(end) || end < start))) return null;
+  return { start, end };
+}
+
+// One question to a page over a port of its own; null when it doesn't answer in time.
+function askPage(client, message) {
+  return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    const timer = setTimeout(() => resolve(null), MEDIA_READ_TIMEOUT_MS);
+    channel.port1.onmessage = (event) => {
+      clearTimeout(timer);
+      resolve(event.data);
+    };
+    client.postMessage(message, [channel.port2]);
+  });
+}
 
 function isShare(request) {
   if (request.method !== 'POST') return false;

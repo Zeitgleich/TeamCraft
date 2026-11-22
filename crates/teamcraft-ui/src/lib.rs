@@ -71,6 +71,7 @@ pub mod guest_resume;
 pub mod media_cache;
 pub mod media_formats;
 pub mod media_layout;
+pub mod media_stream;
 pub mod meeting_list;
 pub mod meeting_reminders;
 pub mod meetings;
