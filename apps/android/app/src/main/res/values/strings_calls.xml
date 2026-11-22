@@ -145,4 +145,20 @@
   <!-- Call recording (#216, e2ee.md §8.3) -->
   <string name="call_recording_by">Recorded by %1$s. Leave the call if you don\'t want to be recorded.</string>
   <string name="call_recording_someone">Someone</string>
+  <string name="call_tile_speaking">speaking</string>
+  <string name="call_self_view">Your camera</string>
+  <string name="call_self_view_top_start">Move to top left</string>
+  <string name="call_self_view_top_end">Move to top right</string>
+  <string name="call_self_view_bottom_start">Move to bottom left</string>
+  <string name="call_self_view_bottom_end">Move to bottom right</string>
+  <string name="call_announce_joined">%1$s joined the call</string>
+  <string name="call_announce_left">%1$s left the call</string>
+  <plurals name="call_announce_joined_many">
+    <item quantity="one">%d person joined the call</item>
+    <item quantity="other">%d people joined the call</item>
+  </plurals>
+  <plurals name="call_announce_left_many">
+    <item quantity="one">%d person left the call</item>
+    <item quantity="other">%d people left the call</item>
+  </plurals>
 </resources>

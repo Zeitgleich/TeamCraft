@@ -124,12 +124,15 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -402,6 +405,8 @@ internal fun InCallContent(
   }
   CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.onSurface) {
     Box(modifier.fillMaxSize().background(CALL_STAGE_COLOR)) {
+      // Joins and leaves, said once to TalkBack (#2281).
+      CallRosterAnnouncer(ui.maybeState?.participantUserIds.orEmpty(), ui.names)
       Stage(ui, layout, status, chrome, reduceMotion, actions.onToggleControls, Modifier.fillMaxSize())
       if (ui.tracks.isNotEmpty()) Scrims(ui.areControlsShown, reduceMotion)
       Column(Modifier.fillMaxSize().safeDrawingPadding()) {
@@ -608,7 +613,8 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
       .alpha(if (person.isRejoining) 0.5f else 1f)
       .clip(TILE_SHAPE)
       .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-      .speakerOutline(person.isSpeaking, TILE_SHAPE),
+      .speakerOutline(person.isSpeaking, TILE_SHAPE)
+      .speakingState(person.isSpeaking),
     contentAlignment = Alignment.Center,
   ) {
     // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
@@ -616,6 +622,17 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
     AvatarImage(person.userId, person.name, size)
     NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart), person.maybeHostLabel)
   }
+}
+
+/**
+ * Who speaks, in words (#2282): the outline and the glow are only a picture. The tile reads as one
+ * element with "speaking" as its state; a tile that isn't speaking keeps the semantics it had.
+ */
+@Composable
+private fun Modifier.speakingState(isSpeaking: Boolean): Modifier {
+  if (!isSpeaking) return this
+  val speaking = stringResource(R.string.call_tile_speaking)
+  return semantics(mergeDescendants = true) { stateDescription = speaking }
 }
 
 /** The thin accent outline on the active speaker's tile; visible as a shape, not only a tint. */
@@ -769,7 +786,8 @@ private fun VideoTile(
     modifier
       .clip(shape)
       .background(Color.Black, shape)
-      .speakerOutline(maybeOwner?.isSpeaking == true, shape),
+      .speakerOutline(maybeOwner?.isSpeaking == true, shape)
+      .speakingState(maybeOwner?.isSpeaking == true),
     contentAlignment = Alignment.Center,
   ) {
     if (maybeFrame == null) {
@@ -1244,15 +1262,23 @@ private fun AudioRouteButton(ui: CallUiState, actions: CallUiActions) {
   var isOpen by remember { mutableStateOf(false) }
   val label = stringResource(R.string.call_audio_route)
   val current = ui.audioRoutes.firstOrNull { it.id == ui.audioRouteId }
+  val currentLabel = current?.let { routeLabel(it) }
   Box {
-    CallToggle(
-      icon = CallIcons.VolumeUp,
-      label = label,
-      isChecked = current?.kind == AudioRouteKind.SPEAKER,
-      isOffSwitch = false,
+    // A button that opens a list, not a switch: it names where the sound goes now (#2282).
+    FilledTonalIconButton(
+      onClick = {
+        actions.onInteraction()
+        isOpen = true
+      },
+      shapes = IconButtonDefaults.shapes(
+        shape = IconButtonDefaults.mediumRoundShape,
+        pressedShape = IconButtonDefaults.mediumPressedShape,
+      ),
+      modifier = Modifier
+        .size(IconButtonDefaults.mediumContainerSize())
+        .semantics { if (currentLabel != null) stateDescription = currentLabel },
     ) {
-      actions.onInteraction()
-      isOpen = true
+      Icon(CallIcons.VolumeUp, contentDescription = label, modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
     }
     DropdownMenuPopup(expanded = isOpen, onDismissRequest = { isOpen = false }) {
       DropdownMenuGroup(shapes = MenuDefaults.groupShape(index = 0, count = 1)) {
@@ -1487,6 +1513,30 @@ private fun SelfViewCorner(
     )
     val position = remember { Animatable(Offset.Zero, Offset.VectorConverter) }
     LaunchedEffect(area, top, bottom) { position.snapTo(corners[corner]) }
+    // The drag's end and the accessibility actions go to a corner the same way.
+    fun moveTo(target: Int) {
+      corner = target
+      scope.launch {
+        if (reduceMotion) {
+          position.snapTo(corners[target])
+        } else {
+          position.animateTo(corners[target], spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
+        }
+      }
+    }
+    // Named, and movable without a drag (#2281): "Your camera", with an action per corner.
+    val selfViewLabel = stringResource(R.string.call_self_view)
+    val cornerActions = listOf(
+      R.string.call_self_view_top_start to 0,
+      R.string.call_self_view_top_end to 1,
+      R.string.call_self_view_bottom_start to 2,
+      R.string.call_self_view_bottom_end to 3,
+    ).map { (label, index) ->
+      CustomAccessibilityAction(stringResource(label)) {
+        moveTo(index)
+        true
+      }
+    }
     Box(
       Modifier
         .offset { IntOffset(position.value.x.roundToInt(), position.value.y.roundToInt()) }
@@ -1494,6 +1544,10 @@ private fun SelfViewCorner(
         .shadow(SELF_VIEW_ELEVATION, TILE_SHAPE)
         .clip(TILE_SHAPE)
         .background(Color.Black)
+        .semantics {
+          contentDescription = selfViewLabel
+          customActions = cornerActions
+        }
         .pointerInput(area, top, bottom) {
           detectDragGestures(
             onDrag = { change, drag ->
@@ -1502,15 +1556,7 @@ private fun SelfViewCorner(
             },
             onDragEnd = {
               val centre = position.value + Offset(pipSize.x / 2, pipSize.y / 2)
-              corner = corners.indices.minBy { (corners[it] + Offset(pipSize.x / 2, pipSize.y / 2) - centre).getDistance() }
-              val target = corners[corner]
-              scope.launch {
-                if (reduceMotion) {
-                  position.snapTo(target)
-                } else {
-                  position.animateTo(target, spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMedium))
-                }
-              }
+              moveTo(corners.indices.minBy { (corners[it] + Offset(pipSize.x / 2, pipSize.y / 2) - centre).getDistance() })
             },
           )
         },

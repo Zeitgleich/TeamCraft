@@ -145,4 +145,20 @@
   <!-- Call recording (#216, e2ee.md §8.3) -->
   <string name="call_recording_by">Aufnahme durch %1$s. Verlasse den Anruf, wenn du nicht aufgenommen werden möchtest.</string>
   <string name="call_recording_someone">Jemand</string>
+  <string name="call_tile_speaking">spricht</string>
+  <string name="call_self_view">Deine Kamera</string>
+  <string name="call_self_view_top_start">Nach oben links verschieben</string>
+  <string name="call_self_view_top_end">Nach oben rechts verschieben</string>
+  <string name="call_self_view_bottom_start">Nach unten links verschieben</string>
+  <string name="call_self_view_bottom_end">Nach unten rechts verschieben</string>
+  <string name="call_announce_joined">%1$s ist dem Anruf beigetreten</string>
+  <string name="call_announce_left">%1$s hat den Anruf verlassen</string>
+  <plurals name="call_announce_joined_many">
+    <item quantity="one">%d Person ist dem Anruf beigetreten</item>
+    <item quantity="other">%d Personen sind dem Anruf beigetreten</item>
+  </plurals>
+  <plurals name="call_announce_left_many">
+    <item quantity="one">%d Person hat den Anruf verlassen</item>
+    <item quantity="other">%d Personen haben den Anruf verlassen</item>
+  </plurals>
 </resources>

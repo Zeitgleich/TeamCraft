@@ -262,6 +262,7 @@ sidebar-scheduled-attention = { $count ->
 sidebar-drafts = Drafts & sent
 sidebar-item-draft = Draft
 sidebar-item-draft-label = { $label }, draft
+sidebar-item-presence = { $label }, { $status }
 drafts-title = Drafts & sent
 drafts-tab-drafts = Drafts
 drafts-tab-sent = Sent

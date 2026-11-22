@@ -1034,6 +1034,9 @@ pub fn SidebarItem(
       .and_then(|member| state.read(|backend| backend.user(member)))
   });
 
+  // A direct conversation's row says the person's presence in its label (#2282); the dot beside
+  // the name is the only place the state shows, and the label overrides what the row contains.
+  let dm_presence = StoredValue::new(None::<Memo<PresenceStatus>>);
   let leading = match kind {
     ConversationKind::Public | ConversationKind::Private | ConversationKind::Integration => {
       let fallback = channel_fallback_icon(kind).unwrap_or(IconName::Hash);
@@ -1050,7 +1053,8 @@ pub fn SidebarItem(
             .map_or(PresenceStatus::Offline, |user| user.presence)
         })
       });
-      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence.get() /> }}</span> }
+      dm_presence.set_value(Some(presence));
+      view! { <span class="dm-dot">{move || view! { <PresenceDot presence=presence.get() is_labelled=false /> }}</span> }
         .into_any()
     },
   };
@@ -1115,6 +1119,19 @@ pub fn SidebarItem(
       i18n.t_with("sidebar-item-draft-label", &[("label", &label)])
     } else {
       label
+    };
+    let label = match dm_presence.get_value() {
+      Some(presence) => i18n.t_with(
+        "sidebar-item-presence",
+        &[
+          ("label", &label),
+          (
+            "status",
+            &i18n.t(crate::components::avatar::presence_key(presence.get())),
+          ),
+        ],
+      ),
+      None => label,
     };
     match typing.get() {
       Some(typing) => format!("{label}, {typing}"),

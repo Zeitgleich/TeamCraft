@@ -479,3 +479,17 @@ call-recording-take-unfinished = The app was closed while recording. The recordi
 tile-recording = recording
 call-recording-left = { $name } (left the call, may still be listening)
 call-recording-unconfirmed = The server hasn't confirmed that the others are told about your recording. They may not see it.
+
+## Call announcements (#2281): said once by the call's live region
+call-announce-joined = { $names } joined the call
+call-announce-joined-many = { $count } people joined the call
+call-announce-left = { $names } left the call
+call-announce-left-many = { $count } people left the call
+call-announce-waiting = { $names } is waiting in the lobby
+call-announce-waiting-many = { $count } people are waiting in the lobby
+call-announce-mic-on = Microphone on
+call-announce-mic-off = Microphone muted
+call-announce-recording-by = { $names } started recording
+call-announce-recording-by-many = { $count } people started recording
+call-announce-recording-own = You started recording
+call-announce-recording-stopped = Recording stopped

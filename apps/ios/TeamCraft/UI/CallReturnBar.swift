@@ -37,6 +37,7 @@ struct CallReturnBar: View {
       .buttonStyle(.plain)
       .accessibilityElement(children: .combine)
       .accessibilityLabel(Text("call_return \(call.displayName)"))
+      .accessibilityValue(spokenStatus)
       .accessibilityHint(Text("call_return_hint"))
       roundButton(
         system: call.isMuted ? "mic.slash.fill" : "mic.fill",
@@ -67,6 +68,20 @@ struct CallReturnBar: View {
       Button("cancel", role: .cancel) {}
     } message: { offer in
       Text("call_hosts_leave_body \(offer.waiting)")
+    }
+  }
+
+  /// The status line, which `.combine` leaves out of the label (#2281): on hold, ringing,
+  /// reconnecting, or how long the call runs.
+  private var spokenStatus: Text {
+    if call.isOnHold { return Text("call_on_hold") }
+    switch call.phase {
+    case .ringing: return Text("call_ringing")
+    case .connecting: return Text("call_connecting")
+    case .reconnecting: return Text("call_reconnecting")
+    case .connected:
+      guard let start = call.maybeConnectedAt else { return Text("call_connecting") }
+      return Text(verbatim: CallScreen.format(Date().timeIntervalSince(start)))
     }
   }
 

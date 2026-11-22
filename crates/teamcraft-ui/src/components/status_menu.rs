@@ -93,7 +93,7 @@ pub fn StatusMenu() -> impl IntoView {
         aria-checked=move || is_current().to_string()
         on:click=move |_| set_presence(presence)
       >
-        <PresenceDot presence=presence />
+        <PresenceDot presence=presence is_labelled=false />
         <span class="menu-label">{move || i18n.t(pick_key(presence))}</span>
         {move || is_current().then(|| view! { <Icon name=IconName::Check /> })}
       </button>
@@ -116,7 +116,7 @@ pub fn StatusMenu() -> impl IntoView {
             {move || me.get().display_name}
           </div>
           <div class="menu-user-sub menu-user-status">
-            {move || view! { <PresenceDot presence=me.get().presence /> }}
+            {move || view! { <PresenceDot presence=me.get().presence is_labelled=false /> }}
             <span>
               {move || i18n.t(&format!("presence-{}", me.get().presence.slug()))}
               {move || status_end_label(state, i18n).map(|until| format!(" · {until}"))}

@@ -116,6 +116,21 @@ impl RecordingControl {
   }
 }
 
+/// Who records the call right now, for the call announcer: whether this device does, and the
+/// others (id and name, an empty name when the profile is unknown).
+pub fn recording_now(state: AppState) -> (bool, Vec<(UserId, String)>) {
+  let status = state.read(recording_status);
+  (
+    status.maybe_own_since.is_some(),
+    status
+      .others
+      .into_iter()
+      .filter(|recorder| !recorder.has_left)
+      .map(|recorder| (recorder.user, recorder.name))
+      .collect(),
+  )
+}
+
 /// The header's recording indicator.
 #[component]
 pub fn RecordingIndicator() -> impl IntoView {
@@ -139,7 +154,7 @@ pub fn RecordingIndicator() -> impl IntoView {
     };
     let is_unconfirmed = status.is_own_unconfirmed;
     Some(view! {
-      <span class="recording-pill" role="status" title=i18n.t("call-recording-detail")>
+      <span class="recording-pill" title=i18n.t("call-recording-detail")>
         <span class="recording-dot" aria-hidden="true"></span>
         <span>{text}</span>
       </span>
