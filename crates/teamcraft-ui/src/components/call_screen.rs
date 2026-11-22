@@ -12,6 +12,7 @@ use crate::components::add_to_call::AddPeople;
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
+use crate::components::call_popover::CallPopover;
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_recording::{RecordingBanner, RecordingIndicator, use_recording_control};
 use crate::components::call_video::{
@@ -21,6 +22,7 @@ use crate::components::count_badge::CountBadge;
 use crate::components::icons::{Icon, IconName};
 use crate::components::share_preview::OwnSharePreview;
 use crate::components::share_stage::use_strip_placement;
+use crate::components::tab_list::{on_radio_keys, roving_tabindex};
 use crate::components::video_quality::VideoQualityMenu;
 use crate::components::video_stats::{VideoStatsHub, VideoStatsOverlay};
 use crate::i18n::use_i18n;
@@ -742,92 +744,6 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </Show>
         <CallChatToast chat=chat />
       </div>
-      <Show when=move || share_open.get() fallback=|| ()>
-        <div class="effects-popover share-popover" role="dialog" aria-label=move || i18n.t("share-options")>
-          <h2>{move || i18n.t("share-options")}</h2>
-          <label class="checkbox">
-            <input
-              type="checkbox"
-              prop:checked=move || call.share_sound.get()
-              on:change=move |ev| set_share_sound(event_target_checked(&ev))
-            />
-            <span>
-              {move || i18n.t("share-sound")}
-              <small class="muted-text">{move || i18n.t("share-sound-hint")}</small>
-            </span>
-          </label>
-          <label class="checkbox">
-            <input
-              type="checkbox"
-              prop:checked=move || call.screen_mode.get() == ScreenContentMode::Motion
-              on:change=move |ev| {
-                set_screen_mode(if event_target_checked(&ev) { ScreenContentMode::Motion } else { ScreenContentMode::Detail })
-              }
-            />
-            <span>
-              {move || i18n.t("share-motion")}
-              <small class="muted-text">{move || i18n.t("share-motion-hint")}</small>
-            </span>
-          </label>
-          <Show when=move || can_share_uhd.get() fallback=|| ()>
-            <label class="checkbox">
-              <input
-                type="checkbox"
-                prop:checked=move || call.screen_resolution.get() == ScreenShareResolution::Uhd
-                on:change=move |ev| {
-                  set_screen_resolution(if event_target_checked(&ev) {
-                    ScreenShareResolution::Uhd
-                  } else {
-                    ScreenShareResolution::Standard
-                  })
-                }
-              />
-              <span>
-                {move || i18n.t("share-uhd")}
-                <small class="muted-text">{move || i18n.t("share-uhd-hint")}</small>
-              </span>
-            </label>
-          </Show>
-          <button
-            class="btn btn-primary"
-            on:click=move |_| {
-              share_open.set(false);
-              call.set_screen_share(true);
-            }
-          >
-            {move || i18n.t("share-choose")}
-          </button>
-        </div>
-      </Show>
-      <Show when=move || effects_open.get() fallback=|| ()>
-        <div class="effects-popover" role="dialog" aria-label=move || i18n.t("call-effects")>
-          <h2>{move || i18n.t("call-effects")}</h2>
-          <BackgroundPicker effect=call.effect size=PickerSize::Compact />
-        </div>
-      </Show>
-      {move || call.maybe_quality_menu.get().map(|stream_id| view! { <VideoQualityMenu stream_id=stream_id /> })}
-      <Show when=move || has_audio_menu.get() && call.is_audio_menu_open.get() fallback=|| ()>
-        <AudioMenu />
-      </Show>
-      <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
-        <div class="effects-popover camera-popover" role="dialog" aria-label=move || i18n.t("control-camera-choose")>
-          <h2 id="camera-menu-title">{move || i18n.t("prejoin-camera")}</h2>
-          <div class="camera-options" role="radiogroup" aria-labelledby="camera-menu-title">
-            {move || {
-              let listed = cameras.get();
-              if listed.is_empty() {
-                return view! { <p class="muted-text">{i18n.t("prejoin-no-camera")}</p> }.into_any();
-              }
-              let default_id = listed[0].id.clone();
-              listed
-                .into_iter()
-                .map(|camera| camera_option(camera, &default_id, call.camera_id, pick_camera))
-                .collect_view()
-                .into_any()
-            }}
-          </div>
-        </div>
-      </Show>
       <footer class="call-controls" role="toolbar" aria-label=move || i18n.t("call-controls-label")>
         // The microphone with its menu of microphones and speakers (#986).
         <div class="control-split">
@@ -879,6 +795,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <Show when=move || has_camera_menu.get() fallback=|| ()>
           <ControlButton
             is_active=call.is_camera_menu_open
+            popup=Signal::derive(move || Some(call.is_camera_menu_open.get()))
             icon=IconName::SwitchCamera
             label=Signal::derive(move || i18n.t("control-camera-choose"))
             on_press=move || call.is_camera_menu_open.update(|open| *open = !*open)
@@ -887,6 +804,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <Show when=can_share_screen fallback=|| ()>
         <ControlButton
           is_active=Signal::derive(move || call.is_sharing_screen.get() || share_open.get())
+          popup=Signal::derive(move || (!call.is_sharing_screen.get()).then(|| share_open.get()))
           icon=IconName::Monitor
           label=Signal::derive(move || if call.is_sharing_screen.get() { i18n.t("share-stop") } else { i18n.t("share-start") })
           on_press=move || {
@@ -915,6 +833,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         {has_effects.then(|| view! {
           <ControlButton
             is_active=Signal::derive(move || effects_open.get())
+            popup=Signal::derive(move || Some(effects_open.get()))
             icon=IconName::Image
             label=Signal::derive(move || i18n.t("call-effects"))
             on_press=move || {
@@ -991,6 +910,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <Show when=move || has_video_stats && !state.is_compact() fallback=|| ()>
           <ControlButton
             is_active=call.shows_video_stats
+            is_toggle=true
             icon=IconName::Info
             label=Signal::derive(move || i18n.t("stats-title"))
             on_press=move || video_stats.toggle()
@@ -1065,6 +985,93 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </Show>
         </div>
       </footer>
+      // After the controls in the DOM, so the keyboard reaches a popover from its trigger.
+      <Show when=move || share_open.get() fallback=|| ()>
+        <CallPopover class="effects-popover share-popover" labelled_by="share-menu-title" on_close=Callback::new(move |()| share_open.set(false))>
+          <h2 id="share-menu-title">{move || i18n.t("share-options")}</h2>
+          <label class="checkbox">
+            <input
+              type="checkbox"
+              prop:checked=move || call.share_sound.get()
+              on:change=move |ev| set_share_sound(event_target_checked(&ev))
+            />
+            <span>
+              {move || i18n.t("share-sound")}
+              <small class="muted-text">{move || i18n.t("share-sound-hint")}</small>
+            </span>
+          </label>
+          <label class="checkbox">
+            <input
+              type="checkbox"
+              prop:checked=move || call.screen_mode.get() == ScreenContentMode::Motion
+              on:change=move |ev| {
+                set_screen_mode(if event_target_checked(&ev) { ScreenContentMode::Motion } else { ScreenContentMode::Detail })
+              }
+            />
+            <span>
+              {move || i18n.t("share-motion")}
+              <small class="muted-text">{move || i18n.t("share-motion-hint")}</small>
+            </span>
+          </label>
+          <Show when=move || can_share_uhd.get() fallback=|| ()>
+            <label class="checkbox">
+              <input
+                type="checkbox"
+                prop:checked=move || call.screen_resolution.get() == ScreenShareResolution::Uhd
+                on:change=move |ev| {
+                  set_screen_resolution(if event_target_checked(&ev) {
+                    ScreenShareResolution::Uhd
+                  } else {
+                    ScreenShareResolution::Standard
+                  })
+                }
+              />
+              <span>
+                {move || i18n.t("share-uhd")}
+                <small class="muted-text">{move || i18n.t("share-uhd-hint")}</small>
+              </span>
+            </label>
+          </Show>
+          <button
+            class="btn btn-primary"
+            on:click=move |_| {
+              share_open.set(false);
+              call.set_screen_share(true);
+            }
+          >
+            {move || i18n.t("share-choose")}
+          </button>
+        </CallPopover>
+      </Show>
+      <Show when=move || effects_open.get() fallback=|| ()>
+        <CallPopover class="effects-popover" labelled_by="effects-menu-title" on_close=Callback::new(move |()| effects_open.set(false))>
+          <h2 id="effects-menu-title">{move || i18n.t("call-effects")}</h2>
+          <BackgroundPicker effect=call.effect size=PickerSize::Compact />
+        </CallPopover>
+      </Show>
+      {move || call.maybe_quality_menu.get().map(|stream_id| view! { <VideoQualityMenu stream_id=stream_id /> })}
+      <Show when=move || has_audio_menu.get() && call.is_audio_menu_open.get() fallback=|| ()>
+        <AudioMenu />
+      </Show>
+      <Show when=move || call.is_camera_menu_open.get() fallback=|| ()>
+        <CallPopover class="effects-popover camera-popover" labelled_by="camera-menu-title" on_close=Callback::new(move |()| call.is_camera_menu_open.set(false))>
+          <h2 id="camera-menu-title">{move || i18n.t("prejoin-camera")}</h2>
+          <div class="camera-options" role="radiogroup" on:keydown=|ev| on_radio_keys(&ev) aria-labelledby="camera-menu-title">
+            {move || {
+              let listed = cameras.get();
+              if listed.is_empty() {
+                return view! { <p class="muted-text">{i18n.t("prejoin-no-camera")}</p> }.into_any();
+              }
+              let default_id = listed[0].id.clone();
+              listed
+                .into_iter()
+                .map(|camera| camera_option(camera, &default_id, call.camera_id, pick_camera))
+                .collect_view()
+                .into_any()
+            }}
+          </div>
+        </CallPopover>
+      </Show>
     </section>
   }
 }
@@ -1092,6 +1099,7 @@ fn camera_option(
       type="button"
       role="radio"
       class="camera-option"
+      tabindex=move || roving_tabindex(is_chosen.get())
       class:chosen=move || is_chosen.get()
       aria-checked=move || is_chosen.get().to_string()
       on:click=move |_| pick(id.clone())
@@ -1115,6 +1123,13 @@ fn ControlButton(
   /// focusable and its label reads out the reason.
   #[prop(into, default = Signal::stored(false))]
   is_disabled: Signal<bool>,
+  /// A button that opens a popover: whether it is open (`None`: it opens none right now).
+  #[prop(into, default = Signal::stored(None))]
+  popup: Signal<Option<bool>>,
+  /// A toggle whose label stays the same and says its state with `aria-pressed`. The others change
+  /// their label to the action ("Unmute"), which already tells the state: no `aria-pressed`.
+  #[prop(default = false)]
+  is_toggle: bool,
   /// A badge on the button (the chat's unread count).
   #[prop(optional)]
   children: Option<Children>,
@@ -1128,7 +1143,9 @@ fn ControlButton(
       aria-disabled=move || is_disabled.get().then_some("true")
       aria-label=move || label.get()
       title=move || label.get()
-      aria-pressed=move || (is_off.get() || is_active.get()).to_string()
+      aria-pressed=move || is_toggle.then(|| is_active.get().to_string())
+      aria-haspopup=move || popup.get().map(|_| "dialog")
+      aria-expanded=move || popup.get().map(|is_open| is_open.to_string())
       on:click=move |_| on_press()
     >
       <Icon name=icon />

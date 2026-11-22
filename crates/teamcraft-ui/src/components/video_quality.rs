@@ -8,7 +8,9 @@ use leptos::prelude::*;
 use teamcraft_proto::MediaStreamId;
 
 use crate::calls::VideoQuality;
+use crate::components::call_popover::CallPopover;
 use crate::components::icons::{Icon, IconName};
+use crate::components::tab_list::{on_radio_keys, roving_tabindex};
 use crate::i18n::use_i18n;
 use crate::reactive::use_interval_while_visible;
 use crate::state::use_app_state;
@@ -101,9 +103,13 @@ pub fn VideoQualityMenu(stream_id: MediaStreamId) -> impl IntoView {
     call.maybe_quality_menu.set(None);
   };
   view! {
-    <div class="effects-popover camera-popover quality-popover" role="dialog" aria-labelledby="quality-menu-title">
+    <CallPopover
+      class="effects-popover camera-popover quality-popover"
+      labelled_by="quality-menu-title"
+      on_close=Callback::new(move |()| call.maybe_quality_menu.set(None))
+    >
       <h2 id="quality-menu-title">{title}</h2>
-      <div class="camera-options" role="radiogroup" aria-labelledby="quality-menu-title">
+      <div class="camera-options" role="radiogroup" on:keydown=|ev| on_radio_keys(&ev) aria-labelledby="quality-menu-title">
         {move || {
           choices
             .get()
@@ -119,6 +125,7 @@ pub fn VideoQualityMenu(stream_id: MediaStreamId) -> impl IntoView {
                   type="button"
                   role="radio"
                   class="camera-option"
+                  tabindex=move || roving_tabindex(is_chosen.get())
                   class:chosen=move || is_chosen.get()
                   aria-checked=move || is_chosen.get().to_string()
                   on:click=move |_| pick(choice)
@@ -134,6 +141,6 @@ pub fn VideoQualityMenu(stream_id: MediaStreamId) -> impl IntoView {
         }}
       </div>
       <p class="quality-hint muted-text">{move || i18n.t("video-quality-hint")}</p>
-    </div>
+    </CallPopover>
   }
 }

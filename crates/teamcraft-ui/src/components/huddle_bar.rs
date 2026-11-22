@@ -309,7 +309,6 @@ fn MicButton(class: &'static str) -> impl IntoView {
   view! {
     <button
       class=class
-      aria-pressed=move || (!call.is_mic_on.get()).to_string()
       aria-label=label
       title=label
       on:click=move |_| call.set_muted(call.is_mic_on.get_untracked())
@@ -335,7 +334,6 @@ fn CameraButton(class: &'static str) -> impl IntoView {
   view! {
     <button
       class=class
-      aria-pressed=move || (!call.is_camera_on.get()).to_string()
       aria-label=label
       title=label
       on:click=move |_| call.set_camera(!call.is_camera_on.get_untracked())

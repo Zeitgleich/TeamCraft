@@ -108,7 +108,6 @@ fn CallMiniWindow() -> impl IntoView {
         <button
           class="round-btn"
           class:off=is_muted
-          aria-pressed=move || is_muted().to_string()
           aria-label=move || if is_muted() { i18n.t("control-mic-unmute") } else { i18n.t("control-mic-mute") }
           title=move || if is_muted() { i18n.t("control-mic-unmute") } else { i18n.t("control-mic-mute") }
           on:click=move |_| act(if is_muted() { TrayAction::Unmute } else { TrayAction::Mute })
@@ -127,7 +126,6 @@ fn CallMiniWindow() -> impl IntoView {
         <button
           class="round-btn"
           class:off=is_sound_off
-          aria-pressed=move || is_sound_off().to_string()
           aria-label=move || if is_sound_off() { i18n.t("control-undeafen") } else { i18n.t("control-deafen") }
           title=move || if is_sound_off() { i18n.t("control-undeafen") } else { i18n.t("control-deafen") }
           on:click=move |_| act(if is_sound_off() { TrayAction::SoundOn } else { TrayAction::SoundOff })
