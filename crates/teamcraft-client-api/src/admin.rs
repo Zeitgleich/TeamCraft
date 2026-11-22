@@ -269,12 +269,17 @@ pub enum AuditAction {
   CalendarSettingsChanged,
   /// Instance settings (limits, rules, mail texts, ...) were changed or reset.
   SettingsChanged,
+  /// Somebody started recording a call (issue #2117); the detail has the call, the device and the
+  /// devices in the call.
+  CallRecordingStarted,
+  /// A call recording ended: stopped, or its device left; the detail adds how long it ran.
+  CallRecordingStopped,
   /// Anything the console has no wording for yet; the detail carries the raw action name.
   Other,
 }
 
 impl AuditAction {
-  pub const ALL: [AuditAction; 41] = [
+  pub const ALL: [AuditAction; 43] = [
     Self::PolicyChanged,
     Self::RetentionChanged,
     Self::DeviceRemoved,
@@ -315,6 +320,8 @@ impl AuditAction {
     Self::MailSettingsChanged,
     Self::CalendarSettingsChanged,
     Self::SettingsChanged,
+    Self::CallRecordingStarted,
+    Self::CallRecordingStopped,
     Self::Other,
   ];
 
@@ -360,6 +367,8 @@ impl AuditAction {
       Self::MailSettingsChanged => "mail-settings-changed",
       Self::CalendarSettingsChanged => "calendar-settings-changed",
       Self::SettingsChanged => "settings-changed",
+      Self::CallRecordingStarted => "call-recording-started",
+      Self::CallRecordingStopped => "call-recording-stopped",
       Self::Other => "other",
     }
   }

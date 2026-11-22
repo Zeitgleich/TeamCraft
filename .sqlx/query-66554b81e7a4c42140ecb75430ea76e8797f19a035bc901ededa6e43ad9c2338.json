@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO open_call_recordings (call_id, device_id, user_id, conversation_id, peak_participants)\n         VALUES ($1, $2, $3, $4, $5)\n         ON CONFLICT (call_id, device_id) DO UPDATE\n           SET peak_participants = GREATEST(open_call_recordings.peak_participants, EXCLUDED.peak_participants)\n         RETURNING (xmax = 0) AS \"is_new!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_new!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "66554b81e7a4c42140ecb75430ea76e8797f19a035bc901ededa6e43ad9c2338"
+}

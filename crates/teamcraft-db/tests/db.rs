@@ -1273,3 +1273,120 @@ async fn creating_a_space_or_channel_twice_with_one_key_creates_one() {
   assert_eq!(created.id, again.id);
   test_db.drop_database().await;
 }
+
+/// Running call recordings and their audit rows (issue #2117).
+mod call_recordings {
+  use teamcraft_db::{AuditQuery, CallRecordingStart, RecordingAudit, RunningCallRecording};
+  use teamcraft_proto::CallId;
+
+  use super::*;
+
+  #[tokio::test]
+  async fn a_start_announced_again_keeps_one_entry_and_the_stop_has_the_peak_and_the_duration() {
+    let Some(test_db) = TestDatabase::create().await else {
+      return;
+    };
+    let db = &test_db.db;
+    let ids = SnowflakeGenerator::new(1).unwrap();
+    let alice = db
+      .upsert_oidc_user(&identity("a", "Alice"), ids.next_id().unwrap())
+      .await
+      .unwrap();
+    let channel = channel(db, &ids, alice.id).await;
+    let start = CallRecordingStart {
+      call_id: ids.next_id::<CallId>().unwrap(),
+      device_id: ids.next_id::<DeviceId>().unwrap(),
+      user_id: alice.id,
+      conversation_id: channel,
+      participants: 3,
+    };
+    let audit = |action| RecordingAudit {
+      id: ids.next_snowflake().unwrap(),
+      action,
+    };
+    assert!(
+      db.start_call_recording(&start, audit("started"), "{}")
+        .await
+        .unwrap()
+    );
+    // The SFU restarted: the recorder announces the recording again, to more people now.
+    let again = CallRecordingStart {
+      participants: 5,
+      ..start
+    };
+    assert!(
+      !db
+        .start_call_recording(&again, audit("started"), "{}")
+        .await
+        .unwrap()
+    );
+    let running = RunningCallRecording {
+      call_id: start.call_id,
+      device_id: start.device_id,
+    };
+    assert_eq!(db.running_call_recordings().await.unwrap(), [running]);
+
+    let ended = db
+      .end_call_recording(running, 4, audit("stopped"), |ended| {
+        format!(r#"{{"participants":{}}}"#, ended.peak_participants)
+      })
+      .await
+      .unwrap()
+      .unwrap();
+    assert_eq!(ended.peak_participants, 5, "the most of every report");
+    assert_eq!(ended.user_id, alice.id);
+    assert_eq!(ended.conversation_id, channel);
+    assert!(ended.duration_secs < 60);
+    let twice = db
+      .end_call_recording(running, 4, audit("stopped"), |_| String::new())
+      .await
+      .unwrap();
+    assert_eq!(twice, None, "a stop that came twice writes nothing");
+    assert!(db.running_call_recordings().await.unwrap().is_empty());
+
+    let rows = db
+      .list_audit(&AuditQuery {
+        limit: 10,
+        ..AuditQuery::default()
+      })
+      .await
+      .unwrap();
+    let actions: Vec<&str> = rows.iter().map(|row| row.action.as_str()).collect();
+    assert_eq!(actions, ["stopped", "started"], "one start and one stop");
+    assert_eq!(rows[0].maybe_actor, Some(alice.id));
+    assert_eq!(rows[0].maybe_target_kind.as_deref(), Some("conversation"));
+    assert_eq!(rows[0].maybe_target_id, Some(channel.snowflake().get()));
+    assert_eq!(rows[0].detail, r#"{"participants": 5}"#);
+    test_db.drop_database().await;
+  }
+
+  /// A DM of Alice's and Bob's: the call's conversation.
+  async fn channel(db: &teamcraft_db::Database, ids: &SnowflakeGenerator, alice: UserId) -> ConversationId {
+    let bob = db
+      .upsert_oidc_user(&identity("b", "Bob"), ids.next_id().unwrap())
+      .await
+      .unwrap()
+      .id;
+    let participants = [alice, bob];
+    let (id, _) = db
+      .get_or_create_participants_conversation(
+        &NewConversation {
+          id: ids.next_id().unwrap(),
+          maybe_space: None,
+          kind: ConversationKind::Dm,
+          maybe_name: None,
+          maybe_topic: None,
+          maybe_description: None,
+          visibility: ConversationVisibility::Private,
+          history_policy: HistoryPolicy::FromJoin,
+          maybe_category: None,
+          maybe_participants_key: Some(participants_key(&participants)),
+          is_integration: false,
+        },
+        &participants,
+      )
+      .await
+      .unwrap();
+    id
+  }
+}

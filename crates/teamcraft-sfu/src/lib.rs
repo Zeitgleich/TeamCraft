@@ -21,6 +21,7 @@ pub mod net;
 pub mod prejoin;
 pub mod quality;
 pub mod rate_limit;
+pub mod recording;
 pub mod rejoin;
 pub mod reporting;
 pub mod room;

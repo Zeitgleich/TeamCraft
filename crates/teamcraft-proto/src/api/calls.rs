@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::wire_enum::wire_enum;
 use crate::{CallId, ConversationId, DeviceId, MeetingId, UnixMillis, UserId};
 
 /// Body of `POST /api/v1/conversations/{conversation_id}/call/join-token`.
@@ -195,6 +196,31 @@ pub struct SfuParticipantReport {
   pub device_id: DeviceId,
 }
 
+/// Body of the SFU's report `POST /api/internal/v1/calls/recording` (issue #2117): a device's
+/// signed recording notice (e2ee.md §8.3) turned from stopped to recording or back. The SFU reads
+/// the notice's claimed state, call and device (it is signed, not encrypted) but can't check the
+/// signature; it reports only notices that name the call and the device that sent them, so a
+/// device can only ever speak for itself, as in the notice everybody else is shown. The server
+/// writes the audit entries from these. Internal: authenticated with the SFU's registration token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct SfuRecordingReport {
+  pub call_id: CallId,
+  pub user_id: UserId,
+  pub device_id: DeviceId,
+  pub state: SfuRecordingState,
+  /// Devices in the call: at a start, those there then; at a stop, the most at once while the
+  /// recording ran, as far as this SFU saw it.
+  pub participants: u32,
+}
+
+wire_enum! {
+  /// What a device's latest recording notice says.
+  pub enum SfuRecordingState {
+    Recording => "recording",
+    Stopped => "stopped",
+  }
+}
+
 /// Body of `POST /api/internal/v1/calls/roster`: every call the SFU runs and who is in it, sent when
 /// the SFU starts, periodically and after a call moved between a user's devices. The server
 /// reconciles its roster with it, so a lost or never sent leave can't keep a device in a call for
@@ -293,6 +319,26 @@ pub struct SfuCallRoster {
 mod tests {
   use super::*;
   use crate::{Id, Snowflake};
+
+  #[test]
+  fn recording_reports_have_a_stable_wire_format() {
+    let report = SfuRecordingReport {
+      call_id: CallId::from_snowflake(Snowflake::new(7).unwrap()),
+      user_id: UserId::from_snowflake(Snowflake::new(8).unwrap()),
+      device_id: DeviceId::from_snowflake(Snowflake::new(9).unwrap()),
+      state: SfuRecordingState::Recording,
+      participants: 3,
+    };
+    let json = serde_json::to_string(&report).unwrap();
+    assert_eq!(
+      json,
+      r#"{"call_id":"7","user_id":"8","device_id":"9","state":"recording","participants":3}"#
+    );
+    assert_eq!(serde_json::from_str::<SfuRecordingReport>(&json).unwrap(), report);
+    let newer: SfuRecordingReport =
+      serde_json::from_str(&json.replace(r#""recording""#, r#""paused""#)).unwrap();
+    assert_eq!(newer.state, SfuRecordingState::Unknown("paused".into()));
+  }
 
   #[test]
   fn control_requests_have_a_stable_wire_format() {

@@ -22,6 +22,7 @@ pub mod areas;
 pub mod attention;
 pub mod audio;
 pub mod audio_player;
+pub(crate) mod audit_detail;
 pub(crate) mod audit_export;
 pub mod auth;
 pub mod brand;

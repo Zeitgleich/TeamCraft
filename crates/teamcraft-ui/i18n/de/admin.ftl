@@ -699,6 +699,22 @@ audit-brand-changed = Marke geändert
 audit-mail-settings-changed = Mail-Einstellungen geändert
 audit-calendar-settings-changed = Kalender-Einstellungen geändert
 audit-settings-changed = Instanzeinstellungen geändert
+audit-call-recording-started = Anrufaufzeichnung gestartet
+audit-call-recording-stopped = Anrufaufzeichnung beendet
+# Detail of an audit entry: devices in the call when the recording started.
+audit-detail-recording-started = { $count ->
+    [one] 1 Gerät im Anruf
+   *[other] { $count } Geräte im Anruf
+}
+# Detail of an audit entry: how long the recording ran ($length like 12:34) and the most devices in the call.
+audit-detail-recording-stopped = { $count ->
+    [one] Dauer { $length }, 1 Gerät im Anruf
+   *[other] Dauer { $length }, bis zu { $count } Geräte im Anruf
+}
+audit-detail-recording-left = { $count ->
+    [one] Dauer { $length }, 1 Gerät im Anruf; das aufzeichnende Gerät hat den Anruf ohne Beenden verlassen
+   *[other] Dauer { $length }, bis zu { $count } Geräte im Anruf; das aufzeichnende Gerät hat den Anruf ohne Beenden verlassen
+}
 admin-source-config = Aus der Konfigurationsdatei
 admin-source-database = In der Konsole geändert
 admin-save = Speichern

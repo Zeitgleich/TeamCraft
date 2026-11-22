@@ -50,6 +50,7 @@ use crate::{
   forwarding::{DecodableCodecs, Effect, ForwardError, Forwarder},
   quality::CallQuality,
   rate_limit::TokenBucket,
+  recording::RecordingClaim,
   signaling::Outgoing,
 };
 
@@ -142,6 +143,16 @@ pub trait ParticipantLink: Send + Sync {
 }
 
 /// Whether a join started a new participant or took back a slot.
+/// A device's recording notice turned from stopped to recording or back, or a recording device
+/// left: what the SFU reports for the audit log (issue #2117).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingChange {
+  pub user_id: UserId,
+  pub is_recording: bool,
+  /// At a start, the devices in the call; at a stop, the most at once while it ran.
+  pub participants: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinOutcome {
   Joined,
@@ -168,12 +179,34 @@ struct RoomState {
   /// `joined` and doesn't publish that share again. Dropped when the device shares again.
   screen_shares_taken_over: HashMap<DeviceId, ScreenShareTakeover>,
   quality: Arc<CallQuality>,
+  /// The devices whose latest notice says they record, for the audit reports; kept while a device
+  /// reconnects, dropped when it leaves.
+  recordings: HashMap<DeviceId, RecordingRun>,
+}
+
+/// A recording as the SFU follows it, from the claims of the device's notices.
+struct RecordingRun {
+  user_id: UserId,
+  /// The most devices in the call at once since it started.
+  peak_participants: u32,
 }
 
 /// What releasing a session's slot did.
 struct Release {
   has_left: bool,
   is_room_empty: bool,
+  /// The device left while its notice said it records.
+  maybe_recording_stopped: Option<RecordingChange>,
+}
+
+impl RecordingRun {
+  fn stopped(self) -> RecordingChange {
+    RecordingChange {
+      user_id: self.user_id,
+      is_recording: false,
+      participants: self.peak_participants,
+    }
+  }
 }
 
 /// What taking back a slot on a new connection did.
@@ -564,6 +597,16 @@ impl Rooms {
   /// period ran out). Returns whether the participant left because of this session, i.e. whether
   /// its leave is to be reported; a device that is back on a newer session stays.
   pub fn leave(&self, room: &Room, participant_id: DeviceId, session: SessionId) -> bool {
+    self.leave_reporting(room, participant_id, session).0
+  }
+
+  /// [`Self::leave`], with the end of the device's recording when it left while recording.
+  pub fn leave_reporting(
+    &self,
+    room: &Room,
+    participant_id: DeviceId,
+    session: SessionId,
+  ) -> (bool, Option<RecordingChange>) {
     let release = room.leave(participant_id, session);
     if release.is_room_empty {
       let mut rooms = lock(&self.rooms);
@@ -577,7 +620,7 @@ impl Rooms {
         info!(call_id = %room.call_id, "room closed");
       }
     }
-    release.has_left
+    (release.has_left, release.maybe_recording_stopped)
   }
 }
 
@@ -608,6 +651,7 @@ impl Room {
       audio_features_announced: HashMap::new(),
       screen_shares_taken_over: HashMap::new(),
       quality,
+      recordings: HashMap::new(),
     };
     Ok(Self {
       call_id,
@@ -729,6 +773,7 @@ impl Room {
         self.set_muted(participant_id, is_muted, now);
         Ok(())
       },
+      // The session takes these itself, to report the change (`ParticipantSession`).
       CallClientMessage::SetRecording { notice } => {
         self.set_recording_notice(participant_id, notice, now);
         Ok(())
@@ -1086,6 +1131,7 @@ impl Room {
         }
         state.announce_decodable_codecs(Some(participant_id));
         state.announce_audio_features(Some(participant_id));
+        state.note_recorded_participants();
         JoinOutcome::Joined
       },
     };
@@ -1219,12 +1265,15 @@ impl Room {
     }
     // A slot the host dropped while it was reconnecting was this session's too.
     let has_left = holds_slot || (is_latest && !state.participants.contains_key(&participant_id));
+    let mut maybe_recording_stopped = None;
     if has_left {
       state.latest_sessions.remove(&participant_id);
+      maybe_recording_stopped = state.recordings.remove(&participant_id).map(|run| run.stopped());
     }
     Release {
       has_left,
       is_room_empty: state.participants.is_empty(),
+      maybe_recording_stopped,
     }
   }
 
@@ -1324,20 +1373,28 @@ impl Room {
 
   /// Keeps the device's signed recording notice, forwards it to the others and confirms it to
   /// the sender (e2ee.md §8.3). The SFU doesn't check the signature; it bounds the size and how
-  /// often notices come. One it drops goes unconfirmed, and the sender sends it again.
-  fn set_recording_notice(&self, device_id: DeviceId, notice: Base64Bytes, now: Instant) {
+  /// often notices come. One it drops goes unconfirmed, and the sender sends it again. Returns the
+  /// change to report when the notice's claim (about the sender, in this call) turned the
+  /// device's recording on or off (issue #2117).
+  pub(crate) fn set_recording_notice(
+    &self,
+    device_id: DeviceId,
+    notice: Base64Bytes,
+    now: Instant,
+  ) -> Option<RecordingChange> {
     if notice.is_empty() || notice.len() > MAX_RECORDING_NOTICE_BYTES {
       debug!(call_id = %self.call_id, device_id = %device_id, bytes = notice.len(), "recording notice refused: size");
-      return;
+      return None;
     }
     let mut state = lock(&self.state);
     let Some(participant) = state.participants.get_mut(&device_id) else {
-      return;
+      return None;
     };
     if !participant.recording_notice_limit.allow(now) {
       debug!(call_id = %self.call_id, device_id = %device_id, "recording notice over the limit");
-      return;
+      return None;
     }
+    let user_id = participant.user_id;
     // The same notice again: its confirmation got lost. The others have it already.
     if participant.maybe_recording_notice.as_ref() != Some(&notice) {
       participant.maybe_recording_notice = Some(notice.clone());
@@ -1349,7 +1406,10 @@ impl Room {
         },
       );
     }
+    let maybe_claim =
+      RecordingClaim::read(notice.as_slice()).filter(|claim| claim.is_about(self.call_id, device_id));
     state.send_to(device_id, CallEvent::RecordingNoticeKept { notice });
+    state.follow_recording(device_id, user_id, maybe_claim?.is_recording)
   }
 
   /// The account's other devices leave for `device_id` (the call moves there). Reconnecting
@@ -1569,6 +1629,46 @@ impl RoomState {
   }
 
   /// Removes a participant for good: its tracks and DAVE leaf go, everyone hears about it.
+  /// Follows what a device's notice claims: a recording that starts or stops is a change to report.
+  fn follow_recording(
+    &mut self,
+    device_id: DeviceId,
+    user_id: UserId,
+    is_recording: bool,
+  ) -> Option<RecordingChange> {
+    if !is_recording {
+      return self.recordings.remove(&device_id).map(|run| run.stopped());
+    }
+    if self.recordings.contains_key(&device_id) {
+      return None;
+    }
+    let participants = self.participant_count();
+    self.recordings.insert(
+      device_id,
+      RecordingRun {
+        user_id,
+        peak_participants: participants,
+      },
+    );
+    Some(RecordingChange {
+      user_id,
+      is_recording: true,
+      participants,
+    })
+  }
+
+  /// A device joined: every running recording may now hear one more.
+  fn note_recorded_participants(&mut self) {
+    let participants = self.participant_count();
+    for run in self.recordings.values_mut() {
+      run.peak_participants = run.peak_participants.max(participants);
+    }
+  }
+
+  fn participant_count(&self) -> u32 {
+    u32::try_from(self.participants.len()).unwrap_or(u32::MAX)
+  }
+
   fn remove(&mut self, call_id: CallId, participant_id: DeviceId, now: Instant) {
     if self.participants.remove(&participant_id).is_none() {
       return;
@@ -2468,6 +2568,102 @@ mod tests {
       assert!(rooms.leave(&room, id(10), alice_session));
       let (mut dave_rx, _) = join(&rooms, 4, 40);
       assert!(notices(&drain(&mut dave_rx)).is_empty(), "gone with its device");
+    }
+
+    /// A notice as the crypto crate encodes it (version 1), with a blank signature: the SFU
+    /// doesn't check it (`crate::recording`).
+    fn claim(call: CallId, device: i64, sequence: u64, is_recording: bool) -> Base64Bytes {
+      let mut bytes = vec![1];
+      bytes.extend(u64::try_from(call.snowflake().get()).unwrap().to_be_bytes());
+      bytes.extend(u64::try_from(device).unwrap().to_be_bytes());
+      bytes.extend(sequence.to_be_bytes());
+      bytes.push(u8::from(is_recording));
+      bytes.extend([0; 64]);
+      Base64Bytes::new(bytes)
+    }
+
+    /// Issue #2117: the audit hears when a device's own notice starts or stops its recording,
+    /// once per change, with the devices in the call (the most at once by the stop).
+    #[test]
+    fn the_audit_hears_of_a_recording_once_with_its_peak_of_devices() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (_bob_rx, _) = join(&rooms, 2, 20);
+      let call = room.call_id();
+      let now = Instant::now();
+
+      let started = room.set_recording_notice(id(10), claim(call, 10, 1, true), now);
+      assert_eq!(
+        started,
+        Some(RecordingChange {
+          user_id: id(1),
+          is_recording: true,
+          participants: 2,
+        })
+      );
+      // Announced again (a new DAVE session): no news.
+      assert_eq!(
+        room.set_recording_notice(id(10), claim(call, 10, 2, true), now),
+        None
+      );
+      let (_carol_rx, _) = join(&rooms, 3, 30);
+      let stopped = room.set_recording_notice(id(10), claim(call, 10, 3, false), now);
+      assert_eq!(
+        stopped,
+        Some(RecordingChange {
+          user_id: id(1),
+          is_recording: false,
+          participants: 3,
+        })
+      );
+      assert_eq!(
+        room.set_recording_notice(id(10), claim(call, 10, 4, false), now),
+        None
+      );
+    }
+
+    /// A notice about another device or call, or one the SFU can't read, is still forwarded (the
+    /// apps check it) but reported to nobody.
+    #[test]
+    fn notices_about_somebody_else_reach_no_audit() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      let call = room.call_id();
+      let now = Instant::now();
+      assert_eq!(
+        room.set_recording_notice(id(10), claim(call, 20, 1, true), now),
+        None
+      );
+      let other_call = CallId::from_snowflake(Snowflake::new(call.snowflake().get() + 1).unwrap());
+      assert_eq!(
+        room.set_recording_notice(id(10), claim(other_call, 10, 2, true), now),
+        None
+      );
+      assert_eq!(
+        room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), now),
+        None
+      );
+      assert_eq!(notices(&drain(&mut bob_rx)).len(), 3, "forwarded all the same");
+    }
+
+    #[test]
+    fn a_device_that_leaves_while_recording_ends_it_for_the_audit() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, alice_session) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (_bob_rx, _) = join(&rooms, 2, 20);
+      room.set_recording_notice(id(10), claim(room.call_id(), 10, 1, true), Instant::now());
+      let (has_left, maybe_stopped) = rooms.leave_reporting(&room, id(10), alice_session);
+      assert!(has_left);
+      assert_eq!(
+        maybe_stopped,
+        Some(RecordingChange {
+          user_id: id(1),
+          is_recording: false,
+          participants: 2,
+        })
+      );
     }
 
     #[test]

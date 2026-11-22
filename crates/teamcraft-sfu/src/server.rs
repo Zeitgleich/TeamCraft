@@ -43,7 +43,8 @@ use teamcraft_media::join_probe::LinkMeasurement;
 use teamcraft_media::quic_send::set_datagram_send_buffer;
 use teamcraft_proto::{
   CallClientMessage, CallEvent, CallId, CallServerMessage, DeviceId, ErrorBody, ErrorCode, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SfuControlRequest, SfuRosterReport,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, SfuControlRequest, SfuRecordingReport,
+  SfuRecordingState, SfuRosterReport,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -75,7 +76,8 @@ use crate::{
   rejoin::{RejoinLimiter, RejoinTurn},
   reporting::{NoReporter, ParticipantReporter},
   room::{
-    JoinOutcome, ParticipantHandle, ParticipantLink, QuicLink, Room, RoomError, RoomStats, Rooms, SessionId,
+    JoinOutcome, ParticipantHandle, ParticipantLink, QuicLink, RecordingChange, Room, RoomError, RoomStats,
+    Rooms, SessionId,
   },
   signaling::{
     Dequeued, EventSequence, Handover, Outgoing, SignalQueue, SignalingError, read_message, write_message,
@@ -150,6 +152,8 @@ pub(crate) struct ParticipantSession {
   max_bytes: usize,
   roster_now: Arc<Notify>,
   quality: Arc<CallQuality>,
+  /// Takes the recording changes of the audit log (issue #2117).
+  reporter: Arc<dyn ParticipantReporter>,
 }
 
 /// How a participant's session ended.
@@ -953,8 +957,15 @@ pub(crate) async fn release_slot(
       .wait_for_return(grant.device_id, session_id, shared.config.reconnect_grace)
       .await;
   }
-  // Going away: the participant rejoins on the restarted SFU, and the server keeps it in the call.
-  if shared.rooms.leave(room, grant.device_id, session_id) && !shared.rooms.is_going_away() {
+  // Going away: the participant rejoins on the restarted SFU, and the server keeps it in the call
+  // (and its recording, which it announces again there).
+  let (has_left, maybe_recording_stopped) = shared.rooms.leave_reporting(room, grant.device_id, session_id);
+  if has_left && !shared.rooms.is_going_away() {
+    // Before the leave, in the same ordered queue: the server ends the recording with its own
+    // count rather than as left without one.
+    if let Some(change) = maybe_recording_stopped {
+      shared.reporter.recording(recording_report(grant, change));
+    }
     shared.reporter.left(grant);
   }
 }
@@ -1002,6 +1013,7 @@ impl ParticipantSession {
       max_bytes: shared.config.max_signaling_message_bytes,
       roster_now: Arc::clone(&shared.roster_now),
       quality: Arc::clone(shared.rooms.quality()),
+      reporter: Arc::clone(&shared.reporter),
     }
   }
 
@@ -1142,6 +1154,15 @@ impl ParticipantSession {
     // The account's other devices leave for this one; one of them may be in the server's roster
     // only (its leave got lost), which a roster right after repairs at once instead of within the
     // interval.
+    if let CallClientMessage::SetRecording { notice } = message {
+      if let Some(change) = self
+        .room
+        .set_recording_notice(self.grant.device_id, notice, Instant::now())
+      {
+        self.reporter.recording(recording_report(self.grant, change));
+      }
+      return;
+    }
     let is_move_here = matches!(message, CallClientMessage::MoveHere);
     if let Err(error) = self
       .room
@@ -1153,6 +1174,21 @@ impl ParticipantSession {
     if is_move_here {
       self.roster_now.notify_one();
     }
+  }
+}
+
+/// The audit report of a device's recording change (issue #2117).
+fn recording_report(grant: JoinGrant, change: RecordingChange) -> SfuRecordingReport {
+  SfuRecordingReport {
+    call_id: grant.call_id,
+    user_id: grant.user_id,
+    device_id: grant.device_id,
+    state: if change.is_recording {
+      SfuRecordingState::Recording
+    } else {
+      SfuRecordingState::Stopped
+    },
+    participants: change.participants,
   }
 }
 

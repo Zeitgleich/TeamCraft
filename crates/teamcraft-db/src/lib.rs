@@ -11,6 +11,7 @@ mod audit;
 mod background;
 mod bot;
 mod call_history;
+mod call_recording;
 mod channel_deletion;
 mod channel_role_log;
 mod conversation;
@@ -85,6 +86,7 @@ pub use audit::{AuditEntry, AuditQuery, NewAuditEntry};
 pub use background::UserBackground;
 pub use bot::{BOT_ISSUER, StoredBot};
 pub use call_history::{MissedCall, StoredCall};
+pub use call_recording::{CallRecordingStart, EndedCallRecording, RecordingAudit, RunningCallRecording};
 pub use channel_deletion::{
   ChannelFacts, DeletionSignature, RemovalDone, RemovalStep, SpaceChannelCounts, SpaceChannelFacts,
   SpaceDeletion, SpaceDeletionPreviewRow, SpaceDeletionSignature, SpaceLeft, StoredDeletionSignature,

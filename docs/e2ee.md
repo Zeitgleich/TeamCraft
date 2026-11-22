@@ -7069,6 +7069,30 @@ so the SFU reads its call, device, state and sequence number (a wall-clock times
 milliseconds). It never sees the recording; a posted recording is an attachment like any other,
 whose size it sees.
 
+**Audit log (issue #2117).** The server writes "call recording started" and "call recording
+stopped" into the audit log (admin.md §4), from what the SFU reads in the notices it passes on:
+
+- The SFU reports when a device's latest notice turns its recording on or off
+  (`POST /api/internal/v1/calls/recording`, in the same ordered queue as joins and leaves), with the
+  number of devices in the call (at a start; at a stop the most at once while it ran), and a stop
+  when a device leaves while its notice says it records. It counts a notice only when it names this
+  call and the very device that sent it (the device its join token authenticates), so a device can
+  only ever claim something about itself. It doesn't verify the signature (it has no DAVE leaf
+  keys); it doesn't need to, for the log records what every app in the call was shown.
+- **Why the SFU and not the recording app:** a report from the app is a second statement next to
+  the notice that a modified app can leave out or make up, and that could disagree with what the
+  others saw. The SFU's report is the notice itself. A device claiming a recording it doesn't make
+  only puts an indicator on everybody's screen and an entry about itself into the log; a recording
+  without any notice is the covert capture no notice can prevent (above), and in no log either.
+- **One entry per recording, across restarts:** the server keeps the running recordings in its
+  database. A recording announced again (the recorder rejoined, the call got a new DAVE session, the
+  SFU restarted) keeps its start and writes nothing; its stop has the length by the database's
+  clock. A recording whose stop is lost ends when its device leaves: the SFU's leave, the SFU's
+  roster once it has run long enough for devices to rejoin after a restart and no longer has the
+  device, or the SFU sending no roster at all (`ended_by: "left"`). A recording's start lost while
+  the server didn't know the call (it answers the SFU's report with 404) is not in the log.
+- Metadata only: call, device, actor, conversation, counts and seconds. No file name, no content.
+
 **Logs.** Apps log that a recording started or stopped (call id, duration in seconds) and verification
 failures (device id). Never the file's name, path or content.
 

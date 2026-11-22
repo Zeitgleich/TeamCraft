@@ -517,7 +517,7 @@ impl CallService {
     Ok(bool::from(expected.ct_eq(presented)))
   }
 
-  fn conversation_of(&self, call_id: CallId) -> Option<ConversationId> {
+  pub(crate) fn conversation_of(&self, call_id: CallId) -> Option<ConversationId> {
     let active = self.lock();
     active
       .iter()
@@ -599,6 +599,12 @@ impl CallService {
     }
   }
 
+  /// Whether the SFU has run long enough for its devices to have rejoined after a restart: a device
+  /// missing from its roster is gone then.
+  pub fn is_roster_settled(&self, report: &SfuRosterReport) -> bool {
+    Duration::from_secs(report.uptime_secs) >= self.roster_grace
+  }
+
   /// Reconciles the roster with the SFU's whole roster (#684). The SFU sends it in the same ordered
   /// queue as its join and leave reports, so it reflects everything reported before it. A device
   /// it lacks is gone: at once once the SFU has run for `roster_grace` (it would have rejoined by
@@ -614,7 +620,7 @@ impl CallService {
       .iter()
       .map(|call| (call.call_id, call.participants.iter().copied().collect()))
       .collect();
-    let is_settled = Duration::from_secs(report.uptime_secs) >= self.roster_grace;
+    let is_settled = self.is_roster_settled(report);
     let grace = self.roster_grace;
     let nobody = HashSet::new();
     let mut changes = self.drop_participants(|_, call| {
@@ -1456,6 +1462,8 @@ pub async fn move_call(
 /// of a 1:1 call leaving.
 pub async fn report_left(state: &AppState, report: SfuParticipantReport) -> Result<(), ApiError> {
   let calls = calls_of(state)?;
+  // Also for a call this server lost: the recording's row knows its conversation.
+  super::call_recordings::device_left(state, report.call_id, report.device_id).await;
   let conversation_id = calls
     .conversation_of(report.call_id)
     .ok_or_else(ApiError::call_not_found)?;
@@ -1484,6 +1492,7 @@ pub async fn report_roster(state: &AppState, report: SfuRosterReport) -> Result<
   }
   let changes = calls.reconcile(&report, Instant::now(), unix_now_millis()?);
   publish_roster_changes(state, changes).await;
+  super::call_recordings::reconcile(state, &report, calls.is_roster_settled(&report)).await;
   Ok(())
 }
 
@@ -1537,7 +1546,12 @@ pub async fn expire_silent_sfu(state: &AppState) {
     return;
   };
   let changes = calls.expire_if_silent(Instant::now());
+  let has_ended_calls = !changes.changes.is_empty();
   publish_roster_changes(state, changes).await;
+  // Nothing confirms anybody is still in a call, so nobody records one either.
+  if has_ended_calls {
+    super::call_recordings::end_all(state).await;
+  }
 }
 
 /// "Leave on all devices": the caller's devices leave the conversation's call. The SFU is told to
