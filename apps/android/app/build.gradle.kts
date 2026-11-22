@@ -248,4 +248,10 @@ dependencies {
   testImplementation(libs.kotlinx.coroutines.test)
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.androidx.test.junit)
+  // Accessibility Test Framework over the Compose screens (#2287). Versions come from the Compose
+  // BOM, so they are pinned with it.
+  androidTestImplementation(platform(libs.compose.bom))
+  androidTestImplementation(libs.compose.ui.test.junit4)
+  androidTestImplementation(libs.compose.ui.test.junit4.accessibility)
+  debugImplementation(libs.compose.ui.test.manifest)
 }

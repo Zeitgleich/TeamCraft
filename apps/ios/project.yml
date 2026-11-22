@@ -309,6 +309,20 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.Tests
         GENERATE_INFOPLIST_FILE: YES
 
+  # Accessibility audit of the screens that need no server (#2287).
+  TeamCraftUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: TeamCraftUITests
+    dependencies:
+      - target: TeamCraft
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: de.zeitgleich.teamcraft.UITests
+        GENERATE_INFOPLIST_FILE: YES
+        TEST_TARGET_NAME: TeamCraft
+
 schemes:
   TeamCraft:
     build:
@@ -320,5 +334,6 @@ schemes:
       config: Debug
       targets:
         - TeamCraftTests
+        - TeamCraftUITests
     archive:
       config: Release

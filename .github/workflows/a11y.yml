@@ -1,0 +1,94 @@
+# Accessibility checks of the web client (issue #2287): axe-core over the demo build's views in light
+# and dark (scripts/a11y/axe.mjs). Fails on any rule that is not in scripts/a11y/axe-known.json, so
+# a regression stops the pull request while the findings still open stay listed, not switched off.
+# Android's Accessibility Test Framework runs in android.yml, the iOS audit in ios.yml; the theme
+# contrast is a unit test (scripts/tests/test_contrast.py) in ci.yml.
+#
+# The demo build is a development-only debug build (`TEAMCRAFT_WEB_FEATURES=demo`); it is built here
+# and never shipped. Two jobs: the build in the CI image (Rust, wasm, trunk), the browser run on the
+# plain runner (Chrome and Node are there).
+name: Accessibility
+
+on:
+  push:
+    branches: [main]
+    paths: &paths
+      - "crates/teamcraft-ui/**"
+      - "crates/teamcraft-core/**"
+      - "crates/teamcraft-client-api/**"
+      - "crates/teamcraft-proto/**"
+      - "scripts/a11y/**"
+      - "scripts/screenshots/cdp.mjs"
+      - ".github/workflows/a11y.yml"
+  pull_request:
+    # No `labeled`: ci-label.yml re-runs this when the `ci` label comes after opening.
+    types: [opened, synchronize, reopened]
+    paths: *paths
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+  # The build job runs in the CI image on GHCR.
+  packages: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  demo-build:
+    if: github.event_name != 'pull_request' || github.event.pull_request.user.login == 'dependabot[bot]' || contains(github.event.pull_request.labels.*.name, 'ci') || github.run_attempt > 1
+    name: Web demo build
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: a11y-web-demo
+          cache-bin: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Build the web client with the demo data
+        working-directory: crates/teamcraft-ui
+        env:
+          TEAMCRAFT_WEB_FEATURES: demo
+        run: trunk build --dist ../../web-demo
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-demo
+          path: web-demo
+          retention-days: 1
+
+  axe:
+    name: axe-core
+    needs: [demo-build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-demo
+          path: web-demo
+      - name: Fetch the pinned axe-core
+        run: scripts/a11y/fetch-axe.sh "$RUNNER_TEMP/axe"
+      - name: Serve the demo and run axe over its views
+        run: |
+          python3 -m http.server 8093 --bind 127.0.0.1 --directory web-demo >/dev/null 2>&1 &
+          server=$!
+          trap 'kill "$server"' EXIT
+          CHROME="$(command -v google-chrome || command -v chromium)" \
+            node scripts/a11y/axe.mjs http://127.0.0.1:8093 "$RUNNER_TEMP/axe/axe.min.js" --report "$RUNNER_TEMP/axe-report.json"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: axe-report
+          path: ${{ runner.temp }}/axe-report.json
+          if-no-files-found: ignore
