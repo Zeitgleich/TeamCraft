@@ -127,8 +127,20 @@ has none (one more target size, with the composer's suggestions open, is filed).
 
 ## Keeping it from regressing
 
-- Automated checks in CI (axe over the demo views, Android ATF, iOS accessibility audit, theme
-  contrast including custom themes): #2287.
+- Automated checks in CI (#2287), each gating on what passes today; the findings still open are
+  listed, never switched off:
+
+  | Platform | Check                                                                                                                                                                        | Where                                                                              |
+  |----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------|
+  | Web      | axe-core 4.10.3 (WCAG 2.0 to 2.2 A and AA) over the demo build's views, in light and dark: home, a channel, a thread, the quick switcher, settings, a call, the phone layout | `scripts/a11y/axe.mjs`, `a11y.yml`; open findings in `scripts/a11y/axe-known.json` |
+  | Android  | Accessibility Test Framework (`enableAccessibilityChecks`) on the main screen, light and dark, on an emulator                                                                | `AccessibilityChecksTest`, `android.yml`                                           |
+  | iOS      | `performAccessibilityAudit` on the first screen, light and dark (more screens need a seeded demo mode)                                                                       | `TeamCraftUITests`, `ios.yml`                                                      |
+  | Tokens   | WCAG contrast of the web design tokens and of Android's colour scheme, light and dark (4.5:1 text, 3:1 controls)                                                             | `scripts/tests/test_contrast.py`, `ci.yml`                                         |
+
+  A new axe finding fails the run; to accept one, add it to `axe-known.json` with the issue that
+  tracks it (`node scripts/a11y/axe.mjs <site> <axe.min.js> --write-known` rewrites the list from a
+  run); a finding that no longer fires is reported, remove it. The tool versions are pinned
+  (`scripts/a11y/fetch-axe.sh` checks axe's sha512; Compose test libraries follow the Compose BOM).
 - Manual walkthrough with real screen readers per platform, and an accessibility statement with a
   contact for reports: #2288.
 - New UI follows [forms.md](../.claude/rules/forms.md) and [design.md](../.claude/rules/design.md);

@@ -39,7 +39,7 @@ jobs:
           # The runs of the opening start with the label event; give a late one a moment to appear.
           # A CI run that appears later still reads the label itself.
           sleep 10
-          for workflow in ci.yml web-size.yml android.yml ios.yml images.yml codeql-mobile.yml; do
+          for workflow in ci.yml web-size.yml a11y.yml android.yml ios.yml images.yml codeql-mobile.yml; do
             run_id="$(gh run list --workflow "$workflow" --commit "$HEAD_SHA" --event pull_request \
               --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
             if [ -z "$run_id" ]; then

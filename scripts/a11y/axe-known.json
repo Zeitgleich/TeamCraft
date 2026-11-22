@@ -1,0 +1,104 @@
+[
+  {
+    "key": "home/light/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]"
+    ]
+  },
+  {
+    "key": "home/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]",
+      "#msg-body-1000056 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]",
+      "#msg-body-1000058 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]"
+    ]
+  },
+  {
+    "key": "channel/light/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count"
+    ]
+  },
+  {
+    "key": "channel/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count"
+    ]
+  },
+  {
+    "key": "thread/light/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count"
+    ]
+  },
+  {
+    "key": "thread/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count"
+    ]
+  },
+  {
+    "key": "switcher/light/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]"
+    ]
+  },
+  {
+    "key": "switcher/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]",
+      "#msg-body-1000056 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]",
+      "#msg-body-1000058 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]"
+    ]
+  },
+  {
+    "key": "settings/light/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]"
+    ]
+  },
+  {
+    "key": "settings/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      "button[aria-current=\"true\"] > .badge-count[aria-hidden=\"true\"]",
+      "#msg-body-1000056 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]",
+      "#msg-body-1000058 > .md-p > .permalink-chip.md-link > span[translate=\"no\"]"
+    ]
+  },
+  {
+    "key": "call/dark/color-contrast",
+    "impact": "serious",
+    "help": "Elements must meet minimum color contrast ratio thresholds",
+    "targets": [
+      ".leave-btn > span"
+    ]
+  },
+  {
+    "key": "call/dark/scrollable-region-focusable",
+    "impact": "serious",
+    "help": "Scrollable region must have keyboard access",
+    "targets": [
+      ".filmstrip"
+    ]
+  }
+]

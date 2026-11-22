@@ -97,7 +97,7 @@ class MainScreenScreenshots {
                   previews = previews,
                   maybeSelectedId = null,
                   selection = emptyList(),
-                  actionsFor = { _, _ -> RowActions(isUnread = false, toggleRead = null, toggleFavorite = {}) },
+                  actionsFor = { _, _ -> RowActions(isUnread = false, toggleRead = null, toggleFavorite = {}, mute = {}) },
                   onOpen = {},
                   onLongPress = {},
                 ),
