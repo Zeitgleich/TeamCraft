@@ -163,7 +163,13 @@ mod tests {
     let parsed: SendMessageRequest = serde_json::from_str(json).unwrap();
     assert_eq!(parsed.maybe_deletes, Some(ClientMessageId::from_bytes([2; 16])));
     let written = serde_json::to_string(&parsed).unwrap();
-    assert!(written.contains(r#""deletes":"02020202020202020202020202020202""#), "{written}");
-    assert_eq!(serde_json::from_str::<SendMessageRequest>(&written).unwrap(), parsed);
+    assert!(
+      written.contains(r#""deletes":"02020202020202020202020202020202""#),
+      "{written}"
+    );
+    assert_eq!(
+      serde_json::from_str::<SendMessageRequest>(&written).unwrap(),
+      parsed
+    );
   }
 }
