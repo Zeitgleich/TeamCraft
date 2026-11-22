@@ -19,6 +19,10 @@ const REFRESH_AFTER: Duration = Duration::from_secs(150);
 #[derive(Clone)]
 pub struct UserTokens {
   user: String,
+  /// Another client of the realm than the apps' (`DEV_TOKEN_CLIENT` of dev-token.py).
+  maybe_client: Option<String>,
+  /// A cached token older than this is fetched again.
+  refresh_after: Duration,
   cache: Arc<Mutex<Option<(String, Instant)>>>,
   /// How often a client asked for the token: once per API request and gateway handshake, so the
   /// perf tests count a client's requests with it.
@@ -29,8 +33,20 @@ impl UserTokens {
   pub fn new(user: &str) -> Self {
     Self {
       user: user.to_owned(),
+      maybe_client: None,
+      refresh_after: REFRESH_AFTER,
       cache: Arc::default(),
       uses: Arc::default(),
+    }
+  }
+
+  /// Tokens of `user` issued to `client` instead of the apps' client, whose access tokens live
+  /// `lifespan`: fetched again after half of it.
+  pub fn for_client(user: &str, client: &str, lifespan: Duration) -> Self {
+    Self {
+      maybe_client: Some(client.to_owned()),
+      refresh_after: lifespan / 2,
+      ..Self::new(user)
     }
   }
 
@@ -46,10 +62,10 @@ impl UserTokens {
   /// A valid access token (blocks for a moment when a new one is fetched).
   pub fn token(&self) -> Result<String, String> {
     let mut cache = self.cache.lock().map_err(|_| "token cache poisoned".to_owned())?;
-    if let Some(token) = fresh(cache.as_ref()) {
+    if let Some(token) = fresh(cache.as_ref(), self.refresh_after) {
       return Ok(token);
     }
-    let token = fetch(&self.user)?;
+    let token = fetch(&self.user, self.maybe_client.as_deref())?;
     *cache = Some((token.clone(), Instant::now()));
     Ok(token)
   }
@@ -67,7 +83,11 @@ impl UserTokens {
 impl AccessTokenSource for UserTokens {
   fn access_token(&self) -> Result<String, ApiError> {
     self.uses.fetch_add(1, Ordering::Relaxed);
-    let maybe_cached = self.cache.lock().ok().and_then(|cache| fresh(cache.as_ref()));
+    let maybe_cached = self
+      .cache
+      .lock()
+      .ok()
+      .and_then(|cache| fresh(cache.as_ref(), self.refresh_after));
     if let Some(token) = maybe_cached {
       return Ok(token);
     }
@@ -80,19 +100,22 @@ impl AccessTokenSource for UserTokens {
 }
 
 /// The cached token while it is fresh enough.
-fn fresh(cached: Option<&(String, Instant)>) -> Option<String> {
+fn fresh(cached: Option<&(String, Instant)>, refresh_after: Duration) -> Option<String> {
   cached
-    .filter(|(_, fetched_at)| fetched_at.elapsed() < REFRESH_AFTER)
+    .filter(|(_, fetched_at)| fetched_at.elapsed() < refresh_after)
     .map(|(token, _)| token.clone())
 }
 
-fn fetch(user: &str) -> Result<String, String> {
+fn fetch(user: &str, maybe_client: Option<&str>) -> Result<String, String> {
   let script = std::env::var_os(TOKEN_SCRIPT_VAR)
     .map(PathBuf::from)
     .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../dev/dev-token.py"));
-  let output = Command::new("python3")
-    .arg(script)
-    .arg(user)
+  let mut command = Command::new("python3");
+  command.arg(script).arg(user);
+  if let Some(client) = maybe_client {
+    command.env("DEV_TOKEN_CLIENT", client);
+  }
+  let output = command
     .output()
     .map_err(|error| format!("running python3: {error}"))?;
   if !output.status.success() {

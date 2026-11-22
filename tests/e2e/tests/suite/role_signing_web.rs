@@ -16,21 +16,27 @@ use serde_json::{Value, json};
 use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_e2e::Stack;
 use teamcraft_e2e::browser::{BrowserSession, lease_web_port, web_dir};
+use teamcraft_e2e::keycloak::ensure_short_token_client;
 use teamcraft_e2e::peer::Peer;
 use teamcraft_e2e::scenario::{channel_with, space_with};
 use teamcraft_e2e::stack::{ISSUER, KEYCLOAK_URL};
+use teamcraft_e2e::tokens::UserTokens;
 
 use crate::web::{TEST_CSP, body_text, click_text, shot, type_until_kept, wait_for_element, wait_for_text};
 
-/// The dev realm registers this port too; 8082 is often taken by somebody's dev server.
-const PORT: u16 = 8083;
-const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
+/// This file's web test port (`teamcraft_e2e::browser::WEB_TEST_PORTS`).
+const PORT: u16 = 8084;
+const WEB_ORIGIN: &str = "http://127.0.0.1:8084";
 const REALM: &str = "teamcraft-dev";
 const CLIENT: &str = "teamcraft";
+/// A copy of the apps' client whose tokens run out sooner (`teamcraft_e2e::keycloak`): the role
+/// change waits for tokens to run out, and the realm's five minutes made that thirteen.
+const SHORT_CLIENT: &str = "teamcraft-e2e-short-tokens";
+const TOKEN_LIFESPAN: Duration = Duration::from_secs(60);
 const PASSWORD: &str = "role-signing-dev-pass";
-/// Twice the token lifetime of the dev realm plus a margin: a role change shows at the next refresh, and
-/// evidence of a lost role goes out once that token has expired.
-const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(780);
+/// Twice the token lifetime plus a margin: a role change shows at the next refresh, and evidence of a
+/// lost role goes out once that token has expired.
+const ROLE_CHANGE_WAIT: Duration = Duration::from_secs(2 * 60 + 180);
 const SIGN_WAIT: Duration = Duration::from_secs(180);
 /// How long the roles review gets to show a list that can be confirmed.
 const REVIEW_WAIT: Duration = Duration::from_secs(60);
@@ -59,8 +65,15 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
     return;
   };
   let _turn = lease_web_port(PORT).await;
+  if let Err(error) = ensure_short_token_client(SHORT_CLIENT, TOKEN_LIFESPAN.as_secs() as u32).await {
+    let is_required = std::env::var("E2E_REQUIRED").is_ok_and(|value| value == "1");
+    assert!(!is_required, "the short-lived tokens' client: {error}");
+    eprintln!("skipping: no dev Keycloak ({error})");
+    return;
+  }
   let Some(stack) = Stack::builder()
     .with_port(PORT)
+    .with_env("TEAMCRAFT_OIDC__CLIENT_ID", SHORT_CLIENT)
     .with_web_dir(web_dir)
     .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
     .with_env(
@@ -72,9 +85,13 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   else {
     return;
   };
-  let keycloak = Keycloak::connect().await;
+  let keycloak = Keycloak::connect(SHORT_CLIENT).await;
   keycloak.ensure_role_mapper().await;
   keycloak.delete_users_of_earlier_runs().await;
+  // The realm's default roles give everybody "member" of the apps' client only; the reader needs
+  // it on the copy too.
+  let carol_keycloak_id = keycloak.user_id("carol").await;
+  keycloak.add_role(&carol_keycloak_id, "member").await;
   let suffix = std::process::id();
   let (owner_name, admin_name) = (format!("rs-owner-{suffix}"), format!("rs-admin-{suffix}"));
   let owner_id = keycloak.make_user(&owner_name, &["owner"]).await;
@@ -98,7 +115,7 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
 
   // The owner's first sign-in: the first roster appears with no dialog.
   first_sign_in(&owner_page, &owner_name).await;
-  let reader = stack.tokens("carol");
+  let reader = UserTokens::for_client("carol", SHORT_CLIENT, TOKEN_LIFESPAN);
   let scenario = AssertUnwindSafe(async {
     wait_for_roster(&stack, &reader, &["owner"], "the first owner's roster").await;
     shot(&owner_page, "role-signing-1-owner-signed-in").await;
@@ -144,7 +161,7 @@ async fn an_owner_and_an_admin_get_their_rights_with_no_click_and_a_role_change_
   .await;
   print_consoles();
   if let Err(panic) = scenario {
-    let probe = stack.tokens("alice");
+    let probe = UserTokens::for_client("alice", SHORT_CLIENT, TOKEN_LIFESPAN);
     let answer: Value = stack
       .http
       .get(format!("{}/api/v1/role-evidence", stack.base_url))
@@ -215,7 +232,7 @@ async fn a_workspace_admin_sees_a_channels_roles_with_their_marks_and_the_alarm(
   else {
     return;
   };
-  let keycloak = Keycloak::connect().await;
+  let keycloak = Keycloak::connect(CLIENT).await;
   keycloak.ensure_role_mapper().await;
   keycloak.delete_users_of_earlier_runs().await;
   let owner_name = format!("rs-owner-{}", std::process::id());
@@ -627,16 +644,16 @@ async fn roster_roles(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTokens)
   use base64::Engine as _;
 
   let token = reader.token_async().await;
-  let response: Value = stack
+  let answer = stack
     .http
     .get(format!("{}/api/v1/workspace/roster", stack.base_url))
     .bearer_auth(token)
     .send()
     .await
-    .unwrap()
-    .json()
-    .await
     .unwrap();
+  let status = answer.status();
+  let response: Value = answer.json().await.unwrap_or_default();
+  assert!(status.is_success(), "reading the roster: {status} {response}");
   let Some(entry) = response["entries"].as_array().and_then(|entries| entries.last()) else {
     return Vec::new();
   };
@@ -657,17 +674,20 @@ async fn roster_roles(stack: &Stack, reader: &teamcraft_e2e::tokens::UserTokens)
 /// The dev Keycloak's admin API. Only the dev realm; its credentials are the dev stack's.
 struct Keycloak {
   http: reqwest::Client,
+  client_id: String,
   client_uuid: String,
 }
 
 impl Keycloak {
-  async fn connect() -> Self {
+  /// The admin API for the roles of `client_id`.
+  async fn connect(client_id: &str) -> Self {
     let http = reqwest::Client::new();
     let mut keycloak = Self {
       http,
+      client_id: client_id.to_owned(),
       client_uuid: String::new(),
     };
-    let clients = keycloak.get(&format!("/clients?clientId={CLIENT}")).await;
+    let clients = keycloak.get(&format!("/clients?clientId={client_id}")).await;
     keycloak.client_uuid = clients[0]["id"].as_str().unwrap().to_owned();
     assert!(ISSUER.ends_with(REALM));
     keycloak
@@ -716,7 +736,7 @@ impl Keycloak {
           "protocol": "openid-connect",
           "protocolMapper": "oidc-usermodel-client-role-mapper",
           "config": {
-            "usermodel.clientRoleMapping.clientId": CLIENT,
+            "usermodel.clientRoleMapping.clientId": self.client_id,
             "claim.name": "resource_access.${client_id}.roles",
             "jsonType.label": "String",
             "multivalued": "true",
@@ -758,12 +778,16 @@ impl Keycloak {
         }),
       )
       .await;
-    let found: Value = self.get(&format!("/users?username={username}&exact=true")).await;
-    let id = found[0]["id"].as_str().unwrap().to_owned();
+    let id = self.user_id(username).await;
     for role in roles {
       self.add_role(&id, role).await;
     }
     id
+  }
+
+  async fn user_id(&self, username: &str) -> String {
+    let found: Value = self.get(&format!("/users?username={username}&exact=true")).await;
+    found[0]["id"].as_str().unwrap().to_owned()
   }
 
   async fn add_role(&self, user: &str, role: &str) {
