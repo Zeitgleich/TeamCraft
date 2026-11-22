@@ -11,6 +11,9 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.FilterChip
@@ -34,6 +37,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.Dispatchers
@@ -95,10 +99,21 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
     text = {
       Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         val current = settings ?: return@Column
-        for ((level, label) in LEVELS) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(selected = current.level == level, onClick = { settings = current.copy(level = level, isInherited = false) })
-            Text(stringResource(label))
+        Column(Modifier.selectableGroup()) {
+          for ((level, label) in LEVELS) {
+            Row(
+              Modifier
+                .fillMaxWidth()
+                .selectable(
+                  selected = current.level == level,
+                  role = Role.RadioButton,
+                  onClick = { settings = current.copy(level = level, isInherited = false) },
+                ),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              RadioButton(selected = current.level == level, onClick = null)
+              Text(stringResource(label))
+            }
           }
         }
         MutePresets(current) { settings = it }
@@ -109,9 +124,13 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
             isAllowed = bubbles.isAllowedBySystem()
             onPauseOrDispose {}
           }
-          Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
+          Row(
+            Modifier.fillMaxWidth().toggleable(value = isBubble, role = Role.Switch, onValueChange = { isBubble = it }),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+          ) {
             Text(stringResource(R.string.bubble_setting), style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-            Switch(checked = isBubble, onCheckedChange = { isBubble = it })
+            Switch(checked = isBubble, onCheckedChange = null)
           }
           Text(
             stringResource(if (isAllowed) R.string.bubble_setting_hint else R.string.bubble_setting_system_off),
@@ -124,13 +143,18 @@ fun ConversationNotificationsDialog(viewModel: MainViewModel, conversationId: St
           }
         }
         Text(stringResource(R.string.notify_channel_mentions), style = MaterialTheme.typography.titleSmall)
-        for ((choice, label) in CHANNEL_MENTION_CHOICES) {
-          Row(verticalAlignment = Alignment.CenterVertically) {
-            RadioButton(
-              selected = ChannelMentions.shown(current.channelMentions) == choice,
-              onClick = { settings = current.copy(channelMentions = choice) },
-            )
-            Text(stringResource(label))
+        Column(Modifier.selectableGroup()) {
+          for ((choice, label) in CHANNEL_MENTION_CHOICES) {
+            val isChosen = ChannelMentions.shown(current.channelMentions) == choice
+            Row(
+              Modifier
+                .fillMaxWidth()
+                .selectable(selected = isChosen, role = Role.RadioButton, onClick = { settings = current.copy(channelMentions = choice) }),
+              verticalAlignment = Alignment.CenterVertically,
+            ) {
+              RadioButton(selected = isChosen, onClick = null)
+              Text(stringResource(label))
+            }
           }
         }
         Text(stringResource(R.string.notify_quiet_hours), style = MaterialTheme.typography.titleSmall)

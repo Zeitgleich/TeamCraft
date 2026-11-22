@@ -1929,24 +1929,36 @@ pub fn Composer(
             .into_any(),
           })
         }}
+        // Said once when the list opens or its length changes, not on every arrow key.
+        <div class="visually-hidden" role="status">
+          {move || match suggestions.with(Vec::len) {
+            0 => String::new(),
+            count => i18n.t_count("composer-suggestion-count", count),
+          }}
+        </div>
         <Show when=move || !suggestions.with(Vec::is_empty) fallback=|| ()>
           <ul class="suggestions" role="listbox" id=suggestions_id.get_value() aria-label=move || i18n.t("composer-suggestions")>
             <For each=move || indexed_suggestions.get() key=|(index, item)| (*index, item.label.clone()) let:entry>
               {
                 let (index, item) = entry;
                 view! {
-                  <li role="option" aria-selected=move || (selected_suggestion.get() == index).to_string()>
-                    <button
-                      type="button"
+                  // #217: the editor keeps the focus and points at the current option
+                  // (`aria-activedescendant`); an option holds no button of its own.
+                  <li
+                    role="option"
+                    id=suggestion_option_id(&suggestions_id.get_value(), index)
+                    aria-selected=move || (selected_suggestion.get() == index).to_string()
+                    on:mousedown=move |ev| { ev.prevent_default(); accept_suggestion(index); }
+                  >
+                    <div
                       class="suggestion"
                       class:current=move || selected_suggestion.get() == index
-                      on:mousedown=move |ev| { ev.prevent_default(); accept_suggestion(index); }
                     >
                       {item.person.clone().map(|user| view! { <Avatar user=user size=AvatarSize::Small /> })}
                       {item.maybe_custom.clone().map(|reference| view! { <span class="suggestion-emoji" aria-hidden="true"><CustomEmojiGlyph reference=reference /></span> })}
                       <span translate="no">{item.label.clone()}</span>
                       <span class="suggestion-detail" translate="no">{item.detail.clone()}</span>
-                    </button>
+                    </div>
                   </li>
                 }
               }
@@ -2021,8 +2033,12 @@ pub fn Composer(
             aria-multiline="true"
             aria-label=move || i18n.t("composer-label")
             aria-autocomplete="list"
-            aria-controls=suggestions_id.get_value()
-            aria-expanded=move || (!suggestions.with(Vec::is_empty)).to_string()
+            // Only while the list is there: an id that names nothing is invalid ARIA.
+            aria-controls=move || (!suggestions.with(Vec::is_empty)).then(|| suggestions_id.get_value())
+            aria-activedescendant=move || {
+              (!suggestions.with(Vec::is_empty))
+                .then(|| suggestion_option_id(&suggestions_id.get_value(), selected_suggestion.get()))
+            }
             spellcheck="true"
             translate="no"
             data-placeholder=move || {
@@ -2506,6 +2522,11 @@ fn from_draft(item: &DraftFileItem) -> OutgoingFile {
     maybe_draft_id: None,
     maybe_motion: None,
   }
+}
+
+/// The id of the composer's suggestion option at `index`, for `aria-activedescendant`.
+fn suggestion_option_id(list_id: &str, index: usize) -> String {
+  format!("{list_id}-{index}")
 }
 
 #[cfg(test)]

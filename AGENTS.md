@@ -28,6 +28,7 @@ Read before changing behaviour:
 | [docs/crash-reports.md](docs/crash-reports.md)           | Crash reports: Sentry envelopes, scrubbing, queue, symbols    |
 | [docs/tracing.md](docs/tracing.md)                       | Tracing: spans from FFI, store, HTTP to the server            |
 | [docs/push-gateway.md](docs/push-gateway.md)             | Push gateway for store apps (own repo): server side, contract |
+| [docs/accessibility.md](docs/accessibility.md)           | Accessibility: target, test matrix, audit, open findings      |
 | [docs/app-links.md](docs/app-links.md)                   | Links that open the installed app, per platform               |
 | [docs/operations.md](docs/operations.md)                 | Running an instance; deployment: Zeitgleich/teamcraft-deploy  |
 | [docs/release.md](docs/release.md)                       | Versions and the release procedure                            |

@@ -308,12 +308,15 @@ internal fun MeetingFormSheet(
       RepeatSection(form, isSavedSeries, ::errorOf, focus, isSaving, change)
       HorizontalDivider()
       Row(
-        Modifier.fillMaxWidth().padding(horizontal = Spacing.l),
+        Modifier
+          .fillMaxWidth()
+          .toggleable(value = form.hasLobby, enabled = !isSaving, role = Role.Switch, onValueChange = { change(form.copy(hasLobby = it)) })
+          .padding(horizontal = Spacing.l),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Spacing.m),
       ) {
         Text(stringResource(R.string.meeting_form_lobby), modifier = Modifier.weight(1f))
-        Switch(checked = form.hasLobby, onCheckedChange = { change(form.copy(hasLobby = it)) }, enabled = !isSaving)
+        Switch(checked = form.hasLobby, onCheckedChange = null, enabled = !isSaving)
       }
       // Why saving stopped, next to the button (forms.md).
       maybeFailure?.let { failure ->

@@ -200,6 +200,7 @@
   <string name="voice_send">Sprachnachricht senden</string>
   <string name="voice_discard">Sprachnachricht verwerfen</string>
   <string name="voice_stop">Aufnahme beenden</string>
+  <string name="voice_recording_state">Aufnahme läuft</string>
   <string name="voice_starting">Mikrofon wird gestartet …</string>
   <string name="voice_finishing">Wird abgeschlossen …</string>
   <string name="voice_hold_hint">Loslassen zum Senden · nach links wischen zum Abbrechen · nach oben wischen zum Weiteraufnehmen</string>

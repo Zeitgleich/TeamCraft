@@ -280,7 +280,7 @@ mod tests {
     assert_eq!(
       children,
       [
-        "<div class=\"app-banners\" node_ref=banners>",
+        "<div class=\"app-banners\" node_ref=banners inert=is_call_screen_up>",
         "<TopBar />",
         "<FirstSyncBar />"
       ]

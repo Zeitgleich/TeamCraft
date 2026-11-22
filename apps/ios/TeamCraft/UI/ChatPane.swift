@@ -871,6 +871,26 @@ struct ChatPane: View {
         if conversation.canReact {
           Button("react_quick \(Self.quickReaction)") { react(message, Self.quickReaction) }
         }
+        // The long-press menu's main actions, also in the actions rotor (#217): Switch Control
+        // and Full Keyboard Access users don't reach a context menu as easily.
+        if !selection.isActive {
+          if threadId == nil && conversation.canPost {
+            Button("reply_in_thread") { maybeThread = ThreadTarget(threadId: message.maybeThreadId ?? message.id) }
+          }
+          Button("copy") {
+            UIPasteboard.general.string = message.body
+            confirmCopy()
+          }
+          if message.authorId == account.userId && !message.isPending && conversation.canPost {
+            if message.maybePoll == nil {
+              Button("edit") {
+                maybeEditing = message
+                draft = message.body
+              }
+            }
+            Button("delete") { maybeDeleting = message }
+          }
+        }
       }
       .id(message.id)
   }

@@ -270,6 +270,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   let toast_stack = NodeRef::<leptos::html::Div>::new();
   use_flip_stack(toast_stack);
   let app_body = NodeRef::<leptos::html::Div>::new();
+  let is_call_screen_up =
+    move || state.call.phase.get() == CallPhase::Active && !state.call.is_minimized.get();
   let has_expiring_guests = Memo::new(move |_| state.read(|backend| !backend.expiring_guests().is_empty()));
   let edge_swipe = EdgeSwipeBack::new(state, app_body);
   // Which way the phone layout moved last, for the direction the panes slide in (#368). After an
@@ -326,7 +328,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       class:has-bottom-nav=move || has_bottom_nav(state)
     >
       // One grid row for all banners, so the top bar and the body keep their own rows.
-      <div class="app-banners" node_ref=banners>
+      // #217: the full call screen covers the app; what is under it takes no focus and isn't read.
+      <div class="app-banners" node_ref=banners inert=is_call_screen_up>
         // A minimized call stays in reach in every view (#1141).
         <crate::components::huddle_bar::MinimizedCallBar />
         <OpenInAppButton />
@@ -348,6 +351,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
       <div
         class="app-body"
         node_ref=app_body
+        inert=is_call_screen_up
         on:pointerdown=move |ev| edge_swipe.pointer_down(&ev)
         on:pointermove=move |ev| edge_swipe.pointer_move(&ev)
         on:pointerup=move |ev| edge_swipe.pointer_up(&ev)

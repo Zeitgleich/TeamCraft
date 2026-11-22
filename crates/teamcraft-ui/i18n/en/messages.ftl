@@ -146,6 +146,10 @@ message-table-label = Table
 mention-channel = Notify everyone in this conversation
 mention-admins = Admins and owners
 composer-suggestions = Suggestions
+composer-suggestion-count = { $count ->
+    [one] 1 suggestion
+   *[other] { $count } suggestions
+  }
 composer-format = Formatting
 composer-format-toggle = Show formatting
 format-bold = Bold
@@ -211,6 +215,7 @@ history-replaced = Replaced { $time }
 
 ## Daily-use improvements (docs/ux-backlog.md)
 new-messages = New messages
+message-arrived = { $author }: { $text }
 jump-to-latest-new = { $count ->
     [one] 1 new message
    *[other] { $count } new messages
