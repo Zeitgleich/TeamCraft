@@ -376,6 +376,9 @@ async fn proxy_401_keeps_the_session(page: &Page, channel: String) {
 /// connection starts: the session's user may not be the cached one. The chats show meanwhile.
 async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
   let url = format!("{WEB_ORIGIN}/c/{channel}");
+  // The page before is confirmed and may still be catching up from the step before: its requests
+  // would count against the new one, which is the one the rule is about (#1406). It goes first.
+  page.goto("about:blank").await.unwrap();
   let is_answered = Arc::new(AtomicBool::new(false));
   let signed_requests = Arc::new(Mutex::new(Vec::<String>::new()));
   let sockets = Arc::new(Mutex::new(Vec::<String>::new()));
