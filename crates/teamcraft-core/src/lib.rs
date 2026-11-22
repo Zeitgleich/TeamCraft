@@ -53,6 +53,7 @@ pub mod platform;
 #[cfg(feature = "ui")]
 pub mod polls;
 pub mod prefetch;
+pub mod provider_account_names;
 pub mod push_guard;
 #[cfg(any(feature = "ui", feature = "service-worker"))]
 pub mod push_picture;

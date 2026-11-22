@@ -437,6 +437,28 @@ The console's Security section offers it to owners for each member off the roste
 phones), and the correction takes the person off the console's list at once. The phones show the
 member's own alert under Settings > Security.
 
+**Which account is whose** (issue #2241). The roster notes only the subject, which says nothing to an
+owner. So the console shows, under each contradicted member and again in the confirmation, the noted
+account and the one that signs in for them, each with the provider's `preferred_username`, its `email`
+where the token says the provider verified it (`email_verified`), and the subject to look the account
+up at the provider. These names are personal data and change, so they never go into the roster, a
+policy or anything else signed or sent; an owner's app keeps them in its encrypted local store
+(`provider_account_names`), from the tokens its own rounds verified against the pinned provider:
+
+- the noted account's from the token that got it noted, the only one there is (the server keeps no
+  token of a noted account), so an owner's app keeps them for every account the roster notes, at most
+  one per mark (`max_provider_marks`), and drops them once the roster forgets the account;
+- the contradicting account's for as long as the contradiction stands;
+- a newer token of the same account renames it; a correction (`forget_provider_account`) drops both;
+  an app that is no owner (any more) keeps none.
+
+An owner's device that never verified a token of an account (another owner's app noted it, or the
+device was added since) says so ("not seen on this device") instead of guessing. The names decide
+nothing: the subject and the rules above do. They are the provider's word for an account, and a person
+who may edit their own profile there, or a provider admin, can make an account look like somebody
+else's; an address that the provider didn't verify is not shown. That is why the subject is shown
+too: the account to close is found at the provider by it.
+
 **Where the marks live, and how many.** In the signed roster, like the role holders' (`provider_marks`):
 one chain every client verifies already, with every rule above (marks only move forward on every
 device, a roster an older owner's app signs without them changes nothing, a provider move forgets

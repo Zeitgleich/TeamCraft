@@ -6,8 +6,9 @@ use leptos::prelude::*;
 use teamcraft_proto::{KeyAttestationMode, RoleSigningMode, RoleSigningPolicy};
 
 use crate::admin::{
-  OwnerRosterStatus, OwnerWarning, RoleSigningIssue, RosterChange, RosterEntry, RosterRoleChoice,
-  idp_roster_proposal, normalized_roster, roster_changes, roster_problem, signed_roster,
+  ContradictedAccounts, OwnerRosterStatus, OwnerWarning, ProviderAccount, RoleSigningIssue, RosterChange,
+  RosterEntry, RosterRoleChoice, idp_roster_proposal, normalized_roster, roster_changes, roster_problem,
+  signed_roster,
 };
 use crate::clock::{format_date_time, now_ms};
 use crate::components::admin_policy::{PolicyDraft, SelectRow};
@@ -227,6 +228,11 @@ fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
   let contradicted = status.contradicted();
   // An owner of the verified roster, not whom the server calls one (like the banner).
   let can_correct = status.is_owner(state.read(|backend| backend.me().id));
+  let members: Vec<(UserId, Option<ContradictedAccounts>)> = contradicted
+    .members
+    .iter()
+    .map(|user| (*user, status.accounts_of(*user).cloned()))
+    .collect();
   let text = status.maybe_signing_problem.and_then(|problem| match problem {
     RoleSigningIssue::NoRoleClaim => Some(i18n.t("roster-signing-no-role-claim")),
     RoleSigningIssue::NoKeyClaim => Some(i18n.t("roster-signing-no-key-claim")),
@@ -246,7 +252,6 @@ fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
     )),
     RoleSigningIssue::AwaitingOwner => Some(i18n.t("roster-signing-awaiting-owner")),
   });
-  let members = contradicted.members;
   view! {
     {text.map(|text| view! { <p class="auth-alert" role="status">{text}</p> })}
     {(!members.is_empty()).then(|| view! { <AccountContradictions members=members can_correct=can_correct /> })}
@@ -257,17 +262,22 @@ fn SigningNote(status: OwnerRosterStatus) -> impl IntoView {
 /// (e2ee.md §3.1.4): a server and another account may have got in first. An owner forgets the noted
 /// account here, after a confirmation that says what follows (issue #1880).
 #[component]
-fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoView {
+fn AccountContradictions(
+  members: Vec<(UserId, Option<ContradictedAccounts>)>,
+  can_correct: bool,
+) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let confirming = RwSignal::new(None::<UserId>);
+  let users: Vec<UserId> = members.iter().map(|(user, _)| *user).collect();
   let text = i18n.t_with(
     "roster-signing-contradictory-accounts",
-    &[("names", &names(state, &members))],
+    &[("names", &names(state, &users))],
   );
+  let accounts_of = StoredValue::new(members.clone());
   let rows = members
     .into_iter()
-    .map(|user| {
+    .map(|(user, maybe_accounts)| {
       let action = can_correct.then(|| {
         view! {
           " "
@@ -285,6 +295,7 @@ fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoVi
         <li>
           <strong translate="no">{account_label(state, user)}</strong>
           {action}
+          <ProviderAccounts maybe_accounts=maybe_accounts />
         </li>
       }
     })
@@ -307,12 +318,15 @@ fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoVi
         // One per confirmation: a failure for one person doesn't show at the next.
         let pending = PendingAction::new();
         let name = account_label(state, user);
+        let maybe_accounts = accounts_of
+          .with_value(|members| members.iter().find(|(other, _)| *other == user).and_then(|(_, found)| found.clone()));
         let title = i18n.t_with("roster-forget-confirm-title", &[("name", &name)]);
         let label = title.clone();
         view! {
           <div class="roster-confirm" role="dialog" aria-label=label>
             <h4 class="detail-heading">{title}</h4>
             <code translate="no">{i18n.t_with("roster-confirm-id", &[("id", &user.to_string())])}</code>
+            <ProviderAccounts maybe_accounts=maybe_accounts />
             <p>{i18n.t("roster-forget-confirm-what")}</p>
             <p class="auth-alert" role="status">{i18n.t("roster-forget-confirm-close")}</p>
             {move || pending.maybe_failure().map(|failure| view! {
@@ -329,6 +343,51 @@ fn AccountContradictions(members: Vec<UserId>, can_correct: bool) -> impl IntoVi
       })}
     </div>
   }
+}
+
+/// The noted and the contradicting account at the identity provider, as this owner's device saw their
+/// tokens (e2ee.md §3.1.4, issue #2241): the names the provider gives and the account ID to look up
+/// there. What this device never saw a token of says so, rather than nothing.
+#[component]
+fn ProviderAccounts(maybe_accounts: Option<ContradictedAccounts>) -> impl IntoView {
+  let i18n = use_i18n();
+  let (maybe_noted, maybe_contradicting) = maybe_accounts
+    .map(|accounts| (accounts.maybe_noted, accounts.maybe_contradicting))
+    .unwrap_or_default();
+  let line = move |key: &'static str, maybe_account: Option<ProviderAccount>| {
+    let described = maybe_account.map_or_else(
+      || i18n.t("roster-account-unseen"),
+      |account| provider_account_text(i18n, &account),
+    );
+    view! {
+      <li>
+        {i18n.t(key)}
+        " "
+        <span class="muted-text" translate="no">{described}</span>
+      </li>
+    }
+  };
+  view! {
+    <ul class="owner-list">
+      {line("roster-account-noted", maybe_noted)}
+      {line("roster-account-signing-in", maybe_contradicting)}
+    </ul>
+  }
+}
+
+/// `jdoe · jdoe@example.com · ID 1234…`: the names the provider gives, then the ID that finds the
+/// account at the provider whatever its names say.
+fn provider_account_text(i18n: I18n, account: &ProviderAccount) -> String {
+  account
+    .maybe_username
+    .iter()
+    .chain(account.maybe_email.iter())
+    .cloned()
+    .chain(std::iter::once(
+      i18n.t_with("roster-account-id", &[("id", &account.subject)]),
+    ))
+    .collect::<Vec<_>>()
+    .join(" · ")
 }
 
 /// The warnings first, then each owner with their last signature and the roster's expiry.

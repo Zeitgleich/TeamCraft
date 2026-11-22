@@ -240,6 +240,7 @@ impl AdminBackend for MockBackend {
       is_signing_manual: false,
       maybe_signing_problem: None,
       is_own_account_mismatched: false,
+      contradicted_accounts: Vec::new(),
     })
   }
 

@@ -1220,6 +1220,10 @@ roster-forget-confirm-title = Das für { $name } vermerkte Konto vergessen?
 roster-forget-confirm-what = Der Schlüssel bleibt unbestätigt, bis sich die App der Person das nächste Mal anmeldet; dann wird das Konto vermerkt, mit dem sie sich anmeldet. Kein Konto von vor jetzt kann für sie wieder vermerkt werden.
 roster-forget-confirm-close = Wenn das vermerkte Konto nicht ihres ist, schließe es auch beim Identity Provider, sonst kann es es mit einer neuen Anmeldung wieder versuchen.
 roster-forget-confirm = Konto vergessen
+roster-account-noted = Vermerktes Konto:
+roster-account-signing-in = Meldet sich an mit:
+roster-account-unseen = auf diesem Gerät nicht gesehen
+roster-account-id = ID { $id }
 
 policy-scheduled = Geplante Nachrichten
 policy-scheduled-hint = Der Server hebt sie verschlüsselt auf und gibt sie zu ihrer Zeit frei, egal ob die Geräte der Verfassenden an sind. Er setzt diese Regel durch.

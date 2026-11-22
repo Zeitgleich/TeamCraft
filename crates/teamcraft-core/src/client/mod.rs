@@ -196,7 +196,7 @@ pub use org_recovery_attempt::{
 };
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pending_action_count};
 pub use pending_add::{UserAddWait, pending_user_additions};
-pub use role_signing::{RoleSigningProblem, RoleSigningRecord, role_signing_record};
+pub use role_signing::{RoleSigningProblem, RoleSigningRecord, provider_account_names, role_signing_record};
 #[cfg(not(target_arch = "wasm32"))]
 pub use segments::{SegmentPlan, SegmentPrefetch};
 pub use self_add::{is_waiting_for_admission, self_add_attempts};

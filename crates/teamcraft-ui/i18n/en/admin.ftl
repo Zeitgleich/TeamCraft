@@ -1220,6 +1220,10 @@ roster-forget-confirm-title = Forget the account noted for { $name }?
 roster-forget-confirm-what = Their key stays unconfirmed until their app next signs in; the account it signs in with then is noted for them. No account from before now can be noted for them again.
 roster-forget-confirm-close = If the noted account isn't theirs, also close it at the identity provider: otherwise it can try again with a fresh sign-in.
 roster-forget-confirm = Forget account
+roster-account-noted = Noted account:
+roster-account-signing-in = Signs in with:
+roster-account-unseen = not seen on this device
+roster-account-id = ID { $id }
 
 policy-scheduled = Scheduled messages
 policy-scheduled-hint = The server holds these encrypted and releases them at their time, whether their author's devices are on or not. It enforces this rule.
