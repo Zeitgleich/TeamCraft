@@ -157,6 +157,7 @@ synced_prefs! {
   "calls.push_to_talk" => calls.push_to_talk,
   "calls.status_sounds" => calls.status_sounds,
   "calls.small_window" => calls.small_window,
+  "calls.direct_connections" => calls.direct_connections,
   "onboarding.done" => onboarding.done,
   "onboarding.is_dismissed" => onboarding.is_dismissed,
   "files.sort" => files.sort,

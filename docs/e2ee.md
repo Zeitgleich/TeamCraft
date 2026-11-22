@@ -6991,6 +6991,60 @@ whose size it sees.
 **Logs.** Apps log that a recording started or stopped (call id, duration in seconds) and verification
 failures (device id). Never the file's name, path or content.
 
+### 8.4 Direct media and IP addresses (issue #127)
+
+A 1:1 call can carry its media directly between the two devices (ARCHITECTURE.md §6.7). The media
+is the same: DAVE frames encrypted with the same keys, whichever path they take, so neither the
+path nor a change of path weakens or bypasses the call's encryption. What changes is who learns
+which address.
+
+**What each party learns.**
+
+| Party               | On the SFU path (always)              | With a direct path, in addition                                                                                        |
+|---------------------|---------------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| The SFU and server  | each device's public address and port | nothing: offers are end-to-end encrypted; it sees that the media stopped flowing through it                            |
+| The other side      | nothing                               | the device's public address (as its NAT maps it) and the addresses of its interfaces, local network addresses included |
+| Networks on the way | the device talks to the SFU           | the two devices talk to each other                                                                                     |
+
+That is why it is a signed policy with members only by default, and a setting each user can turn
+off (admin.md §3.16).
+
+**The offer.** Candidates and the direct endpoint's certificate hash travel in a `direct_offer`
+that the SFU relays but can't read or forge (`teamcraft_crypto::direct_path`):
+
+- Key: 32 bytes exported from the call's DAVE group for the current epoch (MLS exporter, RFC 9420
+  §8.5, label `TeamCraft-v1 direct path`, empty context), expanded with HKDF-SHA256 into an offer
+  key (`info` = `offer`). Only members of that epoch hold it; after an epoch change the old key is
+  gone and offers are sent again.
+- Seal: XChaCha20-Poly1305 with a random 192-bit nonce. Associated data: a version byte, the call
+  ID, the epoch, the sender's and the receiver's device IDs, so an offer can't be replayed into
+  another call, epoch or direction, nor be redirected to the sender itself.
+- Wire format: version (1 byte, `1`) ‖ epoch (8 bytes, big endian) ‖ nonce (24 bytes) ‖ ciphertext.
+  The receiver opens only offers of the epoch it currently holds.
+- Inside, a counter (per sender and epoch) orders offers: a receiver keeps the highest, so the SFU
+  can't replay an older offer of the same epoch to send a device back to stale addresses.
+
+**The direct connection.** QUIC (TLS 1.3) with ephemeral self-signed certificates on both sides,
+each pinned by the SHA-256 hash in the other side's offer. Since only a member of the DAVE epoch can
+write a valid offer, the direct path connects only to the member it was offered by; the SFU can't
+put itself in the middle of it. Were it able to, it would gain nothing it doesn't already have: it
+relays the same encrypted frames on the SFU path.
+
+**What a hostile server can do.** Drop or delay offers or `direct_path` reports (the call stays on
+or goes back to the SFU path); see that a direct path is in use. It can't make a device offer a
+direct path (each device decides from the signed policy and its user's setting), read the addresses
+in an offer, or keep a device's media from the SFU path: the SFU stops forwarding a device's media
+only while both devices report their direct path up, and a device that loses it reports so and is
+served again at once.
+
+**What a hostile peer can do.** Learn the addresses above, which is what the policy and the setting
+consent to. Put somebody else's address into its offer: the device then sends QUIC handshakes (at
+most 8 candidates, 5 s, with backoff after failures; no media before the pinned handshake completes)
+to that address, which bounds any reflection to a few kilobytes.
+
+**Logs.** Apps log that a direct path came up or went down (call ID, the candidate kind, the round
+trip), never the addresses. The SFU logs relayed offers by count only.
+
 ## 9. Local storage
 
 - Local database: SQLite with SQLCipher; key in the sealed files of local secrets, under the one

@@ -1222,6 +1222,105 @@ pausing this test's unadaptive video; real encoders adapt, so don't read this as
 better. A call through a real reverse proxy (nginx, without TLS, on loopback) works with the same
 numbers; on a poor link the proxy's own buffers come on top, which isn't measured.
 
+### 6.7 Direct media for 1:1 calls (#127)
+
+A call between two devices can carry its media on a direct path between them instead of through
+the SFU: less latency (one hop instead of two, often within one city or one office) and no SFU
+bandwidth. The SFU stays in the call the whole time: it carries the signaling and the DAVE group,
+and it is the relay the media falls back to at once when the direct path fails. The design follows
+Tailscale's NAT traversal ("How NAT traversal works"), with the SFU in the role of DERP: endpoint
+discovery through our own servers, simultaneous open, optional port mapping, and the relay as the
+path that always works. No hosted coordination service, no STUN or TURN server of a third party.
+
+**Who may.** Direct media shows each side's IP addresses to the other (e2ee.md §8.4), so it is a
+signed workspace policy (`direct_media`, admin.md §3.16) and a setting of each user:
+
+| Policy (`direct_media.mode`)  | Direct media between                                           |
+|-------------------------------|----------------------------------------------------------------|
+| `off`                         | nobody: every call goes through the SFU, as before             |
+| `same_organization` (default) | two members of this instance; guests and external people never |
+| `everyone`                    | any two participants, guests included                          |
+
+Each user can turn it off for themselves ("Connect directly in calls", Settings → Calls, synced
+setting `calls.direct_connections`, on by default). Each device decides for itself from the policy
+it verified, its own user's setting and the standing of the other side (a member is somebody whose
+DAVE key binding verifies against an identity this device pinned as a member of the instance; a
+meeting guest's binding is a guest link's identity and never counts as a member). A device that
+doesn't allow it sends no offer and ignores the other side's: one "no" is enough. The server can't
+turn it on for anybody: it can only drop offers, which leaves the call on the SFU.
+
+**When.** Only while the call has exactly two devices, both on a native app (desktop, Android,
+iOS). Browsers can't: WebTransport only connects to a server, and there is no WebRTC (§6.1), so a
+call with a browser stays on the SFU. A third device joining ends the direct path (media goes back
+to the SFU before the new device gets its welcome); when it leaves again, the two may go direct
+once more. Calls on the WebSocket fallback (§6.6) try too: their direct path is UDP of its own, and
+where UDP is blocked it simply never connects.
+
+**Endpoint discovery.** Each device opens one more UDP socket for the direct path (dual stack,
+`[::]`), and a QUIC endpoint on it that is client and server at once. Its candidates:
+
+- *host*: the addresses of its interfaces (IPv4 and IPv6; not loopback, not link-local, not
+  multicast), with the socket's port;
+- *reflexive*: the address the SFU sees: the endpoint makes a short QUIC connection to the SFU from
+  the same socket (`reflect`, with the session's secret as for `attach_audio`), and the SFU answers
+  with the address it came from. Behind a NAT with endpoint-independent mapping (most home routers,
+  many carrier NATs) that is also the address the peer can reach;
+- *mapped* (optional): a port the router maps on request (UPnP-IGD, NAT-PMP, PCP), where the
+  router offers it and the device's settings allow it.
+
+At most 8 candidates, deduplicated, IPv6 first (no NAT in the way, usually).
+
+**Offers.** A device sends its candidates in a `direct_offer` to the other device through the SFU.
+The offer is end-to-end encrypted and authenticated (e2ee.md §8.4): XChaCha20-Poly1305 under a key
+the DAVE group exports for the direct path (label `TeamCraft-v1 direct path`, the epoch's exporter,
+so only the two members of that epoch can read or write it), with the call, epoch and both device IDs
+as associated data. Inside: the candidates, the SHA-256 hash of the endpoint's ephemeral self-signed
+certificate, and a counter that orders offers of one epoch. The SFU only relays: it passes an offer
+on only while the room has exactly two devices and only to the other one, bounded in size
+(`MAX_DIRECT_OFFER_BYTES`, 2 KiB) and rate (`direct_offer_burst`, `direct_offers_per_second`). A
+device sends a new offer after each DAVE epoch change (the key changed), each network change and
+each new reflexive address.
+
+**Simultaneous open.** With both offers in hand, each device dials every pair of its own socket
+and the peer's candidates (IPv6 pairs first, a new pair every 50 ms) and accepts at the same
+time. A QUIC Initial going out is also what opens the own NAT for the answer, so whichever side's
+packets get through first opens the path for both; NATs with endpoint-dependent mapping ("hard"
+NATs) rarely let either through, and those calls stay on the SFU (birthday-paradox probing over many
+ports is a later step). Each side checks the other's certificate against the hash in its offer
+(mutual pinning), so a path to anybody who didn't send the offer is refused. When both directions
+connect, the connection the device with the lower device ID accepted wins; the other is closed. The
+dialing ends after 5 s without a connection, and starts again after a network change or a new offer,
+with a backoff (2 s, doubling, up to 60 s) after paths that failed.
+
+**Switching paths.** The direct path proves itself before it takes media: pings every 200 ms on
+its connection, and it is *up* once it answered for 1 s without a loss. Then the device sends its
+media there and tells the SFU (`direct_path` with `is_active: true`); the SFU stops forwarding the
+peer's media to a device only while *both* say so, so neither side can cut the other off. Any sign of
+trouble goes back at once: three lost pings in a row, 600 ms without anything from the peer, an
+error on the connection, a network change. The device then sends to the SFU again (the SFU forwards
+the moment either side says `is_active: false`) and, for a second, on both paths, so the receiver
+misses nothing during the switch: its jitter buffer drops the copies by RTP sequence number. Media
+on the direct path is the very datagram the SFU would have received, DAVE encrypted the same way:
+the path never changes what is encrypted or how. QUIC migration keeps the direct connection across
+a change of the device's address where the peer can still reach it; otherwise the device falls back,
+sends a new offer, and the pair upgrades again when the new path is up.
+
+**Video.** One layer on the direct path: the sender's own bandwidth estimate of the direct
+connection (QUIC's) picks the simulcast layer the receiver's view needs, as the SFU would.
+Keyframe requests, NACKs and the voice's FEC work end to end as on the SFU path.
+
+**Status.** The call's connection details show "Direct" or "Through the server" (no badge on the
+call screen itself: the path is an implementation detail, the privacy choice is the setting).
+
+**State of the implementation.** In place: the policy and the user setting, the encrypted offer
+(`teamcraft_crypto::direct_path`, the exporter in the vendored `davey`), the wire messages and the
+SFU's relay with its limits, and the client's decision and path-switching logic, which runs without
+I/O and is tested on its own (`teamcraft_media::direct_path`). Still to come (issue #127's
+follow-ups): the direct-path socket and QUIC endpoint in the native call engine with the SFU's
+`reflect`, the media switch and `direct_path` towards the SFU, port mapping, the connection details,
+and the measurements on the shaped test stack (latency and SFU bandwidth with and without, success
+per NAT type).
+
 ## 7. Clients
 
 | Platform              | Shell                                           | Notes                                                                                                                                                                                                                                                         |

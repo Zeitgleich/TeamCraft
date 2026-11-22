@@ -15,6 +15,7 @@ pub mod channel_anchor;
 pub mod checksum;
 pub mod content_key;
 pub mod device_list;
+pub mod direct_path;
 pub mod dpop;
 pub mod fingerprint;
 pub mod guest_link;

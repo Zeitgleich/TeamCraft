@@ -33,7 +33,7 @@ use teamcraft_media::{
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
   ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
-  MAX_RECORDING_NOTICE_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
+  MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_NOTICE_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
   SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents, SfuCallRoster, SfuControlAction,
   TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
 };
@@ -103,6 +103,8 @@ pub struct Room {
   mute_reports_per_second: u32,
   recording_notice_burst: u32,
   recording_notices_per_second: u32,
+  direct_offer_burst: u32,
+  direct_offers_per_second: u32,
   state: Mutex<RoomState>,
   /// Wakes the lost sessions waiting through the reconnect grace when a device joins: the one whose
   /// device took its slot back stops waiting ([`Room::wait_for_return`]).
@@ -218,6 +220,8 @@ struct Participant {
   mute_limit: TokenBucket,
   /// Limits how often the device may send a recording notice.
   recording_notice_limit: TokenBucket,
+  /// Limits how often the device may send a direct path offer.
+  direct_offer_limit: TokenBucket,
   /// The device's latest signed recording notice (e2ee.md §8.3), as it sent it: the SFU can't
   /// read it, it hands it to devices that join later.
   maybe_recording_notice: Option<Base64Bytes>,
@@ -616,6 +620,8 @@ impl Room {
       mute_reports_per_second: config.mute_reports_per_second,
       recording_notice_burst: config.recording_notice_burst,
       recording_notices_per_second: config.recording_notices_per_second,
+      direct_offer_burst: config.direct_offer_burst,
+      direct_offers_per_second: config.direct_offers_per_second,
       state: Mutex::new(state),
       joins: Notify::new(),
     })
@@ -729,6 +735,10 @@ impl Room {
       },
       CallClientMessage::UplinkHurt { is_hurt } => {
         self.set_uplink_hurt(participant_id, is_hurt, now);
+        Ok(())
+      },
+      CallClientMessage::DirectOffer { to_device_id, sealed } => {
+        self.relay_direct_offer(participant_id, to_device_id, sealed, now);
         Ok(())
       },
       CallClientMessage::MoveHere => {
@@ -1057,6 +1067,7 @@ impl Room {
               now,
             ),
             maybe_recording_notice: None,
+            direct_offer_limit: TokenBucket::new(self.direct_offer_burst, self.direct_offers_per_second, now),
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
@@ -1270,6 +1281,45 @@ impl Room {
     }
     participant.is_muted = is_muted;
     state.broadcast_except(device_id, CallEvent::ParticipantMuted { device_id, is_muted });
+  }
+
+  /// Passes a direct path offer on to the other device of a 1:1 call (ARCHITECTURE.md §6.7). The SFU
+  /// can't read it (it is sealed under a key of the DAVE epoch); it relays only while the room has
+  /// exactly the two devices, only to the other one, within the size and rate limits, and drops it
+  /// otherwise: the call then stays on the SFU path. Logged by count, never the content.
+  fn relay_direct_offer(
+    &self,
+    device_id: DeviceId,
+    to_device_id: DeviceId,
+    sealed: Base64Bytes,
+    now: Instant,
+  ) {
+    if sealed.is_empty() || sealed.len() > MAX_DIRECT_OFFER_BYTES {
+      debug!(call_id = %self.call_id, device_id = %device_id, bytes = sealed.len(), "direct offer refused: size");
+      return;
+    }
+    let mut state = lock(&self.state);
+    let is_pair = state.participants.len() == 2
+      && to_device_id != device_id
+      && state.participants.contains_key(&to_device_id);
+    if !is_pair {
+      debug!(call_id = %self.call_id, device_id = %device_id, "direct offer refused: not a 1:1 call");
+      return;
+    }
+    let Some(participant) = state.participants.get_mut(&device_id) else {
+      return;
+    };
+    if !participant.direct_offer_limit.allow(now) {
+      debug!(call_id = %self.call_id, device_id = %device_id, "direct offer over the limit");
+      return;
+    }
+    state.send_to(
+      to_device_id,
+      CallEvent::DirectOffer {
+        from_device_id: device_id,
+        sealed,
+      },
+    );
   }
 
   /// Keeps the device's signed recording notice, forwards it to the others and confirms it to
@@ -2455,6 +2505,73 @@ mod tests {
       assert!(drain(&mut bob_rx).is_empty());
       let (mut carol_rx, _) = join(&rooms, 3, 30);
       assert!(notices(&drain(&mut carol_rx)).is_empty());
+    }
+  }
+
+  /// ARCHITECTURE.md §6.7: the SFU relays sealed direct path offers between the two devices of a
+  /// 1:1 call only, bounded in size and rate.
+  mod direct_offers {
+    use super::*;
+
+    fn offers(events: &[CallEvent]) -> Vec<(DeviceId, Vec<u8>)> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::DirectOffer {
+            from_device_id,
+            sealed,
+          } => Some((*from_device_id, sealed.as_slice().to_vec())),
+          _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn an_offer_reaches_the_other_device_only() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut alice_rx);
+      drain(&mut bob_rx);
+      room.relay_direct_offer(id(10), id(20), Base64Bytes::new(vec![1; 300]), Instant::now());
+      assert_eq!(offers(&drain(&mut bob_rx)), vec![(id(10), vec![1; 300])]);
+      assert!(drain(&mut alice_rx).is_empty(), "nothing back to the sender");
+      room.relay_direct_offer(id(10), id(10), Base64Bytes::new(vec![2; 300]), Instant::now());
+      room.relay_direct_offer(id(10), id(99), Base64Bytes::new(vec![3; 300]), Instant::now());
+      assert!(drain(&mut alice_rx).is_empty() && drain(&mut bob_rx).is_empty());
+    }
+
+    #[test]
+    fn a_third_device_stops_the_relay() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      let (_carol_rx, _) = join(&rooms, 3, 30);
+      drain(&mut bob_rx);
+      room.relay_direct_offer(id(10), id(20), Base64Bytes::new(vec![1; 300]), Instant::now());
+      assert!(offers(&drain(&mut bob_rx)).is_empty());
+    }
+
+    #[test]
+    fn empty_oversized_and_flooding_offers_are_dropped() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      let now = Instant::now();
+      room.relay_direct_offer(id(10), id(20), Base64Bytes::new(Vec::new()), now);
+      room.relay_direct_offer(
+        id(10),
+        id(20),
+        Base64Bytes::new(vec![1; MAX_DIRECT_OFFER_BYTES + 1]),
+        now,
+      );
+      assert!(offers(&drain(&mut bob_rx)).is_empty());
+      for _ in 0..20 {
+        room.relay_direct_offer(id(10), id(20), Base64Bytes::new(vec![1; 100]), now);
+      }
+      let burst = SfuConfig::default().direct_offer_burst as usize;
+      assert_eq!(offers(&drain(&mut bob_rx)).len(), burst);
     }
   }
 

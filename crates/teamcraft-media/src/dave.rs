@@ -33,6 +33,8 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 #[cfg(feature = "native")]
 use teamcraft_crypto::call_recording::RecordingNoticeSigner;
+use teamcraft_crypto::direct_path::{DIRECT_PATH_EXPORTER_LABEL, DIRECT_PATH_EXPORTER_LEN, DirectPathKey};
+use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{CallId, DaveTransitionId, DeviceId, Id, IdError, Snowflake};
 use thiserror::Error;
 use tls_codec::{Deserialize as TlsDeserialize, Serialize as TlsSerialize, VLBytes};
@@ -263,6 +265,18 @@ impl DaveParticipant {
 
   pub fn maybe_epoch(&self) -> Option<DaveEpoch> {
     self.session.epoch().map(|epoch| DaveEpoch(epoch.as_u64()))
+  }
+
+  /// The key that seals direct path offers in the current epoch (#127, e2ee.md §8.4): only the
+  /// members of this epoch hold it. `None` before the group is established.
+  pub fn maybe_direct_path_key(&self) -> Option<DirectPathKey> {
+    let epoch = self.maybe_epoch()?;
+    let exported = SecretBytes::new(self.session.export_secret(
+      DIRECT_PATH_EXPORTER_LABEL,
+      &[],
+      DIRECT_PATH_EXPORTER_LEN,
+    )?);
+    DirectPathKey::from_exporter(epoch.0, exported.expose_secret()).ok()
   }
 
   pub fn maybe_leaf_index(&self) -> Option<DaveLeafIndex> {
@@ -556,6 +570,50 @@ mod tests {
         bob.verification_code(ALICE).unwrap()
       );
       assert_eq!(alice.maybe_privacy_code(), bob.maybe_privacy_code());
+    }
+
+    /// #127: both members derive the same direct path key; an outsider of the epoch can't.
+    #[test]
+    fn members_share_the_direct_path_key_of_their_epoch() {
+      use teamcraft_crypto::call_binding::CallId as BindingCallId;
+      use teamcraft_crypto::direct_path::OfferContext;
+      use teamcraft_crypto::ids::DeviceId as BindingDeviceId;
+
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      assert!(alice.maybe_direct_path_key().is_none(), "no group yet");
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+
+      let context = OfferContext {
+        call_id: BindingCallId::new(1),
+        from: BindingDeviceId::new(1),
+        to: BindingDeviceId::new(2),
+      };
+      let alice_key = alice.maybe_direct_path_key().unwrap();
+      let sealed = alice_key.seal(&context, b"offer", &mut rand_core::OsRng).unwrap();
+      let bob_key = bob.maybe_direct_path_key().unwrap();
+      assert_eq!(bob_key.epoch(), alice_key.epoch());
+      assert_eq!(bob_key.open(&context, &sealed).unwrap().expose_secret(), b"offer");
+
+      let other_gateway = DaveExternalSender::new().unwrap();
+      let mut carol = joined_participant(&other_gateway, CAROL);
+      let mut dave = joined_participant(&other_gateway, BOB);
+      add_members(
+        &other_gateway,
+        &mut carol,
+        &mut [],
+        &mut [(BOB, &mut dave)],
+        &[CAROL, BOB],
+      );
+      let outsider = carol.maybe_direct_path_key().unwrap();
+      assert!(outsider.open(&context, &sealed).is_err());
     }
 
     #[test]

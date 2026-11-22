@@ -2175,6 +2175,9 @@ impl CallEngine {
         }
         Ok(())
       },
+      // The engine takes no direct path yet (#127, ARCHITECTURE.md §6.7): an offer it ignores
+      // keeps the call on the SFU, as it was.
+      CallEvent::DirectOffer { .. } => Ok(()),
       CallEvent::Unknown => Ok(()),
     }
   }

@@ -50,6 +50,11 @@ pub struct SfuConfig {
   pub recording_notice_burst: u32,
   /// Recording notices one participant may send per second, beyond the burst.
   pub recording_notices_per_second: u32,
+  /// Direct path offers (ARCHITECTURE.md §6.7) one participant may send at once; more are dropped
+  /// until the rate refills. A device offers after each epoch change and network change.
+  pub direct_offer_burst: u32,
+  /// Direct path offers one participant may send per second, beyond the burst.
+  pub direct_offers_per_second: u32,
   /// Upper bound for one signaling message.
   pub max_signaling_message_bytes: usize,
   /// Tolerated clock difference to the server when checking join token times.
@@ -258,6 +263,8 @@ impl Default for SfuConfig {
       mute_reports_per_second: 2,
       recording_notice_burst: 5,
       recording_notices_per_second: 1,
+      direct_offer_burst: 4,
+      direct_offers_per_second: 1,
       max_signaling_message_bytes: 256 * 1024,
       join_token_leeway: Duration::from_secs(5),
       max_join_token_lifetime: Duration::from_secs(300),
