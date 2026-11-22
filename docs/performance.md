@@ -980,6 +980,33 @@ Not covered: a still screen on a link that drops to about its slides' rate witho
 buffer (5 → 1 Mbit/s) is followed by the delay steps only (5–17 s); its slides are as fast as the
 link allows either way, but its voice waits behind a slide's queue (up to about 320 ms).
 
+### Voice through an upload collapse (issue #1889)
+
+A presenter talks without a pause, camera on (720p, three layers, 2.5 Mbit/s), and watches the
+viewer's camera; its upload drops from 5 Mbit/s to 120 kbit/s for 20 s, three times, with 12–20 ms
+each way to the SFU. Measured with the SFU suite's `measure_voice_through_upload_collapses`
+(ignored; real QUIC through the suite's relay): voice that reached the viewer later than 200 ms
+after the fastest is played as a gap. Per collapse; at 2 s three runs of main and two of this
+change, at 250 ms one run each:
+
+| Bottleneck queue          | Voice missing, main | This change | Video held after | Good link (77 s) |
+|---------------------------|---------------------|-------------|------------------|------------------|
+| 250 ms (a home router)    | 5.6–6.5 s           | 0.9–1.1 s   | 0.5 s            | 0 bad s          |
+| 2 s (the drop rig's tbf)  | 7.7–8.1 s           | 3.4–4.2 s   | 0.5 s            | 0 bad s          |
+
+Where the time went on main, besides the half second until the video is held: the voice's own QUIC
+connection (#2141) cut its window to two packets per two-second round trip (Cubic, after the loss),
+about 10 kbit/s, and its voice waited in QUIC long after the queue had drained; the camera's
+lowest layer went on at 75 kbit/s for the 5 s of its pause hold (#1719), on a 120 kbit/s link; and
+QUIC was handed video by its window per round trip, which acknowledgements stuck behind the queue
+kept at the old rate. Now the voice connection's window stays at 24 KiB or more, the session
+connection's queue hands QUIC what it drained lately, a collapse stops the camera at once and
+drops what waits of it, nothing is resent while the video is held, and the voice goes to its
+thinnest step at once. What is left is the bottleneck's own queue: it drains at what the link
+carries less what is still sent (the thinnest voice and the acknowledgements, about 25 kbit/s),
+and no sender can take back what it holds. A queue of 2 s costs about 2.5 s of voice on top of
+the half second until the hold.
+
 ### A camera encoder that misses its wait under load (issue #1719)
 
 The 50 ms wait above drops a late picture and forces the next frame to a keyframe. If keyframes

@@ -158,6 +158,8 @@ pub struct UplinkLayers {
   probes: HashMap<StreamId, Probes>,
   /// Since when the estimate is below a camera's lowest layer while it still sends it.
   pause_pending_since: HashMap<StreamId, Instant>,
+  /// The uplink collapsed ([`UplinkLayers::set_collapsed`]): a camera stops at once.
+  is_collapsed: bool,
 }
 
 impl Default for UplinkPolicy {
@@ -192,7 +194,17 @@ impl UplinkLayers {
       share_change_pending_since: HashMap::new(),
       probes: HashMap::new(),
       pause_pending_since: HashMap::new(),
+      is_collapsed: false,
     }
+  }
+
+  /// Whether the uplink collapsed (#1889): the own voice is lost, or stuck in a queue, for longer
+  /// than a burst of loss. Then a camera stops at once instead of after
+  /// [`UplinkPolicy::camera_pause_hold`]: on 120 kbit/s its lowest layer at its least bitrate
+  /// (75 kbit/s) kept the link's queue full, and the voice silent, for those 5 s. Applies from the
+  /// next estimate.
+  pub fn set_collapsed(&mut self, is_collapsed: bool) {
+    self.is_collapsed = is_collapsed;
   }
 
   /// Applies a new estimate at `now`. Returns whether the allocation changed.
@@ -458,7 +470,12 @@ impl UplinkLayers {
   ) -> (Option<u8>, f64) {
     let is_camera = *track.kind == VideoTrackKind::Camera;
     let maybe_lowest = track.layers.first().map(|info| info.layer);
-    if !is_camera || chosen.0.is_some() || maybe_current.is_none() || maybe_lowest.is_none() {
+    if !is_camera
+      || chosen.0.is_some()
+      || maybe_current.is_none()
+      || maybe_lowest.is_none()
+      || self.is_collapsed
+    {
       self.pause_pending_since.remove(&track.stream);
       return chosen;
     }
@@ -686,6 +703,32 @@ mod tests {
       back + policy().camera_pause_hold,
     );
     assert!(!uplink.allows(CAMERA, 0));
+  }
+
+  /// Issue #1889: once the uplink collapsed (the voice guard says so), a camera doesn't wait for
+  /// the pause hold.
+  #[test]
+  fn a_camera_stops_at_once_on_a_collapsed_uplink() {
+    let layers = camera_layers();
+    let tracks = [adapting_camera(&layers)];
+    let mut uplink = UplinkLayers::new(300_000);
+    let start = now();
+    uplink.on_estimate(2_000_000, &tracks, false, &policy(), start);
+    uplink.set_collapsed(true);
+    uplink.on_estimate(0, &tracks, false, &policy(), start);
+    assert!(!uplink.allows(CAMERA, 0));
+    // Recovered: it comes back as after any cut, and a later dip holds it again.
+    uplink.set_collapsed(false);
+    uplink.on_estimate(
+      2_000_000,
+      &tracks,
+      false,
+      &policy(),
+      start + Duration::from_secs(10),
+    );
+    assert!(uplink.allows(CAMERA, 0));
+    uplink.on_estimate(60_000, &tracks, false, &policy(), start + Duration::from_secs(11));
+    assert!(uplink.allows(CAMERA, 0));
   }
 
   /// Issue #935: a cut while only sound went out held every layer of a camera turned on later

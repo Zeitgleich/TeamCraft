@@ -24,7 +24,7 @@ dave = [
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.
-native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:teamcraft-desktop-native", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "dep:rand_core", "fallback-socket", "quic-send"]
+native = ["dave", "dep:webpki-roots", "dep:ndk", "dep:openh264", "dep:teamcraft-desktop-native", "dep:bzip2", "dep:zune-jpeg", "dep:jpeg-encoder", "dep:opus", "dep:cpal", "dep:tokio", "dep:wtransport", "dep:quinn-proto", "dep:socket2", "dep:teamcraft-net", "dep:serde_json", "dep:tracing-subscriber", "dep:anyhow", "dep:url", "dep:rand_core", "fallback-socket", "quic-send"]
 
 # The writer of a call's WebSocket fallback (ARCHITECTURE.md §6.6), shared by the SFU and the native
 # clients.
@@ -181,6 +181,10 @@ symphonia = { version = "0.6.1", optional = true, default-features = false, feat
 # Native call driver: async runtime, WebTransport client and the JSON signaling encoding.
 tokio = { workspace = true, optional = true }
 wtransport = { version = "0.7.2", optional = true, features = ["quinn"] }
+# The voice connection's congestion controller (src/voice_congestion.rs, #1889): quinn's
+# `Controller` trait names `quinn_proto::RttEstimator`, which quinn doesn't re-export. Already in
+# the tree through quinn, same version.
+quinn-proto = { version = "0.11.19", optional = true, default-features = false }
 # The WebSocket fallback for networks that block UDP: same version as teamcraft-core's gateway
 # socket, so no new code enters the tree.
 tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }

@@ -46,6 +46,8 @@ type Departures<T> = mpsc::UnboundedReceiver<(tokio::time::Instant, T, Vec<u8>)>
 pub struct Shaper {
   /// Bit/s; 0 for no limit.
   limit_bps: Arc<AtomicU64>,
+  /// The longest a packet may wait in the queue, in microseconds ([`MAX_QUEUE_DELAY`] unless set).
+  max_queue_delay_us: Arc<AtomicU64>,
   start: Instant,
   /// Every packet: when it came (since the start), its bytes, and whether it was dropped.
   pub log: Arc<Mutex<Vec<(Duration, usize, bool)>>>,
@@ -85,6 +87,7 @@ impl Shaper {
   fn new(start: Instant) -> Self {
     Self {
       limit_bps: Arc::default(),
+      max_queue_delay_us: Arc::new(AtomicU64::new(duration_us(MAX_QUEUE_DELAY))),
       start,
       log: Arc::default(),
       maybe_impairment: Arc::default(),
@@ -104,6 +107,14 @@ impl Shaper {
       .store(maybe_limit_bps.unwrap_or(0), Ordering::Relaxed);
   }
 
+  /// Lets packets wait up to `delay` in the queue (a deeper buffer than [`MAX_QUEUE_DELAY`]: a
+  /// cable modem's or a phone's, which hold seconds at a collapsed rate).
+  pub fn set_max_queue_delay(&self, delay: Duration) {
+    self
+      .max_queue_delay_us
+      .store(duration_us(delay), Ordering::Relaxed);
+  }
+
   /// The queue: tagged packets go into the sender, and come out of the receiver with the time
   /// they leave (dropped ones don't).
   fn spawn_queue<T: Send + 'static>(&self) -> (mpsc::UnboundedSender<(T, Vec<u8>)>, Departures<T>) {
@@ -117,7 +128,8 @@ impl Shaper {
         let at = shaper.start.elapsed();
         let limit_bps = shaper.limit_bps.load(Ordering::Relaxed);
         let departure = next_free.max(now);
-        if limit_bps > 0 && departure.saturating_duration_since(now) > MAX_QUEUE_DELAY {
+        let max_queue_delay = Duration::from_micros(shaper.max_queue_delay_us.load(Ordering::Relaxed));
+        if limit_bps > 0 && departure.saturating_duration_since(now) > max_queue_delay {
           shaper.log.lock().unwrap().push((at, packet.len(), true));
           continue;
         }
@@ -429,4 +441,8 @@ pub fn dropped_by_kernel(sockets: &[&UdpSocket]) -> Option<u64> {
     })
     .sum();
   Some(dropped)
+}
+
+fn duration_us(duration: Duration) -> u64 {
+  u64::try_from(duration.as_micros()).unwrap_or(u64::MAX)
 }

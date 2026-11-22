@@ -13,7 +13,10 @@
 //! doubles that wait (up to [`VoiceStepConfig::max_upgrade_after`]).
 //!
 //! Voice the receivers lose or get late ([`crate::voice_guard`]) steps down too, one step at a
-//! time, without waiting for the estimate.
+//! time, without waiting for the estimate. An uplink that collapsed ([`VoiceSteps::on_collapse`])
+//! takes the voice to the thinnest step at once (#1889): its bottleneck's queue drains at what
+//! the link carries less what is still sent, and a full voice's headers alone slowed that by
+//! seconds.
 //!
 //! A call starts on [`VoiceStepConfig::start`] (the thin step), not the full one: on a 64 kbit/s
 //! link the full voice lost the first seconds of the first turn before anything showed the link
@@ -242,6 +245,18 @@ impl VoiceSteps {
     }
     if target < self.step {
       self.step_down(target, now);
+    }
+    let after = self.encoding();
+    (after != before).then_some(after)
+  }
+
+  /// The uplink collapsed (#1889, `crate::voice_guard`: voice lost for long, or stuck in a
+  /// queue): the thinnest step at once, and back up on proof as after any step down. Returns the
+  /// new encoding when it changed.
+  pub fn on_collapse(&mut self, now: Instant) -> Option<VoiceEncoding> {
+    let before = self.encoding();
+    if self.step > VoiceStep::Thinnest {
+      self.step_down(VoiceStep::Thinnest, now);
     }
     let after = self.encoding();
     (after != before).then_some(after)
@@ -636,6 +651,20 @@ mod tests {
       Some(config.thinnest)
     );
     assert_eq!(steps.on_estimate(GOOD_BPS, true, at(start, 100)), None);
+  }
+
+  /// A collapsed uplink takes the voice to the thinnest step in one go; it comes back on proof.
+  #[test]
+  fn a_collapse_goes_to_the_thinnest_step_at_once() {
+    let config = VoiceStepConfig::default();
+    let mut steps = steps(true);
+    let start = Instant::now();
+    assert_eq!(steps.on_collapse(start), Some(config.thinnest));
+    assert_eq!(steps.on_collapse(at(start, 1)), None);
+    assert_eq!(
+      steps.on_carried(GOOD_BPS, start + config.upgrade_after),
+      Some(config.full)
+    );
   }
 
   /// Without every other participant playing long packets, the steps keep their bitrates in
