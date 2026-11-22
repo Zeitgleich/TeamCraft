@@ -53,12 +53,12 @@ use wtransport::tls::{Certificate, Sha256Digest};
 use wtransport::{Endpoint, Identity};
 
 use super::{bind_wildcard, local_route_to, read_framed, with_trusted_roots, write_framed};
-use crate::call_engine::CallEngine;
+use crate::call_engine::{CallEngine, RelayedDirectOffer};
 use crate::direct_path::{
   BIRTHDAY_LINGER, BIRTHDAY_PROBE_INTERVAL, BIRTHDAY_PUNCHES, BIRTHDAY_SOCKETS, BIRTHDAY_TIMEOUT,
-  BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram, DirectPair,
-  DirectPathInputs, DownReason, OfferInbox, OwnNat, PathChange, PathSelector, Pinger, RelayArbiter,
-  accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, birthday_wait, dial_delay,
+  BirthdayBudget, BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram,
+  DirectPair, DirectPathInputs, DownReason, OfferInbox, OwnNat, PathChange, PathSelector, Pinger,
+  RelayArbiter, accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, dial_delay,
   direct_copy, eligibility, is_birthday_probe, nat_kind, offer_epoch, open_offer, own_candidates,
   read_direct, seal_offer,
 };
@@ -116,7 +116,7 @@ pub(super) struct DirectPath {
   /// This device's offers of the current epoch, numbered.
   counter: u64,
   /// An offer of a later epoch than this device holds: opened once its key is there.
-  maybe_held_offer: Option<Base64Bytes>,
+  maybe_held_offer: Option<RelayedDirectOffer>,
   maybe_peer: Option<PeerOffer>,
   maybe_reflexive: Option<SocketAddr>,
   /// How this device's NAT maps the socket, once both of the SFU's ports reflected it.
@@ -125,8 +125,7 @@ pub(super) struct DirectPath {
   maybe_mapped: Option<SocketAddr>,
   /// The birthday round running now, and when the next may start.
   maybe_birthday: Option<JoinHandle<()>>,
-  failed_birthdays: u32,
-  maybe_birthday_after: Option<Instant>,
+  birthday: BirthdayBudget,
   maybe_session_secret: Option<Base64Bytes>,
   maybe_reflect_target: Option<ReflectTarget>,
   selector: PathSelector,
@@ -209,6 +208,8 @@ struct PeerOffer {
   certificate_hash: [u8; 32],
   candidates: Vec<SocketAddr>,
   body: DirectOfferBody,
+  /// Where the SFU saw the other device's call connection come from, with this offer.
+  maybe_observed_ip: Option<IpAddr>,
 }
 
 struct DirectConnection {
@@ -255,8 +256,7 @@ impl DirectPath {
       maybe_nat: None,
       maybe_mapped: None,
       maybe_birthday: None,
-      failed_birthdays: 0,
-      maybe_birthday_after: None,
+      birthday: BirthdayBudget::default(),
       maybe_session_secret: None,
       maybe_reflect_target: None,
       selector: PathSelector::new(),
@@ -320,7 +320,8 @@ impl DirectPath {
       .as_ref()
       .and_then(|_| self.pinger.next_deadline());
     let birthday = self
-      .maybe_birthday_after
+      .birthday
+      .next_start()
       .filter(|_| self.maybe_birthday.is_none() && self.maybe_connection.is_none());
     [selector, pinger, birthday].into_iter().flatten().min()
   }
@@ -361,11 +362,11 @@ impl DirectPath {
     }
     self.follow_key(engine);
     if let Some(held) = self.maybe_held_offer.take() {
-      self.take_offer(engine, held.as_slice(), now);
+      self.take_offer(engine, held, now);
     }
-    for (from, sealed) in offers {
-      if from == pair.peer {
-        self.take_offer(engine, sealed.as_slice(), now);
+    for offer in offers {
+      if offer.from == pair.peer {
+        self.take_offer(engine, offer, now);
       }
     }
     self.maybe_dial(now);
@@ -434,9 +435,11 @@ impl DirectPath {
       },
       DirectInput::BirthdayEnded => {
         self.maybe_birthday = None;
-        self.maybe_birthday_after = Some(now + birthday_wait(self.failed_birthdays));
-        self.failed_birthdays = self.failed_birthdays.saturating_add(1);
-        debug!(failed = self.failed_birthdays, "a birthday round found no way in");
+        self.birthday.on_ended(now);
+        debug!(
+          failed = self.birthday.failed(),
+          "a birthday round found no way in"
+        );
         None
       },
     }
@@ -479,8 +482,7 @@ impl DirectPath {
     self.apply_change(change, engine);
     self.selector.reset_backoff();
     // A new network may have another NAT: birthday probing may start again at once.
-    self.failed_birthdays = 0;
-    self.maybe_birthday_after = None;
+    self.birthday.on_network_changed();
     self.renew_socket(engine, now);
   }
 
@@ -548,14 +550,15 @@ impl DirectPath {
     self.send_offer(engine);
   }
 
-  fn take_offer(&mut self, engine: &mut CallEngine, sealed: &[u8], now: Instant) {
+  fn take_offer(&mut self, engine: &mut CallEngine, offer: RelayedDirectOffer, now: Instant) {
     let (Some(key), Some(pair)) = (self.maybe_key.as_ref(), self.maybe_pair) else {
       return;
     };
+    let sealed = offer.sealed.as_slice();
     match offer_epoch(sealed) {
       Ok(epoch) if epoch > key.epoch() => {
         // This device hasn't processed that epoch's commit yet.
-        self.maybe_held_offer = Some(Base64Bytes::new(sealed.to_vec()));
+        self.maybe_held_offer = Some(offer);
         return;
       },
       Ok(epoch) if epoch < key.epoch() => return,
@@ -595,6 +598,7 @@ impl DirectPath {
       certificate_hash,
       candidates,
       body,
+      maybe_observed_ip: offer.maybe_observed_ip,
     });
     if has_new_certificate {
       self.pin_server(certificate_hash);
@@ -709,8 +713,7 @@ impl DirectPath {
     // Else the own dialing goes on: when it connects as well, the other device takes that one (the
     // lower device ID's accepted one wins on both sides), so it must not be dropped here.
     self.stop_birthday();
-    self.failed_birthdays = 0;
-    self.maybe_birthday_after = None;
+    self.birthday.on_connected();
     info!(call_id = %pair.call_id, is_accepted, "direct connection up: proving it");
     let reading = tokio::spawn(read_direct_datagrams(connection.clone(), self.inputs_tx.clone()));
     self.maybe_connection = Some(DirectConnection {
@@ -875,8 +878,7 @@ impl DirectPath {
   /// Starts a birthday round when this device has a part in one (one of the two behind a hard
   /// NAT), none runs, no connection is there, and the backoff after failed rounds has passed.
   fn maybe_birthday(&mut self, now: Instant) {
-    let is_waiting = self.maybe_birthday_after.is_some_and(|after| now < after);
-    if self.maybe_birthday.is_some() || self.maybe_connection.is_some() || is_waiting {
+    if self.maybe_birthday.is_some() || self.maybe_connection.is_some() || !self.birthday.may_start(now) {
       return;
     }
     let (Some(socket), Some(peer)) = (self.maybe_socket.as_ref(), self.maybe_peer.as_ref()) else {
@@ -890,9 +892,10 @@ impl DirectPath {
       has_mapped: self.maybe_mapped.is_some(),
       token: socket.probe_token,
     };
-    let Some(role) = birthday_role(&own, &peer.body) else {
+    let Some(role) = birthday_role(&own, &peer.body, peer.maybe_observed_ip) else {
       return;
     };
+    self.birthday.on_started();
     let inputs = self.inputs_tx.clone();
     match role {
       BirthdayRole::Open { peer, own_token } => {
@@ -1012,8 +1015,6 @@ impl DirectPath {
     self.maybe_reflexive = None;
     self.maybe_nat = None;
     self.maybe_mapped = None;
-    self.failed_birthdays = 0;
-    self.maybe_birthday_after = None;
     self.inbox = OfferInbox::default();
     self.selector = PathSelector::new();
     self.arbiter.clear();

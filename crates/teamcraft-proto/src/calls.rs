@@ -19,7 +19,11 @@
 //!
 //! Media flows as QUIC datagrams (`teamcraft-media::datagram`), not through these types.
 
-use std::{fmt, net::SocketAddr, num::NonZeroU16};
+use std::{
+  fmt,
+  net::{IpAddr, SocketAddr},
+  num::NonZeroU16,
+};
 
 use serde::{Deserialize, Serialize};
 
@@ -626,6 +630,11 @@ pub enum CallEvent {
   DirectOffer {
     from_device_id: DeviceId,
     sealed: Base64Bytes,
+    /// The address the SFU sees the other device's call connection come from (IPv4 peers in their
+    /// IPv4 form): birthday probing aims only at the address the SFU saw, never at one the offer
+    /// alone names (ARCHITECTURE.md §6.7, "Hard NATs"). None on the WebSocket fallback.
+    #[serde(default, rename = "observed_ip", skip_serializing_if = "Option::is_none")]
+    maybe_observed_ip: Option<IpAddr>,
   },
   #[serde(other)]
   Unknown,
@@ -1502,6 +1511,7 @@ mod tests {
     let relayed = CallEvent::DirectOffer {
       from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
       sealed: Base64Bytes::new(vec![3]),
+      maybe_observed_ip: None,
     };
     let json = serde_json::to_string(&relayed).unwrap();
     assert_eq!(
@@ -1509,6 +1519,17 @@ mod tests {
       r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw=="}"#
     );
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), relayed);
+    let observed = CallEvent::DirectOffer {
+      from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
+      sealed: Base64Bytes::new(vec![3]),
+      maybe_observed_ip: Some("198.51.100.4".parse().unwrap()),
+    };
+    let json = serde_json::to_string(&observed).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"direct_offer","from_device_id":"8","sealed":"Aw==","observed_ip":"198.51.100.4"}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), observed);
   }
 
   /// #127: the direct path's report and the reflexive address. The secret never shows in a debug

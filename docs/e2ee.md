@@ -7250,15 +7250,18 @@ served again at once.
 **What a hostile peer can do.** Learn the addresses above, which is what the policy and the setting
 consent to. Put somebody else's address into its offer: the device then sends QUIC handshakes (at
 most 8 candidates, 5 s, with backoff after failures; no media before the pinned handshake completes)
-to that address, which bounds any reflection to a few kilobytes. Claim a hard NAT behind somebody
-else's address: a device behind an easy NAT then sends birthday probes to random ports of that
-address (ARCHITECTURE.md §6.7, "Hard NATs"), bounded per round to 2048 probes of 12 bytes (about
-82 KB with the IP and UDP headers, over 10 s, 200 a second) and to one round, then 30 s, doubling to
-5 minutes, between rounds; the other device's offers don't shorten the wait, so a hostile peer gets
-at most about 82 KB every 5 minutes once it settles, all of it to one address. Claim an easy NAT
-while this device is behind a hard one: this device's 256 birthday sockets each send 3 punches of
-12 bytes to the claimed address (two of them with a TTL of 3, which die a few hops away), about
-31 KB per round, under the same backoff. A probe carries no
+to that address, which bounds any reflection to a few kilobytes. Birthday probing (ARCHITECTURE.md §6.7,
+"Hard NATs") can't be aimed elsewhere: a device probes or punches only the address the SFU itself
+saw the other device's call connection come from (`observed_ip`, added by the SFU to the relayed
+offer), and only when the offer's reflexive address is that one. So a hostile member reaches no
+host but its own address (and that of its own NAT). There, per round: at most 2048 probes of
+12 bytes (about 82 KB with the IP and UDP headers, over 10 s, 200 a second) from a device behind an
+easy NAT, or 256 × 3 punches of 12 bytes (about 31 KB, two of them with a TTL of 3) from one behind
+a hard NAT. At most 3 rounds per call, 30 s and then 60 s apart; the other device's offers neither
+shorten the wait nor add rounds. Only this device's own network change starts the count over. In
+all, at most about 250 KB per call and network to the peer's own address. The SFU could name
+another address (it is not a member, but it relays everything anyway): a hostile server could
+then direct the same bounded traffic elsewhere, which it can do more cheaply itself. A probe carries no
 key: its token (8 random bytes per socket, sealed in the offer) only tells the hard side that a
 probe is this call's, and the handshake that follows is pinned like every direct connection.
 

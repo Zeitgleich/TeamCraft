@@ -1091,7 +1091,7 @@ The same two native clients, each behind a router of its own in a rootless netwo
 | CGNAT                        | port-restricted              | 5/5         | 2 s (2–3 s)                  | simultaneous open                |
 | symmetric                    | full-cone                    | 5/5         | 2 s (2 s)                    | dialing (full cone takes anyone) |
 | symmetric                    | port-restricted              | 5/5         | 3 s (2–4 s)                  | birthday probing                 |
-| symmetric                    | port-restricted, no firewall | 5/5         | 2 s (2–3 s)                  | birthday probing (short TTL)     |
+| symmetric                    | port-restricted, no firewall | 7/8         | 2 s (2–3 s)                  | birthday probing (short TTL)     |
 | symmetric + NAT-PMP          | symmetric                    | 5/5         | 2 s (2 s)                    | the mapped port                  |
 | symmetric                    | symmetric                    | 0/5         | –                            | stays on the SFU                 |
 | UDP only to the SFU          | port-restricted              | 0/5         | –                            | stays on the SFU                 |
@@ -1102,6 +1102,10 @@ The same two native clients, each behind a router of its own in a rootless netwo
 - **Birthday probing.** Every round in the matrix found a way in. The hit came 0.2–2.3 s into the
   round (median 0.6 s), within the first few hundred probes, with 256 sockets against 64 512
   ports. Against a full-cone NAT no probe is needed: the hard side's own dialing gets in.
+- **The one miss against a router without firewall.** Its round had no hit before the third
+  punch at 4 s, whose full TTL reaches that router and spoils the ports not yet probed. The call
+  would get its second round 30 s later; the matrix's calls last 25 s. The rows with "no
+  firewall" ran 5 calls and then 3 more after the SFU-observed address check (8 in all).
 - **Two hard NATs, or no UDP between the two.** Those calls stay on the SFU, as designed.
 - **Without the router's own firewall.** A Linux NAT that lets unsolicited packets reach the
   router keeps a connection-tracking entry for each simultaneous-open Initial that arrives before

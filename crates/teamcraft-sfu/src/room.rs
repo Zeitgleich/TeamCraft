@@ -16,6 +16,7 @@
 use std::{
   collections::{HashMap, HashSet},
   future::Future,
+  net::IpAddr,
   pin::Pin,
   sync::{
     Arc, Mutex, MutexGuard, PoisonError,
@@ -139,6 +140,11 @@ pub trait ParticipantLink: Send + Sync {
   ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
     self.close(code, reason);
     Box::pin(std::future::ready(()))
+  }
+  /// The address the connection comes from now (IPv4 in its IPv4 form), where the SFU knows it:
+  /// the address birthday probing may aim at (#127). The fallback's is a proxy's word: none.
+  fn remote_ip(&self) -> Option<IpAddr> {
+    None
   }
 }
 
@@ -314,6 +320,10 @@ impl ParticipantLink for QuicLink {
     self.sender.send_datagram(bytes);
   }
 
+  fn remote_ip(&self) -> Option<IpAddr> {
+    ParticipantLink::remote_ip(&self.connection)
+  }
+
   fn close(&self, code: u32, reason: &[u8]) {
     ParticipantLink::close(&self.connection, code, reason);
   }
@@ -332,6 +342,10 @@ impl ParticipantLink for Connection {
     if let Err(error) = Connection::send_datagram(self, bytes) {
       trace!(%error, "datagram dropped");
     }
+  }
+
+  fn remote_ip(&self) -> Option<IpAddr> {
+    Some(self.remote_address().ip().to_canonical())
   }
 
   /// Ends the session with its close capsule and the connection after it, in the background; a
@@ -1375,11 +1389,17 @@ impl Room {
       debug!(call_id = %self.call_id, device_id = %device_id, "direct offer over the limit");
       return;
     }
+    // Not logged: the address goes to the other device only.
+    let maybe_observed_ip = match &participant.presence {
+      Presence::Connected(handle) => handle.link.remote_ip(),
+      Presence::Reconnecting => None,
+    };
     state.send_to(
       to_device_id,
       CallEvent::DirectOffer {
         from_device_id: device_id,
         sealed,
+        maybe_observed_ip,
       },
     );
   }
@@ -2727,6 +2747,7 @@ mod tests {
           CallEvent::DirectOffer {
             from_device_id,
             sealed,
+            ..
           } => Some((*from_device_id, sealed.as_slice().to_vec())),
           _ => None,
         })
@@ -2741,7 +2762,15 @@ mod tests {
       drain(&mut alice_rx);
       drain(&mut bob_rx);
       room.relay_direct_offer(id(10), id(20), Base64Bytes::new(vec![1; 300]), Instant::now());
-      assert_eq!(offers(&drain(&mut bob_rx)), vec![(id(10), vec![1; 300])]);
+      let relayed = drain(&mut bob_rx);
+      assert_eq!(offers(&relayed), vec![(id(10), vec![1; 300])]);
+      assert!(
+        relayed.iter().any(|event| matches!(
+          event,
+          CallEvent::DirectOffer { maybe_observed_ip: Some(ip), .. } if *ip == QUIET_LINK_IP
+        )),
+        "the sender's address as the SFU sees it goes along"
+      );
       assert!(drain(&mut alice_rx).is_empty(), "nothing back to the sender");
       room.relay_direct_offer(id(10), id(10), Base64Bytes::new(vec![2; 300]), Instant::now());
       room.relay_direct_offer(id(10), id(99), Base64Bytes::new(vec![3; 300]), Instant::now());
@@ -2852,12 +2881,18 @@ mod tests {
     events
   }
 
+  /// Where every [`QuietLink`] comes from.
+  const QUIET_LINK_IP: IpAddr = IpAddr::V4(std::net::Ipv4Addr::new(198, 51, 100, 4));
+
   /// A link that drops everything.
   struct QuietLink;
 
   impl ParticipantLink for QuietLink {
     fn send_datagram(&self, _bytes: &[u8]) {}
     fn close(&self, _code: u32, _reason: &[u8]) {}
+    fn remote_ip(&self) -> Option<IpAddr> {
+      Some(QUIET_LINK_IP)
+    }
   }
 
   fn entry(user: i64, device: i64) -> CallRosterEntry {

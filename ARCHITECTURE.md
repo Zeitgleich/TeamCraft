@@ -1295,8 +1295,11 @@ arrived there first would hold the port pair, and a Linux NAT without a firewall
 routers run Linux) then sends the easy side's probe to that very port from another port, which the
 hard NAT drops, and keeps that other port for every later probe. A third punch at 4 s goes with the
 system's TTL, for hard NATs further away (company networks). A connection stops the round; a round without a hit ends after 12 s and
-the next waits 30 s, doubling up to 5 minutes (only the device's own network change starts one
-earlier, never the other device's offers). Two hard NATs, a device that can't tell its NAT, or an
+the next waits 30 s, doubling up to 5 minutes, at most 3 rounds in a call (only the device's own
+network change starts over, never the other device's offers). Probes and punches go only to the
+address the SFU itself sees the other device's call connection come from: the SFU adds it to each
+relayed `direct_offer` (`observed_ip`), and a device takes part only when the offer's reflexive
+address is that one, so a member can't aim the other device's probing at somebody else's host. Two hard NATs, a device that can't tell its NAT, or an
 SFU without the second port: the call stays on the SFU.
 
 **Offers.** A device sends its candidates in a `direct_offer` to the other device through the SFU.
