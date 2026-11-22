@@ -5174,6 +5174,7 @@ mod tests {
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
       maybe_probe_bytes: None,
+      maybe_uplink_floor: None,
     }
   }
 

@@ -2,7 +2,9 @@ package de.zeitgleich.teamcraft.calls
 
 import de.zeitgleich.teamcraft.R
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import uniffi.teamcraft_ffi.CallPhase
 
@@ -36,6 +38,14 @@ class CallStatusHintTest {
     assertNull(hint(phase = CallPhase.CONNECTING, isVideoHeldForVoice = true))
     assertNull(hint(phase = CallPhase.ENDED, isVideoHeldForVoice = true))
     assertNull(hint())
+  }
+
+  @Test
+  fun theSelfViewSaysSoOnlyWhileConnected() {
+    assertTrue(isSelfViewHeldForVoice(CallPhase.CONNECTED, isVideoHeldForVoice = true))
+    assertFalse(isSelfViewHeldForVoice(CallPhase.RECONNECTING, isVideoHeldForVoice = true))
+    assertFalse(isSelfViewHeldForVoice(null, isVideoHeldForVoice = true))
+    assertFalse(isSelfViewHeldForVoice(CallPhase.CONNECTED, isVideoHeldForVoice = false))
   }
 
   private fun hint(

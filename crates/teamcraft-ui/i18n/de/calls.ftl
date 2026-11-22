@@ -126,6 +126,7 @@ tile-host = Gastgeber
 tile-co-host = Co-Gastgeber
 video-undecodable = Dieses Video kann hier nicht gezeigt werden: Es kommt in einem Format, das dieses Gerät nicht abspielt
 video-paused-by-publisher = Video pausiert: Die Verbindung ist schwach, die Stimme hat Vorrang
+video-held-for-voice = Video pausiert für deine Stimme
 video-stalled = Video pausiert: schwache Verbindung
 
 ## Videoqualität (#967): wie scharf das Video einer anderen Person ankommt, wie im Menü eines Videoplayers

@@ -67,6 +67,20 @@ struct CallScreen: View {
       if model.calls.isCameraOn {
         SelfViewCorner(size: CGSize(width: 108, height: 144), spring: spring) {
           CameraPreviewView(session: model.calls.camera.captureSession)
+            .overlay(alignment: .bottom) {
+              // #1891: the preview still shows the camera while the others don't get it; the
+              // status hint announces it, this is the note on the tile.
+              if call.isVideoHeldForVoice && call.phase == .connected {
+                Text("call_self_view_held_for_voice")
+                  .font(.caption2.weight(.medium))
+                  .foregroundStyle(.white)
+                  .multilineTextAlignment(.center)
+                  .frame(maxWidth: .infinity)
+                  .padding(.horizontal, 6)
+                  .padding(.vertical, 4)
+                  .background(.black.opacity(0.6))
+              }
+            }
             .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(.white.opacity(0.35)))
         }

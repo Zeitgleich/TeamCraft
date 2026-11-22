@@ -83,6 +83,7 @@
   <string name="call_video_held_for_voice">Your connection is struggling: your video is paused so your voice gets through</string>
   <string name="call_video_yielded_for_voice">Your connection is struggling: the others\' video is paused so you can hear them</string>
   <string name="call_video_paused_by_publisher">Video paused: their connection is weak, their voice comes first</string>
+  <string name="call_self_view_held_for_voice">Video paused for your voice</string>
   <string name="call_securing">Securing the call…</string>
   <string name="call_secured">End-to-end encrypted</string>
   <string name="call_ended">Call ended</string>

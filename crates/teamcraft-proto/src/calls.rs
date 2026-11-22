@@ -377,6 +377,10 @@ pub enum CallEvent {
     /// probes nothing.
     #[serde(rename = "probe_bytes", default, skip_serializing_if = "Option::is_none")]
     maybe_probe_bytes: Option<u32>,
+    /// When this client's own video gives way to its voice on a thin uplink (#1891): the
+    /// instance's setting. SFUs from before send none, and the client keeps its defaults.
+    #[serde(rename = "uplink_floor", default, skip_serializing_if = "Option::is_none")]
+    maybe_uplink_floor: Option<UplinkFloor>,
   },
   ParticipantJoined {
     participant: CallParticipant,
@@ -619,6 +623,20 @@ pub struct CallParticipant {
 pub struct ScreenAudioTrack {
   pub device_id: DeviceId,
   pub stream_id: MediaStreamId,
+}
+
+/// The audio-only floor of a client's uplink (#1891): below it the own video stops so the voice
+/// gets through, and the call screen says so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UplinkFloor {
+  /// Kept free for the microphone when the uplink limits the own video, in bits per second
+  /// (Opus with its RTP, DAVE and transport overhead). A camera whose lowest layer doesn't fit
+  /// next to it stops.
+  pub audio_reserve_bps: u32,
+  /// How long the estimate has to stay below the reserve plus a camera's lowest layer before the
+  /// camera stops, in milliseconds: one cut of an estimate that grows back within seconds
+  /// doesn't stop the picture.
+  pub camera_pause_hold_ms: u32,
 }
 
 /// A screen share that ended because another device started one ([`CallEvent::ScreenShareTakenOver`]).
@@ -971,6 +989,7 @@ mod tests {
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
       maybe_probe_bytes: None,
+      maybe_uplink_floor: None,
     };
     let json = serde_json::to_string(&joined).unwrap();
     assert!(json.ends_with(r#""maybe_reconnect_grace_ms":30000,"maybe_max_simulcast_layers":4}"#));
@@ -1034,6 +1053,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
         ..
       }
     ));
@@ -1172,6 +1192,7 @@ mod tests {
       serde_json::from_str::<CallEvent>(json).unwrap(),
       CallEvent::Joined {
         maybe_probe_bytes: Some(15_000),
+        maybe_uplink_floor: None,
         ..
       }
     ));
@@ -1180,9 +1201,30 @@ mod tests {
       serde_json::from_str::<CallEvent>(&older).unwrap(),
       CallEvent::Joined {
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
         ..
       }
     ));
+  }
+
+  /// #1891: the instance's audio-only floor of the uplink; older SFUs send none.
+  #[test]
+  fn uplink_floor_in_joined() {
+    let json = r#"{"type":"joined","call_id":"7","participant":{"user_id":"4","device_id":"5","audio_stream_id":9},"participants":[],"uplink_floor":{"audio_reserve_bps":64000,"camera_pause_hold_ms":3000}}"#;
+    let event: CallEvent = serde_json::from_str(json).unwrap();
+    assert!(matches!(
+      event,
+      CallEvent::Joined {
+        maybe_uplink_floor: Some(UplinkFloor {
+          audio_reserve_bps: 64_000,
+          camera_pause_hold_ms: 3_000,
+        }),
+        ..
+      }
+    ));
+    let sent = serde_json::to_string(&event).unwrap();
+    assert!(sent.contains(r#""uplink_floor":{"audio_reserve_bps":64000,"camera_pause_hold_ms":3000}"#));
+    assert_eq!(serde_json::from_str::<CallEvent>(&sent).unwrap(), event);
   }
 
   /// Older clients read the event as `Unknown` and keep their codec (H.264).

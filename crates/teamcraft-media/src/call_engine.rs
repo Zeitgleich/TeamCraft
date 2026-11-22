@@ -236,8 +236,14 @@ pub struct CallEngine {
   uplink: SendSideEstimator,
   /// What becomes of the own voice on the uplink: while it is lost, the own video stops (#1871).
   uplink_voice: VoiceGuard,
-  /// Whether the UI was told the own video is held for the voice ([`CallEngineEvent::VideoHeldForVoice`]).
+  /// Whether the own video is held for the voice: while the voice is hurt, thin, or video waits
+  /// for a probe's proof.
   is_video_held_for_voice: bool,
+  /// Whether the uplink carries no layer of an own track: the estimate is below the audio-only
+  /// floor (#1891, [`UplinkPolicy::audio_reserve_bps`] plus the lowest layer).
+  is_video_floored: bool,
+  /// What the UI was last told ([`CallEngineEvent::VideoHeldForVoice`]): held or floored.
+  is_video_held_told: bool,
   /// What the SFU was last told of the uplink's voice ([`CallClientMessage::UplinkHurt`]).
   is_uplink_hurt_told: bool,
   /// When an own video frame went out that the uplink has to queue (#1889): voice behind it
@@ -347,8 +353,10 @@ pub enum CallEngineEvent {
   /// receives and asks for lower layers than its tiles want (#1762); `false` once it is back to
   /// what they want. The UI says the computer is busy.
   DecodeLimited(bool),
-  /// The own video is held back while the own voice is lost on the uplink (#1871, #1891): the UI
-  /// says so, so nobody wonders why the camera froze. `false` once it may go out again.
+  /// The own video is held back for the own voice (#1871, #1891): while the voice is lost on the
+  /// uplink, or the estimate is below the audio-only floor and the uplink carries none of an own
+  /// track's layers. The UI says so, so nobody wonders why the camera froze. `false` once it goes
+  /// out again.
   VideoHeldForVoice(bool),
   /// A publisher's uplink carries none of the layers of `stream_id` now, or does again (#1891):
   /// its tile says why the picture stopped.
@@ -793,6 +801,8 @@ impl CallEngine {
       uplink,
       uplink_voice: VoiceGuard::new(VoiceGuardConfig::own_uplink()),
       is_video_held_for_voice: false,
+      is_video_floored: false,
+      is_video_held_told: false,
       is_uplink_hurt_told: false,
       maybe_burst_sent_at: None,
       maybe_video_held_since: None,
@@ -1947,8 +1957,12 @@ impl CallEngine {
         maybe_screen_share_taken_over,
         maybe_retransmit_window_ms,
         maybe_probe_bytes,
+        maybe_uplink_floor,
       } => {
         self.maybe_reconnect_grace = maybe_reconnect_grace_ms.map(Duration::from_millis);
+        if let Some(floor) = maybe_uplink_floor {
+          self.set_uplink_policy(self.uplink_policy.with_floor(floor));
+        }
         self.set_retransmit_window(maybe_retransmit_window_ms);
         self.maybe_probe_bytes = maybe_probe_bytes;
         self.maybe_downlink_measurement = None;
@@ -2462,6 +2476,7 @@ impl CallEngine {
     self.adaptive_tracks.remove(&stream);
     self.bitrates_announced.remove(&stream);
     self.update_uplink_demand();
+    self.follow_video_floor();
     was_published
   }
 
@@ -2564,9 +2579,18 @@ impl CallEngine {
         voice_step = ?self.voice_steps.step(),
         "the own video waits for the voice"
       );
-      self.event(CallEngineEvent::VideoHeldForVoice(is_held));
+      self.tell_video_held();
     }
     is_held
+  }
+
+  /// Tells the UI whether the own video waits for the voice: held, or below the floor.
+  fn tell_video_held(&mut self) {
+    let is_held = self.is_video_held_for_voice || self.is_video_floored;
+    if is_held != self.is_video_held_told {
+      self.is_video_held_told = is_held;
+      self.event(CallEngineEvent::VideoHeldForVoice(is_held));
+    }
   }
 
   /// The uplink collapsed (#1889): the own voice goes to its thinnest step at once. Its
@@ -2604,6 +2628,25 @@ impl CallEngine {
       self.announce_uplink_layers();
     }
     self.note_held_back_layers(now);
+    self.follow_video_floor();
+  }
+
+  /// Whether the uplink carries none of an own track's layers (#1891): the estimate is below the
+  /// audio-only floor, or the video is held. The UI hears it with the hold.
+  fn follow_video_floor(&mut self) {
+    let is_floored = self
+      .own_tracks
+      .keys()
+      .any(|stream| self.uplink_layers.is_paused(*stream));
+    if is_floored != self.is_video_floored {
+      self.is_video_floored = is_floored;
+      info!(
+        is_floored,
+        estimate_bps = self.uplink.estimate_bps(),
+        "the uplink carries no layer of an own track"
+      );
+    }
+    self.tell_video_held();
   }
 
   /// Voice that waits unreported in the uplink's queue (#1889): checked every tick, not only when
@@ -4494,7 +4537,7 @@ fn frame_codec(codec: &VideoCodec) -> FrameCodec {
 
 #[cfg(test)]
 mod tests {
-  use teamcraft_proto::{Id, MediaStreamId, Snowflake};
+  use teamcraft_proto::{Id, MediaStreamId, Snowflake, UplinkFloor};
 
   use super::*;
   use crate::call_auth::DeviceCallKeyAuthenticator;
@@ -6058,6 +6101,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       }
     }
   }
@@ -6224,6 +6268,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert_eq!(
@@ -6308,6 +6353,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       assert!(
@@ -6367,6 +6413,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       };
       alice.handle_signal(event(1, kept), now).unwrap();
       let outputs = drain(&mut alice);
@@ -6454,6 +6501,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       };
       assert!(matches!(
         alice.handle_signal(event(1, other_call), now),
@@ -6509,6 +6557,92 @@ mod tests {
 
   mod uplink {
     use super::*;
+
+    /// #1891: the instance's floor from `joined` replaces the defaults; an SFU from before
+    /// leaves them.
+    #[test]
+    fn the_sfus_uplink_floor_is_applied_at_the_join() {
+      let now = Instant::now();
+      let older = engine_joined(1, now);
+      assert_eq!(older.uplink_policy, UplinkPolicy::default());
+      let mut alice = engine(1, now);
+      alice.join("t".into());
+      let CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        ..
+      } = joined(1, &[])
+      else {
+        unreachable!()
+      };
+      let floor = UplinkFloor {
+        audio_reserve_bps: 64_000,
+        camera_pause_hold_ms: 2_000,
+      };
+      let with_floor = CallEvent::Joined {
+        call_id,
+        participant,
+        participants,
+        video_tracks,
+        screen_audio_tracks,
+        maybe_reconnect_grace_ms,
+        maybe_max_simulcast_layers,
+        maybe_switch_secret: None,
+        maybe_screen_share_taken_over: None,
+        maybe_retransmit_window_ms: None,
+        maybe_probe_bytes: None,
+        maybe_uplink_floor: Some(floor),
+      };
+      alice.handle_signal(event(1, with_floor), now).unwrap();
+      assert_eq!(alice.uplink_policy.audio_reserve_bps, 64_000);
+      assert_eq!(alice.uplink_policy.camera_pause_hold, Duration::from_secs(2));
+      assert_eq!(alice.uplink_policy.floor(), floor);
+    }
+
+    /// #1891: an estimate below the voice's reserve plus the camera's lowest layer stops the
+    /// camera, and the UI says the video waits for the voice, as when the voice is
+    /// lost; once the camera goes out again, it doesn't. The voice itself isn't hurt.
+    #[test]
+    fn a_camera_below_the_floor_shows_the_voice_note() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      let own = video_track(50, 1, 3);
+      ask_for(&mut alice, &own);
+      alice
+        .handle_signal(event(6, CallEvent::VideoPublished { track: own }), now)
+        .unwrap();
+      drain(&mut alice);
+      let policy = alice.uplink_policy;
+      let lowest_bps = layers(1)[0].max_bitrate_bps;
+      // Below the lowest layer at its least share next to the voice.
+      let thin_bps = policy.audio_reserve_bps + lowest_bps / 4;
+      // A camera that adapts its bitrate rides out the cut for the hold (`uplink_layers`' tests);
+      // this one is sent whole or not at all.
+      alice.apply_uplink_layers(thin_bps, now);
+      let later = now + policy.camera_pause_hold + Duration::from_millis(100);
+      alice.apply_uplink_layers(thin_bps, later);
+      assert!(alice.uplink_layers.is_paused(StreamId(50)));
+      assert!(!alice.is_video_held_for_voice, "the voice isn't hurt");
+      assert!(
+        drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(true))),
+        "the note shows"
+      );
+      let mut is_back = false;
+      for step in 1..=600u32 {
+        alice.apply_uplink_layers(10_000_000, later + Duration::from_millis(100) * step);
+        if drain(&mut alice).contains(&EngineOutput::Event(CallEngineEvent::VideoHeldForVoice(false))) {
+          is_back = true;
+          break;
+        }
+      }
+      assert!(is_back, "the note goes once the camera is back");
+      assert!(!alice.uplink_layers.is_paused(StreamId(50)));
+    }
 
     /// #1871: an uplink that collapsed loses the own voice; the camera stops with the first
     /// feedback that shows it, not once the estimate came down, and stays off for the hold.
@@ -8064,6 +8198,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       }
     }
 
@@ -8321,6 +8456,7 @@ mod tests {
         maybe_screen_share_taken_over: maybe_takeover,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       }
     }
   }
@@ -8468,6 +8604,7 @@ mod tests {
         maybe_screen_share_taken_over: None,
         maybe_retransmit_window_ms: None,
         maybe_probe_bytes: None,
+        maybe_uplink_floor: None,
       }
     }
   }
@@ -9771,6 +9908,7 @@ mod tests {
       maybe_screen_share_taken_over: None,
       maybe_retransmit_window_ms: None,
       maybe_probe_bytes: None,
+      maybe_uplink_floor: None,
     }
   }
 

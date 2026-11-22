@@ -597,6 +597,14 @@ depend on any of it.
   default 10), `TEAMCRAFT_SFU_VOICE_GUARD_MAX_DELAY_MS` (how late is late, default 150) and
   `TEAMCRAFT_SFU_VOICE_GUARD_HOLD_MS` (how long the video stays back after the last loss,
   default 3000) tune it.
+- **Audio-only floor** (#1891): where the video gives way to the voice on a thin link. The SFU
+  tells every client at the join what to keep free for its microphone on its uplink,
+  `TEAMCRAFT_SFU_UPLINK_AUDIO_RESERVE_KBPS` (16 to 256, default 48), and how long its camera rides
+  out an estimate below that plus the camera's lowest layer before it stops,
+  `TEAMCRAFT_SFU_UPLINK_CAMERA_PAUSE_HOLD_MS` (at most 30000, default 5000). While the camera is
+  stopped, its own tile and the others' tiles say the video is paused for the voice. On each
+  receiver's downlink the SFU keeps `TEAMCRAFT_SFU_DOWNLINK_AUDIO_RESERVE_KBPS` free for the
+  voices (16 to 1024, default 120: three speakers). Clients from before take their defaults.
 
 ### Call fallback through the proxy
 
