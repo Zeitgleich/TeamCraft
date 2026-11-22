@@ -84,7 +84,7 @@ jobs:
           python3 -m http.server 8093 --bind 127.0.0.1 --directory web-demo >/dev/null 2>&1 &
           server=$!
           trap 'kill "$server"' EXIT
-          CHROME="$(command -v google-chrome || command -v chromium)" \
+          CHROME_NO_SANDBOX=1 CHROME="$(command -v google-chrome || command -v chromium)" \
             node scripts/a11y/axe.mjs http://127.0.0.1:8093 "$RUNNER_TEMP/axe/axe.min.js" --report "$RUNNER_TEMP/axe-report.json"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()

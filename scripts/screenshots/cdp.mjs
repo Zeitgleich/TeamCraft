@@ -18,6 +18,8 @@ export async function launch() {
     "--remote-debugging-port=0",
     `--user-data-dir=${profile}`,
     "--no-first-run",
+    // CI runners (Ubuntu 24.04) refuse Chrome's user-namespace sandbox; the page is our own demo build.
+    ...(process.env.CHROME_NO_SANDBOX ? ["--no-sandbox"] : []),
     "--hide-scrollbars",
     "--force-color-profile=srgb",
     "--lang=en-US",
