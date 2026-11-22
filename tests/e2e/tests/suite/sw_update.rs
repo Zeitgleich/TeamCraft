@@ -278,8 +278,9 @@ async fn eval(page: &Page, script: &str) -> serde_json::Value {
     .evaluate(wrapped)
     .await
     .unwrap_or_else(|error| panic!("the page script failed: {error}\n{script}"))
+    // A script that returns nothing (undefined or null) has no value to convert.
     .into_value()
-    .unwrap_or_else(|error| panic!("the page script returned something unexpected: {error}\n{script}"))
+    .unwrap_or(serde_json::Value::Null)
 }
 
 /// Polls until a script (an expression, a promise of one) is true.

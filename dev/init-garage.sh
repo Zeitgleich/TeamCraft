@@ -29,11 +29,14 @@ for _ in $(seq 1 30); do
 done
 garage status >/dev/null
 
-if garage layout show 2>&1 | grep -q "No nodes"; then
+# Read the whole output first: `grep -q` leaving early would fail the pipeline under pipefail
+# (SIGPIPE to garage) and report a good layout as unexpected.
+layout="$(garage layout show 2>&1)"
+if grep -q "No nodes" <<<"$layout"; then
   node_id="$(garage node id -q | cut -d@ -f1)"
   garage layout assign -z dev -c 1G "$node_id"
   garage layout apply --version 1
-elif ! garage layout show 2>&1 | grep -q "dev"; then
+elif ! grep -q "dev" <<<"$layout"; then
   echo "Unexpected layout, inspect with: docker compose -f docker-compose.dev.yml exec garage /garage layout show" >&2
   exit 1
 fi

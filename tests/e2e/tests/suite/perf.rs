@@ -47,7 +47,7 @@ use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::{ConversationId, HistoryPolicy, SpaceId, UserId};
 
-use crate::web::{TEST_CSP, click_text, type_until_kept, wait_for_element, wait_for_text};
+use crate::web::{TEST_CSP, click_text, enter_recovery_key, wait_for_element, wait_for_text};
 
 const PORT: u16 = 8083;
 /// The other port the dev realm registers. This test holds it as well: what it measures (times,
@@ -467,8 +467,7 @@ pub(crate) async fn sign_in_and_unlock(page: &Page, user: &str) {
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
   sign_in_at_keycloak(page, user).await;
-  // The setup screen may render again while the core settles and lose what was typed (#444).
-  type_until_kept(page, "#enroll-secret", PASSPHRASE).await;
+  enter_recovery_key(page, PASSPHRASE).await;
   click_text(page, "Unlock").await;
   wait_for_text(page, "Activity").await;
 }

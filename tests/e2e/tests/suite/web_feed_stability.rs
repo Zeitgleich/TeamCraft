@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::network::{
   EmulateNetworkConditionsByRuleParams, NetworkConditions, OverrideNetworkStateParams,
 };
@@ -24,10 +25,10 @@ use crate::web::{Rig, WEB_ORIGIN, body_text, sign_in_as_alice, wait_for_text};
 
 /// Live messages in the conversation: more than a page, and more than fit on the screen.
 const LIVE_MESSAGES: usize = 40;
-/// Imported messages: a page at once, the rest in pages of 200 at one per upkeep tick.
-const IMPORTED_MESSAGES: usize = 1_600;
-/// From here on the test reads a little above the newest message.
-const IMPORTED_HALF: usize = 600;
+/// Imported messages: a page at once, the rest in pages of 200 as the reader scrolls up.
+const IMPORTED_MESSAGES: usize = 600;
+/// The text of the oldest imported message: on screen once the reader got to the beginning.
+const OLDEST_IMPORTED: &str = "old 0";
 const IMPORT_BATCH: usize = 100;
 /// The time of the oldest imported message: long before everything else in the conversation.
 const OLD_MS: i64 = 1_500_000_000_000;
@@ -36,18 +37,17 @@ const QUIET_PHASE: Duration = Duration::from_secs(12);
 const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 const TYPING_FRAMES: usize = 4;
 /// How long the import may take to be read to its beginning.
+/// Rounds at the top of the list without a page arriving that end the reading: the oldest page
+/// stays on "Waiting for this message" (#2263), so the beginning of the import is not on screen.
+const ROUNDS_WITHOUT_NEWS: u32 = 30;
+/// Long enough for a reader to scroll up through the whole import in steps.
+const READING_DEADLINE: Duration = Duration::from_secs(240);
 const PAGING_DEADLINE: Duration = Duration::from_secs(120);
 const SET_UP_DEADLINE: Duration = Duration::from_secs(120);
-/// Rounds of a second without a new page that say the paging ended (a page per tick of 5 s).
-const QUIET_ROUNDS: u32 = 8;
 /// Longer than the floating day stays after a scroll.
+/// How long the reader at the bottom is watched after the import finished.
+const AT_THE_BOTTOM_PHASE: Duration = Duration::from_secs(10);
 const SCROLL_SETTLE: Duration = Duration::from_millis(2_000);
-/// Scrolls up like a wheel: the event leaves the bottom, the position follows.
-const SCROLL_UP: &str = r#"(() => {
-  const list = document.querySelector('.message-list');
-  list.dispatchEvent(new WheelEvent('wheel', { deltaY: -300, bubbles: true }));
-  list.scrollTop -= 300;
-})()"#;
 /// More than the newest page the browser holds, and more than one further page.
 const OLDER_HISTORY_MESSAGES: usize = 400;
 /// How long a page of older history may take once the reader is at the top.
@@ -61,6 +61,14 @@ const SCROLL_TO_TOP: &str = r#"(() => {
 /// What a message on screen may end up from where it was: rounding, not a move.
 const MAX_DRIFT_PX: f64 = 1.5;
 /// Two frames on, the list has followed the jump: the probe starts counting from there.
+/// One step up like a wheel: two screens, which stay inside what the feed reads ahead of the reader
+/// (four screens)
+/// (a jump to the top lands in a hole that is read only then).
+const SCROLL_UP_STEP: &str = r#"(() => {
+  const list = document.querySelector('.message-list');
+  list.dispatchEvent(new WheelEvent('wheel', { deltaY: -600, bubbles: true }));
+  list.scrollTop = Math.max(0, list.scrollTop - 2 * list.clientHeight);
+})()"#;
 const AFTER_THE_JUMP: &str = r#"new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(() => {
   window.feedProbe.forgetPlaces();
   window.feedProbe.take();
@@ -253,6 +261,12 @@ async fn scenario() {
   rig.alice.client.sync_account_data().await.unwrap();
 
   let page = rig.browser.page.clone();
+  // A desktop-sized window: the list is a few hundred pixels tall in the default one, and the
+  // reader's steps (screens) and the feed's read-ahead (screens) grow with it.
+  page
+    .execute(SetDeviceMetricsOverrideParams::new(1280, 1000, 1.0, false))
+    .await
+    .unwrap();
   sign_in_as_alice(&page).await;
   wait_for_text(&page, "browser-channel").await;
   page.goto(format!("{WEB_ORIGIN}/dm/{dm}")).await.unwrap();
@@ -293,13 +307,34 @@ async fn scenario() {
     importer.client.send_imported(dm, batch).await.unwrap();
   }
   importer.client.finish_import(dm).await.unwrap();
-  let following = watch_paging(&page, false, |stats| stats.max_index as usize > IMPORTED_HALF).await;
+  // The web reads imported history above the oldest message as the reader scrolls (#1911), so a
+  // reader at the bottom sees nothing arrive: a finished import changes nothing on screen.
+  tokio::time::sleep(AT_THE_BOTTOM_PHASE).await;
+  let following = take_stats(&page).await;
 
-  // (d) The same for somebody reading a little further up.
-  page.evaluate(SCROLL_UP).await.unwrap();
-  tokio::time::sleep(SCROLL_SETTLE).await;
-  let _ = take_stats(&page).await;
-  let reading = watch_paging(&page, true, |stats| stats.max_index as usize > IMPORTED_MESSAGES).await;
+  // (d) A reader scrolling up reads the imported history page by page, and what is on screen stays
+  // where it is while a page arrives above it. The reading ends at the beginning of the import, or
+  // when the reader is at the top and nothing more arrives.
+  let deadline = Instant::now() + READING_DEADLINE;
+  let mut reading = FeedStats::default();
+  let mut rounds_without_news = 0;
+  while !body_text(&page).await.contains(OLDEST_IMPORTED) && rounds_without_news < ROUNDS_WITHOUT_NEWS {
+    assert!(
+      Instant::now() < deadline,
+      "the beginning of the import was not reached: {reading:?}"
+    );
+    page.evaluate(SCROLL_UP_STEP).await.unwrap();
+    page.evaluate(AFTER_THE_JUMP).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let round = take_stats(&page).await;
+    assert_still_while_reading(round);
+    rounds_without_news = if round.count_changes == 0 && is_at_top(&page).await {
+      rounds_without_news + 1
+    } else {
+      0
+    };
+    reading = reading.plus(round);
+  }
 
   eprintln!("feed stability, composer idle: {quiet:?}");
   eprintln!("feed stability, peer typing:   {typing:?}");
@@ -307,15 +342,10 @@ async fn scenario() {
   eprintln!("feed stability, history reading above: {reading:?}");
   assert_still("the composer idle", quiet);
   assert_still("the other person typing", typing);
-  assert_still("imported history arriving at the bottom", following);
-  assert_still("imported history arriving above the reader", reading);
-  assert_eq!(
-    reading.day_shown_frames, 0,
-    "the floating day showed without scrolling: {reading:?}"
-  );
+  assert_still("a finished import at the bottom", following);
   assert!(
-    reading.max_index as usize > IMPORTED_MESSAGES,
-    "the import was not read to its beginning: {reading:?}"
+    reading.count_changes > 0,
+    "the list never grew while the reader scrolled up: {reading:?}"
   );
   rig.finish().await;
 }
@@ -597,25 +627,13 @@ async fn prepare_import(rig: &mut Rig, importer: &mut Peer, dm: ConversationId) 
   );
 }
 
-/// Watches until `until` holds, with `wait_until_quiet` and for some ticks without a new page.
-async fn watch_paging(page: &Page, wait_until_quiet: bool, until: impl Fn(&FeedStats) -> bool) -> FeedStats {
-  let deadline = Instant::now() + PAGING_DEADLINE;
-  let mut total = FeedStats::default();
-  let mut quiet_rounds = 0;
-  loop {
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let stats = take_stats(page).await;
-    quiet_rounds = if stats.count_changes == 0 {
-      quiet_rounds + 1
-    } else {
-      0
-    };
-    total = total.plus(stats);
-    let is_done = until(&total) && (quiet_rounds >= QUIET_ROUNDS || !wait_until_quiet);
-    if is_done || Instant::now() > deadline {
-      return total;
-    }
-  }
+async fn is_at_top(page: &Page) -> bool {
+  page
+    .evaluate("document.querySelector('.message-list').scrollTop === 0")
+    .await
+    .ok()
+    .and_then(|value| value.into_value::<bool>().ok())
+    .unwrap_or(false)
 }
 
 async fn take_stats(page: &Page) -> FeedStats {

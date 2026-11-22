@@ -390,28 +390,9 @@ async fn take(page: &Page) -> RenderStats {
 
 /// Gives `peer` a profile picture.
 async fn upload_picture(rig: &Rig, peer: &Peer) {
-  let upload = rig
-    .stack
-    .post(
-      &peer.tokens,
-      "/me/avatar",
-      json!({ "content_type": "image/png", "size_bytes": PICTURE_PNG.len() }),
-    )
-    .await
-    .expect(StatusCode::CREATED);
-  let response = rig
-    .stack
-    .http
-    .put(upload.body["upload_url"].as_str().unwrap())
-    .header("content-type", "image/png")
-    .body(PICTURE_PNG.to_vec())
-    .send()
-    .await
-    .unwrap();
-  assert!(response.status().is_success(), "{}", response.status());
   rig
     .stack
-    .post(&peer.tokens, "/me/avatar/complete", json!({}))
+    .put_bytes(&peer.tokens, "/me/avatar", "image/png", PICTURE_PNG.to_vec())
     .await
     .expect(StatusCode::OK);
 }

@@ -13,6 +13,7 @@ use chromiumoxide::page::Page;
 use reqwest::StatusCode;
 use serde_json::json;
 use teamcraft_core::client::{HostsChange, admits_link_arrivals};
+use teamcraft_core::workspace::RosterRole;
 use teamcraft_e2e::browser::{BrowserSession, web_dir};
 use teamcraft_e2e::call::{SfuIdentity, join_call};
 use teamcraft_e2e::peer::settle;
@@ -208,6 +209,13 @@ async fn a_member_admits_a_browser_guest_when_the_organizer_has_left_and_they_sh
   let chat: ConversationId = meeting.body["conversation_id"].as_str().unwrap().parse().unwrap();
   let link = meeting.body["join_url"].as_str().unwrap().to_owned();
 
+  // The signed roster vouches for Bob (e2ee.md §4.6): the organizer's device names as admitters
+  // only the members it can vouch for.
+  alice
+    .client
+    .publish_roster(&[(alice.user_id(), RosterRole::Owner), (bob_id, RosterRole::Admin)])
+    .await
+    .unwrap();
   // The organizer's app sets the chat's group up with Bob in it, chooses "no lobby", signs Bob
   // as an admitter, and is gone from here on.
   alice.client.set_up_meeting_chat(chat, &[bob_id]).await.unwrap();
@@ -422,7 +430,7 @@ impl Env {
       .with_env("TEAMCRAFT_WEB__CONTENT_SECURITY_POLICY", TEST_CSP)
       .start()
       .await?;
-    let browser = BrowserSession::launch_with(&guest_browser_args()).await?;
+    let browser = BrowserSession::launch_with_pointer(&guest_browser_args()).await?;
     let certificate_hash = stack.maybe_sfu.as_ref().unwrap().certificate_hash;
     Some(Self {
       stack,
