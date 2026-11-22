@@ -63,8 +63,8 @@
   --sb-dim: #5c626c;
   /* White text on it needs 4.5:1 (WCAG AA). */
   --badge-bg: #c8441d;
-  /* The system red of Apple's badges (#715): the rail's space tiles. */
-  --dock-red: #ff3b30;
+  /* The red of Apple's badges (#715) in its accessible shade: white text on it reads at 4.5:1 (#2287). */
+  --dock-red: #d70015;
 
   --lvl-debug: #7c8798;
   --lvl-info: #1b6fb4;
@@ -171,7 +171,7 @@
   --call-border: #2c3548;
   --call-text: #e8ecf3;
   --call-muted: #9aa6ba;
-  --call-danger: #d64533;
+  --call-danger: #c93a28;
   --call-danger-hover: #a93226;
   /* A control on the call's surfaces under the pointer, and while pressed or open. */
   --call-hover: #202838;
@@ -230,7 +230,7 @@
     --accent-soft: #182a47;
     --focus: #8ab8ff;
     --danger: #ff7a6b;
-    --dock-red: #ff453a;
+    --dock-red: #d70015;
     --warn-soft: #4a2a14;
     --warn-text: #ffb27a;
     --on-danger: #2a0905;
@@ -284,7 +284,7 @@
   --accent-soft: #182a47;
   --focus: #8ab8ff;
   --danger: #ff7a6b;
-  --dock-red: #ff453a;
+  --dock-red: #d70015;
   --warn-soft: #4a2a14;
   --warn-text: #ffb27a;
   --on-danger: #2a0905;
