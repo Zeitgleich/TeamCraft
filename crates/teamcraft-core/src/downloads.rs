@@ -20,6 +20,7 @@ use crate::api::ServerApi;
 use crate::client::Client;
 use crate::client::disk_downloads::{
   DownloadStatus, DownloadTarget, download_record, due_downloads, forget_download, resume_failed_downloads,
+  set_open_when_done, take_open_when_done,
 };
 use crate::client::files::failure_of;
 use crate::error::CoreError;
@@ -42,6 +43,8 @@ pub struct Downloads {
   controls: Vec<(AttachmentId, DownloadControl)>,
   /// Saved files to open or show, for the host (only an app with a desktop can).
   opens: Vec<OpenRequest>,
+  /// A save finished since the last [`Self::start_due`]: look for marks to open it when done.
+  is_open_check_due: bool,
   /// When to look for saves to continue (client clock): at the start, after a save finished and
   /// when the next retry is due.
   maybe_next_scan_ms: Option<i64>,
@@ -82,6 +85,11 @@ pub enum DownloadControl {
   Open,
   /// Shows the saved file in the file manager.
   Reveal,
+  /// Marks an unfinished download: the saved file opens by itself once it is saved. A finished
+  /// download opens at once.
+  OpenWhenDone,
+  /// Takes the mark of [`Self::OpenWhenDone`] back.
+  KeepClosed,
 }
 
 /// A saved file the host opens (or shows in its folder). The path comes from the core's record,
@@ -141,6 +149,7 @@ impl Downloads {
       saving: HashMap::new(),
       controls: Vec::new(),
       opens: Vec::new(),
+      is_open_check_due: false,
       maybe_next_scan_ms: Some(i64::MIN),
       has_resumed: false,
       is_network_back: false,
@@ -278,6 +287,9 @@ impl Downloads {
   /// changed (a file to save is marked as downloading).
   pub async fn start_due<A: ServerApi, S: LocalStore>(&mut self, client: &mut Client<A, S>) -> bool {
     let mut is_changed = self.apply_controls(client);
+    if std::mem::take(&mut self.is_open_check_due) {
+      self.queue_opens_when_done(client);
+    }
     self.queue_due_saves(client);
     for work in self.streams.start_due(client).await {
       self.running.push(Box::pin(work.map(|()| Finished::Viewed)));
@@ -352,8 +364,9 @@ impl Downloads {
   pub async fn next_finished(&mut self) -> Finished {
     match self.running.next().await {
       Some(finished) => {
-        if let Finished::Saved { attachment, .. } = &finished {
+        if let Finished::Saved { attachment, saved } = &finished {
           self.saving.remove(attachment);
+          self.is_open_check_due |= saved.is_ok();
           // It may have failed on the network: its retry is due later.
           self.maybe_next_scan_ms = Some(i64::MIN);
         }
@@ -426,6 +439,23 @@ impl Downloads {
         }
         Ok(())
       },
+      DownloadControl::OpenWhenDone | DownloadControl::KeepClosed => {
+        let is_marked = control == DownloadControl::OpenWhenDone;
+        if is_marked && !set_open_when_done(client.store(), attachment, true)? {
+          // Finished meanwhile: nothing to wait for.
+          if let Some(record) = download_record(client.store(), attachment)?
+            && let DownloadStatus::Saved { path } = record.status
+          {
+            self.opens.push(OpenRequest {
+              path: PathBuf::from(path),
+              is_reveal: false,
+            });
+          }
+        } else if !is_marked {
+          set_open_when_done(client.store(), attachment, false)?;
+        }
+        Ok(())
+      },
       DownloadControl::Open | DownloadControl::Reveal => {
         if let Some(record) = download_record(client.store(), attachment)?
           && let DownloadStatus::Saved { path } = record.status
@@ -437,6 +467,17 @@ impl Downloads {
         }
         Ok(())
       },
+    }
+  }
+
+  /// Opens the saved files that were marked to open when done.
+  fn queue_opens_when_done<A: ServerApi, S: LocalStore>(&mut self, client: &Client<A, S>) {
+    match take_open_when_done(client.store()) {
+      Ok(paths) => self.opens.extend(paths.into_iter().map(|path| OpenRequest {
+        path: PathBuf::from(path),
+        is_reveal: false,
+      })),
+      Err(error) => tracing::warn!(%error, "could not read the downloads to open"),
     }
   }
 

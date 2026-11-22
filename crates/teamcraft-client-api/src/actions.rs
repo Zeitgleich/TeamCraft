@@ -463,6 +463,9 @@ pub struct DownloadEntry {
   /// When it was asked for (the device's clock, only for the order).
   pub started_at_ms: i64,
   pub state: DownloadState,
+  /// The user clicked the unfinished download: the file opens by itself once it is saved.
+  #[serde(default)]
+  pub is_open_when_done: bool,
 }
 
 /// Where a download in the list stands.
@@ -499,6 +502,10 @@ pub enum DownloadControl {
   Open,
   /// Shows the saved file in the file manager.
   Reveal,
+  /// Marks an unfinished download to open by itself once saved (a finished one opens at once).
+  OpenWhenDone,
+  /// Takes that mark back.
+  KeepClosed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -47,6 +47,10 @@ pub struct DownloadRecord {
   /// a paused or waiting one got.
   #[serde(rename = "partial", default, skip_serializing_if = "Option::is_none")]
   pub maybe_partial_path: Option<String>,
+  /// The user clicked the unfinished download: the saved file opens by itself once it is saved
+  /// (`take_open_when_done`). Cancelling or failing for good drops the mark.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_open_when_done: bool,
 }
 
 /// Where a saved file goes.
@@ -112,6 +116,60 @@ pub fn forget_download(store: &impl LocalStore, attachment: AttachmentId) -> Res
     },
     _ => Ok(false),
   }
+}
+
+/// Marks (or unmarks) an unfinished download to open once saved. Returns whether the download
+/// was unfinished, so the mark applies; a finished one isn't marked (the host opens it at once).
+pub fn set_open_when_done(
+  store: &impl LocalStore,
+  attachment: AttachmentId,
+  is_open_when_done: bool,
+) -> Result<bool, CoreError> {
+  let Some(record) = download_record(store, attachment)?.filter(|record| !record.is_finished()) else {
+    return Ok(false);
+  };
+  save(
+    store,
+    &DownloadRecord {
+      is_open_when_done,
+      ..record
+    },
+  )?;
+  Ok(true)
+}
+
+/// The saved files marked to open when done; the marks are cleared, so each opens once.
+pub fn take_open_when_done(store: &impl LocalStore) -> Result<Vec<String>, CoreError> {
+  let mut paths = Vec::new();
+  for record in download_records(store)? {
+    if !record.is_open_when_done {
+      continue;
+    }
+    match &record.status {
+      DownloadStatus::Saved { path } => {
+        paths.push(path.clone());
+        save(
+          store,
+          &DownloadRecord {
+            is_open_when_done: false,
+            ..record
+          },
+        )?;
+      },
+      // A cancelled or failed one lost its mark already; this is a stale record.
+      DownloadStatus::Failed { .. } | DownloadStatus::Cancelled => {
+        save(
+          store,
+          &DownloadRecord {
+            is_open_when_done: false,
+            ..record
+          },
+        )?;
+      },
+      _ => {},
+    }
+  }
+  Ok(paths)
 }
 
 /// The downloads to continue at `now_ms`: those waiting for a retry that came due and, when
@@ -206,6 +264,7 @@ pub(super) fn record_start(
       status: DownloadStatus::Running,
       retry: UploadRetry::Fresh,
       maybe_partial_path: None,
+      is_open_when_done: false,
     },
   };
   save(store, &record)?;
@@ -247,6 +306,7 @@ pub(super) fn record_stop(
       } else {
         record.maybe_partial_path.clone()
       },
+      is_open_when_done: record.is_open_when_done && !is_cancel,
       ..record.clone()
     },
   )?;
@@ -286,6 +346,8 @@ pub(super) fn record_finish(
       record.status = if is_retried(reason) && !record.retry.is_stalled() {
         DownloadStatus::Waiting
       } else {
+        // Failed for good: nobody waits for the file any more.
+        record.is_open_when_done = false;
         DownloadStatus::Failed { reason }
       };
       TransferState::Failed { reason }
@@ -767,6 +829,7 @@ mod tests {
       },
       retry: UploadRetry::Fresh,
       maybe_partial_path: None,
+      is_open_when_done: false,
     };
     let json = serde_json::to_value(&record).unwrap();
     assert_eq!(

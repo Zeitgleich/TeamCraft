@@ -286,6 +286,40 @@ fn DownloadRow(
   } else {
     IconName::File
   };
+  // A click on the row's name or icon: a saved file opens at once; a running or paused download is
+  // marked to open when it is saved (Chrome's way), and a second click takes the mark back.
+  let open_control = move || {
+    live.with(|entry| match entry.state {
+      DownloadState::Saved => Some(DownloadControl::Open),
+      DownloadState::Active | DownloadState::Retrying { .. } | DownloadState::Paused => {
+        Some(if entry.is_open_when_done {
+          DownloadControl::KeepClosed
+        } else {
+          DownloadControl::OpenWhenDone
+        })
+      },
+      _ => None,
+    })
+  };
+  let is_waiting_to_open = move || live.with(|entry| entry.is_open_when_done);
+  let is_openable = matches!(
+    entry.state,
+    DownloadState::Saved | DownloadState::Active | DownloadState::Retrying { .. } | DownloadState::Paused
+  );
+  let open_title = move || match open_control() {
+    Some(DownloadControl::Open) => i18n.t("downloads-open"),
+    Some(DownloadControl::KeepClosed) => i18n.t("downloads-keep-closed"),
+    Some(_) => i18n.t("downloads-open-when-done"),
+    None => String::new(),
+  };
+  let on_open = {
+    let id = id.clone();
+    move |_| {
+      if let Some(control) = open_control() {
+        state.write(|backend| backend.control_download(&id, control));
+      }
+    }
+  };
   let actions = match entry.state {
     DownloadState::Active | DownloadState::Retrying { .. } => view! {
       <ActionButton label="downloads-pause" icon=IconName::Pause on_click=control(DownloadControl::Pause) />
@@ -310,16 +344,19 @@ fn DownloadRow(
     .into_any(),
   };
 
-  view! {
-    <li class="download-row" class:is-broken=is_broken class:is-paused=entry.state == DownloadState::Paused>
+  // The name and icon area is its own button, beside the action buttons (never around them), so
+  // Enter opens it and the actions' clicks can't reach it. Spans only: a button holds phrasing content.
+  let name = entry.file_name.clone();
+  let content = move || {
+    view! {
       <span class="download-icon" aria-hidden="true">
         <Icon name=icon />
       </span>
-      <div class="download-main">
-        <div class="download-name" translate="no" title=entry.file_name.clone()>
-          {entry.file_name.clone()}
-        </div>
-        <div class="download-status">{status}</div>
+      <span class="download-main">
+        <span class="download-name" translate="no">
+          {name.clone()}
+        </span>
+        <span class="download-status">{status}</span>
         {shows_progress.then(|| view! {
           <span
             class="download-progress"
@@ -332,7 +369,33 @@ fn DownloadRow(
             <span class="download-progress-fill" style:--downloads-progress=move || fraction().to_string()></span>
           </span>
         })}
-      </div>
+      </span>
+    }
+  };
+  let open_area = if is_openable {
+    view! {
+      <button
+        type="button"
+        class="download-open"
+        title=open_title
+        aria-pressed=move || {
+          open_control()
+            .filter(|control| *control != DownloadControl::Open)
+            .map(|_| is_waiting_to_open().to_string())
+        }
+        on:click=on_open
+      >
+        {content()}
+      </button>
+    }
+    .into_any()
+  } else {
+    view! { <span class="download-open" title=entry.file_name.clone()>{content()}</span> }.into_any()
+  };
+
+  view! {
+    <li class="download-row" class:is-broken=is_broken class:is-paused=entry.state == DownloadState::Paused>
+      {open_area}
       <div class="download-actions">{actions}</div>
     </li>
   }
@@ -366,7 +429,7 @@ fn status_line(i18n: I18n, entry: &DownloadEntry, maybe_rate: Option<f64>) -> St
       &[("done", &format_bytes(done)), ("total", &format_bytes(total))],
     )
   };
-  match entry.state {
+  let mut parts: Vec<String> = match entry.state {
     DownloadState::Active => {
       let mut parts = vec![format!("↓ {}", sizes())];
       if let Some(rate) = maybe_rate {
@@ -375,14 +438,28 @@ fn status_line(i18n: I18n, entry: &DownloadEntry, maybe_rate: Option<f64>) -> St
           parts.push(time_left(i18n, seconds));
         }
       }
-      parts.join(" • ")
+      parts
     },
-    DownloadState::Retrying { .. } => format!("{} • {}", sizes(), i18n.t("downloads-retrying")),
-    DownloadState::Paused => format!("{} • {}", sizes(), i18n.t("downloads-paused")),
+    DownloadState::Retrying { .. } => vec![sizes(), i18n.t("downloads-retrying")],
+    DownloadState::Paused => vec![sizes(), i18n.t("downloads-paused")],
+    _ => return finished_status_line(i18n, entry),
+  };
+  if entry.is_open_when_done {
+    parts.push(i18n.t("downloads-opens-when-done"));
+  }
+  parts.join(" • ")
+}
+
+/// The status of a download that is over: saved, failed or cancelled.
+fn finished_status_line(i18n: I18n, entry: &DownloadEntry) -> String {
+  let total = entry.total_bytes;
+  match entry.state {
     DownloadState::Saved => format!("{} • {}", format_bytes(total), i18n.t("downloads-done")),
     DownloadState::Failed { reason } => i18n.t(short_failure_key(reason)),
     DownloadState::Cancelled => i18n.t("downloads-cancelled"),
     DownloadState::Unknown => i18n.t("downloads-unknown"),
+    // Handled by `status_line`.
+    DownloadState::Active | DownloadState::Retrying { .. } | DownloadState::Paused => String::new(),
   }
 }
 
