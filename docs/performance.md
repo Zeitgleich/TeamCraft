@@ -1655,7 +1655,11 @@ get worse either: before, the core also started only after `GET /me`.
   the heads, each moved head in a record of its own). A new session pauses it until its sync is done.
   A busy conversation the device was connected to costs no request at the next fresh session
   (`sync_heads::live_heads::*`: as many requests as an unchanged workspace, also after a restart; a
-  message missed while the connection was down is still read). The rest is in the next section.
+  message missed while the connection was down is still read). `sync_perf.rs` (above) measures it:
+  three channels that got a message while Carol was connected cost a fresh session 19 requests,
+  37 ms locally and 197 ms at 30 ms RTT, the same as the unchanged workspace (19, 38 ms, 213 ms);
+  before, they cost what channels changed while away still cost (25 requests, 46 ms, 239 ms). Debug
+  build, local machine, November 2026, one run. The rest is in the next section.
 
 #### Web start on phones (issue #1465)
 
