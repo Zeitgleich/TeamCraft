@@ -37,6 +37,9 @@ quic-send = ["dep:tokio", "dep:wtransport"]
 # Cisco's binary at runtime instead (openh264_library.rs explains why).
 openh264-source = ["native", "openh264/source"]
 
+# Port mapping for the direct path of 1:1 calls (#127): PCP, NAT-PMP and UPnP-IGD. Desktop only.
+port-mapping = ["native", "dep:igd-next", "dep:netdev", "dep:futures-util"]
+
 # Browser clients: the WebTransport + WebCodecs + Web Audio call driver (wasm32).
 web = [
   "dave",
@@ -194,6 +197,12 @@ url = { workspace = true, optional = true }
 # A fresh dual-stack socket to move a call connection to after a network change (wtransport
 # binds its first socket the same way; already in the tree through it and quinn).
 socket2 = { version = "0.6.3", optional = true }
+# UPnP-IGD port mapping for the direct path (#127): SSDP search and SOAP, maintained (libp2p uses
+# it), MIT; its HTTP client is hyper, already in the tree.
+igd-next = { version = "0.18.0", optional = true, default-features = false, features = ["aio_tokio"] }
+# The default gateway, where PCP and NAT-PMP are asked (#127): routes from the system without
+# parsing tool output, MIT; only its gateway lookup.
+netdev = { version = "0.47.0", optional = true, default-features = false, features = ["gateway"] }
 # Happy Eyeballs for the QUIC handshake to the SFU (src/sfu_address.rs, issue #420).
 teamcraft-net = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }

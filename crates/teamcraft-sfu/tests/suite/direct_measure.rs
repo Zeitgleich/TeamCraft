@@ -9,6 +9,11 @@
 //! - `MEASURE_SFU_HOST`: the address the clients reach the SFU at
 //! - `MEASURE_DIRECT`: `1` lets the clients go direct, `0` keeps them on the SFU
 //! - `MEASURE_SECS`: how long the clients stay in the call
+//! - `MEASURE_REFLECT`: `1` gives the SFU its second port that only reflects (hard NATs show)
+//! - `MEASURE_FALLBACK`: `1` gives the SFU its WebSocket fallback, for networks that block UDP
+//!
+//! The NAT matrix (docs/performance.md, "Direct media through NATs") runs it in namespaces behind
+//! routers of each NAT type: `scripts/nat-matrix.sh`.
 //!
 //! `cargo test -p teamcraft-sfu --test suite -- --ignored direct_measure::run --nocapture`
 
@@ -57,22 +62,29 @@ async fn run() {
 
 /// The SFU, and the bytes it forwarded, once a second.
 async fn run_sfu(dir: &std::path::Path, secs: u64) {
-  let config = SfuConfig {
+  let is_on = |name: &str| std::env::var(name).as_deref() == Ok("1");
+  let mut config = SfuConfig {
     bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
+    maybe_reflect_bind_addr: is_on("MEASURE_REFLECT").then_some(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0))),
     ..SfuConfig::default()
   };
+  if is_on("MEASURE_FALLBACK") {
+    config.fallback.maybe_bind_addr = Some(SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)));
+  }
   let host = std::env::var("MEASURE_SFU_HOST").unwrap();
   let identity = Identity::self_signed(["localhost", host.as_str()]).unwrap();
   let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
   let port = sfu.local_addr().unwrap().port();
+  let fallback_port = sfu.fallback_addr().unwrap().map_or(0, |addr| addr.port());
   let hash = hex(sfu.certificate_hash().as_ref());
   let control = sfu.control();
   let metrics = SfuMetrics::new(control.quality()).unwrap();
   tokio::spawn(sfu.run());
-  std::fs::write(dir.join("sfu.info"), format!("{port} {hash}")).unwrap();
+  std::fs::write(dir.join("sfu.info"), format!("{port} {hash} {fallback_port}")).unwrap();
   let start = Instant::now();
   let mut lines = String::new();
-  while start.elapsed() < Duration::from_secs(secs + 30) {
+  let extra_secs: u64 = std::env::var("MEASURE_SFU_EXTRA_SECS").map_or(30, |secs| secs.parse().unwrap());
+  while start.elapsed() < Duration::from_secs(secs + extra_secs) {
     tokio::time::sleep(Duration::from_secs(1)).await;
     let text = metrics
       .render(control.room_stats(), control.fallback_connections())
@@ -89,7 +101,9 @@ async fn run_sfu(dir: &std::path::Path, secs: u64) {
 /// One client: the call's path, both round trips and the audio heard, once a second.
 async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
   let info = std::fs::read_to_string(dir.join("sfu.info")).unwrap();
-  let (port, hash) = info.trim().split_once(' ').unwrap();
+  let mut fields = info.split_whitespace();
+  let (port, hash) = (fields.next().unwrap(), fields.next().unwrap());
+  let fallback_port = fields.next().unwrap_or("0");
   let host = std::env::var("MEASURE_SFU_HOST").unwrap();
   let is_direct_allowed = std::env::var("MEASURE_DIRECT").as_deref() == Ok("1");
   let engine = CallEngineConfig {
@@ -104,6 +118,12 @@ async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
     engine,
   );
   config.maybe_certificate_hash = Some(unhex(hash));
+  if fallback_port != "0" {
+    config.maybe_fallback_url = Some(format!(
+      "ws://{host}:{fallback_port}{}",
+      teamcraft_proto::CALL_FALLBACK_PATH
+    ));
+  }
   config.source = AudioSource::Tone {
     frequency_hz: 300.0 + 200.0 * device as f32,
     amplitude: 0.3,

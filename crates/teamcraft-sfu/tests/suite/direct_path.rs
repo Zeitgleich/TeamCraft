@@ -57,6 +57,62 @@ async fn reflect_answers_the_address_the_connection_came_from() {
   connection.close(0u32.into(), b"done");
 }
 
+/// The second port (#127, "Hard NATs") is told with the audio secret and reflects the same socket
+/// to the same address: without a NAT in between, both reflections agree.
+#[tokio::test]
+async fn the_second_port_reflects_the_same_socket_alike() {
+  let sfu = start_sfu_with_reflect_port().await;
+  let mut alice = Session::join(&sfu, ALICE).await;
+  let (secret, maybe_port) = alice.audio_secret_and_port().await;
+  let reflect_port = maybe_port.expect("the second port is told");
+  assert_eq!(Some(reflect_port), sfu.maybe_reflect.map(|addr| addr.port()));
+  let (endpoint, first) = connect_with_endpoint(&sfu).await;
+  let to_first = reflect_on(&first, secret.clone()).await;
+  let second_sfu = RunningSfu {
+    address: SocketAddr::new(sfu.address.ip(), reflect_port),
+    ..sfu
+  };
+  let second = endpoint
+    .connect(format!("https://{}{CALL_PATH}", second_sfu.address))
+    .await
+    .unwrap();
+  let to_second = reflect_on(&second, secret).await;
+  assert_eq!(to_first, to_second);
+  assert_eq!(to_first.port(), endpoint.local_addr().unwrap().port());
+}
+
+/// The second port answers nothing but `reflect`: a join there is refused.
+#[tokio::test]
+async fn the_second_port_refuses_a_join() {
+  let sfu = start_sfu_with_reflect_port().await;
+  let second_sfu = RunningSfu {
+    address: sfu.maybe_reflect.unwrap(),
+    ..sfu
+  };
+  let connection = connect(&second_sfu).await;
+  let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+  let join = CallClientMessage::Join {
+    maybe_dave_resume_epoch: None,
+    token: format!("dev:{CALL_ID}:{ALICE}:{ALICE}"),
+    capabilities: MediaCapabilities::default(),
+    dave_transition_mode: DaveTransitionMode::Coordinated,
+  };
+  write_message(&mut send, &join).await.unwrap();
+  let reply: CallServerMessage = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap();
+  let CallServerMessage::Error { error } = reply else {
+    panic!("expected a refusal, got {reply:?}");
+  };
+  assert_eq!(error.error_code, ErrorCode::ProtocolViolation);
+}
+
+/// Without a second port, sessions are told none.
+#[tokio::test]
+async fn no_second_port_is_told_by_default() {
+  let sfu = start_sfu().await;
+  let mut alice = Session::join(&sfu, ALICE).await;
+  assert_eq!(alice.audio_secret_and_port().await.1, None);
+}
+
 #[tokio::test]
 async fn reflect_refuses_an_unknown_secret() {
   let sfu = start_sfu().await;
@@ -163,9 +219,24 @@ async fn connect_with_endpoint(
   (endpoint, connection)
 }
 
+#[derive(Clone, Copy)]
 struct RunningSfu {
   address: SocketAddr,
   certificate_hash: [u8; 32],
+  maybe_reflect: Option<SocketAddr>,
+}
+
+async fn reflect_on(connection: &Connection, secret: Base64Bytes) -> SocketAddr {
+  let (mut send, mut recv) = connection.open_bi().await.unwrap().await.unwrap();
+  write_message(&mut send, &CallClientMessage::Reflect { secret })
+    .await
+    .unwrap();
+  let reply: CallServerMessage = read_message(&mut recv, MAX_SIGNALING_BYTES).await.unwrap();
+  connection.close(0u32.into(), b"done");
+  let CallServerMessage::Reflected { address } = reply else {
+    panic!("expected the reflection, got {reply:?}");
+  };
+  address
 }
 
 /// A joined raw session.
@@ -204,14 +275,21 @@ impl Session {
 
   /// The secret the SFU offers after the join, between the call's events.
   async fn audio_secret(&mut self) -> Base64Bytes {
+    self.audio_secret_and_port().await.0
+  }
+
+  /// The secret and the second reflection port, as the SFU offers them after the join.
+  async fn audio_secret_and_port(&mut self) -> (Base64Bytes, Option<u16>) {
     tokio::time::timeout(TIMEOUT, async {
       loop {
-        if let CallServerMessage::AudioSocket { secret } =
-          read_message::<CallServerMessage>(&mut self.recv, MAX_SIGNALING_BYTES)
-            .await
-            .unwrap()
+        if let CallServerMessage::AudioSocket {
+          secret,
+          maybe_reflect_port,
+        } = read_message::<CallServerMessage>(&mut self.recv, MAX_SIGNALING_BYTES)
+          .await
+          .unwrap()
         {
-          return secret;
+          return (secret, maybe_reflect_port);
         }
       }
     })
@@ -221,18 +299,29 @@ impl Session {
 }
 
 async fn start_sfu() -> RunningSfu {
+  start_sfu_with(None).await
+}
+
+async fn start_sfu_with_reflect_port() -> RunningSfu {
+  start_sfu_with(Some(SocketAddr::from((Ipv6Addr::LOCALHOST, 0)))).await
+}
+
+async fn start_sfu_with(maybe_reflect_bind_addr: Option<SocketAddr>) -> RunningSfu {
   let config = SfuConfig {
     bind_addr: SocketAddr::from((Ipv6Addr::LOCALHOST, 0)),
+    maybe_reflect_bind_addr,
     ..SfuConfig::default()
   };
   let identity = Identity::self_signed(["localhost", "::1"]).unwrap();
   let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
   let address = sfu.local_addr().unwrap();
+  let maybe_reflect = sfu.reflect_addr().unwrap();
   let certificate_hash = *sfu.certificate_hash().as_ref();
   tokio::spawn(sfu.run());
   RunningSfu {
     address,
     certificate_hash,
+    maybe_reflect,
   }
 }
 

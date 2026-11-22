@@ -106,6 +106,8 @@ pub const CALL_PATH: &str = "/call";
 /// A bound SFU, ready to [`Sfu::run`].
 pub struct Sfu {
   endpoint: Endpoint<Server>,
+  /// The second port that only reflects (#127, [`SfuConfig::maybe_reflect_bind_addr`]).
+  maybe_reflect_endpoint: Option<Endpoint<Server>>,
   certificate_hash: Sha256Digest,
   maybe_fallback_listener: Option<TcpListener>,
   shared: Arc<Shared>,
@@ -136,6 +138,9 @@ pub(crate) struct Shared {
   pub(crate) switch_secrets: SwitchSecrets,
   /// The secrets that let a second connection carry a fallback session's audio (#1979).
   pub(crate) audio_sockets: AudioSockets,
+  /// The port of the second endpoint that only reflects (#127), told to QUIC sessions with their
+  /// audio secret.
+  maybe_reflect_port: Option<u16>,
   /// Link probe tickets taken (#1959): each opens one session.
   probe_tickets: Mutex<ProbeTickets>,
 }
@@ -273,6 +278,15 @@ impl Sfu {
     let mut transport = QuicTransportConfig::default();
     set_datagram_send_buffer(&mut transport);
     set_congestion_control(&mut transport, config.quic_congestion);
+    let maybe_reflect_endpoint = config
+      .maybe_reflect_bind_addr
+      .map(|addr| bind_reflect_endpoint(&config, addr, identity.clone_identity()))
+      .transpose()?;
+    let maybe_reflect_port = maybe_reflect_endpoint
+      .as_ref()
+      .map(|endpoint| endpoint.local_addr().map(|addr| addr.port()))
+      .transpose()
+      .map_err(SfuError::Bind)?;
     let server_config = ServerConfig::builder()
       .with_bind_socket(bind_socket(&config).map_err(SfuError::Bind)?)
       .with_custom_transport(identity, transport)
@@ -297,6 +311,7 @@ impl Sfu {
     }
     Ok(Self {
       endpoint,
+      maybe_reflect_endpoint,
       certificate_hash,
       maybe_fallback_listener,
       shared: Arc::new(Shared {
@@ -314,6 +329,7 @@ impl Sfu {
         has_warned_of_forwarding: AtomicBool::new(false),
         switch_secrets: SwitchSecrets::default(),
         audio_sockets: AudioSockets::default(),
+        maybe_reflect_port,
         probe_tickets: Mutex::new(ProbeTickets::default()),
       }),
     })
@@ -330,6 +346,16 @@ impl Sfu {
 
   pub fn local_addr(&self) -> Result<SocketAddr, SfuError> {
     self.endpoint.local_addr().map_err(SfuError::Bind)
+  }
+
+  /// Where the second port that only reflects listens, if there is one (#127).
+  pub fn reflect_addr(&self) -> Result<Option<SocketAddr>, SfuError> {
+    self
+      .maybe_reflect_endpoint
+      .as_ref()
+      .map(Endpoint::local_addr)
+      .transpose()
+      .map_err(SfuError::Bind)
   }
 
   /// Where the WebSocket fallback listens, if it does.
@@ -372,9 +398,18 @@ impl Sfu {
         None => std::future::pending().await,
       }
     };
+    let maybe_reflect = self.maybe_reflect_endpoint.take();
+    let shared = Arc::clone(&self.shared);
+    let reflections = async move {
+      match maybe_reflect {
+        Some(endpoint) => accept_reflections(endpoint, shared).await,
+        None => std::future::pending().await,
+      }
+    };
     tokio::select! {
       () = self.accept_sessions() => {},
       () = fallback => {},
+      () = reflections => {},
       () = shutdown => {},
     }
     // Going away empties the rooms; that is no roster to tell the server.
@@ -474,6 +509,75 @@ fn bind_socket(config: &SfuConfig) -> std::io::Result<UdpSocket> {
   }
   socket.bind(&config.bind_addr.into())?;
   Ok(socket.into())
+}
+
+/// The second endpoint (#127): the same certificate as the SFU's, its own port, and nothing but
+/// `reflect` is answered there. No migration: a reflection is one short connection.
+fn bind_reflect_endpoint(
+  config: &SfuConfig,
+  addr: SocketAddr,
+  identity: Identity,
+) -> Result<Endpoint<Server>, SfuError> {
+  let reflect_config = SfuConfig {
+    bind_addr: addr,
+    ..config.clone()
+  };
+  let server_config = ServerConfig::builder()
+    .with_bind_socket(bind_socket(&reflect_config).map_err(SfuError::Bind)?)
+    .with_identity(identity)
+    .max_idle_timeout(Some(config.idle_timeout))
+    .map_err(|_| SfuError::IdleTimeout)?
+    .build();
+  Endpoint::server(server_config).map_err(SfuError::Bind)
+}
+
+/// Serves the second port: each connection may ask for one reflection, under the same pre-join
+/// limit per address as the main port's sessions.
+async fn accept_reflections(endpoint: Endpoint<Server>, shared: Arc<Shared>) {
+  loop {
+    let incoming = endpoint.accept().await;
+    let shared = Arc::clone(&shared);
+    tokio::spawn(async move {
+      if let Err(error) = handle_reflection(incoming, &shared).await {
+        debug!(%error, "reflection on the second port ended");
+      }
+    });
+  }
+}
+
+async fn handle_reflection(incoming: IncomingSession, shared: &Shared) -> Result<(), SessionError> {
+  let request = incoming.await?;
+  if request.path() != CALL_PATH {
+    request.not_found().await;
+    return Ok(());
+  }
+  let connection = request.accept().await?;
+  let remote_ip = connection.remote_address().ip().to_canonical();
+  let Some(prejoin_slot) = shared
+    .prejoin
+    .try_acquire(remote_ip, shared.config.max_prejoin_sessions_per_ip)
+  else {
+    connection.close(PRE_JOIN_LIMIT.into(), b"too many sessions");
+    return Ok(());
+  };
+  let (mut send, mut recv) = tokio::time::timeout(shared.config.join_timeout, connection.accept_bi())
+    .await
+    .map_err(|_| SessionError::JoinTimeout)??;
+  let first = tokio::time::timeout(
+    shared.config.join_timeout,
+    read_message::<CallClientMessage>(&mut recv, shared.config.max_signaling_message_bytes),
+  )
+  .await
+  .map_err(|_| SessionError::JoinTimeout)??;
+  if let CallClientMessage::Reflect { secret } = &first {
+    reflect(shared, &connection, send, secret.as_slice()).await;
+  } else {
+    let error = ErrorBody::new(ErrorCode::ProtocolViolation, "this port only reflects");
+    reject(&mut send, CallServerMessage::Error { error }).await;
+    connection.close(AUDIO_CONNECTION_CLOSE.into(), b"refused");
+  }
+  drop(prejoin_slot);
+  Ok(())
 }
 
 async fn handle_session(incoming: IncomingSession, shared: &Shared) -> Result<(), SessionError> {
@@ -757,7 +861,10 @@ fn offer_audio_connection<'a>(
     .audio_sockets
     .register(&secret, AudioTarget::new(grant, audio_tx))?;
   // Fails only when the writer task ended, i.e. the session is closing anyway.
-  let _ = signal_tx.try_send(Outgoing::AudioSocket(secret.to_wire()));
+  let _ = signal_tx.try_send(Outgoing::AudioSocket {
+    secret: secret.to_wire(),
+    maybe_reflect_port: shared.maybe_reflect_port,
+  });
   Some(registration)
 }
 

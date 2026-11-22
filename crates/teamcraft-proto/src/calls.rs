@@ -348,6 +348,11 @@ pub enum CallServerMessage {
   /// none, and clients from before ignore it.
   AudioSocket {
     secret: Base64Bytes,
+    /// A second UDP port of the same SFU address that answers only `reflect` (#127): the direct
+    /// path reflects there as well, and a different mapped port tells it its NAT is a hard one
+    /// (ARCHITECTURE.md §6.7, "Hard NATs"). SFUs without one, and older ones, send none.
+    #[serde(default, rename = "reflect_port", skip_serializing_if = "Option::is_none")]
+    maybe_reflect_port: Option<u16>,
   },
   /// Answer to [`CallClientMessage::Reflect`] (#127): the address and port the reflecting
   /// connection's packets came from, as the SFU saw them (IPv4 peers in their IPv4 form).
@@ -1453,10 +1458,24 @@ mod tests {
   fn audio_socket_wire_format() {
     let offer = CallServerMessage::AudioSocket {
       secret: Base64Bytes::new(vec![1, 2]),
+      maybe_reflect_port: None,
     };
     let json = serde_json::to_string(&offer).unwrap();
     assert_eq!(json, r#"{"type":"audio_socket","secret":"AQI="}"#);
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), offer);
+    let with_port = CallServerMessage::AudioSocket {
+      secret: Base64Bytes::new(vec![1, 2]),
+      maybe_reflect_port: Some(3479),
+    };
+    let json = serde_json::to_string(&with_port).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"audio_socket","secret":"AQI=","reflect_port":3479}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<CallServerMessage>(&json).unwrap(),
+      with_port
+    );
     let attach = CallClientMessage::AttachAudio {
       secret: Base64Bytes::new(vec![1, 2]),
     };

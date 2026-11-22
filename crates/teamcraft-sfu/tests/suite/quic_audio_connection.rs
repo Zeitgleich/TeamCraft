@@ -128,7 +128,7 @@ impl Session {
   async fn audio_secret(&mut self) -> Base64Bytes {
     tokio::time::timeout(TIMEOUT, async {
       loop {
-        if let CallServerMessage::AudioSocket { secret } =
+        if let CallServerMessage::AudioSocket { secret, .. } =
           read_message::<CallServerMessage>(&mut self.recv, MAX_SIGNALING_BYTES)
             .await
             .unwrap()

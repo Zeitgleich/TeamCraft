@@ -138,6 +138,9 @@ pub mod dave;
 pub mod direct_path;
 #[cfg(feature = "effects")]
 pub mod effects;
+#[cfg(feature = "port-mapping")]
+pub mod port_mapping;
+pub mod port_mapping_wire;
 #[cfg(feature = "native")]
 mod sfu_address;
 #[cfg(feature = "native")]

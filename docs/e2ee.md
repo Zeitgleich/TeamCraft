@@ -7250,12 +7250,32 @@ served again at once.
 **What a hostile peer can do.** Learn the addresses above, which is what the policy and the setting
 consent to. Put somebody else's address into its offer: the device then sends QUIC handshakes (at
 most 8 candidates, 5 s, with backoff after failures; no media before the pinned handshake completes)
-to that address, which bounds any reflection to a few kilobytes.
+to that address, which bounds any reflection to a few kilobytes. Claim a hard NAT behind somebody
+else's address: a device behind an easy NAT then sends birthday probes to random ports of that
+address (ARCHITECTURE.md §6.7, "Hard NATs"), bounded per round to 2048 probes of 12 bytes (about
+82 KB with the IP and UDP headers, over 10 s, 200 a second) and to one round, then 30 s, doubling to
+5 minutes, between rounds; the other device's offers don't shorten the wait, so a hostile peer gets
+at most about 82 KB every 5 minutes once it settles, all of it to one address. Claim an easy NAT
+while this device is behind a hard one: this device's 256 birthday sockets each send 2 punches of
+12 bytes to the claimed address, about 21 KB per round, under the same backoff. A probe carries no
+key: its token (8 random bytes per socket, sealed in the offer) only tells the hard side that a
+probe is this call's, and the handshake that follows is pinned like every direct connection.
+
+**What a hostile router can do.** Port mapping (PCP, NAT-PMP, UPnP-IGD) asks the default gateway,
+and anything on the local network can answer in its place. A device takes only the exact answer to
+its request (version, opcode, protocol, internal port, PCP's nonce, connected socket), and offers
+the external address only if it is a global one; UPnP's descriptions and SOAP answers are bounded
+in size and their URLs must point at the router that answered. The worst a hostile router does is
+offer a wrong address as the mapped candidate, which the other device dials like any other (above);
+it learns nothing it doesn't already see as the router.
 
 **The reflection.** The reflexive candidate comes from the SFU: the direct path socket opens a
 short WebTransport connection to the session's SFU, names the session's audio-socket secret
 (`reflect`), and the SFU answers with the address it saw (`reflected`). The SFU learns one more
 port of an address it already sees, and only for a session that runs; an unknown secret is refused.
+An SFU with a second port that only reflects (`reflect_port`) is asked there too, from the same
+socket, under the same secret and the same pre-join limit per address; it answers `reflect` only.
+The two answers tell the device whether its NAT is a hard one; the SFU learns that much as well.
 
 **The direct connection's certificates.** Each device makes a fresh self-signed certificate for
 each direct path socket (a new socket after every network change) and offers its SHA-256. The
