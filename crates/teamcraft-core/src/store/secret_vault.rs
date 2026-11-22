@@ -1630,6 +1630,8 @@ mod tests {
       let key = vault.recording_key().unwrap();
       assert!(vault.recording_key().unwrap().is_same_key(&key));
       assert_eq!(fake.counts(), Counts::default());
+      // The app quits; the next start holds the file's lock anew.
+      drop(vault);
       let vault = reopen(&fake, &directory);
       let kept = vault.existing_recording_key().unwrap().unwrap();
       assert!(kept.is_same_key(&key));
@@ -1643,6 +1645,7 @@ mod tests {
       let key = vault.recording_key().unwrap();
       vault.forget_recording_key().unwrap();
       assert!(vault.existing_recording_key().unwrap().is_none());
+      drop(vault);
       let vault = reopen(&fake, &directory);
       assert!(vault.existing_recording_key().unwrap().is_none());
       assert!(!vault.recording_key().unwrap().is_same_key(&key));
