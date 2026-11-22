@@ -959,7 +959,12 @@ settings-holiday-feed-error-too_many = Der Kalender hat mehr als 5000 Feiertage.
 ## Absturzberichte (docs/crash-reports.md)
 crash-reports-heading = Absturzberichte
 crash-reports-send = Absturzberichte senden
-crash-reports-send-hint = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
-crash-reports-required-hint = Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
-crash-reports-notice = Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien.
+crash-reports-send-hint-publisher = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den App-Entwickler: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-send-hint-organization = Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-required-hint-publisher = Deine Organisation schreibt Absturzberichte vor. Sie gehen an den App-Entwickler und enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-required-hint-organization = Deine Organisation schreibt Absturzberichte vor. Sie enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.
+crash-reports-notice-publisher-optional = TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Du kannst das in den Einstellungen abschalten.
+crash-reports-notice-publisher-required = TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte.
+crash-reports-notice-organization-optional = TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Du kannst das in den Einstellungen abschalten.
+crash-reports-notice-organization-required = TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte.
 crash-reports-notice-settings = Einstellungen

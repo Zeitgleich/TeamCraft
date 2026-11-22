@@ -19,9 +19,10 @@ use teamcraft_proto::{
   StickerPackKey, StickerPackResponse, StickerSet, VerifiedStickerPack,
 };
 
+use crate::asset_ledger::AssetLedger;
 use crate::convert;
 pub use crate::custom_emoji::MAX_KEPT_REMOVED_PICTURES;
-use crate::custom_emoji::{OneKey, PictureCache, admin_keys};
+use crate::custom_emoji::{OneKey, PictureCache, SignedUnder, asset_signer};
 use crate::error::CoreError;
 use crate::records;
 use crate::store::{LocalStore, Table};
@@ -53,17 +54,20 @@ pub(crate) fn sign_sticker_pack(
 
 /// The packs of the server's list whose documents verify against `workspace`, in the list's order.
 /// Of two versions of one pack (a server mixing old and new documents), the higher wins.
+/// Every pack version accepted is noted in `ledger`.
 pub fn verified_packs(
   listed: &[StickerPackResponse],
   workspace: &WorkspaceState,
+  ledger: &mut AssetLedger,
 ) -> Vec<VerifiedStickerPack> {
   let mut order: Vec<StickerPackKey> = Vec::new();
   let mut by_key: BTreeMap<StickerPackKey, VerifiedStickerPack> = BTreeMap::new();
   for response in listed {
-    let Some(pack) = verify(response, workspace) else {
+    let Some(pack) = verify(response, workspace, ledger) else {
       tracing::debug!(pack = %response.pack, "a sticker pack's signature doesn't verify; left out");
       continue;
     };
+    ledger.hold(response.signed.payload.as_slice());
     match by_key.get(&pack.pack) {
       Some(known) if (known.version, known.signed_at) >= (pack.version, pack.signed_at) => {},
       Some(_) => {
@@ -78,34 +82,39 @@ pub fn verified_packs(
   order.into_iter().filter_map(|key| by_key.remove(&key)).collect()
 }
 
-/// One listed pack, if an owner or admin of the verified roster signed its document and the
-/// document keeps the rules every device checks.
-pub fn verify(response: &StickerPackResponse, workspace: &WorkspaceState) -> Option<VerifiedStickerPack> {
+/// One listed pack, if an owner or admin of the verified roster signed its document (or a former
+/// one and `ledger` admits it) and the document keeps the rules every device checks.
+pub fn verify(
+  response: &StickerPackResponse,
+  workspace: &WorkspaceState,
+  ledger: &AssetLedger,
+) -> Option<VerifiedStickerPack> {
   let document: StickerPackDocument = serde_json::from_slice(response.signed.payload.as_slice()).ok()?;
   // A pack an older, higher limit allowed stays valid: devices check the hard ceiling only.
   document.check(MAX_STICKERS_PER_PACK_LIMIT).ok()?;
   let signer = claimed_signer(response.signed.signature.as_slice()).ok()?;
   let signer_user = convert::user_from_crypto(signer).ok()?;
-  let verified = admin_keys(workspace, signer_user, document.signed_at_ms)
-    .into_iter()
-    .any(|key| {
-      verify_log_entry(
-        response.signed.signature.as_slice(),
-        WorkspaceLog::StickerPack,
-        document.version,
-        response.signed.payload.as_slice(),
-        &OneKey(signer, key),
-      )
-      .is_ok()
-    });
-  verified.then_some(VerifiedStickerPack {
-    pack: document.pack,
-    version: document.version,
-    name: document.name,
-    stickers: document.stickers,
-    signed_by: signer_user,
-    signed_at: document.signed_at_ms,
-  })
+  let under = SignedUnder::of(document.maybe_roster_version, document.signed_at_ms);
+  let signed_by = asset_signer(workspace, signer_user, under, |key| {
+    verify_log_entry(
+      response.signed.signature.as_slice(),
+      WorkspaceLog::StickerPack,
+      document.version,
+      response.signed.payload.as_slice(),
+      &OneKey(signer, key),
+    )
+    .is_ok()
+  })?;
+  ledger
+    .admits(response.signed.payload.as_slice(), signed_by)
+    .then_some(VerifiedStickerPack {
+      pack: document.pack,
+      version: document.version,
+      name: document.name,
+      stickers: document.stickers,
+      signed_by: signer_user,
+      signed_at: document.signed_at_ms,
+    })
 }
 
 /// The packs this device verified last; empty before the first read.
@@ -177,8 +186,22 @@ mod tests {
       Base64Bytes::new(self.identity.public_key().as_bytes().to_vec())
     }
 
+    /// A document from before the roster version: judged by its signing time.
     fn listed(&self, version: u64, name: &str, signed_at_ms: i64) -> StickerPackResponse {
-      let document = document(version, name, signed_at_ms);
+      self.listed_under(version, name, signed_at_ms, None)
+    }
+
+    fn listed_under(
+      &self,
+      version: u64,
+      name: &str,
+      signed_at_ms: i64,
+      maybe_roster_version: Option<u64>,
+    ) -> StickerPackResponse {
+      let document = StickerPackDocument {
+        maybe_roster_version,
+        ..document(version, name, signed_at_ms)
+      };
       StickerPackResponse {
         pack: PACK,
         version,
@@ -202,6 +225,7 @@ mod tests {
         format: CustomEmojiFormat::Png,
       }],
       signed_at_ms,
+      maybe_roster_version: None,
     }
   }
 
@@ -226,10 +250,17 @@ mod tests {
   fn an_admins_pack_verifies_and_a_members_does_not() {
     let (admin, member) = (Signer::new(1), Signer::new(2));
     let state = workspace(&[(&admin, RosterRole::Admin), (&member, RosterRole::Unknown)]);
-    assert!(verify(&admin.listed(1, "Team", 5), &state).is_some());
-    assert!(verify(&member.listed(1, "Fake", 5), &state).is_none());
+    assert!(verify(&admin.listed(1, "Team", 5), &state, &AssetLedger::default()).is_some());
+    assert!(verify(&member.listed(1, "Fake", 5), &state, &AssetLedger::default()).is_none());
     // Somebody the roster doesn't know at all.
-    assert!(verify(&Signer::new(3).listed(1, "Fake", 5), &state).is_none());
+    assert!(
+      verify(
+        &Signer::new(3).listed(1, "Fake", 5),
+        &state,
+        &AssetLedger::default()
+      )
+      .is_none()
+    );
   }
 
   mod rejection {
@@ -244,13 +275,13 @@ mod tests {
       let mut listed = admin.listed(1, "Team", 5);
       listed.name = "renamed_by_server".into();
       listed.version = 9;
-      let pack = verify(&listed, &state).unwrap();
+      let pack = verify(&listed, &state, &AssetLedger::default()).unwrap();
       assert_eq!((pack.name.as_str(), pack.version), ("Team", 1));
 
       let mut swapped = document(1, "Team", 5);
       swapped.stickers[0].sha256 = CustomEmojiHash::from_bytes([99; 32]);
       listed.signed.payload = Base64Bytes::new(serde_json::to_vec(&swapped).unwrap());
-      assert!(verify(&listed, &state).is_none());
+      assert!(verify(&listed, &state, &AssetLedger::default()).is_none());
     }
 
     #[test]
@@ -259,13 +290,13 @@ mod tests {
       let state = workspace(&[(&admin, RosterRole::Owner)]);
       let mut listed = admin.listed(1, "Team", 5);
       listed.signed.signature = Base64Bytes::new(Vec::new());
-      assert!(verify(&listed, &state).is_none());
+      assert!(verify(&listed, &state, &AssetLedger::default()).is_none());
       let mut flipped = admin.listed(1, "Team", 5);
       let mut bytes = flipped.signed.signature.as_slice().to_vec();
       let last = bytes.len() - 1;
       bytes[last] ^= 1;
       flipped.signed.signature = Base64Bytes::new(bytes);
-      assert!(verify(&flipped, &state).is_none());
+      assert!(verify(&flipped, &state, &AssetLedger::default()).is_none());
     }
 
     /// Signed by the right person, but as a custom emoji, or with another version than the one it
@@ -285,7 +316,10 @@ mod tests {
           },
           ..admin.listed(2, "Team", 5)
         };
-        assert!(verify(&listed, &state).is_none(), "{log:?} {version}");
+        assert!(
+          verify(&listed, &state, &AssetLedger::default()).is_none(),
+          "{log:?} {version}"
+        );
       }
     }
 
@@ -295,7 +329,7 @@ mod tests {
       let admin = Signer::new(1);
       let impostor = Signer::new(1);
       let state = workspace(&[(&admin, RosterRole::Admin)]);
-      assert!(verify(&impostor.listed(1, "Team", 5), &state).is_none());
+      assert!(verify(&impostor.listed(1, "Team", 5), &state, &AssetLedger::default()).is_none());
     }
 
     /// A pack that breaks the document's rules (two stickers of one name) is left out even when an
@@ -310,7 +344,7 @@ mod tests {
         signed: sign_sticker_pack(&admin.device, &admin.certificate, &document).unwrap(),
         ..admin.listed(1, "Team", 5)
       };
-      assert!(verify(&listed, &state).is_none());
+      assert!(verify(&listed, &state, &AssetLedger::default()).is_none());
     }
   }
 
@@ -326,6 +360,7 @@ mod tests {
         member.listed(3, "Forged", 7),
       ],
       &state,
+      &mut AssetLedger::default(),
     );
     assert_eq!(packs.len(), 1);
     assert_eq!((packs[0].name.as_str(), packs[0].version), ("Second", 2));
@@ -342,6 +377,7 @@ mod tests {
         identity_key: former.key(),
         is_owner: false,
         maybe_from_ms: Some(100),
+        maybe_from_version: Some(2),
         maybe_until: Some(TenureEnd {
           version: 3,
           maybe_at_ms: Some(200),
@@ -349,8 +385,72 @@ mod tests {
       }],
       maybe_replayed_at: None,
     };
-    assert!(verify(&former.listed(1, "Early", 150), &state).is_some());
-    assert!(verify(&former.listed(2, "Late", 250), &state).is_none());
+    assert!(verify(&former.listed(1, "Early", 150), &state, &AssetLedger::default()).is_some());
+    assert!(verify(&former.listed(2, "Late", 250), &state, &AssetLedger::default()).is_none());
+
+    // Issue #2290: with the roster version named, the signing time no longer decides. Version 3
+    // ended the tenure, so a document naming it (or later) is refused even with an early time,
+    // and one before the tenure began is a version the signer never held as an admin.
+    state.roster.version = 4;
+    assert!(
+      verify(
+        &former.listed_under(3, "Early", 9_999, Some(2)),
+        &state,
+        &AssetLedger::default()
+      )
+      .is_some()
+    );
+    for version in [0, 1, 3, 4, 5] {
+      assert!(
+        verify(
+          &former.listed_under(4, "Backdated", 150, Some(version)),
+          &state,
+          &AssetLedger::default()
+        )
+        .is_none(),
+        "roster {version}"
+      );
+    }
+  }
+
+  /// Issue #2290 on a device that followed the demotion: the pack version it held counts, a new
+  /// one the demoted admin signs (whatever time or roster version it names) doesn't.
+  #[test]
+  fn a_demoted_admins_new_pack_version_is_refused_where_the_demotion_was_followed() {
+    let former = Signer::new(1);
+    let mut before = workspace(&[(&former, RosterRole::Admin)]);
+    before.roster.version = 2;
+    let mut after = workspace(&[]);
+    after.roster.version = 3;
+    after.admin_history = AdminHistory {
+      is_complete: true,
+      tenures: vec![AdminTenure {
+        user_id: former.user,
+        identity_key: former.key(),
+        is_owner: false,
+        maybe_from_ms: Some(100),
+        maybe_from_version: Some(1),
+        maybe_until: Some(TenureEnd {
+          version: 3,
+          maybe_at_ms: Some(200),
+        }),
+      }],
+      maybe_replayed_at: None,
+    };
+    let mut ledger = AssetLedger::default();
+    ledger.follow(1);
+    let held = former.listed_under(1, "Team", 150, Some(2));
+    assert_eq!(
+      verified_packs(std::slice::from_ref(&held), &before, &mut ledger).len(),
+      1
+    );
+    let packs = verified_packs(
+      &[held, former.listed_under(2, "Backdated", 150, Some(2))],
+      &after,
+      &mut ledger,
+    );
+    assert_eq!(packs.len(), 1);
+    assert_eq!((packs[0].name.as_str(), packs[0].version), ("Team", 1));
   }
 
   #[test]

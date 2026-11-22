@@ -793,6 +793,28 @@ pub fn images_in_scope(files: &[FileInfo], scope: LightboxScope, start: MediaKey
   media_viewer::images_in_scope(files, scope, start.message, ViewerMedia::PicturesAndVideos)
 }
 
+/// The file on screen: from the viewer's list, else as a tile of the conversation shows it
+/// (`maybe_shown`, [`crate::media_cache::shown_file`]). A picture that just arrived is on screen in
+/// the conversation before the core's page of pictures lists it; only a file neither has is gone
+/// (its message was deleted). Not knowing it yet is never taken for gone.
+pub fn file_on_screen(
+  images: &[FileInfo],
+  key: MediaKey,
+  maybe_shown: impl FnOnce() -> Option<FileInfo>,
+) -> Option<FileInfo> {
+  images
+    .iter()
+    .find(|file| key.matches(file))
+    .cloned()
+    .or_else(|| maybe_shown().filter(|file| key.matches(file)))
+}
+
+/// Whether a page of the conversation's pictures lists `key`: the viewer reads its first page again
+/// until it does.
+pub fn lists(files: &[FileInfo], key: MediaKey) -> bool {
+  files.iter().any(|file| key.matches(file))
+}
+
 /// How many images the message of `start` has, to choose the scope it opens with.
 pub fn album_len(files: &[FileInfo], start: MediaKey) -> usize {
   media_viewer::album_len(files, start.message, ViewerMedia::PicturesAndVideos)
@@ -932,6 +954,38 @@ mod tests {
       assert_eq!(MediaKey::of(&uploading), None);
       assert_eq!(MediaKey::of(&file(4, 41, "notes.txt", "text/plain")), None);
       assert_eq!(MediaKey::of(&image(4, 42, "e.png")), Some(key(4, 42)));
+    }
+  }
+
+  mod file_on_screen {
+    use super::*;
+
+    #[test]
+    fn a_listed_file_comes_from_the_list() {
+      let images = images_in_scope(&conversation(), LightboxScope::Conversation, key(1, 10));
+      let found = file_on_screen(&images, key(2, 22), || panic!("not asked"));
+      assert_eq!(found.map(|file| file.file_name), Some("b2.png".to_owned()));
+    }
+
+    #[test]
+    fn a_picture_the_list_does_not_have_yet_is_not_gone_while_a_tile_shows_it() {
+      // The full picture still comes down in the conversation; the core's page doesn't list the
+      // message yet.
+      let images = images_in_scope(&conversation(), LightboxScope::Conversation, key(4, 40));
+      assert!(!lists(&conversation(), key(4, 40)));
+      let found = file_on_screen(&images, key(4, 40), || Some(image(4, 40, "new.png")));
+      assert_eq!(found.map(|file| file.file_name), Some("new.png".to_owned()));
+    }
+
+    #[test]
+    fn a_file_neither_the_list_nor_a_tile_has_is_gone() {
+      let images = images_in_scope(&conversation(), LightboxScope::Conversation, key(4, 40));
+      assert_eq!(file_on_screen(&images, key(4, 40), || None), None);
+      assert_eq!(
+        file_on_screen(&images, key(4, 40), || Some(image(4, 41, "other.png"))),
+        None,
+        "another file of the message is not this one"
+      );
     }
   }
 

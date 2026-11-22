@@ -18,9 +18,9 @@ use serde::Deserialize;
 use teamcraft_client_api::crash_reporting::trace::{self, TraceSettings, WireTraceTree};
 use teamcraft_client_api::crash_reporting::{
   AppInfo, AppPlatform, BrowserInfo, BrowserNoiseCount, CallReport, CallReportGate, CrashEvent, CrashLevel,
-  CrashReporter, CrashReportingConfig, CrashReportingConsent, CrashSendOutcome, ErrorSource, EventId,
-  InstallationId, MAX_PENDING_PANICS, PanicParts, PendingPanic, ScriptStack, StackFrame, Transaction,
-  frames_from_script_stack, without_ids,
+  CrashReporter, CrashReportingConfig, CrashReportingConsent, CrashReportsNoticeKind, CrashSendOutcome,
+  ErrorSource, EventId, InstallationId, MAX_PENDING_PANICS, PanicParts, PendingPanic, ScriptStack,
+  StackFrame, Transaction, frames_from_script_stack, without_ids,
 };
 use teamcraft_client_api::debug_log;
 use teamcraft_client_api::failure::ActionFailure;
@@ -65,6 +65,28 @@ thread_local! {
 pub struct CrashReportsStatus {
   pub allows_opt_out: bool,
   pub shows_notice: bool,
+  /// Which text says who receives the reports: the notice and the settings hint.
+  pub notice: CrashReportsNoticeKind,
+}
+
+/// The first-start notice's text.
+pub fn notice_key(kind: CrashReportsNoticeKind) -> &'static str {
+  match kind {
+    CrashReportsNoticeKind::PublisherOptional => "crash-reports-notice-publisher-optional",
+    CrashReportsNoticeKind::PublisherRequired => "crash-reports-notice-publisher-required",
+    CrashReportsNoticeKind::OrganizationOptional => "crash-reports-notice-organization-optional",
+    CrashReportsNoticeKind::OrganizationRequired => "crash-reports-notice-organization-required",
+  }
+}
+
+/// The privacy settings' hint under the switch.
+pub fn hint_key(kind: CrashReportsNoticeKind) -> &'static str {
+  match kind {
+    CrashReportsNoticeKind::PublisherOptional => "crash-reports-send-hint-publisher",
+    CrashReportsNoticeKind::PublisherRequired => "crash-reports-required-hint-publisher",
+    CrashReportsNoticeKind::OrganizationOptional => "crash-reports-send-hint-organization",
+    CrashReportsNoticeKind::OrganizationRequired => "crash-reports-required-hint-organization",
+  }
 }
 
 /// Sets the reporter up before anything else runs: the last known instance setting and the
@@ -543,6 +565,7 @@ fn publish_status(reporter: &CrashReporter) {
   let status = reporter.config().map(|config| CrashReportsStatus {
     allows_opt_out: config.allows_opt_out,
     shows_notice: config.shows_notice,
+    notice: CrashReportsNoticeKind::new(&config.recipient, config.allows_opt_out),
   });
   STATUS.with(|signal| signal.try_set(status));
 }

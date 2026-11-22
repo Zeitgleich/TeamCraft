@@ -336,6 +336,66 @@ async fn a_saved_file_opens_from_its_record_and_leaves_the_list_when_removed() {
   assert!(std::fs::metadata(&path).is_ok(), "the saved file stays");
 }
 
+#[tokio::test]
+async fn a_download_marked_to_open_when_done_opens_once_when_saved() {
+  let mut setup = Setup::new("open-when-done").await;
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  downloads.start_due(&mut setup.bob.client).await;
+  downloads.control(setup.attachment, DownloadControl::OpenWhenDone);
+  setup.run(&mut downloads).await;
+  assert!(
+    downloads.take_opens().is_empty(),
+    "nothing opens before it is saved"
+  );
+
+  // The host's next turn picks the finished download up.
+  setup.run(&mut downloads).await;
+  let FileTransfer::Local { path } = setup.transfer() else {
+    panic!("not saved");
+  };
+  assert_eq!(
+    downloads.take_opens(),
+    vec![OpenRequest {
+      path: PathBuf::from(path),
+      is_reveal: false
+    }]
+  );
+  setup.run(&mut downloads).await;
+  assert!(downloads.take_opens().is_empty(), "the mark is used up");
+}
+
+#[tokio::test]
+async fn the_open_when_done_mark_can_be_taken_back_and_a_cancel_drops_it() {
+  let mut setup = Setup::new("open-when-done-off").await;
+  setup.server.cut_next_download_after(MIB);
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+  downloads.control(setup.attachment, DownloadControl::Pause);
+  downloads.control(setup.attachment, DownloadControl::OpenWhenDone);
+  downloads.control(setup.attachment, DownloadControl::KeepClosed);
+  setup.run(&mut downloads).await;
+  downloads.control(setup.attachment, DownloadControl::Resume);
+  setup.run(&mut downloads).await;
+  setup.run(&mut downloads).await;
+  assert!(downloads.take_opens().is_empty(), "the mark was taken back");
+
+  // Marked, then cancelled: asking again later doesn't open it.
+  let mut setup = Setup::new("open-when-done-cancel").await;
+  setup.server.cut_next_download_after(MIB);
+  let mut downloads = Downloads::new(1);
+  downloads.save(setup.channel, setup.attachment);
+  setup.run(&mut downloads).await;
+  downloads.control(setup.attachment, DownloadControl::OpenWhenDone);
+  downloads.control(setup.attachment, DownloadControl::Cancel);
+  setup.run(&mut downloads).await;
+  downloads.control(setup.attachment, DownloadControl::Resume);
+  setup.run(&mut downloads).await;
+  setup.run(&mut downloads).await;
+  assert!(downloads.take_opens().is_empty(), "a cancel drops the mark");
+}
+
 /// Alice sends Bob a file of [`FILE_BYTES`]; Bob's downloads go into a folder of their own.
 struct Setup {
   server: FakeServer,

@@ -2,8 +2,13 @@
 <resources>
   <string name="crash_reports_title">Absturzberichte</string>
   <string name="crash_reports_send">Absturzberichte senden</string>
-  <string name="crash_reports_send_hint">Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
-  <string name="crash_reports_required_hint">Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
-  <string name="crash_reports_notice">Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien.</string>
+  <string name="crash_reports_send_hint_publisher">Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den App-Entwickler: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
+  <string name="crash_reports_send_hint_organization">Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
+  <string name="crash_reports_required_hint_publisher">Deine Organisation schreibt Absturzberichte vor. Sie gehen an den App-Entwickler und enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
+  <string name="crash_reports_required_hint_organization">Deine Organisation schreibt Absturzberichte vor. Sie enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel.</string>
+  <string name="crash_reports_notice_publisher_optional">TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Du kannst das in den Einstellungen abschalten.</string>
+  <string name="crash_reports_notice_publisher_required">TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte.</string>
+  <string name="crash_reports_notice_organization_optional">TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Du kannst das in den Einstellungen abschalten.</string>
+  <string name="crash_reports_notice_organization_required">TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte.</string>
   <string name="crash_reports_notice_settings">Einstellungen</string>
 </resources>

@@ -9,6 +9,7 @@ use crate::calls::{
   ScreenShareResolution, ScreenShareSound, selected_camera_is_rear,
 };
 use crate::components::add_to_call::AddPeople;
+use crate::components::call_announcer::CallAnnouncer;
 use crate::components::call_audio_menu::AudioMenu;
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
@@ -410,6 +411,48 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       })
     })
   };
+  // What the call announcer watches (#2281). The status lines above are plain text, not live
+  // regions of their own: they mount with their text, which screen readers often skip.
+  let announced_remote = Signal::derive(move || {
+    remote.with(|tiles| {
+      tiles
+        .iter()
+        .map(|tile| (tile.user.id, tile.user.display_name.clone()))
+        .collect()
+    })
+  });
+  let announced_lobby = Signal::derive(move || {
+    let Some(hub) = maybe_hub else {
+      return Vec::new();
+    };
+    let me = state.me().id;
+    let Some(meeting) = hub
+      .hosted_meeting_for(request.conversation, me)
+      .or_else(|| hub.cohosted_meeting_for(request.conversation))
+    else {
+      return Vec::new();
+    };
+    hub.lobbies.with(|all| {
+      all
+        .iter()
+        .find(|(id, _)| *id == meeting)
+        .map(|(_, entries)| {
+          entries
+            .iter()
+            .map(|entry| (entry.user.id, entry.user.display_name.clone()))
+            .collect()
+        })
+        .unwrap_or_default()
+    })
+  });
+  let announced_phases = Signal::derive(move || {
+    vec![
+      (is_connecting.get(), "call-connecting"),
+      (call.has_ended.get(), "call-ended"),
+      (is_reconnecting.get(), "call-reconnecting"),
+      (is_on_limited_network.get(), "call-limited-network"),
+    ]
+  });
   let self_tile = move |is_large: bool| {
     view! {
       <VideoTile
@@ -652,11 +695,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
             <span>{move || i18n.t("call-notetaker-badge")}</span>
           </span>
         </Show>
+        // Joins, leaves, the lobby, the microphone, recording and the phases, said once (#2281).
+        <CallAnnouncer remote=announced_remote lobby=announced_lobby phases=announced_phases />
         // Who records the call (e2ee.md §8.3): always shown while anybody does.
         <RecordingIndicator />
         <Show when=move || is_connecting.get() fallback=|| ()>
           // Waiting for this device's way into the call's encryption (#1990): calm, no error.
-          <span class="muted-text" role="status">
+          <span class="muted-text">
             {move || {
               let key = if state.read(|backend| backend.is_call_awaiting_encryption()) {
                 "call-getting-ready"
@@ -668,7 +713,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </span>
         </Show>
         <Show when=move || call.has_ended.get() fallback=|| ()>
-          <span class="muted-text" role="status">
+          <span class="muted-text">
             {move || {
               // Nobody answered the ring: said as a phone says it, not as a plain end.
               let is_unanswered = state.read(|backend| backend.call_end_reason()) == Some(CallEndReason::NoAnswer);
@@ -677,29 +722,29 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </span>
         </Show>
         <Show when=move || is_reconnecting.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-reconnecting")}</span>
+          <span class="muted-text">{move || i18n.t("call-reconnecting")}</span>
         </Show>
         <Show when=move || is_on_limited_network.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-limited-network")}</span>
+          <span class="muted-text">{move || i18n.t("call-limited-network")}</span>
         </Show>
         <Show when=move || is_video_held_for_voice.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-video-held-for-voice")}</span>
+          <span class="muted-text">{move || i18n.t("call-video-held-for-voice")}</span>
         </Show>
         <Show when=move || is_video_yielded_for_voice.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-video-yielded-for-voice")}</span>
+          <span class="muted-text">{move || i18n.t("call-video-yielded-for-voice")}</span>
         </Show>
         <Show when=move || is_video_limited_by_device.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-device-busy")}</span>
+          <span class="muted-text">{move || i18n.t("call-device-busy")}</span>
         </Show>
         <Show when=move || is_own_capture_stalled.get() fallback=|| ()>
-          <span class="muted-text" role="status">{move || i18n.t("call-capture-stalled")}</span>
+          <span class="muted-text">{move || i18n.t("call-capture-stalled")}</span>
         </Show>
         <For
           each=move || stalled_videos.get().into_iter().enumerate()
           key=|(index, maybe_name)| (*index, maybe_name.clone())
           let:stalled
         >
-          <span class="muted-text" role="status">
+          <span class="muted-text">
             {match stalled.1 {
               Some(name) => i18n.t_with("call-video-stalled", &[("name", &name)]),
               None => i18n.t("call-video-stalled-unnamed"),

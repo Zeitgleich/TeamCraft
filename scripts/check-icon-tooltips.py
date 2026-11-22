@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Fails when an icon-only button has an `aria-label` but no visible tooltip (issue #2019).
 
-Sighted pointer users learn what an icon button does from its tooltip: `title=` or `data-tip=`
-next to the `aria-label`. The check reads every `<button ...>` tag of the UI crate that has the
-`icon-btn` class and reports the ones with an `aria-label` and neither attribute.
+Sighted pointer users learn what an icon button does from its tooltip: `title=` next to the
+`aria-label`. The check reads every `<button ...>` tag of the UI crate that has the `icon-btn`
+class and reports the ones with an `aria-label` and no `title=`.
+
+`data-tip=` (a styled tooltip) is styled only inside the lightbox (`380-lightbox.css`), so it is
+allowed only in the lightbox's own files; anywhere else it shows nothing and is reported.
 
     scripts/check-icon-tooltips.py [root]   # default: crates/teamcraft-ui/src of the repository
 
@@ -29,6 +32,9 @@ def tag_end(text: str, start: int) -> int:
     return len(text)
 
 
+LIGHTBOX_FILES = {"lightbox.rs", "lightbox_controls.rs"}
+
+
 def main() -> int:
     root = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else (
         pathlib.Path(__file__).resolve().parent.parent / "crates/teamcraft-ui/src"
@@ -36,14 +42,18 @@ def main() -> int:
     failures = []
     for path in sorted(root.rglob("*.rs")):
         text = path.read_text()
+        if path.name not in LIGHTBOX_FILES:
+            for match in re.finditer(r"\bdata-tip\b", text):
+                line = text.count("\n", 0, match.start()) + 1
+                failures.append(f"{path}:{line}: data-tip is styled only in the lightbox; use title=")
         for match in re.finditer(r"<button\b", text):
             tag = text[match.start():tag_end(text, match.end())]
             if "icon-btn" not in tag or "aria-label" not in tag:
                 continue
-            if "title=" in tag or "data-tip" in tag or "tooltip-ok" in tag:
+            if "title=" in tag or "tooltip-ok" in tag or (path.name in LIGHTBOX_FILES and "data-tip" in tag):
                 continue
             line = text.count("\n", 0, match.start()) + 1
-            failures.append(f"{path}:{line}: icon button has an aria-label but no title/data-tip")
+            failures.append(f"{path}:{line}: icon button has an aria-label but no title")
     for failure in failures:
         print(failure)
     if failures:

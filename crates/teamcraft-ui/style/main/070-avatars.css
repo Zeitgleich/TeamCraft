@@ -45,28 +45,34 @@
   position: absolute;
   right: -2px;
   bottom: -2px;
-  box-shadow: 0 0 0 2px var(--chrome);
+  box-shadow: 0 0 0 1.5px var(--presence-ring), 0 0 0 3px var(--chrome);
 }
 
+/* A dark ring around every dot: the colours alone are 1.2 to 2.6:1 against each other and the
+   surface, the ring is what passes 3:1 (WCAG 1.4.11), and the shapes below tell the states apart
+   without colour (WCAG 1.4.1, #2282). */
 .presence {
+  --presence-ring: #1b1b1b;
   display: inline-block;
   flex: none;
   width: 10px;
   height: 10px;
   border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--presence-ring);
 }
 
 .presence-online {
   background: var(--online);
 }
 
-/* Busy and do not disturb share red; only do not disturb carries the bar (issue #1578). */
+/* Busy: a dot with a dark centre. Do not disturb carries the bar instead (issue #1578). */
 .presence-busy {
-  background: var(--dnd);
+  background: radial-gradient(circle, var(--presence-ring) 0 24%, var(--dnd) 28%);
 }
 
+/* Away: a crescent, the moon. */
 .presence-away {
-  background: var(--away);
+  background: radial-gradient(circle at 70% 30%, var(--presence-ring) 0 40%, var(--away) 44%);
 }
 
 /* Be right back: the away colour with clock hands, so it reads apart from away without colour. */
@@ -91,5 +97,6 @@
 .presence-offline {
   background: transparent;
   border: 2px solid var(--offline);
+  box-shadow: 0 0 0 1.5px var(--presence-ring);
 }
 

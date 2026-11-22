@@ -171,6 +171,10 @@ pub struct AdminTenure {
   /// When the owner signed the roster that began it; `None` for a roster without a signing time.
   #[serde(rename = "from_ms", default, skip_serializing_if = "Option::is_none")]
   pub maybe_from_ms: Option<i64>,
+  /// The version of the roster that began it, to judge a document that names the roster version
+  /// its signer held (e2ee.md §4.13). `None` in a history recorded before this was kept.
+  #[serde(rename = "from_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_from_version: Option<u64>,
   /// The first roster without them; `None` while they are on the roster.
   #[serde(rename = "until", default, skip_serializing_if = "Option::is_none")]
   pub maybe_until: Option<TenureEnd>,
@@ -326,6 +330,7 @@ impl AdminHistory {
           identity_key: member.identity_key.clone(),
           is_owner: member.role == RosterRole::Owner,
           maybe_from_ms: roster.maybe_signed_at_ms,
+          maybe_from_version: Some(roster.version),
           maybe_until: None,
         });
       }
@@ -1672,6 +1677,7 @@ mod tests {
       let ended: Vec<_> = state.admin_history.ended_tenures_of(bob.user_id).collect();
       assert_eq!(ended.len(), 1);
       assert_eq!(ended[0].maybe_from_ms, Some(2_000));
+      assert_eq!(ended[0].maybe_from_version, Some(2));
       assert_eq!(
         ended[0].maybe_until,
         Some(TenureEnd {

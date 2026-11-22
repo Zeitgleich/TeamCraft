@@ -17009,54 +17009,6 @@
         }
       }
     },
-    "crash_reports_send_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
-          }
-        }
-      }
-    },
-    "crash_reports_required_hint": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
-          }
-        }
-      }
-    },
-    "crash_reports_notice": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "This app sends crash reports to your organization: where a crash happened and the app version, never messages, names or files."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien."
-          }
-        }
-      }
-    },
     "crash_reports_notice_settings": {
       "localizations": {
         "en": {
@@ -17085,6 +17037,134 @@
           "stringUnit": {
             "state": "translated",
             "value": "OK"
+          }
+        }
+      }
+    },
+    "crash_reports_send_hint_publisher": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When the app crashes or hits an error, it sends a report to the app developer: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den App-Entwickler: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_send_hint_organization": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_required_hint_publisher": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization requires crash reports. They go to the app developer and say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation schreibt Absturzberichte vor. Sie gehen an den App-Entwickler und enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_required_hint_organization": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation schreibt Absturzberichte vor. Sie enthalten wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_notice_publisher_optional": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sends error reports to the app developer when it crashes. You can turn this off in Settings."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Du kannst das in den Einstellungen abschalten."
+          }
+        }
+      }
+    },
+    "crash_reports_notice_publisher_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sends error reports to the app developer when it crashes. They contain no personal information and never chat content."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sendet bei Abstürzen Fehlerberichte an den App-Entwickler. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte."
+          }
+        }
+      }
+    },
+    "crash_reports_notice_organization_optional": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sends error reports to your organization when it crashes. You can turn this off in Settings."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Du kannst das in den Einstellungen abschalten."
+          }
+        }
+      }
+    },
+    "crash_reports_notice_organization_required": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sends error reports to your organization when it crashes. They contain no personal information and never chat content."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte."
           }
         }
       }
@@ -25661,6 +25741,198 @@
           "stringUnit": {
             "state": "translated",
             "value": "Neuer Link erstellt: Der alte funktioniert nicht mehr."
+          }
+        }
+      }
+    },
+    "call_tile_speaking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "speaking"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "spricht"
+          }
+        }
+      }
+    },
+    "call_video_camera": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Camera"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Kamera"
+          }
+        }
+      }
+    },
+    "call_announce_joined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ joined the call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ ist dem Anruf beigetreten"
+          }
+        }
+      }
+    },
+    "call_announce_left %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ left the call"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat den Anruf verlassen"
+          }
+        }
+      }
+    },
+    "call_announce_joined_many %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person joined the call"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people joined the call"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person ist dem Anruf beigetreten"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen sind dem Anruf beigetreten"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "call_announce_left_many %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld person left the call"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld people left the call"
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Person hat den Anruf verlassen"
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Personen haben den Anruf verlassen"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "crash_reports_send_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When the app crashes or hits an error, it sends a report to your organization's crash reports service: where in the app it happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn die App abstürzt oder auf einen Fehler stößt, sendet sie einen Bericht an den Absturzbericht-Dienst deiner Organisation: wo in der App es passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_required_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your organization requires crash reports. They say where in the app a crash happened, the app and system version, recent log lines and a random ID of this installation. Never messages, names, file names or keys."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Organisation schreibt Absturzberichte vor. Sie enthalten, wo in der App ein Absturz passiert ist, App- und Systemversion, die letzten Protokollzeilen und eine zufällige ID dieser Installation. Niemals Nachrichten, Namen, Dateinamen oder Schlüssel."
+          }
+        }
+      }
+    },
+    "crash_reports_notice": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This app sends crash reports to your organization: where a crash happened and the app version, never messages, names or files."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese App sendet Absturzberichte an deine Organisation: wo ein Absturz passiert ist und die App-Version, niemals Nachrichten, Namen oder Dateien."
           }
         }
       }

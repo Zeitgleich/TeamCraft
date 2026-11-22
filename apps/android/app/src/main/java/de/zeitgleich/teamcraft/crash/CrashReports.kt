@@ -59,7 +59,10 @@ class CrashReports(private val context: Context, private val sdk: CrashSdk) {
     val maybeConfig = withContext(Dispatchers.Default) { crashReportsConfig(answer.body.decodeToString()) }
     updateConfig(
       maybeConfig?.let {
-        CrashConfig(it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice, it.traceRate, it.slowJobMs.toLong())
+        CrashConfig(
+          it.dsn, it.sampleRate, it.environment, it.allowsOptOut, it.showsNotice, it.traceRate, it.slowJobMs.toLong(),
+          it.isPublisherRecipient,
+        )
       },
     )
   }
@@ -106,7 +109,7 @@ class CrashReports(private val context: Context, private val sdk: CrashSdk) {
     }
 
   private fun status(maybeConfig: CrashConfig?): CrashReportsStatus? =
-    maybeConfig?.takeIf { sdk.isAvailable }?.let { CrashReportsStatus(it.allowsOptOut, it.showsNotice) }
+    maybeConfig?.takeIf { sdk.isAvailable }?.let { CrashReportsStatus(it.allowsOptOut, it.showsNotice, it.isPublisherRecipient) }
 
   private fun installationId(): String =
     prefs.getString(KEY_INSTALLATION, null) ?: newInstallationId().also { prefs.edit().putString(KEY_INSTALLATION, it).apply() }
@@ -146,7 +149,9 @@ data class CrashConfig(
   val traceRate: Double = 0.0,
   /** A core job that waits or runs this long is reported as a sampled warning; 0: never. */
   val slowJobMs: Long = 1_000,
+  /** The publisher's service receives the reports; else the organization (also when stored by an older version). */
+  val isPublisherRecipient: Boolean = false,
 )
 
 /** What the privacy settings and the first-start notice need to know. */
-data class CrashReportsStatus(val allowsOptOut: Boolean, val showsNotice: Boolean)
+data class CrashReportsStatus(val allowsOptOut: Boolean, val showsNotice: Boolean, val isPublisherRecipient: Boolean)

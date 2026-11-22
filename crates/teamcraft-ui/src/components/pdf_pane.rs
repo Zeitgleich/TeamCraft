@@ -95,11 +95,11 @@ pub fn pdf_pane(i18n: I18n, bytes: Uint8Array, download: Callback<()>) -> AnyVie
   view! {
     // Nothing to zoom, page through or search in a document that failed.
     <div class="pdf-tools" prop:hidden=move || matches!(session.phase(), PdfPhase::Failed(_))>
-      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-out") data-tip=move || i18n.t("preview-zoom-out") on:click=move |_| session.zoom(1.0 / PDF_ZOOM_STEP)>
+      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-out") title=move || i18n.t("preview-zoom-out") on:click=move |_| session.zoom(1.0 / PDF_ZOOM_STEP)>
         <Icon name=IconName::ZoomOut />
       </button>
       <button class="btn btn-small" on:click=move |_| session.fit()>{move || format!("{} %", (session.scale() * 100.0).round())}</button>
-      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-in") data-tip=move || i18n.t("preview-zoom-in") on:click=move |_| session.zoom(PDF_ZOOM_STEP)>
+      <button class="icon-btn" aria-label=move || i18n.t("preview-zoom-in") title=move || i18n.t("preview-zoom-in") on:click=move |_| session.zoom(PDF_ZOOM_STEP)>
         <Icon name=IconName::ZoomIn />
       </button>
       <label class="pdf-page-field">

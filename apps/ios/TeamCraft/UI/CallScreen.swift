@@ -63,8 +63,9 @@ struct CallScreen: View {
         .ignoresSafeArea()
         .contentShape(Rectangle())
         .onTapGesture { setControlsShown(!areControlsShown) }
-        .accessibilityAddTraits(.isButton)
-        .accessibilityLabel(Text("call_toggle_controls"))
+        // An action, not a label and a button trait on the container: those could replace the
+        // tiles' own labels for VoiceOver (#2281).
+        .accessibilityAction(named: Text("call_toggle_controls")) { setControlsShown(!areControlsShown) }
       chrome
       if model.calls.isCameraOn {
         SelfViewCorner(size: CGSize(width: 108, height: 144), spring: spring) {
@@ -191,6 +192,9 @@ struct CallScreen: View {
         announce(String(localized: "call_recording_by \(recordingNames)"), isUrgent: true)
       }
     }
+    .onChange(of: call.participantUserIds) { old, new in
+      rosterAnnouncer.note(RosterChange(before: old, now: new), names: model.calls.names, say: { announce($0) })
+    }
     .onChange(of: call.phase) { _, phase in
       if phase == .reconnecting { announce(String(localized: "call_reconnecting")) }
     }
@@ -198,6 +202,9 @@ struct CallScreen: View {
       if new > old { announce(String(localized: "call_lobby_banner \(new)")) }
     }
   }
+
+  /// Joins and leaves, said together after a short window (#2281).
+  @State private var rosterAnnouncer = RosterAnnouncer()
 
   /// WCAG 2.2.1 (#217): with VoiceOver or Switch Control the controls don't step aside on a timer;
   /// they would vanish while the user moves towards them.
@@ -313,7 +320,9 @@ struct CallScreen: View {
       .animation(Motion.fast, value: person.isSpeaking)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
-        CallTileLabel(name: person.name, isMuted: person.isMuted, isUnverified: person.isUnverified).text)
+        CallTileLabel(name: person.name, isMuted: person.isMuted, isUnverified: person.isUnverified).text
+      )
+      .accessibilityValue(person.isSpeaking ? Text("call_tile_speaking") : Text(verbatim: ""))
     }
   }
 
@@ -323,6 +332,7 @@ struct CallScreen: View {
     if !person.name.isEmpty {
       HStack(spacing: 4) {
         if person.isUnverified { unverifiedMark }
+        if person.isSpeaking { speakingMark }
         if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
         hostBadge(of: person.id)
@@ -345,6 +355,14 @@ struct CallScreen: View {
         .foregroundStyle(.white.opacity(0.8))
         .lineLimit(1)
     }
+  }
+
+  /// Who speaks, as a shape and not only the accent ring (WCAG 1.4.1, #2281); VoiceOver gets the
+  /// state as the tile's value.
+  private var speakingMark: some View {
+    Image(systemName: "waveform")
+      .font(.app(.caption2))
+      .accessibilityHidden(true)
   }
 
   /// The warning mark of a tile whose person could not be verified (an SF Symbol, never an emoji);
@@ -414,8 +432,15 @@ struct CallScreen: View {
               RoundedRectangle(cornerRadius: 14, style: .continuous)
                 .stroke(Theme.accent, lineWidth: isSpeaking(stream) ? 3 : 0))
             .onTapGesture { withAnimation(spring) { maybeSpotlightId = stream.id } }
+            .accessibilityElement(children: .ignore)
             .accessibilityAddTraits(.isButton)
-            .accessibilityLabel(Text("call_video_spotlight"))
+            .accessibilityLabel(
+              ownerName(of: stream).map {
+                CallTileLabel(name: $0, isMuted: isMuted(stream), isUnverified: isUnverified(stream)).text
+              } ?? Text("call_video_camera")
+            )
+            .accessibilityValue(isSpeaking(stream) ? Text("call_tile_speaking") : Text(verbatim: ""))
+            .accessibilityHint(Text("call_video_spotlight"))
         }
       }
       .padding(.horizontal, 16)
@@ -429,6 +454,7 @@ struct CallScreen: View {
     if let name = ownerName(of: stream) {
       HStack(spacing: 4) {
         if isUnverified(stream) { unverifiedMark }
+        if isSpeaking(stream) { speakingMark }
         if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
         if let userId = call.userIdByDevice[stream.deviceId] { hostBadge(of: userId) }
@@ -437,6 +463,7 @@ struct CallScreen: View {
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(CallTileLabel(name: name, isMuted: isMuted(stream), isUnverified: isUnverified(stream)).text)
+      .accessibilityValue(isSpeaking(stream) ? Text("call_tile_speaking") : Text(verbatim: ""))
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
       .background(.black.opacity(0.55), in: Capsule())

@@ -754,29 +754,35 @@ fn CrashReportsCard() -> impl IntoView {
     let state = use_app_state();
     let prefs = state.settings.prefs;
     let status = Signal::derive(crate::crash_reports::status);
-    let is_mandatory = Signal::derive(move || status.get().is_some_and(|status| !status.allows_opt_out));
     view! {
       <Show when=move || status.get().is_some()>
         <SettingsCard heading="crash-reports-heading">
-          <Show
-            when=move || is_mandatory.get()
-            fallback=move || view! {
-              <SwitchRow
-                label="crash-reports-send"
-                hint="crash-reports-send-hint"
-                value=Signal::derive(move || prefs.with(|all| all.privacy.send_crash_reports))
-                on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.send_crash_reports = value))
-              />
+          {move || {
+            let Some(status) = status.get() else { return ().into_any() };
+            let hint = crate::crash_reports::hint_key(status.notice);
+            if status.allows_opt_out {
+              view! {
+                <SwitchRow
+                  label="crash-reports-send"
+                  hint=hint
+                  value=Signal::derive(move || prefs.with(|all| all.privacy.send_crash_reports))
+                  on_change=Callback::new(move |value: bool| prefs.update(|all| all.privacy.send_crash_reports = value))
+                />
+              }
+              .into_any()
+            } else {
+              view! {
+                <SwitchRow
+                  label="crash-reports-send"
+                  hint=hint
+                  value=Signal::derive(|| true)
+                  on_change=Callback::new(|_: bool| {})
+                  is_disabled=Signal::derive(|| true)
+                />
+              }
+              .into_any()
             }
-          >
-            <SwitchRow
-              label="crash-reports-send"
-              hint="crash-reports-required-hint"
-              value=Signal::derive(|| true)
-              on_change=Callback::new(|_: bool| {})
-              is_disabled=Signal::derive(|| true)
-            />
-          </Show>
+          }}
         </SettingsCard>
       </Show>
     }
