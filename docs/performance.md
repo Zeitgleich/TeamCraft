@@ -1031,6 +1031,36 @@ still might, so a camera layer whose hardware gives a picture for fewer than one
 `video_codec.rs`). Screen layers don't: a 4K one takes VideoToolbox 20 to 41 ms a picture, and
 OpenH264 far longer.
 
+### Direct media for 1:1 calls (issue #127)
+
+Two native clients with device-bound DAVE keys, each in a rootless network namespace of its own
+(pasta, which maps the namespace's UDP ports to the host's like a home router), the SFU on the host.
+Each namespace's link is shaped in both directions with `tc` (netem under a tbf, through an ifb for ingress): the
+SFU's port as a data centre further away, everything else (the other device) as the same city,
+both with jitter and 0.1 % loss, and a rate that swings in a random walk between half and twice its
+middle. The harness is `crates/teamcraft-sfu/tests/suite/direct_measure.rs` (ignored; roles by
+environment). 40 s calls, the clients' path and round trips once a second, the SFU's forwarded
+bytes (`teamcraft_sfu_forwarded_bytes_total`).
+
+| Profile (each way, per link)                     | Path             | Round trip | Voice A→B one way (from the links) | SFU forwards, s 15–35 | Frames heard/s |
+|--------------------------------------------------|------------------|------------|------------------------------------|-----------------------|----------------|
+| SFU 25 ± 3 ms, peer 4 ± 1 ms, 5–20 Mbit/s        | through the SFU  | 52 ms      | ≈ 50 ms                            | 98 kbit/s             | 50             |
+| same                                             | direct           | 16 ms      | ≈ 8 ms                             | 0                     | 50             |
+| SFU 60 ± 3 ms, peer 20 ± 1 ms, 1–6 Mbit/s        | through the SFU  | 123 ms     | ≈ 120 ms                           | 98 kbit/s             | 52             |
+| same                                             | direct           | 82 ms      | ≈ 40 ms                            | 0                     | 49             |
+
+- The voice moves to the direct path about 9 s after the join and stays there; nothing is lost at
+  the switch (50 frames a second throughout). Most of the 9 s is pasta's port forwarding, which
+  appears up to a second after the socket is bound: the first dialing round finds no way in and
+  the second one, 2 s later, connects. The design's numbers (offer, 50 ms per pair, 1 s of proof)
+  come to about 2 s where the NAT opens on the first packet.
+- The SFU forwards none of the pair's audio while both report the direct path; it still receives
+  it (its speaker selection and the voice guard watch it) and would forward it at once.
+- Video isn't part of this step (it stays on the SFU), so the SFU's saving in a call with cameras
+  is the audio's share only.
+- Not measured yet: success per NAT type (only pasta's endpoint-independent mapping here), real
+  mobile networks.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
