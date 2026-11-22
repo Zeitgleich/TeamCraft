@@ -16,6 +16,7 @@ mod calls;
 mod channel_anchor;
 mod channel_roles;
 mod color_theme;
+mod command_failures;
 mod composer_format;
 mod crash_reports;
 mod creating;
@@ -186,6 +187,8 @@ pub struct TeamCraft {
   activity: Mutex<ActivityReports>,
   /// The calls running in the user's conversations, read without the engine (issue #1352).
   running_calls: calls::RunningCalls,
+  /// Queued commands that failed, until the app takes them (#2242).
+  command_failures: command_failures::CommandFailures,
   /// What the app measured of its link before a call, per network (#1969).
   link: Arc<calls::LinkMeasures>,
   /// Whether the app is in the foreground: only then does it measure its link.
@@ -332,6 +335,13 @@ impl TeamCraft {
   /// and hands the new one to [`Self::note_id_token`].
   pub fn take_id_token_request(&self) -> bool {
     self.id_tokens.take_request()
+  }
+
+  /// The queued actions (delete a channel or a space, …) the server or the network refused since
+  /// the last call, oldest first, each with the server's error code: the app shows them (issue
+  /// #2242, #322). Call it whenever [`EventListener::on_change`] fires. A cheap getter over memory.
+  pub fn take_command_failures(&self) -> Vec<command_failures::CommandFailure> {
+    self.command_failures.take()
   }
 
   /// The network changed (Android `NetworkCallback`, iOS `NWPathMonitor`) or the app came back
@@ -2280,12 +2290,14 @@ impl TeamCraft {
     let connection = ConnectionStatus::new();
     let id_tokens = engine::IdTokens::default();
     let running_calls = calls::RunningCalls::default();
+    let command_failures = command_failures::CommandFailures::default();
     let signals = engine::SyncSignals {
       network: network.clone(),
       connection: connection.clone(),
       catch_up_focus: Default::default(),
       id_tokens: id_tokens.clone(),
       running_calls: running_calls.clone(),
+      command_failures: command_failures.clone(),
     };
     // The core's threads never call the app themselves (issue #2225).
     let listener = app_changes::AppChanges::start(listener)?;
@@ -2311,6 +2323,7 @@ impl TeamCraft {
       id_tokens,
       activity: Mutex::default(),
       running_calls,
+      command_failures,
       link: Arc::default(),
       is_foreground: std::sync::atomic::AtomicBool::new(true),
     }))

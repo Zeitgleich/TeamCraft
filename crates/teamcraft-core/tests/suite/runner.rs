@@ -370,3 +370,56 @@ async fn enrolled(api: FakeServerApi) -> Client<FakeServerApi, Arc<MemoryStore>>
     .await
     .unwrap()
 }
+
+/// Issue #2242: a queued command the server refuses reaches the app, instead of a log line only.
+#[cfg(feature = "ui")]
+#[tokio::test]
+async fn a_failed_queued_command_is_reported_to_the_app() {
+  use std::cell::RefCell;
+
+  use teamcraft_client_api::failure::{ActionFailure, FailureKind};
+  use teamcraft_client_api::model::id_from_raw;
+  use teamcraft_core::ui_backend::CoreCommand;
+  use teamcraft_proto::ErrorCode;
+
+  let server = FakeServer::new();
+  let api = server.add_user("Alice");
+  let client = PendingEnrollment::new()
+    .complete(
+      api,
+      Arc::new(MemoryStore::new()),
+      clock(),
+      settings(),
+      options(PASSPHRASE),
+    )
+    .await
+    .unwrap();
+  let (mut runner, handle) = SyncRunner::new(client, RunnerSettings::default(), Box::new(|| {}));
+  let reported = Rc::new(RefCell::new(Vec::<ActionFailure>::new()));
+  let sink = reported.clone();
+  runner.report_command_failures(Box::new(move |failure| sink.borrow_mut().push(failure)));
+  let work = async {
+    // A hold this device hasn't verified yet: the server refuses the deletion.
+    server.answer_next_delete_with(409, ErrorCode::LegalHold);
+    let command = CoreCommand::DeleteChannel {
+      conversation: id_from_raw(4242),
+    };
+    assert!(handle.send(RunnerCommand::Ui(command)));
+    // Commands run in order: once this job ran, the refused one is done.
+    let (reply, answer) = futures_channel::oneshot::channel();
+    let job = ClientJob::new(move |_client: &mut dyn Any| {
+      Box::pin(async move {
+        let _ = reply.send(());
+      })
+    });
+    assert!(handle.send(RunnerCommand::WithClient(job)));
+    answer.await.unwrap();
+    assert!(handle.send(RunnerCommand::Stop));
+  };
+
+  let (_client, ()) = tokio::join!(runner.run(), work);
+
+  let reported = reported.borrow();
+  assert_eq!(reported.len(), 1, "the failure reached the hook once");
+  assert_eq!(reported[0].kind, FailureKind::Server(ErrorCode::LegalHold));
+}

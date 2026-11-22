@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="error_last_channel_admin">Ernenne zuerst in den Kanaleinstellungen jemand anderen zum Kanal-Admin oder lösche den Kanal.</string>
+  <string name="error_import_in_progress">In diesen Kanal läuft gerade ein Import. Lösche ihn, sobald der Import fertig ist.</string>
+  <string name="error_space_has_hidden_channels">Dieser Space enthält private Kanäle, in denen du nicht bist. Bitte einen Workspace-Admin, ihn zu löschen.</string>
+  <string name="error_forbidden">Dafür fehlt dir die Berechtigung. Frage einen Admin des Space oder Workspace.</string>
+  <string name="error_rate_limited">Zu viele Anfragen auf einmal. Warte einen Moment und versuche es erneut.</string>
+  <string name="error_conflict">Jemand hat das gleichzeitig geändert. Sieh dir den aktuellen Stand an und versuche es erneut.</string>
+  <string name="error_not_found">Das gibt es nicht mehr. Es wurde vielleicht gelöscht oder verschoben.</string>
+  <string name="error_server_trouble">Der Server hat gerade ein Problem. Versuche es in ein paar Minuten erneut.</string>
+</resources>

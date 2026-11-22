@@ -14,6 +14,8 @@ use std::time::Duration;
 use futures_channel::mpsc;
 use futures_util::StreamExt;
 use futures_util::future::{Either, LocalBoxFuture, select};
+#[cfg(feature = "ui")]
+use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
@@ -62,6 +64,10 @@ pub struct SyncRunner<A: ServerApi, S> {
   drained: Vec<futures_channel::oneshot::Sender<()>>,
   /// Told once a connection is up and caught up ([`RunnerCommand::CatchUp`]).
   caught_up: Vec<futures_channel::oneshot::Sender<()>>,
+  /// Told of every queued UI command the server or the network refused, so the app shows it
+  /// (issue #322: a failed action never passes silently).
+  #[cfg(feature = "ui")]
+  maybe_on_command_failed: Option<Box<dyn Fn(ActionFailure)>>,
 }
 
 /// How often the app is told to read again while a file goes up or down, for its progress.
@@ -200,6 +206,8 @@ impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
       maybe_reported_bytes: None,
       drained: Vec::new(),
       caught_up: Vec::new(),
+      #[cfg(feature = "ui")]
+      maybe_on_command_failed: None,
     };
     (runner, RunnerHandle { sender, stop })
   }
@@ -207,6 +215,12 @@ impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
   /// Reconnects at once whenever `changes` reports a network change or a wake-up.
   pub fn watch_network(&mut self, changes: &NetworkChanges) {
     self.maybe_network = Some(changes.subscribe());
+  }
+
+  /// Calls `on_failed` with the failure of every queued UI command that fails.
+  #[cfg(feature = "ui")]
+  pub fn report_command_failures(&mut self, on_failed: Box<dyn Fn(ActionFailure)>) {
+    self.maybe_on_command_failed = Some(on_failed);
   }
 
   /// Reports the connection's state to `status` (kept by the app across runner restarts).
@@ -405,6 +419,9 @@ impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
           .await;
         if let Err(error) = result {
           tracing::warn!(%error, "UI command failed");
+          if let Some(on_failed) = &self.maybe_on_command_failed {
+            on_failed(error.to_failure());
+          }
         }
         // It may have answered a read, also as failed (a list's status): read again.
         self.changed();
