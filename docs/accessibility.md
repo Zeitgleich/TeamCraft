@@ -113,7 +113,7 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | A-4  | Switches and radios without a name (notification dialog, Do not disturb, meeting lobby, UnifiedPush, blur faces) | High | fixed: whole rows `toggleable`/`selectable` with a role |
 | A-5  | The voice recording timer was a live region: read every second, into the recording                         | High     | fixed; the record button says "Recording" and its disabled state |
 | A-6  | Record button: no role, disabled and recording only shown visually                                         | Medium   | fixed with A-5 |
-| A-7  | A-33: poll results, media review strip, pickable tiles, mention suggestions, upload progress, targets, font scale, new-message announcements | Medium/Low | #2285, call parts #2281, presence #2282 |
+| A-7  | A-33: poll own vote, media review strip, pickable tiles, mention and emoji suggestions, upload progress, 48 dp targets (reactions, thread link, attachment remove, zoom, trim handles), font scale (attach tiles, call avatar initial), lobby buttons, shutter, repeat field, external invitee error, option switches, selection mode | Medium/Low | fixed: #2285 (new messages are announced at the bottom, the jump pill is a polite live region); call parts #2281, presence #2282 |
 
 ### Findings: iOS
 

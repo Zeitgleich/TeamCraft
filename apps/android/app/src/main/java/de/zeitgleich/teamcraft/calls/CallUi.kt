@@ -634,7 +634,8 @@ private fun AvatarImage(userId: String, name: String, size: Dp, modifier: Modifi
       Text(
         name.firstOrNull()?.uppercase() ?: "?",
         color = Color.White,
-        fontSize = (size.value * 0.42f).sp,
+        // Dp to sp through the font scale, so the initial stays inside its circle at 200 % (A11y #2285).
+        fontSize = with(LocalDensity.current) { (size * 0.42f).toSp() },
         // The name label says who it is; TalkBack shouldn't read the initial on its own.
         modifier = Modifier.clearAndSetSemantics {},
         fontWeight = FontWeight.Medium,

@@ -180,8 +180,10 @@ private fun PollOptionRow(
 ) {
   val shape = RoundedCornerShape(12.dp)
   val countText = maybeCount?.let { count -> stringResource(R.string.poll_option_count, count, share) }
+  // A custom stateDescription replaces the toggle's own "checked": say the own vote first (A11y #2285).
+  val chosenText = stringResource(if (isChosen) R.string.a11y_state_checked else R.string.a11y_state_not_checked)
   val state = maybeCount?.let { count ->
-    pluralStringResource(R.plurals.poll_option_votes, count, count, share)
+    chosenText + ", " + pluralStringResource(R.plurals.poll_option_votes, count, count, share)
   }
   val fill by animateFloatAsState(targetValue = share / 100f, animationSpec = LocalMotion.current.base(), label = "poll share")
   val mark = when {

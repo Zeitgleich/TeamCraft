@@ -1,5 +1,8 @@
 package de.zeitgleich.teamcraft.ui.media
 
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.plus
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.only
@@ -246,12 +249,17 @@ private fun AlbumGrid(album: MediaAlbumRef, draft: MediaDraft, isFull: Boolean, 
 @Composable
 private fun GridTile(item: RecentMediaItem, number: Int, isEnabled: Boolean, onToggle: () -> Unit) {
   val isSelected = number > 0
-  val description = stringResource(if (item.isVideo) R.string.attach_recent_video else R.string.attach_recent_photo)
+  val description = mediaTileDescription(item)
+  val selectedState = if (isSelected) stringResource(R.string.a11y_selection_number, number) else stringResource(R.string.a11y_not_selected)
   Box(
     Modifier
       .aspectRatio(1f)
-      .toggleable(value = isSelected, enabled = isEnabled, onValueChange = { onToggle() })
-      .semantics { contentDescription = description },
+      .toggleable(value = isSelected, enabled = isEnabled, role = Role.Checkbox, onValueChange = { onToggle() })
+      .semantics {
+        contentDescription = description
+        // The number in the selection and a video's length are part of the tile (A11y #2285).
+        stateDescription = selectedState
+      },
   ) {
     Thumbnail(item, side = 120.dp, modifier = Modifier.matchParentSize())
     if (isSelected) Box(Modifier.matchParentSize().background(Color.Black.copy(alpha = 0.3f)))
@@ -260,13 +268,20 @@ private fun GridTile(item: RecentMediaItem, number: Int, isEnabled: Boolean, onT
   }
 }
 
+/** A tile's name for screen readers: "Photo", or "Video, 0:12". */
+@Composable
+internal fun mediaTileDescription(item: RecentMediaItem): String {
+  if (!item.isVideo) return stringResource(R.string.attach_recent_photo)
+  return stringResource(R.string.a11y_media_photo_length, stringResource(R.string.attach_recent_video), DateUtils.formatElapsedTime(item.durationMs / 1000))
+}
+
 @Composable
 internal fun VideoLength(durationMs: Long, modifier: Modifier) {
   Text(
     DateUtils.formatElapsedTime(durationMs / 1000),
     style = MaterialTheme.typography.labelSmall,
     color = Color.White,
-    modifier = modifier.padding(4.dp).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp)).padding(horizontal = 4.dp),
+    modifier = modifier.padding(4.dp).background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(6.dp)).padding(horizontal = 4.dp).clearAndSetSemantics {},
   )
 }
 
@@ -282,7 +297,9 @@ private fun SelectionBadge(number: Int, modifier: Modifier) {
       .border(1.5.dp, Color.White, CircleShape),
     contentAlignment = Alignment.Center,
   ) {
-    if (isSelected) Text(number.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary)
+    if (isSelected) {
+      Text(number.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary, modifier = Modifier.clearAndSetSemantics {})
+    }
   }
 }
 
