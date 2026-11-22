@@ -722,9 +722,21 @@ async fn screenshot(page: &Page, scheme: &str, name: &str) {
     .unwrap();
 }
 
-/// A click with the mouse, not through the DOM: it counts as the user's gesture.
+/// A click with the mouse, not through the DOM: it counts as the user's gesture. The call screen
+/// builds its stage again when the call changes (a share, a tile), so an element found a moment ago
+/// may be gone by the click ("not visible"): it is looked up again until the click lands.
 async fn click_for_real(page: &Page, selector: &str) {
-  wait_for_element(page, selector).await.click().await.unwrap();
+  let deadline = Instant::now() + SETUP_TIMEOUT;
+  loop {
+    match wait_for_element(page, selector).await.click().await {
+      Ok(_) => return,
+      Err(error) if Instant::now() < deadline => {
+        eprintln!("clicking {selector} again: {error}");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+      },
+      Err(error) => panic!("clicking {selector}: {error}"),
+    }
+  }
 }
 
 async fn has_element(page: &Page, selector: &str) -> bool {
