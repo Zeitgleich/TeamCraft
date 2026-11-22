@@ -47,17 +47,25 @@ const REACTION_LIMIT: Duration = Duration::from_millis(2_000);
 const SYNC_HELD: Duration = Duration::from_secs(6);
 const WAIT: Duration = Duration::from_secs(60);
 
-/// One picture into the composer's file input, as a picker does; its name is filled in.
+/// One photo as a phone takes it (12 MP JPEG, a few MB of noise that doesn't compress away) into the
+/// composer's file input, as a picker does; its name is filled in. A small picture hides what a
+/// real one costs on the way to the row: reading it and making its thumbnail.
 const PICK_PICTURE: &str = r"(async name => {
   const canvas = document.createElement('canvas');
-  canvas.width = 320;
-  canvas.height = 240;
+  canvas.width = 4032;
+  canvas.height = 3024;
   const context = canvas.getContext('2d');
-  context.fillStyle = '#3a7';
-  context.fillRect(0, 0, 320, 240);
-  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+  const image = context.createImageData(canvas.width, canvas.height);
+  const words = new Uint32Array(image.data.buffer);
+  let seed = 2269;
+  for (let index = 0; index < words.length; index++) {
+    seed = (seed * 1103515245 + 12345) >>> 0;
+    words[index] = seed | 0xff000000;
+  }
+  context.putImageData(image, 0, 0);
+  const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/jpeg', 0.9));
   const transfer = new DataTransfer();
-  transfer.items.add(new File([blob], name, { type: 'image/png' }));
+  transfer.items.add(new File([blob], name, { type: 'image/jpeg' }));
   const input = document.querySelector('input[type=file][multiple]');
   input.files = transfer.files;
   input.dispatchEvent(new Event('change', { bubbles: true }));
@@ -199,7 +207,7 @@ async fn measure_file_echo(page: &Page, is_measure_only: bool) {
     .unwrap_or(5);
   let mut millis = Vec::new();
   for run in 0..runs {
-    let name = format!("picture-{run}.png");
+    let name = format!("photo-{run}.jpg");
     page
       .evaluate(format!("({PICK_PICTURE})({name:?})"))
       .await
@@ -226,6 +234,7 @@ async fn measure_file_echo(page: &Page, is_measure_only: bool) {
       .ok()
       .and_then(|result| result.into_value::<String>().ok())
       .unwrap_or_default();
+    eprintln!("pending echo: picture run {run}: the row showed {picture:?}");
     if !is_measure_only {
       assert_eq!(picture, "picked", "the row shows the picked picture at once");
     }
