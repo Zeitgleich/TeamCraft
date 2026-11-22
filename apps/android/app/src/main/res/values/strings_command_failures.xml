@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="error_last_channel_admin">Make someone else channel admin in the channel\'s settings first, or delete the channel.</string>
+  <string name="error_import_in_progress">An import is running into this channel. Delete it once the import is done.</string>
+  <string name="error_space_has_hidden_channels">This space holds private channels you aren\'t in. Ask a workspace admin to delete it.</string>
+  <string name="error_forbidden">You don\'t have permission for this. Ask an admin of the space or workspace.</string>
+  <string name="error_rate_limited">Too many requests at once. Wait a moment and try again.</string>
+  <string name="error_conflict">Someone changed this at the same time. Look at the current state and try again.</string>
+  <string name="error_not_found">This doesn\'t exist any more. It may have been deleted or moved.</string>
+  <string name="error_server_trouble">The server has a problem right now. Try again in a few minutes.</string>
+</resources>

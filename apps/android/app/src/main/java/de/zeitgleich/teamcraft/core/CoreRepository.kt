@@ -3,8 +3,11 @@ package de.zeitgleich.teamcraft.core
 import android.content.Context
 import java.io.File
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -19,6 +22,7 @@ import de.zeitgleich.teamcraft.server.StoragePaths
 import uniffi.teamcraft_ffi.AccessToken
 import uniffi.teamcraft_ffi.AppActivity
 import uniffi.teamcraft_ffi.AppConfig
+import uniffi.teamcraft_ffi.CommandFailure
 import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.ConversationItem
 import uniffi.teamcraft_ffi.EventListener
@@ -50,6 +54,11 @@ class CoreRepository(
 
   /** Increments whenever the local store changed; screens re-read on every value. */
   val changeCount: StateFlow<Long> = changes
+
+  private val commandFailureQueue = Channel<CommandFailure>(Channel.BUFFERED)
+
+  /** Queued actions the server or the network refused (#2242), each once, for the screens to show. */
+  val commandFailures: Flow<CommandFailure> = commandFailureQueue.receiveAsFlow()
 
   /**
    * A new value every time a core opens or closes: what was read from one account's store is never
@@ -104,6 +113,8 @@ class CoreRepository(
         Changes {
           changes.update { it + 1 }
           connection.value = maybeCore?.connectionState()
+          // Cheap getter over memory, called on the core's thread for the app.
+          runCatching { maybeCore?.takeCommandFailures() }.getOrNull()?.forEach { commandFailureQueue.trySend(it) }
         },
       )
     }

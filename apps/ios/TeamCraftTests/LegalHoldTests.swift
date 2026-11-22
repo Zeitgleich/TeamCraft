@@ -28,4 +28,17 @@ final class LegalHoldTests: XCTestCase {
     XCTAssertEqual(CoreFailure(LegalHold()), .legalHold)
     XCTAssertEqual(AppFailure(.legalHold).message, "error_legal_hold")
   }
+
+  func testAQueuedActionRefusedByTheServerIsWordedByItsCode() {
+    func refused(_ code: String?) -> AppFailure {
+      AppFailure(CommandFailure(kind: .refused, maybeErrorCode: code, detail: "refused"))
+    }
+    XCTAssertEqual(refused("legal_hold").message, "error_legal_hold")
+    XCTAssertEqual(refused("last_channel_admin").message, "error_last_channel_admin")
+    XCTAssertEqual(refused("import_in_progress").message, "error_import_in_progress")
+    XCTAssertEqual(refused("space_has_hidden_channels").message, "error_space_has_hidden_channels")
+    XCTAssertEqual(refused("conversation_not_found"), .notFound)
+    XCTAssertEqual(refused("brand_new_code"), .generic)
+    XCTAssertEqual(AppFailure(CommandFailure(kind: .unreachable, maybeErrorCode: nil, detail: "")), .network)
+  }
 }

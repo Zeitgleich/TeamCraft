@@ -64,6 +64,7 @@ import de.zeitgleich.teamcraft.auth.isSsoOnly
 import de.zeitgleich.teamcraft.auth.localSignInErrorText
 import de.zeitgleich.teamcraft.calls.CallOptions
 import de.zeitgleich.teamcraft.core.ChatActions
+import de.zeitgleich.teamcraft.core.commandFailureText
 import de.zeitgleich.teamcraft.core.ComposerSend
 import de.zeitgleich.teamcraft.core.ComposerSendState
 import de.zeitgleich.teamcraft.core.SendAttempt
@@ -400,6 +401,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     viewModelScope.launch(Dispatchers.IO) { MediaDraftStore.sweep(getApplication(), System.currentTimeMillis()) }
     viewModelScope.launch { graph.core.changeCount.collect { isStartCacheStale = true } }
+    // A refused queued action (deleting a channel or space, …) shows like any failed action (#2242).
+    viewModelScope.launch { graph.core.commandFailures.collect { failures.value = commandFailureText(it) } }
     viewModelScope.launch {
       graph.core.changeCount.collectLatest {
         while (true) {

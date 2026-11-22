@@ -216,6 +216,8 @@ pub(crate) struct SyncSignals {
   pub(crate) id_tokens: IdTokens,
   /// The calls running in the user's conversations (issue #1352).
   pub(crate) running_calls: RunningCalls,
+  /// Where queued commands that failed wait for the app (#2242).
+  pub(crate) command_failures: crate::command_failures::CommandFailures,
 }
 
 /// Where a push's preview spent its time, for the `push opened` line: durations only.
@@ -1196,6 +1198,12 @@ impl Engine {
       Box::new(move || listener.on_change()),
     );
     runner.watch_network(&self.signals.network);
+    let command_failures = self.signals.command_failures.clone();
+    let failed_listener = self.listener.clone();
+    runner.report_command_failures(Box::new(move |failure| {
+      command_failures.push(failure.into());
+      failed_listener.on_change();
+    }));
     runner.share_connection_status(self.signals.connection.clone());
     let notice = LoopDeathNotice(self.maybe_jobs.clone());
     // Boxed: the future that owns it is moved by value into its timing below, and a client is too
@@ -3198,6 +3206,7 @@ mod tests {
         catch_up_focus: CatchUpFocus::default(),
         id_tokens: Default::default(),
         running_calls: Default::default(),
+        command_failures: Default::default(),
       };
       let start = EngineStart::new(config, tokens, None, Arc::new(listener), signals).unwrap();
       let key_source = StaticKeySource::new(SymmetricKey::from_slice(&KEY).unwrap());

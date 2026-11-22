@@ -12,6 +12,8 @@ enum AppFailure: Error, Equatable {
   case tooLarge
   /// A deletion refused because the conversation is under legal hold.
   case legalHold
+  /// Refusals of a queued action (`CommandFailure`, #2242), worded by the server's error code.
+  case lastChannelAdmin, importInProgress, spaceHasHiddenChannels, forbidden, rateLimited, conflict, notFound, serverTrouble
   case backupOutOfMemory, backupTooNew, backupDamaged
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
   /// The session is bound to a device key that is gone (docs/e2ee.md §3.1.2).
@@ -44,6 +46,31 @@ enum AppFailure: Error, Equatable {
     }
   }
 
+  /// A queued action the server or the network refused; unknown codes read as a generic failure.
+  init(_ failure: CommandFailure) {
+    switch failure.kind {
+    case .unreachable: self = .network
+    case .other: self = .generic
+    case .refused:
+      let code = failure.maybeErrorCode ?? ""
+      switch code {
+      case "legal_hold": self = .legalHold
+      case "last_channel_admin": self = .lastChannelAdmin
+      case "import_in_progress": self = .importInProgress
+      case "space_has_hidden_channels": self = .spaceHasHiddenChannels
+      case "forbidden", "not_space_member": self = .forbidden
+      case "unauthorized", "invalid_token", "account_deleted": self = .signedOut
+      case "rate_limited": self = .rateLimited
+      case "conflict", "epoch_conflict", "version_conflict": self = .conflict
+      case "payload_too_large": self = .tooLarge
+      case "unavailable", "internal": self = .serverTrouble
+      // Every `*_not_found` code, including ones this version doesn't know yet.
+      case _ where code.hasSuffix("_not_found"): self = .notFound
+      default: self = .generic
+      }
+    }
+  }
+
   var message: LocalizedStringKey {
     switch self {
     case .network: return "error_network"
@@ -62,6 +89,14 @@ enum AppFailure: Error, Equatable {
     case .callEncryptionPending: return "call_encryption_pending"
     case .tooLarge: return "error_too_large"
     case .legalHold: return "error_legal_hold"
+    case .lastChannelAdmin: return "error_last_channel_admin"
+    case .importInProgress: return "error_import_in_progress"
+    case .spaceHasHiddenChannels: return "error_space_has_hidden_channels"
+    case .forbidden: return "error_forbidden"
+    case .rateLimited: return "error_rate_limited"
+    case .conflict: return "error_conflict"
+    case .notFound: return "error_not_found"
+    case .serverTrouble: return "error_server_trouble"
     case .generic: return "error_generic"
     case .linkCodeInvalid: return "link_code_invalid"
     case .linkCodeForNewDevice: return "link_code_for_new_device"
@@ -150,6 +185,8 @@ final class AppModel {
   private(set) var isBusy = false
   /// Increments on every store change; screens re-read when it changes.
   private(set) var changeCount = 0
+  /// The newest queued action the server or the network refused (#2242); the root view shows it once.
+  var maybeQueuedFailure: AppFailure?
   /// The last conversation opened from a notification, counted so the same one twice is a change.
   private(set) var reopenedConversation: ReopenedConversation?
   /// Everyone typing anywhere right now (#882): the chat list's rows, the header and the typing
@@ -1368,6 +1405,8 @@ final class AppModel {
   /// conversations that are read now go.
   private func storeDidChange() {
     changeCount += 1
+    // A cheap getter over memory: the refusals of queued actions (delete a channel or space, …).
+    if let failure = maybeCore?.takeCommandFailures().last { maybeQueuedFailure = AppFailure(failure) }
     if maybeCore != nil { settingsSyncer().storeDidChange() }
     homeWidget.storeDidChange(self)
     shareTargetsUpdater.storeDidChange(self)

@@ -44,6 +44,15 @@ struct RootView: View {
     ) {
       Button("done", role: .cancel) {}
     }
+    // A queued action the server refused (delete a channel or space, …) is never silent (#2242).
+    .alert(
+      "entry_action_failed",
+      isPresented: Binding(get: { model.maybeQueuedFailure != nil }, set: { _ in model.maybeQueuedFailure = nil })
+    ) {
+      Button("done", role: .cancel) {}
+    } message: {
+      if let failure = model.maybeQueuedFailure { Text(failure.message) }
+    }
     .appLinkQuestions(model)
     .task(id: appLinkMoment) { await model.actOnAppLink() }
     // Every touch counts for presence; the core reports it at most every 30 s (issue #472).
