@@ -2,7 +2,7 @@
 //! messages are encrypted like any send, with the origin inside the ciphertext, and stored by the
 //! server below the conversation's live messages. Used by `teamcraft-import`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
@@ -387,16 +387,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.account.key_bag.ring_mut(ring_id).insert(fresh.duplicate())?;
     self.persist_keys()?;
     record.ids.push(key_hex(fresh.id()));
-    record.sealed_to.clear();
     record.epoch = epoch;
     records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
     Ok(fresh)
   }
 
-  /// Seals the import key of `conversation` to the group's member devices that may read the
-  /// import and don't have the key from this device yet ([`Self::seal_import_key`]), and notes
+  /// Seals the import keys of `conversation` to the group's member devices that may read the
+  /// import and don't have them from this device yet ([`Self::seal_import_keys`]), and notes
   /// them. Before every batch, when the import is finished and on every later pass, so a device
-  /// that joined since gets it too. Nothing to do without an import key or a group.
+  /// that joined since gets them too, the earlier keys as well. Nothing to do without an import
+  /// key or a group.
   pub async fn share_import_key(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
     self.check_legacy_import_keys(conversation).await?;
     if !self.has_group(conversation)? {
@@ -406,21 +406,29 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let Some(mut record) = records::get_json::<ImportKey>(&self.store, Table::SyncState, &record_key)? else {
       return Ok(());
     };
-    let Some(key) = record.ids.last().and_then(|id| {
-      self
-        .account
-        .key_bag
-        .ring(convert::conversation(conversation))
-        .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == *id))
-        .map(ContentKey::duplicate)
-    }) else {
+    let ring_id = convert::conversation(conversation);
+    // Every import key, not only the newest: a device that joined after the key changed has none
+    // of the earlier ones, and the messages under them would wait for it forever (issue #2263).
+    let keys: Vec<(String, ContentKey)> = record
+      .ids
+      .iter()
+      .filter_map(|id| {
+        self
+          .account
+          .key_bag
+          .ring(ring_id)
+          .and_then(|ring| ring.keys().iter().find(|key| key_hex(key.id()) == *id))
+          .map(|key| (id.clone(), key.duplicate()))
+      })
+      .collect();
+    if keys.is_empty() {
       return Ok(());
-    };
-    let sealed = self
-      .seal_import_key(conversation, &key, &record.sealed_to)
-      .await?;
+    }
+    let sealed = self.seal_import_keys(conversation, &keys, &record.sealed).await?;
     if !sealed.is_empty() {
-      record.sealed_to.extend(sealed);
+      for (device, id) in sealed {
+        record.sealed.entry(id).or_default().insert(device);
+      }
       records::put_json(&self.store, Table::SyncState, &record_key, &record)?;
     }
     Ok(())
@@ -469,13 +477,14 @@ struct ImportGrant {
   users: BTreeSet<UserId>,
 }
 
-/// The import keys of a conversation ([`Client::import_content_key`]) and who has the last one.
+/// The import keys of a conversation ([`Client::import_content_key`]) and who has which.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct ImportKey {
   /// The keys' IDs in the ring, as hex, oldest first; the last one encrypts.
   ids: Vec<String>,
-  /// Member devices (`user/device`) this device sealed the last key to.
-  sealed_to: BTreeSet<String>,
+  /// Per key (its hex ID), the member devices (`user/device`) this device sealed it to.
+  #[serde(default)]
+  sealed: BTreeMap<String, BTreeSet<String>>,
   /// The group's epoch when the last key was made: in another one, the next batch takes a new key.
   epoch: u64,
   /// Keys an earlier version noted for the import, as hex, under which no message of another

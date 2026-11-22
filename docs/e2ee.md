@@ -4819,8 +4819,10 @@ into, or a new channel somebody joined early). A member on an earlier version ta
 like any other.
 
 - **Who gets it.** Before each batch, when the import is finished and on every later pass of
-  `serve` until it leaves, the import device seals the current import key to each verified device
-  in the group that hasn't got it from it yet and whose user may read the import: a guest only when
+  `serve` until it leaves, the import device seals the import keys to each verified device
+  in the group that hasn't got it from it yet and whose user may read the import (every import key,
+  not only the current one: the device keeps per key whom it sealed it to, so a device that joined
+  after the key changed gets the earlier keys too, issue #2263): a guest only when
   the import grant names them; anybody else only when something besides the server names them, the
   import's mapping (the grant, or for a channel merged into the members the mapping names there,
   the *readers*) or the verified roster, and the server doesn't call them a guest. Being in the
