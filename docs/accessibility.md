@@ -83,12 +83,12 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | W-6  | No keyboard way to answer an incoming call in the web app                                                                     | 2.1.1      | High     | fixed: Alt+Shift+A / V / D, named in the announcement |
 | W-7  | Composer suggestions: no `aria-activedescendant`, buttons inside options, `aria-expanded` on a textbox (axe: critical)          | 4.1.2      | High     | fixed, with a polite "N suggestions"; `aria-controls` only while the list exists |
 | W-8  | Call popovers (share, effects, camera, audio, quality): no focus handling, wrong ARIA                                         | 2.1.1, 4.1.2 | Medium | fixed: focus in, Esc closes and returns, `aria-haspopup` + `aria-expanded` |
-| W-9  | Joins, leaves, lobby arrivals and shortcut mutes aren't announced                                                             | 4.1.3      | Medium   | #2281   |
-| W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | #2281   |
+| W-9  | Joins, leaves, lobby arrivals and shortcut mutes aren't announced                                                             | 4.1.3      | Medium   | fixed: one call announcer (`call_announcer.rs`), bursts coalesced |
+| W-10 | Call status regions mount with their text, so they are often not announced                                                    | 4.1.3      | Medium   | fixed: the phases and recording start go through the announcer; the recording pill is no live region |
 | W-11 | Toggle buttons change their label and set `aria-pressed` ("Unmute, pressed")                                                   | 4.1.2      | Medium   | fixed: a changing label has no `aria-pressed` |
 | W-12 | Date and "new messages" dividers were separators with text and a button inside (axe: nested-interactive)                       | 1.3.1      | Medium   | fixed   |
 | W-13 | A channel switch focuses the composer, which doesn't name the channel                                                         | 2.4.6      | Medium   | fixed   |
-| W-14 | Presence by colour only (away vs online 1.19:1) and hidden from screen readers                                                | 1.4.1, 1.4.11 | Medium | #2282  |
+| W-14 | Presence by colour only (away vs online 1.19:1) and hidden from screen readers                                                | 1.4.1, 1.4.11 | Medium | fixed: a shape per state, a dark ring (3:1), the state as the avatar's and the DM row's label |
 | W-15 | Quick switcher: unread, group names and "no results" not conveyed                                                             | 1.3.1, 4.1.3 | Medium | fixed   |
 | W-16 | Device picker radios without arrow keys                                                                                       | 2.1.1      | Low      | fixed: roving tabindex, arrows, Home, End |
 | W-17 | Every pending message announces "Sending"                                                                                     | 4.1.3      | Low      | fixed   |
@@ -113,7 +113,7 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | A-4  | Switches and radios without a name (notification dialog, Do not disturb, meeting lobby, UnifiedPush, blur faces) | High | fixed: whole rows `toggleable`/`selectable` with a role |
 | A-5  | The voice recording timer was a live region: read every second, into the recording                         | High     | fixed; the record button says "Recording" and its disabled state |
 | A-6  | Record button: no role, disabled and recording only shown visually                                         | Medium   | fixed with A-5 |
-| A-7  | A-33: poll own vote, media review strip, pickable tiles, mention and emoji suggestions, upload progress, 48 dp targets (reactions, thread link, attachment remove, zoom, trim handles), font scale (attach tiles, call avatar initial), lobby buttons, shutter, repeat field, external invitee error, option switches, selection mode | Medium/Low | fixed: #2285 (new messages are announced at the bottom, the jump pill is a polite live region); call parts #2281, presence #2282 |
+| A-7  | A-33: poll own vote, media review strip, pickable tiles, mention and emoji suggestions, upload progress, 48 dp targets (reactions, thread link, attachment remove, zoom, trim handles), font scale (attach tiles, call avatar initial), lobby buttons, shutter, repeat field, external invitee error, option switches, selection mode | Medium/Low | fixed: #2285 (new messages are announced at the bottom, the jump pill is a polite live region); call parts and presence fixed: who speaks is a state of the tile, the audio output button names its route, the self view is named and movable by action, joins and leaves are announced, presence is in the row's words (the microphone is not announced on mobile: the system and the button say it) |
 
 ### Findings: iOS
 
@@ -122,8 +122,8 @@ has none (one more target size, with the composer's suggestions open, is filed).
 | I-H1 | Edit, delete, copy and reply in thread only in the long-press menu                                          | High     | fixed: in the actions rotor too |
 | I-H2 | A message isn't one VoiceOver element: 3–6 stops, grouped messages without a sender                         | High     | #2286 (needs a device to get right) |
 | I-H3 | Call controls hide after 5 s under VoiceOver and Switch Control                                             | High     | fixed   |
-| I-H4 | No announcements at all: recording, reconnecting, lobby knocks                                              | High     | fixed for these three; the rest #2281 |
-| I-M  | 17 Medium and 15 Low: draft chips, clipping at large sizes, links rotor, viewer escape, drag-only crop, contrast at reduced opacity, no Increase Contrast | Medium/Low | #2286, presence #2282, call #2281 |
+| I-H4 | No announcements at all: recording, reconnecting, lobby knocks                                              | High     | fixed: these three, and joins and leaves (coalesced) |
+| I-M  | 17 Medium and 15 Low: draft chips, clipping at large sizes, links rotor, viewer escape, drag-only crop, contrast at reduced opacity, no Increase Contrast | Medium/Low | #2286, presence and call fixed (filmstrip tiles named, the return bar's status as its value, speaking as a mark and a value; to check on a device with the Accessibility Inspector, #2286) |
 
 ## Keeping it from regressing
 

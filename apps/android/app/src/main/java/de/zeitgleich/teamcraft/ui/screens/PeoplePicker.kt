@@ -31,12 +31,17 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.ui.UserAvatar
 import de.zeitgleich.teamcraft.ui.avatarColorOfHue
+import de.zeitgleich.teamcraft.ui.presenceLabel
+import de.zeitgleich.teamcraft.ui.presenceOf
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.delay
 
@@ -116,11 +121,16 @@ internal fun PeoplePicker(
 
 @Composable
 private fun PersonRow(user: User, isPicked: Boolean, mode: PickMode, modifier: Modifier) {
+  // Presence in words (#2282): the dot is only a picture, the avatar's initial is not read.
+  val presenceText = stringResource(presenceLabel(presenceOf(user.presence)))
   Row(
-    modifier.fillMaxWidth().padding(horizontal = Spacing.l, vertical = Spacing.s),
+    modifier
+      .fillMaxWidth()
+      .semantics(mergeDescendants = true) { stateDescription = presenceText }
+      .padding(horizontal = Spacing.l, vertical = Spacing.s),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Box {
+    Box(Modifier.clearAndSetSemantics {}) {
       UserAvatar(user.id, Modifier.size(40.dp)) {
         Box(Modifier.size(40.dp).background(avatarColorOfHue(user.avatarHue), CircleShape), contentAlignment = Alignment.Center) {
           Text(user.displayName.firstOrNull()?.uppercase().orEmpty(), color = Color.White, style = MaterialTheme.typography.titleMedium)

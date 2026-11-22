@@ -173,7 +173,7 @@ pub fn AudioCard(file: FileInfo) -> impl IntoView {
       <button
         class="icon-btn file-action"
         aria-label=move || i18n.t("file-download")
-        data-tip=move || i18n.t("file-download")
+        title=move || i18n.t("file-download")
         on:click=move |_| actions.download()
       >
         <Icon name=IconName::Download />
@@ -240,7 +240,7 @@ fn AudioControls(
       <button
         class="icon-btn audio-mute"
         aria-label=mute_label
-        data-tip=mute_label
+        title=mute_label
         on:click=move |_| player.run(PlayerCommand::ToggleMute)
       >
         <Icon name=Signal::derive(move || if is_silent() { IconName::VolumeOff } else { IconName::Volume }) />

@@ -508,6 +508,90 @@ mod existing {
     assert_eq!(bob.texts(dm), expected);
   }
 
+  /// Issue #2263: a device reading on demand that joins the group while an import runs (the group
+  /// changes, the import goes on under a new key) reads the whole import, not only the part
+  /// under the newest key.
+  #[tokio::test]
+  async fn a_device_that_joins_during_an_import_reads_all_of_it_on_demand() {
+    let server = FakeServer::new();
+    let on_demand = ClientSettings {
+      history_page_size: 5,
+      imported_page_size: 5,
+      history_reading: HistoryReading::OnDemand,
+      ..settings()
+    };
+    let mut alice = Peer::enroll(&server, "Alice").await;
+    let mut importer = Peer::enroll(&server, "Import").await;
+    let mut bob = Peer::enroll(&server, "Bob").await;
+    sign_import_policy(&mut alice, &mut importer, AdminSelfJoin::Visible).await;
+    let dm = alice.client.open_dm(bob.client.user_id()).await.unwrap();
+    for index in 0..8 {
+      alice
+        .client
+        .send_text(dm, None, &format!("live {index}"))
+        .await
+        .unwrap();
+    }
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+    let participants = vec![alice.client.user_id(), bob.client.user_id()];
+    assert!(!open_existing(&mut importer, &participants, dm).await);
+    importer.client.request_import_join(dm).await.unwrap();
+    settle(&mut [&mut bob, &mut importer]).await;
+    bob.client.apply_pending_changes().await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer]).await;
+
+    let imported: Vec<String> = (0..30).map(|index| format!("old {index}")).collect();
+    let drafts: Vec<ImportDraft> = imported
+      .iter()
+      .enumerate()
+      .map(|(index, body)| {
+        let offset = i64::try_from(index).unwrap();
+        draft(&index.to_string(), body, ImportedAuthor::Deleted, OLD_MS + offset)
+      })
+      .collect();
+    let mut batches = drafts.chunks(7);
+    importer
+      .client
+      .send_imported(dm, batches.next().unwrap())
+      .await
+      .unwrap();
+    // The reader's device joins in the middle of the import: the group changes, so the rest is
+    // under another import key, and the device needs both.
+    let mut client = common::link_device_with(&mut bob, on_demand).await;
+    let (gateway, _) = client.connect_gateway().await.unwrap();
+    let mut browser = Peer {
+      name: "Bob browser".into(),
+      api: bob.api.clone(),
+      store: client.store().clone(),
+      client,
+      gateway,
+    };
+    for _ in 0..3 {
+      settle(&mut [&mut alice, &mut bob, &mut importer, &mut browser]).await;
+      bob.client.apply_pending_changes().await.unwrap();
+      alice.client.apply_pending_changes().await.unwrap();
+    }
+    browser.client.catch_up_messages(dm).await.unwrap();
+
+    for batch in batches {
+      importer.client.send_imported(dm, batch).await.unwrap();
+      settle(&mut [&mut alice, &mut bob, &mut importer, &mut browser]).await;
+    }
+    importer.client.finish_import(dm).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut importer, &mut browser]).await;
+
+    for request in 1..=12 {
+      browser.client.load_older_history(dm, request).await.unwrap();
+      settle(&mut [&mut alice, &mut bob, &mut importer, &mut browser]).await;
+    }
+    let texts = browser.texts(dm);
+    assert!(
+      texts.iter().any(|text| text == "old 0"),
+      "the beginning is read: {texts:?}"
+    );
+    assert_eq!(texts.len(), 38, "{texts:?}");
+  }
+
   /// The import's DM or notes of `participants`, which is `existing`; `true` if the import device
   /// is in its group right away.
   async fn open_existing(importer: &mut Peer, participants: &[UserId], existing: ConversationId) -> bool {

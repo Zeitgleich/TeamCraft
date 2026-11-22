@@ -1142,7 +1142,9 @@ The message list shows the encrypted thumbnail at once. On web and desktop it th
 picture inline (up to 16 MiB, a few at a time), and the lightbox does for any image or video: the
 client core downloads the blob, checks its hash and decrypts it in memory (desktop: `core_attachment`,
 raw bytes to the webview; web: the core in the page), up to `MAX_VIEWER_BYTES` (128 MiB) on every
-platform; bigger files are only saved, except videos, which stream (below). The page holds the plaintext only as `blob:` URLs in a session
+platform; bigger files are only saved, except videos, which stream (below). A file is downloaded
+once even when the lightbox asks for it while the preview's download runs: both get the same bytes.
+While it comes down, the thumbnail carries the upload's progress ring. The page holds the plaintext only as `blob:` URLs in a session
 cache bounded by bytes (`teamcraft-ui` `media_cache`), revoked once evicted and no longer shown.
 The full file is never written to disk unless the user saves it; only the inline rendition of a still
 picture (at most 960 pixels a side) is also kept in the persistent media cache (§9.6), sealed like the
@@ -4819,8 +4821,10 @@ into, or a new channel somebody joined early). A member on an earlier version ta
 like any other.
 
 - **Who gets it.** Before each batch, when the import is finished and on every later pass of
-  `serve` until it leaves, the import device seals the current import key to each verified device
-  in the group that hasn't got it from it yet and whose user may read the import: a guest only when
+  `serve` until it leaves, the import device seals the import keys to each verified device
+  in the group that hasn't got it from it yet and whose user may read the import (every import key,
+  not only the current one: the device keeps per key whom it sealed it to, so a device that joined
+  after the key changed gets the earlier keys too, issue #2263): a guest only when
   the import grant names them; anybody else only when something besides the server names them, the
   import's mapping (the grant, or for a channel merged into the members the mapping names there,
   the *readers*) or the verified roster, and the server doesn't call them a guest. Being in the
@@ -5240,14 +5244,47 @@ other keys, is left for later in #207.
 **Integrity: signed by an admin.** What makes a picture count is a signature, not the server:
 
 - An admin's device signs the emoji's document (shortcode, SHA-256 and format of the picture, when it
-  was signed) as an entry of no log, `WorkspaceLog::CustomEmoji` (crypto crate), with its device key
+  was signed, and the version of the verified roster the device held) as an entry of no log, `WorkspaceLog::CustomEmoji` (crypto crate), with its device key
   and certificate, like a channel's signed deletion. A new name is a new document over the same
   picture.
 - Every device verifies the server's list against its own verified roster: the signer must be an
   owner or admin of the roster now, or have been one in a tenure of the admin history (§4.6.1) that
-  covers the signing time, so a former admin's emoji stay and nothing they sign later counts. A
-  document that doesn't verify is left out; the server's copies of the name and hash are ignored.
+  covers the roster version the document names, so a former admin's emoji stay; what they sign
+  after their demotion is refused by every device that followed it (below). A document that doesn't verify is left out; the server's copies of the
+  name and hash are ignored.
 - A picture is kept only when its SHA-256 is the one the verified document names.
+
+**Former admins (issue #2290).** A document's signing time and roster version are the signer's
+word. A demoted admin who is still a member keeps a valid device key and can sign a new document
+that names a time or roster version inside their old tenure; before #2290 only the server's role
+check on the save stopped that. What they can't choose is what each device saw, and when:
+
+- *The ledger.* Each device keeps, locally (never signed, never sent), the documents it accepted, by
+  the SHA-256 of their signed payload, one ledger for emoji and one for sticker packs (at most 4096
+  each, the oldest go first), and the roster version it had verified when it began keeping them.
+- *Admins now count.* A document signed by an owner or admin of the device's verified roster counts
+  and is noted in the ledger.
+- *Former admins count only for what the device held.* A document that verifies only through a past
+  tenure counts if the device held it already, that is, accepted it while the signer was an admin.
+  One first seen after a demotion this device followed (the demoting roster is newer than the
+  ledger's start) is refused, whatever time or version it names. An admin of the roster now can
+  sign it again (a rename does), and it counts.
+- *The roster version.* Every app names the roster version it held (`roster_version`); a tenure
+  covers it when the roster that began the tenure is at or before it and the demoting roster after
+  it. Documents without it (from apps before #2290) are judged by `signed_at_ms` as before. The
+  version decides only where the ledger can't: an unmodified app of a demoted admin names a roster
+  that no longer lists them, so even a device without a ledger refuses it. `signed_at_ms` is for
+  display and for ordering two documents of one name.
+- *Tenures from before.* A device's admin history notes the roster version that began each tenure
+  from #2290 on; a tenure recorded earlier has only its end.
+
+**What it does not stop.** A device that began its ledger after a demotion (new, or updated to
+#2290 after it) has nothing to compare with: it accepts the past-tenure documents the server lists,
+judged by the roster version they name or, without one, their signing time, as before. A demoted
+admin with a modified app and a compromised server that keeps their save can show such devices new
+pictures; devices that followed the demotion don't draw them. A legitimate document a device first
+sees only after the demotion (it was offline across the tenure's end) is refused there too, until an
+admin signs it again.
 
 The server checks what it can without trusting anybody: the picture (a still PNG or WebP within the
 size and side limits, read from its header, the same check the apps run), the name, that the
@@ -5293,7 +5330,8 @@ emoji: a still PNG or WebP within the size and side limits, read from its header
 the pack's key (16 random bytes chosen by the device that creates it, so the document names its pack
 before the server has seen it), a version (1, then one more per change), the name, and per sticker,
 in order, a name (unique in the pack), an alt text and the picture's SHA-256 and format, and when it
-was signed. It is an entry of no log, `WorkspaceLog::StickerPack` (crypto crate), signed with the
+was signed with the roster version the device held (§4.13, "Bound to a roster version"). It is an
+entry of no log, `WorkspaceLog::StickerPack` (crypto crate), signed with the
 device key and certificate like an emoji's document; the log kind is part of the signed data, so an
 emoji's document can't pass for a pack or the other way round, and the signed version is the
 document's own. A rename, reorder, edit or removal is the next version of the whole document, so a
@@ -5301,7 +5339,8 @@ server can't mix stickers of two versions.
 
 - Every device verifies the server's list against its own verified roster, exactly as for emoji:
   the signer must be an owner or admin of the roster now, or have been one in a tenure of the admin
-  history that covers the signing time. A document that doesn't verify, or breaks the document's
+  history (the version the document names, or its signing time without one) that this device's
+  ledger admits (§4.13, "Former admins"). A document that doesn't verify, or breaks the document's
   rules (names, alt texts, at most 500 stickers), is left out; the server's copies of name and
   version are ignored.
 - Of the versions listed for one pack key, the highest that verifies counts.

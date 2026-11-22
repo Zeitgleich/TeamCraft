@@ -66,9 +66,14 @@ pub struct CustomEmojiDocument {
   #[schema(value_type = String)]
   pub sha256: CustomEmojiHash,
   pub format: CustomEmojiFormat,
-  /// When the admin's device signed it (its own clock): judged against when the signer was an
-  /// admin of the verified roster.
+  /// When the admin's device signed it (its own clock), for display and ordering. Judges the
+  /// signer's authority only in a document without `roster_version` (e2ee.md §4.13).
   pub signed_at_ms: i64,
+  /// The version of the verified roster the signing device held: the signer must be an owner or
+  /// admin in it, and it must come before any roster that demoted them. Signing devices always
+  /// name it; `None` in documents from before (issue #2290).
+  #[serde(rename = "roster_version", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_roster_version: Option<u64>,
 }
 
 /// A [`CustomEmojiDocument`] as JSON, verbatim as signed, and the signature: a signed log entry of

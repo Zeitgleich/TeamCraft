@@ -675,6 +675,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       DownloadControl::Forget => crate::downloads::DownloadControl::Forget,
       DownloadControl::Open => crate::downloads::DownloadControl::Open,
       DownloadControl::Reveal => crate::downloads::DownloadControl::Reveal,
+      DownloadControl::OpenWhenDone => crate::downloads::DownloadControl::OpenWhenDone,
+      DownloadControl::KeepClosed => crate::downloads::DownloadControl::KeepClosed,
     };
     self.command(CoreCommand::ControlDownload { attachment, control });
   }
@@ -865,6 +867,7 @@ fn download_entry(record: DownloadRecord, transfers: &Transfers) -> DownloadEntr
     done_bytes,
     started_at_ms: record.started_at_ms,
     state,
+    is_open_when_done: record.is_open_when_done,
   }
 }
 

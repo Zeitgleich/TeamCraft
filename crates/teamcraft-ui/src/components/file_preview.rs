@@ -160,7 +160,7 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
               {move || if is_source.get() { i18n.t("preview-show-formatted") } else { i18n.t("preview-show-source") }}
             </button>
           })}
-          <button class="icon-btn" aria-label=move || i18n.t("file-download") data-tip=move || i18n.t("file-download") on:click=move |_| download.run(())>
+          <button class="icon-btn" aria-label=move || i18n.t("file-download") title=move || i18n.t("file-download") on:click=move |_| download.run(())>
             <Icon name=IconName::Download />
           </button>
           <button class="icon-btn" aria-label=move || i18n.t("close") title=move || i18n.t("close") data-autofocus on:click=move |_| state.close_overlay()>

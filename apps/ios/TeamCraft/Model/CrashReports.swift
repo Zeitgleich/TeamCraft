@@ -1,5 +1,6 @@
 import Foundation
 import Sentry
+import SwiftUI
 import os
 
 /// Crash reports of the app (docs/crash-reports.md): runs sentry-cocoa only while the signed-in
@@ -218,10 +219,13 @@ struct CrashConfig: Codable, Equatable, Sendable {
   let traceRate: Double
   /// A core job that waits or runs this long is reported as a sampled warning; 0: never.
   let slowJobMs: UInt64
+  /// The publisher's service receives the reports; else the organization (also when stored by an
+  /// older version).
+  let isPublisherRecipient: Bool
 
   init(
     dsn: String, sampleRate: Double, environment: String, allowsOptOut: Bool, showsNotice: Bool,
-    traceRate: Double = 0, slowJobMs: UInt64 = 1_000
+    traceRate: Double = 0, slowJobMs: UInt64 = 1_000, isPublisherRecipient: Bool = false
   ) {
     self.dsn = dsn
     self.sampleRate = sampleRate
@@ -230,13 +234,14 @@ struct CrashConfig: Codable, Equatable, Sendable {
     self.showsNotice = showsNotice
     self.traceRate = traceRate
     self.slowJobMs = slowJobMs
+    self.isPublisherRecipient = isPublisherRecipient
   }
 
   init(_ config: CrashReportsConfig) {
     self.init(
       dsn: config.dsn, sampleRate: config.sampleRate, environment: config.environment,
       allowsOptOut: config.allowsOptOut, showsNotice: config.showsNotice, traceRate: config.traceRate,
-      slowJobMs: config.slowJobMs)
+      slowJobMs: config.slowJobMs, isPublisherRecipient: config.isPublisherRecipient)
   }
 
   init(from decoder: Decoder) throws {
@@ -248,6 +253,7 @@ struct CrashConfig: Codable, Equatable, Sendable {
     showsNotice = try container.decode(Bool.self, forKey: .showsNotice)
     traceRate = try container.decodeIfPresent(Double.self, forKey: .traceRate) ?? 0
     slowJobMs = try container.decodeIfPresent(UInt64.self, forKey: .slowJobMs) ?? 1_000
+    isPublisherRecipient = try container.decodeIfPresent(Bool.self, forKey: .isPublisherRecipient) ?? false
   }
 }
 
@@ -255,10 +261,32 @@ struct CrashConfig: Codable, Equatable, Sendable {
 struct CrashReportsStatus: Equatable {
   let allowsOptOut: Bool
   let showsNotice: Bool
+  let isPublisherRecipient: Bool
 
   init(_ config: CrashConfig) {
     allowsOptOut = config.allowsOptOut
     showsNotice = config.showsNotice
+    isPublisherRecipient = config.isPublisherRecipient
+  }
+
+  /// The first-start notice's text: who receives the reports, and whether people may opt out.
+  var noticeKey: LocalizedStringKey {
+    switch (isPublisherRecipient, allowsOptOut) {
+    case (true, true): "crash_reports_notice_publisher_optional"
+    case (true, false): "crash_reports_notice_publisher_required"
+    case (false, true): "crash_reports_notice_organization_optional"
+    case (false, false): "crash_reports_notice_organization_required"
+    }
+  }
+
+  /// The privacy settings' hint under the switch, by the same two facts.
+  var hintKey: LocalizedStringKey {
+    switch (isPublisherRecipient, allowsOptOut) {
+    case (true, true): "crash_reports_send_hint_publisher"
+    case (true, false): "crash_reports_required_hint_publisher"
+    case (false, true): "crash_reports_send_hint_organization"
+    case (false, false): "crash_reports_required_hint_organization"
+    }
   }
 }
 

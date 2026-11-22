@@ -40,6 +40,7 @@ pub fn Avatar(
   shows_profile_picture: bool,
 ) -> impl IntoView {
   let presence = user.presence;
+  let i18n = crate::i18n::use_i18n();
   let id = user.id;
   // Their picture, once loaded (signed-in builds); the generated initials until then.
   let picture = Memo::new(move |_| {
@@ -57,10 +58,18 @@ pub fn Avatar(
   // keeps its `<img>` (only changed attributes are written) instead of loading and flashing it
   // (issue #687).
   view! {
-    <span class=size.class() style:--hue=user.avatar_hue.to_string() aria-hidden="true">
+    // With a presence dot the avatar is the one place that says it (#2282): it is an image named
+    // "Online", the name stands next to it. Without, it only decorates.
+    <span
+      class=size.class()
+      style:--hue=user.avatar_hue.to_string()
+      role=show_presence.then_some("img")
+      aria-label=show_presence.then(|| i18n.t(presence_key(presence)))
+      aria-hidden=(!show_presence).then_some("true")
+    >
       <img class="avatar-img" src=move || picture.get() alt="" hidden=move || picture.with(Option::is_none) />
       <span class="avatar-initials" hidden=move || picture.with(Option::is_some)>{initials}</span>
-      {show_presence.then(|| view! { <PresenceDot presence=presence /> })}
+      {show_presence.then(|| view! { <PresenceDot presence=presence is_labelled=false /> })}
     </span>
   }
 }
@@ -75,9 +84,30 @@ fn shown_picture(
   source_picture().or_else(|| shows_profile_picture.then(profile_picture).flatten())
 }
 
+/// The i18n key of a presence state's words ("Online", "Away", …).
+pub fn presence_key(presence: PresenceStatus) -> &'static str {
+  match presence {
+    PresenceStatus::Online => "presence-online",
+    PresenceStatus::Busy => "presence-busy",
+    PresenceStatus::DoNotDisturb => "presence-dnd",
+    PresenceStatus::BeRightBack => "presence-brb",
+    PresenceStatus::Away => "presence-away",
+    PresenceStatus::Offline => "presence-offline",
+  }
+}
+
+/// The presence dot. Its shape tells the states apart without colour (070-avatars.css); a screen
+/// reader gets the state in words (#2282), unless a parent already says it (`is_labelled` off).
 #[component]
-pub fn PresenceDot(presence: PresenceStatus) -> impl IntoView {
-  view! { <span class=format!("presence presence-{}", presence.slug()) aria-hidden="true"></span> }
+pub fn PresenceDot(presence: PresenceStatus, #[prop(default = true)] is_labelled: bool) -> impl IntoView {
+  let i18n = crate::i18n::use_i18n();
+  let class = format!("presence presence-{}", presence.slug());
+  if is_labelled {
+    view! { <span class=class role="img" aria-label=move || i18n.t(presence_key(presence))></span> }
+      .into_any()
+  } else {
+    view! { <span class=class aria-hidden="true"></span> }.into_any()
+  }
 }
 
 #[cfg(test)]

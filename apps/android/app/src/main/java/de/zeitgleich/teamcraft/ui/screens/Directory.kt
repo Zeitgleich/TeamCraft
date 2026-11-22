@@ -56,9 +56,11 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.R
@@ -72,6 +74,8 @@ import de.zeitgleich.teamcraft.ui.ListPhase
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.PageAnswer
 import de.zeitgleich.teamcraft.ui.UserAvatar
+import de.zeitgleich.teamcraft.ui.presenceLabel
+import de.zeitgleich.teamcraft.ui.presenceOf
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -300,14 +304,17 @@ private fun FilterMenu(@StringRes label: Int, values: List<String>, chosen: Stri
 @Composable
 private fun PersonRow(person: DirectoryPersonItem, onMessage: (() -> Unit)?) {
   val messageLabel = stringResource(R.string.directory_message, person.displayName)
+  // Presence in words (#2282): the dot is only a picture, the avatar's initial is not read.
+  val presenceText = stringResource(presenceLabel(presenceOf(corePresence(person.presence))))
   Row(
     Modifier
       .fillMaxWidth()
+      .semantics(mergeDescendants = true) { stateDescription = presenceText }
       .then(if (onMessage != null) Modifier.clickable(role = Role.Button, onClickLabel = messageLabel, onClick = onMessage) else Modifier)
       .padding(horizontal = Spacing.l, vertical = Spacing.s),
     verticalAlignment = Alignment.CenterVertically,
   ) {
-    Box {
+    Box(Modifier.clearAndSetSemantics {}) {
       UserAvatar(person.userId, Modifier.size(40.dp)) {
         Box(Modifier.size(40.dp).background(MaterialTheme.colorScheme.secondaryContainer, CircleShape), contentAlignment = Alignment.Center) {
           Text(

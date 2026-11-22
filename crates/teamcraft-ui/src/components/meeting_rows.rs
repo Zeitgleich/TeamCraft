@@ -677,7 +677,7 @@ fn RowMenu(
         aria-haspopup="menu"
         aria-expanded=move || is_open.get().to_string()
         aria-label=move || i18n.t("meetings-more")
-        data-tip=move || i18n.t("meetings-more")
+        title=move || i18n.t("meetings-more")
         on:click=move |_| is_open.update(|open| *open = !*open)
       >
         <Icon name=IconName::More />

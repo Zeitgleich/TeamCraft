@@ -122,7 +122,7 @@ pub fn UserProfileDialog(user: UserId) -> impl IntoView {
           <h2 id="profile-card-title" class="profile-name" translate="no">{name}</h2>
           {handle.map(|handle| view! { <p class="profile-handle" translate="no">"@" {handle}</p> })}
           <p class="profile-presence">
-            <PresenceDot presence=person.presence />
+            <PresenceDot presence=person.presence is_labelled=false />
             <span>{move || i18n.t(&format!("presence-{}", person.presence.slug()))}</span>
             <InMeetingBadge user=user />
             <LastSeen user=user is_compact=true />

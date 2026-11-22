@@ -1,7 +1,7 @@
 //! MLS groups per conversation: creation, signed membership changes with rebase on conflict,
 //! welcomes, and processing the server's ordered MLS queue (e2ee.md §4, §4.6).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use rand_core::OsRng;
@@ -2498,39 +2498,45 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     )
   }
 
-  /// Seals the import key of `conversation` (e2ee.md §4.10, "The import key") to each verified
-  /// member device of the group not named in `sealed_to` whose user may read the import
-  /// ([`Self::may_get_import_key`]). The bundle names no current key, so nobody writes under it.
-  /// Returns the devices it went to, as `user/device`.
-  pub(crate) async fn seal_import_key(
+  /// Seals the import keys of `conversation` (e2ee.md §4.10, "The import key") to each verified
+  /// member device of the group whose user may read the import ([`Self::may_get_import_key`]), for
+  /// the keys `sealed` doesn't name for it (`key ID → devices`). A device that joined after the key
+  /// changed gets the earlier keys too, or the messages under them stay unreadable for it. The
+  /// bundles name no current key, so nobody writes under them. Returns what went out, as
+  /// `(user/device, key ID)`.
+  pub(crate) async fn seal_import_keys(
     &mut self,
     conversation: ConversationId,
-    key: &ContentKey,
-    sealed_to: &BTreeSet<String>,
-  ) -> Result<Vec<String>, CoreError> {
+    keys: &[(String, ContentKey)],
+    sealed: &BTreeMap<String, BTreeSet<String>>,
+  ) -> Result<Vec<(String, String)>, CoreError> {
     let me = self.own_member();
     let mut due = Vec::new();
     for member in self.group_or_error(conversation)?.members()? {
       let name = super::key_history::member_key(member)?;
-      if member != me && !sealed_to.contains(&name) {
-        due.push((member, name));
+      let is_sealed = |id: &String| sealed.get(id).is_some_and(|devices| devices.contains(&name));
+      let missing: Vec<usize> = (0..keys.len())
+        .filter(|index| !is_sealed(&keys[*index].0))
+        .collect();
+      if member != me && !missing.is_empty() {
+        due.push((member, name, missing));
       }
     }
     // Decided per user before anything is asked of the server: who may not read stays out of
-    // `sealed_to` and is asked again (locally) next time, in case they may by then.
+    // `sealed` and is asked again (locally) next time, in case they may by then.
     let mut eligible = Vec::with_capacity(due.len());
-    for (member, name) in due {
+    for (member, name, missing) in due {
       let user = convert::user_from_crypto(member.user_id)?;
       if self.may_get_import_key(conversation, user).await? {
-        eligible.push((member, name));
+        eligible.push((member, name, missing));
       }
     }
     if eligible.is_empty() {
       return Ok(Vec::new());
     }
     let directory = self.member_directory(conversation).await?;
-    let mut sealed = Vec::new();
-    for (member, name) in eligible {
+    let mut done = Vec::new();
+    for (member, name, missing) in eligible {
       let recipient = match self
         .group_or_error(conversation)?
         .verified_member(member, &directory)
@@ -2543,12 +2549,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         },
       };
       let guard = self.share_guard(conversation, member, SealedShare::MissedKeys)?;
+      let to_send: Vec<ContentKey> = missing.iter().map(|index| keys[*index].1.duplicate()).collect();
       self
-        .seal_keys_to(conversation, std::slice::from_ref(key), &recipient, &guard)
+        .seal_keys_to(conversation, &to_send, &recipient, &guard)
         .await?;
-      sealed.push(name);
+      done.extend(missing.iter().map(|index| (name.clone(), keys[*index].0.clone())));
     }
-    Ok(sealed)
+    Ok(done)
   }
 
   /// Whether `user`, a member of the group, gets the import key of `conversation`: a guest only

@@ -13,7 +13,7 @@ struct CrashReportsSection: View {
       } header: {
         Text("crash_reports_title")
       } footer: {
-        Text(status.allowsOptOut ? LocalizedStringKey("crash_reports_send_hint") : LocalizedStringKey("crash_reports_required_hint"))
+        Text(status.hintKey)
       }
     }
   }
@@ -37,17 +37,27 @@ private struct CrashReportsNotice: ViewModifier {
   @State private var reports = CrashReports.shared
 
   func body(content: Content) -> some View {
-    content.alert(
+    content.task(id: reports.isNoticeDue) {
+      // Goes away by itself and counts as seen (the shared core value). With VoiceOver on it stays
+      // until dismissed, so nobody is cut off (WCAG 2.2.1); Settings keeps the switch either way.
+      guard reports.isNoticeDue, !UIAccessibility.isVoiceOverRunning else { return }
+      try? await Task.sleep(for: .milliseconds(Int(crashNoticeTimeoutMs())))
+      if !Task.isCancelled { reports.markNoticeSeen() }
+    }
+    .alert(
       "crash_reports_title",
       isPresented: Binding(get: { reports.isNoticeDue }, set: { if !$0 { reports.markNoticeSeen() } })
     ) {
       Button("crash_reports_notice_ok", role: .cancel) { reports.markNoticeSeen() }
-      Button("crash_reports_notice_settings") {
-        reports.markNoticeSeen()
-        onSettings()
+      // Only an instance that lets people opt out has a switch to point to.
+      if reports.status?.allowsOptOut == true {
+        Button("crash_reports_notice_settings") {
+          reports.markNoticeSeen()
+          onSettings()
+        }
       }
     } message: {
-      Text("crash_reports_notice")
+      if let status = reports.status { Text(status.noticeKey) }
     }
   }
 }
