@@ -185,7 +185,7 @@ fn UploadControl(
         type="button"
         class="upload-stop"
         aria-label=move || i18n.t("file-cancel-upload")
-        data-tip=move || i18n.t("file-cancel-upload")
+        title=move || i18n.t("file-cancel-upload")
         on:click=move |ev| {
           ev.stop_propagation();
           actions.cancel();
@@ -205,7 +205,7 @@ fn UploadControl(
       <button
         type="button"
         class="upload-retry"
-        data-tip=label
+        title=label
         on:click=move |ev| {
           ev.stop_propagation();
           actions.retry();
@@ -219,7 +219,7 @@ fn UploadControl(
         type="button"
         class="upload-dismiss"
         aria-label=move || i18n.t("file-cancel-upload")
-        data-tip=move || i18n.t("file-cancel-upload")
+        title=move || i18n.t("file-cancel-upload")
         on:click=move |ev| {
           ev.stop_propagation();
           actions.cancel();
@@ -1178,7 +1178,7 @@ fn MediaToolbar(file: FileInfo, #[prop(optional, into)] on_expand: Option<Callba
         class:is-active=move || is_saved.get()
         aria-pressed=move || is_saved.get().to_string()
         aria-label=move || if is_saved.get() { i18n.t("action-unsave") } else { i18n.t("action-save") }
-        data-tip=move || if is_saved.get() { i18n.t("action-unsave") } else { i18n.t("action-save") }
+        title=move || if is_saved.get() { i18n.t("action-unsave") } else { i18n.t("action-save") }
         on:click=move |_| actions.toggle_saved()
       >
         <Icon name=IconName::Bookmark />
@@ -1195,7 +1195,7 @@ fn ToolbarButton(label: &'static str, icon: IconName, on_click: impl Fn() + 'sta
     <button
       class="icon-btn media-tool"
       aria-label=move || i18n.t(label)
-      data-tip=move || i18n.t(label)
+      title=move || i18n.t(label)
       on:click=move |_| on_click()
     >
       <Icon name=icon />
@@ -1281,7 +1281,7 @@ pub fn FileCard(file: FileInfo, #[prop(optional)] maybe_star: Option<FileStar>) 
         <button
           class="icon-btn file-action"
           aria-label=move || i18n.t("file-preview")
-          data-tip=move || i18n.t("file-preview")
+          title=move || i18n.t("file-preview")
           on:click=move |_| state.overlay.set(Overlay::FilePreview(conversation, key))
         >
           <Icon name=IconName::Eye />
@@ -1291,7 +1291,7 @@ pub fn FileCard(file: FileInfo, #[prop(optional)] maybe_star: Option<FileStar>) 
         <button
           class="icon-btn file-action file-download"
           aria-label=move || i18n.t("file-download")
-          data-tip=move || i18n.t("file-download")
+          title=move || i18n.t("file-download")
           on:click=move |_| actions.download()
         >
           <Icon name=IconName::Download />
@@ -1321,7 +1321,7 @@ fn StarButton(star: FileStar) -> impl IntoView {
       aria-pressed=move || star.is_starred.get().to_string()
       prop:disabled=move || !star.is_starred.get() && !star.can_star.get()
       aria-label=label
-      data-tip=label
+      title=label
       on:click=move |_| star.on_toggle.run(())
     >
       <Icon name=IconName::Star />
@@ -1415,7 +1415,7 @@ pub(crate) fn FileMenu(actions: FileActions) -> impl IntoView {
         aria-haspopup="menu"
         aria-expanded=move || is_open.get().to_string()
         aria-label=move || i18n.t("lightbox-more")
-        data-tip=move || i18n.t("lightbox-more")
+        title=move || i18n.t("lightbox-more")
         on:click=toggle
       >
         <Icon name=IconName::More />

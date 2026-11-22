@@ -135,7 +135,7 @@ pub fn VoiceButton(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Ca
       class="icon-btn voice-record-btn"
       class:is-holding=move || maybe_hold.get().is_some_and(|hold| hold.is_recording)
       aria-label=label
-      data-tip=label
+      title=label
       aria-disabled=move || is_busy_elsewhere().to_string()
       on:pointerdown=on_pointer_down
       on:pointerup=on_pointer_up
@@ -171,7 +171,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
       }
       .into_any(),
       RecorderPhase::Recording | RecorderPhase::Finishing => view! {
-        <button class="icon-btn" aria-label=move || i18n.t("voice-discard") data-tip=move || i18n.t("voice-discard") on:click=move |_| recorder.discard()>
+        <button class="icon-btn" aria-label=move || i18n.t("voice-discard") title=move || i18n.t("voice-discard") on:click=move |_| recorder.discard()>
           <Icon name=IconName::Trash />
         </button>
         <span class="voice-dot" aria-hidden="true"></span>
@@ -184,10 +184,10 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
           }).collect_view()}
         </span>
         <span class="voice-hint">{move || i18n.t("voice-hold-hint")}</span>
-        <button class="icon-btn" aria-label=move || i18n.t("voice-stop") data-tip=move || i18n.t("voice-stop") on:click=move |_| recorder.stop(None)>
+        <button class="icon-btn" aria-label=move || i18n.t("voice-stop") title=move || i18n.t("voice-stop") on:click=move |_| recorder.stop(None)>
           <Icon name=IconName::Stop />
         </button>
-        <button class="send-btn" aria-label=move || i18n.t("voice-send") data-tip=move || i18n.t("voice-send") on:click=move |_| on_send.run(())>
+        <button class="send-btn" aria-label=move || i18n.t("voice-send") title=move || i18n.t("voice-send") on:click=move |_| on_send.run(())>
           <Icon name=IconName::Send />
         </button>
       }
@@ -198,7 +198,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
           .unwrap_or_default();
         let stop_note = info.maybe_stop.map(|stop| i18n.t(stop_key(stop)));
         view! {
-          <button class="icon-btn" aria-label=move || i18n.t("voice-discard") data-tip=move || i18n.t("voice-discard") on:click=move |_| recorder.discard()>
+          <button class="icon-btn" aria-label=move || i18n.t("voice-discard") title=move || i18n.t("voice-discard") on:click=move |_| recorder.discard()>
             <Icon name=IconName::Trash />
           </button>
           <span class="voice-live" aria-hidden="true">
@@ -208,7 +208,7 @@ pub fn VoiceBar(key: ComposerKey, max_seconds: u32, #[prop(into)] on_send: Callb
           </span>
           <span class="voice-time">{format_seconds(info.duration_ms as f64 / 1000.0)}</span>
           {stop_note.map(|note| view! { <span class="voice-hint" role="status">{note}</span> })}
-          <button class="send-btn" aria-label=move || i18n.t("voice-send") data-tip=move || i18n.t("voice-send") on:click=move |_| on_send.run(())>
+          <button class="send-btn" aria-label=move || i18n.t("voice-send") title=move || i18n.t("voice-send") on:click=move |_| on_send.run(())>
             <Icon name=IconName::Send />
           </button>
         }

@@ -252,7 +252,7 @@ pub fn VoiceCard(file: FileInfo) -> impl IntoView {
           {failure}
         </div>
       </div>
-      <button class="voice-speed" aria-label=speed_label data-tip=speed_label on:click=cycle_speed>
+      <button class="voice-speed" aria-label=speed_label title=speed_label on:click=cycle_speed>
         {move || speed.get().label()}
       </button>
       <FileMenu actions=actions />
