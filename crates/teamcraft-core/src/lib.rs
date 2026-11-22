@@ -5,6 +5,7 @@
 pub mod account_data;
 pub mod anchoring;
 pub mod api;
+pub mod asset_ledger;
 pub mod attestation;
 pub mod call_answer;
 pub mod call_group_wait;

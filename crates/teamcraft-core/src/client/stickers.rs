@@ -16,10 +16,13 @@ use teamcraft_proto::{
 
 use super::Client;
 use crate::api::ServerApi;
+use crate::asset_ledger::AssetLedger;
 use crate::error::CoreError;
 use crate::stickers::{has_picture, keep_picture, sign_sticker_pack, store_set, stored_set, verified_packs};
 use crate::store::{LocalStore, MessageContent, MessageMeta};
 
+/// The pack documents this device accepted ([`AssetLedger`]), in [`crate::store::Table::Workspace`].
+const LEDGER_KEY: &str = "sticker_pack_ledger";
 /// Pictures downloaded per read, one after the other: the UI asks again for the rest.
 const PICTURES_PER_ROUND: usize = 32;
 
@@ -40,10 +43,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       Err(error) => return Err(error.into()),
     };
     let workspace = self.workspace()?;
+    let mut ledger = AssetLedger::load(&self.store, LEDGER_KEY)?;
+    ledger.follow(workspace.roster.version);
     let set = StickerSet {
-      packs: verified_packs(&listed.packs, &workspace),
+      packs: verified_packs(&listed.packs, &workspace, &mut ledger),
       limits: listed.limits,
     };
+    ledger.save(&self.store, LEDGER_KEY)?;
     store_set(&self.store, &set)?;
     Box::pin(self.fetch_sticker_pictures()).await;
     Ok(())
@@ -69,6 +75,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       name,
       stickers: Vec::new(),
       signed_at_ms: self.now_ms(),
+      maybe_roster_version: None,
     };
     self.save_sticker_document(document).await?;
     Box::pin(self.refresh_sticker_packs()).await?;
@@ -191,7 +198,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(document)
   }
 
-  async fn save_sticker_document(&mut self, document: StickerPackDocument) -> Result<(), CoreError> {
+  /// Signs `document` under the roster this device verified (issue #2290) and saves it.
+  async fn save_sticker_document(&mut self, mut document: StickerPackDocument) -> Result<(), CoreError> {
+    document.maybe_roster_version = Some(self.workspace()?.roster.version);
     let signed = sign_sticker_pack(&self.account.device, &self.account.certificate, &document)?;
     self
       .api
@@ -316,6 +325,7 @@ mod tests {
       name: "Team".into(),
       stickers: vec![entry("a1"), entry("b22"), entry("c333")],
       signed_at_ms: 0,
+      maybe_roster_version: None,
     };
     apply_change(
       &mut document,

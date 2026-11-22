@@ -272,6 +272,7 @@ fn signed(user_id: u64, shortcode: &str, picture: &[u8]) -> Value {
     sha256: hash(picture),
     format,
     signed_at_ms: 1_700_000_000_000,
+    maybe_roster_version: Some(1),
   };
   let payload = serde_json::to_vec(&document).unwrap();
   let user = CryptoUserId::new(user_id);
