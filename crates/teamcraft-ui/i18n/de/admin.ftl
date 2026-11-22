@@ -4,14 +4,58 @@
 ## Administration
 admin-title = Administration
 admin-nav-label = Bereiche der Administration
-admin-nav-channels = Spaces und Kanäle
+admin-nav-search = Einstellung finden
+admin-nav-search-placeholder = Einstellung finden
+admin-nav-no-match = Keine Seite passt. Versuche ein anderes Wort, etwa „Mail“ oder „Gäste“.
+admin-group-overview = Übersicht
+admin-group-people = Personen
+admin-group-conversations = Unterhaltungen
+admin-group-security = Sicherheit und Daten
+admin-group-appearance = Erscheinungsbild
+admin-group-server = Server
+admin-group-integrations = Integrationen
+admin-nav-health = Systemzustand
+admin-nav-health-keywords = übersicht status warnungen backups prüfungen identitätsanbieter abgleich scim
 admin-nav-users = Nutzer und Gäste
-admin-nav-security = Sicherheitsrichtlinie
+admin-nav-users-keywords = konten mitglieder geräte deaktivieren löschen wiederherstellung einladen gäste
+admin-nav-people = Verzeichnis
+admin-nav-people-keywords = profilfelder namen status benachrichtigungen standard verzeichnis
+admin-nav-permissions = Rollen und Berechtigungen
+admin-nav-permissions-keywords = rollen rechte moderatoren wer darf erlaubt
+admin-nav-channels = Spaces und Kanäle
+admin-nav-channels-keywords = räume spaces kanäle besitzer archivieren moderation mitglieder
+admin-nav-announcement = Ankündigung
+admin-nav-announcement-keywords = banner wartung neuigkeiten nachricht an alle
 admin-nav-retention = Aufbewahrung
-admin-nav-updates = Updates
-admin-nav-backgrounds = Hintergründe
-admin-nav-emoji = Emoji
+admin-nav-retention-keywords = behalten löschen tage nachrichten legal hold speicher
+admin-nav-security = Sicherheitsrichtlinie
+admin-nav-security-keywords = besitzer signaturen signieren wiederherstellung gäste richtlinie zwei-faktor
 admin-nav-audit = Audit-Protokoll
+admin-nav-audit-keywords = verlauf aktionen wer geändert export compliance
+admin-nav-import = Verlauf importieren
+admin-nav-import-keywords = migration anderer chat import konto
+admin-nav-brands = Marken
+admin-nav-brands-keywords = logo farben hostnamen texte links branding
+admin-nav-backgrounds = Anruf-Hintergründe
+admin-nav-backgrounds-keywords = kamera video bilder hintergrund
+admin-nav-emoji = Eigene Emoji
+admin-nav-emoji-keywords = reaktionen kürzel sticker
+admin-nav-instance = Server und Speicher
+admin-nav-instance-keywords = medienserver push anbieter speicher telefonie instanz
+admin-nav-settings = Grenzen und Regeln
+admin-nav-settings-keywords = grenzen uploads größen regeln mailtexte instanzeinstellungen konfigurationsdatei
+admin-nav-mail = Mailserver
+admin-nav-mail-keywords = smtp e-mail einladungen zusammenfassungen
+admin-nav-calendar = Kalenderserver
+admin-nav-calendar-keywords = caldav besprechungen kalender
+admin-nav-updates = Desktop-Updates
+admin-nav-updates-keywords = desktop apps versionen update kanal
+admin-nav-integrations = Bots
+admin-nav-integrations-keywords = bridge integrationen bots logs monitoring ci
+admin-nav-webhooks = Webhooks
+admin-nav-webhooks-keywords = ereignisse ausgehend urls ticketsystem chat-ops
+admin-nav-notetaker = KI-Notetaker
+admin-nav-notetaker-keywords = transkript zusammenfassung anrufe ki api-schlüssel
 admin-back = Zurück
 admin-metadata-only = Nur Metadaten
 admin-metadata-detail = Admins verwalten Räume, ohne sie lesen zu können: Nachrichtentext, Dateien und Reaktionen werden nicht angezeigt.
@@ -403,11 +447,7 @@ audit-other = Sonstiges
 policy-saving = Wird signiert und veröffentlicht…
 
 ## Administration console: permissions, people, announcement, instance
-admin-nav-permissions = Berechtigungen
-admin-nav-people = Personen und Benachrichtigungen
-admin-nav-announcement = Ankündigung
-admin-nav-instance = Instanz
-admin-permissions-title = Berechtigungen
+admin-permissions-title = Rollen und Berechtigungen
 admin-permissions-subtitle = Was jede Rolle darf. Änderungen gelten sofort; ein Kanal kann Berechtigungen nur wieder entziehen.
 permissions-scope = Gilt für
 permissions-instance = Die ganze Instanz
@@ -450,7 +490,7 @@ policy-guest-dm-shared = Personen, mit denen sie eine Unterhaltung teilen
 policy-guest-dm-hint = Mitglieder, Admins und Owner können Gästen immer schreiben, und Gäste können dort antworten und in den Kanälen schreiben, zu denen sie hinzugefügt wurden.
 policy-guest-expiry = Gastzugang endet nach
 policy-guest-never = Nie
-admin-people-title = Personen und Benachrichtigungen
+admin-people-title = Verzeichnis
 admin-people-subtitle = Wie Namen erscheinen, welche Status es gibt und was Benachrichtigungen standardmäßig zeigen.
 policy-directory = Verzeichnis und Datenschutz
 policy-directory-hint = Was andere über eine Person sehen. Gäste sehen nie E-Mail-Adressen.
@@ -516,7 +556,7 @@ announcement-dismissible = Man kann sie wegklicken
 announcement-preview = Vorschau
 announcement-publish = Veröffentlichen
 announcement-clear = Ankündigung entfernen
-admin-instance-title = Instanz
+admin-instance-title = Server und Speicher
 admin-instance-subtitle = Worauf diese Instanz läuft: Medienserver, Push, Speicher. Geheimnisse werden nicht angezeigt.
 instance-loading = Status wird geladen …
 instance-yes = Ja
@@ -645,10 +685,6 @@ policy-last-seen-hint = Jede Person kann ihre Zeit weiterhin in den Datenschutze
 
 ## Getting started (empty workspace)
 # Runtime settings: brands, mail, calendar and instance settings in the admin console
-admin-nav-brands = Marken
-admin-nav-mail = Mailserver
-admin-nav-calendar = Kalender
-admin-nav-settings = Instanzeinstellungen
 audit-brand-changed = Marke geändert
 audit-mail-settings-changed = Mail-Einstellungen geändert
 audit-calendar-settings-changed = Kalender-Einstellungen geändert
@@ -718,7 +754,7 @@ admin-brands-own-mail-active = Diese Marke verwendet ihren eigenen Mailserver.
 admin-brands-own-mail-instance = Diese Marke verwendet den Mailserver der Instanz.
 admin-brands-own-mail-needs-sender = Trage zuerst eine Absenderadresse für diese Marke ein und speichere sie: Ihr Mailserver sendet mit dieser Adresse.
 admin-brands-own-mail-remove = Mailserver der Instanz verwenden
-admin-calendar-title = Kalender
+admin-calendar-title = Kalenderserver
 admin-calendar-subtitle = Der CalDAV-Kalender, in den Besprechungen geschrieben werden.
 admin-calendar-unavailable = Besprechungen sind auf diesem Server nicht eingerichtet, daher gibt es keinen Kalender einzurichten. Richte zuerst [meetings] in der Konfigurationsdatei ein.
 admin-calendar-server = CalDAV-Server
@@ -824,7 +860,7 @@ admin-brands-delete = Marke löschen
 admin-brands-delete-restore = Löschen und Konfigurationsdatei wieder verwenden
 admin-brands-delete-confirm = Zum Löschen erneut klicken
 admin-brands-close = Schließen
-admin-settings-title = Instanzeinstellungen
+admin-settings-title = Grenzen und Regeln
 admin-settings-subtitle = Grenzen, Regeln und Mailtexte, für die früher die Konfigurationsdatei nötig war. Eine Gruppe, die du nicht änderst, behält die Werte der Datei.
 
 ## Key names in keyboard shortcuts (the caps shown on a keyboard)
@@ -832,9 +868,8 @@ admin-recovery-unavailable = Eine Organisationswiederherstellung kann noch nicht
 
 ## Settings: sections, search and rows (#327)
 # Dateien-Ansicht und Einrichtungs-Checkliste (Issue #301)
-admin-nav-integrations = Integrationen
 admin-integrations-unavailable = Bots sind in diesem Build nicht verfügbar.
-admin-integrations-title = Integrationen
+admin-integrations-title = Bots
 admin-integrations-subtitle = Bot-Konten für die Integrations-Bridge: Logs, Monitoring-Alarme und CI-Ergebnisse in verschlüsselten Kanälen.
 admin-integrations-name = Neuer Bot
 admin-integrations-name-example = z. B. NAS-Bridge
@@ -861,7 +896,6 @@ admin-integrations-reveal-done = Ich habe es gespeichert
 admin-integrations-next-steps = Danach: den Bot zu den Kanälen hinzufügen, die er bedient (Kanaleinstellungen, Integrationen), und die Bridge einmal starten, damit sie ihr Gerät einrichtet.
 
 ## Outgoing webhooks (docs/webhooks.md)
-admin-nav-webhooks = Webhooks
 admin-webhooks-title = Webhooks
 admin-webhooks-subtitle = Andere Systeme (Ticketsystem, CI, Chat-Ops) benachrichtigen, wenn Channels angelegt oder archiviert werden, Personen beitreten oder gehen, oder Anrufe beginnen und enden. Gesendet werden nur IDs und Zeiten: nie Namen oder Nachrichten und nichts über Direktnachrichten.
 admin-webhooks-secret-title = Signaturschlüssel
@@ -923,8 +957,7 @@ admin-webhooks-event-health-alert_resolved = Systemwarnung beendet
 admin-webhooks-event-ping = Test
 
 ## Notetaker (admin.md §3.7)
-admin-nav-import = Import
-admin-import-title = Import
+admin-import-title = Verlauf importieren
 admin-import-subtitle = Verlauf aus einem anderen Chat: das Konto, mit dem sich das Import-Werkzeug anmeldet, und bis wann es importieren und Gesprächen beitreten darf.
 import-e2ee-warning = Solange der Import läuft, ist das Import-Konto Mitglied der Gespräche, in die es importiert, auch von Direktnachrichten und Notizen, und kann lesen, was dort geschrieben wird, bis alle dabei sind und es geht. In diesen Direktnachrichten sehen die Beteiligten einen Hinweis.
 import-account = Import-Konto
@@ -934,8 +967,7 @@ import-until = Darf importieren bis
 import-open = Der Import ist offen.
 import-closed = Der Import ist geschlossen: Importierte Nachrichten behalten ihre Herkunft, Neues wird nicht importiert.
 import-end = Import beenden
-admin-nav-notetaker = Notetaker
-admin-notetaker-title = Notetaker
+admin-notetaker-title = KI-Notetaker
 admin-notetaker-subtitle = Ein KI-Teilnehmer, der zu Anrufen hinzugefügt werden kann: Er erstellt ein Transkript des Anrufs und schreibt Zusammenfassung und Transkript in die Unterhaltung des Anrufs.
 notetaker-e2ee-warning = Anrufe mit dem Notetaker sind nicht Ende-zu-Ende-verschlüsselt, solange er dabei ist: Der Ton geht an den Notetaker und weiter an OpenRouter und den Anbieter des Modells. Alle im Anruf sehen, dass er dabei ist. Lies die Hinweise zur Auftragsverarbeitung im Admin-Handbuch (DSGVO), bevor du ihn einschaltest.
 notetaker-enabled = Notetaker an
@@ -980,7 +1012,6 @@ notetaker-error-prompt = Die Anweisungen sind leer oder länger als 8000 Zeichen
 notetaker-error-other = Diese Einstellungen lassen sich nicht signieren. Lade die Seite neu und versuche es noch einmal.
 
 ## Systemzustand (Issue #213)
-admin-nav-health = Systemzustand
 admin-health-title = Systemzustand
 admin-health-subtitle = Ob der Server, seine Dienste und seine Backups funktionieren. Nur Namen, Zustände und Zeiten: nichts aus einer Unterhaltung.
 health-loading = Prüfungen werden geladen …

@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::admin::{AdminSection, admin_error_i18n_key};
+use crate::admin::{AdminGroup, AdminSection, admin_error_i18n_key};
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
@@ -50,63 +50,12 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   let maybe_error = Memo::new(move |_| state.read(|backend| backend.admin_error()));
   let alerts = Memo::new(move |_| state.read(|backend| backend.health_alert_count()));
 
-  let nav_item = move |target: AdminSection, icon: IconName| {
-    view! {
-      <li>
-        <button
-          class="admin-nav-item"
-          aria-current=move || (target == section).then_some("page")
-          on:click=move |_| state.open_admin(target)
-        >
-          <Icon name=icon />
-          <span>{move || i18n.t(&format!("admin-nav-{}", target.slug()))}</span>
-          {(target == AdminSection::Health)
-            .then(|| {
-              view! {
-                <Show when=move || { alerts.get() > 0 } fallback=|| ()>
-                  <span class="badge-count" role="img" aria-label=move || i18n.t_count("health-alerts-badge", alerts.get())>
-                    {move || alerts.get()}
-                  </span>
-                </Show>
-              }
-            })}
-        </button>
-      </li>
-    }
-  };
+  // The page frame (`SectionHeader`) names the group the open page belongs to.
+  provide_context(OpenSection(section));
 
   view! {
     <section class="admin" aria-label=move || i18n.t("admin-title")>
-      <nav class="admin-nav" aria-label=move || i18n.t("admin-nav-label")>
-        <button class="admin-back" on:click=move |_| back_or_home(state)>
-          <Icon name=IconName::ChevronRight class="flip" />
-          <span>{move || i18n.t("admin-back")}</span>
-        </button>
-        <h1>{move || i18n.t("admin-title")}</h1>
-        <ul>
-          {nav_item(AdminSection::Channels, IconName::Layers)}
-          {nav_item(AdminSection::Users, IconName::Users)}
-          {nav_item(AdminSection::Permissions, IconName::Shield)}
-          {nav_item(AdminSection::Security, IconName::Key)}
-          {nav_item(AdminSection::People, IconName::User)}
-          {nav_item(AdminSection::Announcement, IconName::Bell)}
-          {nav_item(AdminSection::Backgrounds, IconName::Image)}
-          {nav_item(AdminSection::Emoji, IconName::Smile)}
-          {nav_item(AdminSection::Brands, IconName::Spotlight)}
-          {nav_item(AdminSection::Mail, IconName::Send)}
-          {nav_item(AdminSection::Calendar, IconName::Calendar)}
-          {nav_item(AdminSection::Settings, IconName::Sliders)}
-          {nav_item(AdminSection::Retention, IconName::Clock)}
-          {nav_item(AdminSection::Updates, IconName::Download)}
-          {nav_item(AdminSection::Health, IconName::Activity)}
-          {nav_item(AdminSection::Instance, IconName::Monitor)}
-          {nav_item(AdminSection::Integrations, IconName::Terminal)}
-          {nav_item(AdminSection::Webhooks, IconName::Link)}
-          {nav_item(AdminSection::Notetaker, IconName::Compose)}
-          {nav_item(AdminSection::Import, IconName::Download)}
-          {nav_item(AdminSection::Audit, IconName::List)}
-        </ul>
-      </nav>
+      <AdminNav section=section alerts=alerts />
       <div class="admin-content">
         // On every page: an admin role nobody signed is refused by other people's apps (#765).
         <RosterBanner />
@@ -148,23 +97,229 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
   }
 }
 
-/// Header of an admin section with the "metadata only" reminder.
+/// The section the console shows, for the page frame below it.
+#[derive(Clone, Copy)]
+struct OpenSection(AdminSection);
+
+/// The console's navigation (issue #958): the sections under a handful of headings, a field that
+/// finds a setting by name or by what it is about, and on a phone a grouped picker instead of a
+/// strip of 21 tabs.
+#[component]
+fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let query = RwSignal::new(String::new());
+  // What the typed words match, in navigation order; every section while the field is empty.
+  let matches = Memo::new(move |_| {
+    let query = query.get();
+    AdminSection::ALL
+      .into_iter()
+      .filter(|target| {
+        let texts = [
+          i18n.t(&format!("admin-nav-{}", target.slug())),
+          i18n.t(&format!("admin-nav-{}-keywords", target.slug())),
+          group_label(i18n, target.group()),
+        ];
+        matches_query(&query, &texts)
+      })
+      .collect::<Vec<_>>()
+  });
+
+  let nav_item = move |target: AdminSection| {
+    view! {
+      <li hidden=move || !matches.with(|found| found.contains(&target))>
+        <button
+          type="button"
+          class="admin-nav-item"
+          aria-current=move || (target == section).then_some("page")
+          on:click=move |_| state.open_admin(target)
+        >
+          <Icon name=section_icon(target) />
+          <span>{move || i18n.t(&format!("admin-nav-{}", target.slug()))}</span>
+          {(target == AdminSection::Health)
+            .then(|| {
+              view! {
+                <Show when=move || { alerts.get() > 0 } fallback=|| ()>
+                  <span class="badge-count" role="img" aria-label=move || i18n.t_count("health-alerts-badge", alerts.get())>
+                    {move || alerts.get()}
+                  </span>
+                </Show>
+              }
+            })}
+        </button>
+      </li>
+    }
+  };
+
+  let nav_group = move |group: AdminGroup| {
+    let heading_id = format!("admin-nav-group-{}", group.slug());
+    let has_match = move || matches.with(|found| found.iter().any(|target| target.group() == group));
+    view! {
+      <div class="admin-nav-group" hidden=move || !has_match()>
+        {(group != AdminGroup::Overview).then(|| {
+          let id = heading_id.clone();
+          view! { <h2 class="admin-nav-heading" id=id>{move || group_label(i18n, group)}</h2> }
+        })}
+        <ul aria-labelledby=(group != AdminGroup::Overview).then_some(heading_id.clone())>
+          {group.sections().map(nav_item).collect_view()}
+        </ul>
+      </div>
+    }
+  };
+
+  // A page far down the list (Server, Integrations) stays in sight when it opens.
+  request_animation_frame(|| {
+    if let Some(current) = document()
+      .query_selector(".admin-nav-groups [aria-current=\"page\"]")
+      .ok()
+      .flatten()
+    {
+      let options = web_sys::ScrollIntoViewOptions::new();
+      options.set_block(web_sys::ScrollLogicalPosition::Nearest);
+      current.scroll_into_view_with_scroll_into_view_options(&options);
+    }
+  });
+
+  view! {
+    <nav class="admin-nav" aria-label=move || i18n.t("admin-nav-label")>
+      <button type="button" class="admin-back" on:click=move |_| back_or_home(state)>
+        <Icon name=IconName::ChevronRight class="flip" />
+        <span>{move || i18n.t("admin-back")}</span>
+      </button>
+      <h1>{move || i18n.t("admin-title")}</h1>
+      <label class="admin-nav-search">
+        <Icon name=IconName::Search />
+        <span class="visually-hidden">{move || i18n.t("admin-nav-search")}</span>
+        <input
+          class="input"
+          type="search"
+          autocomplete="off"
+          placeholder=move || i18n.t("admin-nav-search-placeholder")
+          prop:value=move || query.get()
+          on:input=move |ev| query.set(event_target_value(&ev))
+          on:keydown=move |ev| {
+            // Enter opens the first page found; Escape empties the field.
+            match ev.key().as_str() {
+              "Enter" => {
+                if let Some(first) = matches.with_untracked(|found| found.first().copied()) {
+                  ev.prevent_default();
+                  state.open_admin(first);
+                }
+              },
+              "Escape" if !query.with_untracked(String::is_empty) => {
+                ev.prevent_default();
+                query.set(String::new());
+              },
+              _ => {},
+            }
+          }
+        />
+      </label>
+      <div class="admin-nav-groups">
+        {AdminGroup::ALL.into_iter().map(nav_group).collect_view()}
+        <Show when=move || matches.with(Vec::is_empty) fallback=|| ()>
+          <p class="muted-text small admin-nav-empty" role="status">{move || i18n.t("admin-nav-no-match")}</p>
+        </Show>
+      </div>
+      // Phone width: one grouped picker replaces the list (690-compact.css).
+      <label class="admin-nav-picker">
+        <span class="visually-hidden">{move || i18n.t("admin-nav-label")}</span>
+        <select class="input" on:change=move |ev| {
+          let slug = event_target_value(&ev);
+          if let Some(target) = AdminSection::ALL.into_iter().find(|target| target.slug() == slug) {
+            state.open_admin(target);
+          }
+        }>
+          {AdminGroup::ALL
+            .into_iter()
+            .map(|group| {
+              view! {
+                <optgroup label=move || group_label(i18n, group)>
+                  {group
+                    .sections()
+                    .map(|target| {
+                      view! {
+                        <option value=target.slug() selected=target == section>
+                          {move || i18n.t(&format!("admin-nav-{}", target.slug()))}
+                        </option>
+                      }
+                    })
+                    .collect_view()}
+                </optgroup>
+              }
+            })
+            .collect_view()}
+        </select>
+      </label>
+    </nav>
+  }
+}
+
+fn group_label(i18n: crate::i18n::I18n, group: AdminGroup) -> String {
+  i18n.t(&format!("admin-group-{}", group.slug()))
+}
+
+fn section_icon(section: AdminSection) -> IconName {
+  match section {
+    AdminSection::Health => IconName::Activity,
+    AdminSection::Users => IconName::Users,
+    AdminSection::People => IconName::User,
+    AdminSection::Permissions => IconName::Shield,
+    AdminSection::Channels => IconName::Layers,
+    AdminSection::Announcement => IconName::Bell,
+    AdminSection::Retention => IconName::Clock,
+    AdminSection::Security => IconName::Key,
+    AdminSection::Audit => IconName::List,
+    AdminSection::Import => IconName::Download,
+    AdminSection::Brands => IconName::Spotlight,
+    AdminSection::Backgrounds => IconName::Image,
+    AdminSection::Emoji => IconName::Smile,
+    AdminSection::Instance => IconName::Monitor,
+    AdminSection::Settings => IconName::Sliders,
+    AdminSection::Mail => IconName::Send,
+    AdminSection::Calendar => IconName::Calendar,
+    AdminSection::Updates => IconName::Download,
+    AdminSection::Integrations => IconName::Terminal,
+    AdminSection::Webhooks => IconName::Link,
+    AdminSection::Notetaker => IconName::Compose,
+  }
+}
+
+/// Whether every word of the query is found in one of the texts, ignoring case: "mail brand" finds
+/// a page whose name says mail and whose keywords say brand.
+fn matches_query(query: &str, texts: &[String]) -> bool {
+  let haystack = texts.join(" ").to_lowercase();
+  query
+    .split_whitespace()
+    .all(|word| haystack.contains(&word.to_lowercase()))
+}
+
+/// The frame every admin page starts with (issue #958): the group it belongs to, its title, what it
+/// does, and the "metadata only" boundary with its explanation one click away.
 #[component]
 pub fn SectionHeader(
   #[prop(into)] title: Signal<String>,
   #[prop(into)] subtitle: Signal<String>,
 ) -> impl IntoView {
   let i18n = use_i18n();
+  let maybe_group = use_context::<OpenSection>()
+    .map(|OpenSection(section)| section.group())
+    .filter(|group| *group != AdminGroup::Overview);
   view! {
     <header class="admin-section-head">
-      <div>
+      <div class="admin-section-titles">
+        {maybe_group.map(|group| view! { <p class="admin-eyebrow">{move || group_label(i18n, group)}</p> })}
         <h2>{move || title.get()}</h2>
         <p class="muted-text">{move || subtitle.get()}</p>
       </div>
-      <span class="metadata-pill" title=move || i18n.t("admin-metadata-detail")>
-        <Icon name=IconName::EyeOff />
-        <span>{move || i18n.t("admin-metadata-only")}</span>
-      </span>
+      <details class="metadata-note">
+        <summary class="metadata-pill">
+          <Icon name=IconName::EyeOff />
+          <span>{move || i18n.t("admin-metadata-only")}</span>
+          <Icon name=IconName::Info class="metadata-more" />
+        </summary>
+        <p class="metadata-detail">{move || i18n.t("admin-metadata-detail")}</p>
+      </details>
     </header>
   }
 }
@@ -278,5 +433,28 @@ pub fn ListCutNotice(#[prop(into)] is_cut: Signal<bool>) -> impl IntoView {
     is_cut
       .get()
       .then(|| view! { <p class="muted-text small" role="status">{i18n.t("admin-list-cut")}</p> })
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn an_empty_query_matches_every_page() {
+    assert!(matches_query("", &texts(&["Mail server"])));
+    assert!(matches_query("   ", &texts(&["Mail server"])));
+  }
+
+  #[test]
+  fn every_word_must_be_found_in_one_of_the_texts_ignoring_case() {
+    let page = texts(&["Mail server", "smtp invitations", "Server"]);
+    assert!(matches_query("mail", &page));
+    assert!(matches_query("SMTP mail", &page));
+    assert!(!matches_query("mail calendar", &page));
+  }
+
+  fn texts(texts: &[&str]) -> Vec<String> {
+    texts.iter().map(|text| (*text).to_owned()).collect()
   }
 }

@@ -44,6 +44,8 @@
   align-items: start;
 }
 .instance-card {
+  /* A grid item may shrink below its table's width; the table scrolls in its own wrapper. */
+  min-width: 0;
   padding: 16px;
   border: 1px solid var(--border);
   border-radius: var(--radius);

@@ -8,11 +8,12 @@
 
 .admin-nav {
   flex: none;
-  width: 230px;
+  width: 240px;
   display: flex;
   flex-direction: column;
   gap: 4px;
   padding: 16px 12px;
+  overflow-y: auto;
   border-right: 1px solid var(--border);
   background: var(--surface-2);
 }
@@ -54,6 +55,62 @@
   color: var(--text-muted);
 }
 
+/* Find a setting (issue #958): filters the list below as you type. */
+.admin-nav-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  margin: 0 0 6px;
+}
+
+.admin-nav-search .icon {
+  position: absolute;
+  inset-inline-start: 10px;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+
+.admin-nav-search input {
+  width: 100%;
+  padding-inline-start: 32px;
+  border-radius: var(--radius-pill);
+}
+
+/* The groups: a small heading over the pages that belong together. */
+.admin-nav-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.admin-nav-group ul {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.admin-nav-heading {
+  margin: 0;
+  padding: 0 10px 4px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  font-weight: var(--weight-semibold);
+}
+
+.admin-nav-item .badge-count {
+  margin-inline-start: auto;
+}
+
+.admin-nav-empty {
+  padding: 0 10px;
+}
+
+/* The grouped picker that replaces the list at phone width (690-compact.css). */
+.admin-nav-picker {
+  display: none;
+}
+
 .flip {
   transform: rotate(180deg);
 }
@@ -75,6 +132,13 @@
   overflow-y: auto;
 }
 
+/* One width rule for every page (issue #958): wide enough for the tables, never a line that runs
+   across a large screen. Tables scroll inside their own wrapper. */
+.admin-content > * {
+  width: 100%;
+  max-width: 72rem;
+}
+
 .admin-section-head {
   flex: none;
   display: flex;
@@ -88,6 +152,52 @@
   font-size: var(--text-xl);
   letter-spacing: var(--tracking-xl);
   line-height: var(--leading-xl);
+}
+
+.admin-section-titles {
+  min-width: 0;
+}
+
+/* The group the page belongs to, above its title: where am I. */
+.admin-eyebrow {
+  margin: 0 0 2px;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: var(--weight-semibold);
+}
+
+/* "Metadata only" opens its explanation in place instead of a tooltip nobody finds. */
+.metadata-note {
+  position: relative;
+  flex: none;
+}
+
+.metadata-note > summary {
+  list-style: none;
+  cursor: pointer;
+}
+
+.metadata-note > summary::-webkit-details-marker {
+  display: none;
+}
+
+.metadata-more {
+  opacity: 0.7;
+}
+
+.metadata-detail {
+  position: absolute;
+  inset-inline-end: 0;
+  top: calc(100% + 6px);
+  z-index: 3;
+  width: min(20rem, 80vw);
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  box-shadow: var(--shadow-card);
+  font-size: var(--text-sm);
 }
 
 .metadata-pill {

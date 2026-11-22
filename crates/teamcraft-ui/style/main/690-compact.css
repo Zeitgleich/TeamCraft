@@ -670,45 +670,51 @@
   }
 }
 
-/* The administration console: its side navigation becomes a strip of tabs that scrolls sideways
-   on its own, above the content. */
+/* The administration console: the side navigation becomes one row above the content, Back and a
+   grouped picker of every page (issue #958) instead of 21 tabs scrolling sideways. */
 :root[data-layout="compact"] .admin {
   flex-direction: column;
   min-height: 0;
   flex: 1;
 }
 
-:root[data-layout="compact"] .admin-nav,
-:root[data-layout="compact"] .admin-nav ul {
+:root[data-layout="compact"] .admin-nav {
   flex-direction: row;
   align-items: center;
-}
-
-:root[data-layout="compact"] .admin-nav {
+  gap: var(--space-2);
   width: auto;
   padding: var(--space-1) var(--space-2);
-  overflow-x: auto;
+  overflow: visible;
   border-right: 0;
   border-bottom: 1px solid var(--border);
-  scrollbar-width: none;
 }
 
-:root[data-layout="compact"] .admin-nav ul {
-  display: flex;
-  gap: 2px;
-}
-
-:root[data-layout="compact"] .admin-nav h1 {
+:root[data-layout="compact"] .admin-nav h1,
+:root[data-layout="compact"] .admin-nav-search,
+:root[data-layout="compact"] .admin-nav-groups {
   display: none;
 }
 
-:root[data-layout="compact"] .admin-nav-item,
 :root[data-layout="compact"] .admin-back {
   flex: none;
   width: auto;
-  height: auto;
   min-height: var(--touch);
   white-space: nowrap;
+}
+
+:root[data-layout="compact"] .admin-nav-picker {
+  display: block;
+  flex: 1;
+  min-width: 0;
+}
+
+:root[data-layout="compact"] .admin-nav-picker select {
+  width: 100%;
+  min-height: var(--touch);
+}
+
+:root[data-layout="compact"] .admin-section-head {
+  flex-wrap: wrap;
 }
 
 :root[data-layout="compact"] .admin-content {
