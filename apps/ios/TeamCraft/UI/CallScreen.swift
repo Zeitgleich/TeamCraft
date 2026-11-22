@@ -13,6 +13,8 @@ import SwiftUI
 struct CallScreen: View {
   @Environment(AppModel.self) private var model
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
+  @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverOn
+  @Environment(\.accessibilitySwitchControlEnabled) private var isSwitchControlOn
   let call: ActiveCall
 
   /// The call is in a DM or group DM.
@@ -175,7 +177,7 @@ struct CallScreen: View {
     .task(id: AutoHideKey(isShown: areControlsShown, hasVideo: hasRemoteVideo, phase: call.phase, interactions: interactions)) {
       // The chrome steps aside when there is video to look at; without video it stays.
       guard !hasRemoteVideo else {
-        if areControlsShown && call.phase == .connected {
+        if areControlsShown && call.phase == .connected && !keepsControlsShown {
           try? await Task.sleep(for: Self.autoHideDelay)
           if !Task.isCancelled { setControlsShown(false) }
         }
@@ -183,6 +185,29 @@ struct CallScreen: View {
       }
       if !areControlsShown { setControlsShown(true) }
     }
+    // What VoiceOver users can't see happen (#217); the banners only change in place.
+    .onChange(of: call.recordingUserIds) { old, new in
+      if new.contains(where: { !old.contains($0) }) {
+        announce(String(localized: "call_recording_by \(recordingNames)"), isUrgent: true)
+      }
+    }
+    .onChange(of: call.phase) { _, phase in
+      if phase == .reconnecting { announce(String(localized: "call_reconnecting")) }
+    }
+    .onChange(of: shownLobby?.people.count ?? 0) { old, new in
+      if new > old { announce(String(localized: "call_lobby_banner \(new)")) }
+    }
+  }
+
+  /// WCAG 2.2.1 (#217): with VoiceOver or Switch Control the controls don't step aside on a timer;
+  /// they would vanish while the user moves towards them.
+  private var keepsControlsShown: Bool { isVoiceOverOn || isSwitchControlOn }
+
+  /// Says what changed. Recording is urgent: it is a matter of consent (e2ee.md §8.3).
+  private func announce(_ text: String, isUrgent: Bool = false) {
+    var announcement = AttributedString(text)
+    if isUrgent { announcement.accessibilitySpeechAnnouncementPriority = .high }
+    AccessibilityNotification.Announcement(announcement).post()
   }
 
   // MARK: Stage
@@ -550,14 +575,9 @@ struct CallScreen: View {
   @ViewBuilder
   private var recordingNotice: some View {
     if !call.recordingUserIds.isEmpty {
-      let someone = String(localized: "call_recording_someone")
-      let names = call.recordingUserIds
-        .map { id in model.calls.names[id].flatMap { $0.isEmpty ? nil : $0 } ?? someone }
-        .sorted()
-        .joined(separator: ", ")
       HStack(spacing: 8) {
         Circle().fill(.red).frame(width: 8, height: 8).accessibilityHidden(true)
-        Text("call_recording_by \(names)")
+        Text("call_recording_by \(recordingNames)")
       }
       .font(.app(.subheadline).weight(.medium))
       .foregroundStyle(.white)
@@ -566,6 +586,15 @@ struct CallScreen: View {
       .background(.black.opacity(0.55), in: Capsule())
       .accessibilityElement(children: .combine)
     }
+  }
+
+  /// The people recording the call, by name, for the notice and its announcement.
+  private var recordingNames: String {
+    let someone = String(localized: "call_recording_someone")
+    return call.recordingUserIds
+      .map { id in model.calls.names[id].flatMap { $0.isEmpty ? nil : $0 } ?? someone }
+      .sorted()
+      .joined(separator: ", ")
   }
 
   /// What matters while talking: that the connection is gone, that nobody hears you, that the own
