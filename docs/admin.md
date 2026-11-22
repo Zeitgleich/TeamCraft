@@ -1236,6 +1236,25 @@ through the emoji picker's "Workspace" section and the `:` suggestions of the co
   changes.
 - **Audit:** `custom_emoji_added`, `custom_emoji_renamed` and `custom_emoji_deleted`.
 
+**Stickers (issue #2132).** Under Administration → Stickers, admins and owners create sticker packs
+(a name of up to 64 characters), add pictures to them with a name (as for emoji, unique within the
+pack) and an alt text (required: what screen readers say and what apps without the picture show),
+and rename, edit, reorder, remove and delete. Everybody sends them from the composer's picker
+(Emoji | Stickers on web and desktop) or the sticker sheet (Android, iOS).
+
+- **Who:** as for emoji: `manage_workspace` on the server, and on every device an admin or owner of
+  the verified roster, whose device signs each version of a pack (e2ee.md §4.14). Packs are
+  workspace-wide; per-space packs and members' own packs are left for later.
+- **Storage:** as for emoji, unencrypted, keyed by the picture's SHA-256. A picture no pack names any
+  more is deleted from storage a day after its upload (so a pack being put together keeps its
+  pictures).
+- **Limits** (`[limits]`, also Settings → Limits): `max_sticker_packs` (50), `max_stickers_per_pack`
+  (120), `max_sticker_bytes` (256 KB per picture) and `max_sticker_side_px` (512 px), with ceilings
+  of 500, 500, 1 MB and 1024 px. Still PNG or WebP only, as for emoji.
+- **Deleting** a sticker or a pack changes no message: devices that hold the picture keep showing
+  it, others show the message's fallback text (`[Sticker: alt text]`).
+- **Audit:** `sticker_pack_added`, `sticker_pack_changed` and `sticker_pack_deleted`.
+
 ### 3.12 Profile pictures (issue #2071)
 
 Where people's pictures come from is part of the signed workspace policy (`directory`), under
