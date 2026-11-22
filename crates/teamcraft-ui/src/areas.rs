@@ -361,6 +361,16 @@ pub fn guest_devices(_unit: ()) -> Result<Option<GuestDevices>, SplitLoaderError
   Ok(GuestDevices::for_page())
 }
 
+/// The page's callbacks for the call module (`web_calls::Callbacks`), with the JSON readers of
+/// what the module reports: in the call screens' module, which a call's screens load first (#1699).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(calls, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn call_callbacks(
+  host: std::rc::Weak<crate::web_calls::WebCallHost>,
+) -> Result<Result<crate::web_calls::Callbacks, String>, SplitLoaderError> {
+  Ok(crate::web_calls::Callbacks::new(host))
+}
+
 /// A media report for the screen shares' meter (`share_quality`, #1733): the report's readers and
 /// the meter only run while a screen is shared in a call, so they are in the call screens' module,
 /// not in the signed-in app.
