@@ -123,3 +123,10 @@
   list-style: none;
 }
 
+
+/* Reduced motion: the change shows, nothing slides or scales (2.3.3). */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-layout="compact"] .sb-entries-toggle .icon {
+    transition: none;
+  }
+}

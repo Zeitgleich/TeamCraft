@@ -39,6 +39,9 @@ pub enum Platform {
 /// Opens the quick switcher.
 pub const QUICK_SWITCHER: Shortcut = Shortcut::primary("K");
 
+/// Takes back the newest delete or leave whose Undo toast is still showing (outside text fields).
+pub const UNDO: Shortcut = Shortcut::primary("Z");
+
 /// Searches in the open conversation (the header's search icon opens the same search).
 pub const SEARCH_IN_CONVERSATION: Shortcut = Shortcut::primary("F");
 

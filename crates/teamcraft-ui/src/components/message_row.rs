@@ -629,7 +629,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         })}
         {badge_bot.then(|| view! { <span class="badge">{move || i18n.t("badge-bot")}</span> })}
         {badge_guest.then(|| view! { <span class="badge badge-guest">{move || i18n.t("badge-guest")}</span> })}
-        {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" title=status.text>{status.emoji}</span> })}
+        {status.filter(|_| state.settings.prefs.get_untracked().display.show_status_in_messages).map(|status| view! { <span class="msg-status" role="img" aria-label=status.text.clone() title=status.text>{status.emoji}</span> })}
         <time class="msg-time" datetime=message.sent_at.to_string() title=time_title.clone()>
           {time.clone()}
         </time>
@@ -996,7 +996,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
         view! {
           <span
             class="msg-delivery is-pending"
-            role="status"
+            role="img"
             aria-label=move || i18n.t("message-sending")
             title=move || i18n.t("message-sending")
           >
@@ -1007,7 +1007,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       ),
       Delivery::Delayed if is_uploading() => Some(
         view! {
-          <span class="msg-delivery is-pending" role="status" aria-label=move || i18n.t("message-sending")>
+          <span class="msg-delivery is-pending" role="img" aria-label=move || i18n.t("message-sending")>
             <Icon name=IconName::Clock />
           </span>
         }
@@ -1015,7 +1015,7 @@ fn user_message(message: Message, is_grouped: bool, in_thread: bool, motion: Row
       ),
       Delivery::Delayed => Some(
         view! {
-          <span class="msg-delivery is-pending msg-delayed" role="status">
+          <span class="msg-delivery is-pending msg-delayed">
             <Icon name=IconName::Clock />
             {move || i18n.t("message-not-sent")}
           </span>

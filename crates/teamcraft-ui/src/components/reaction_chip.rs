@@ -181,6 +181,13 @@ pub fn ReactionChip(
         aria-disabled=(!can_react).to_string()
         aria-label=label.clone()
         title=label
+        on:keydown=move |ev| {
+          // Shift+F10 or the menu key: the full list of who reacted, as the pointer's "Show everyone" (W-22).
+          if has_more && (ev.key() == "ContextMenu" || (ev.shift_key() && ev.key() == "F10")) {
+            ev.prevent_default();
+            is_open.set(true);
+          }
+        }
         on:click=move |_| {
           // The long press that opened the list is no tap.
           if long_press.has_fired() || !can_react {
@@ -209,6 +216,11 @@ pub fn ReactionChip(
       {move || is_open.get().then(|| {
         let heading = popover_names.label(i18n.locale(), &popover_emoji);
         let everyone = popover_names.clone();
+        // Opened from the keyboard, the focus goes into the list; Escape or Close ends it.
+        let close_button = NodeRef::<leptos::html::Button>::new();
+        close_button.on_load(|button| {
+          let _ = button.focus();
+        });
         view! {
           <span class="reaction-scrim" on:click=move |_| is_open.set(false)></span>
           <span class="reaction-popover" role="dialog" aria-label=heading>
@@ -222,7 +234,7 @@ pub fn ReactionChip(
                 {i18n.t_count("reaction-others-unnamed", everyone.total - everyone.named())}
               </span>
             })}
-            <button class="btn btn-small" on:click=move |_| is_open.set(false)>{i18n.t("reaction-close")}</button>
+            <button class="btn btn-small" node_ref=close_button on:click=move |_| is_open.set(false)>{i18n.t("reaction-close")}</button>
           </span>
         }
       })}

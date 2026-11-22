@@ -82,6 +82,7 @@ shortcuts-notes = Gemeinsame Notizen
 shortcut-move-block = Block nach oben oder unten verschieben
 shortcut-back-forward = Zurück oder vorwärts
 shortcut-close = Dialog oder Seitenbereich schließen
+shortcut-undo-delete = Löschen oder Verlassen rückgängig machen (solange der Hinweis zu sehen ist)
 shortcut-messages = Zwischen Nachrichten wechseln
 shortcut-open-thread = Thread der markierten Nachricht öffnen
 shortcut-quote-message = Markierte Nachricht in einer Antwort zitieren

@@ -470,6 +470,11 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
               >
                 <div class="toast-body">
                   <span>{toast.text}</span>
+                  {toast.maybe_undo.is_some().then(|| view! {
+                    <span class="toast-hint">
+                      {move || i18n.t_with("undo-shortcut-hint", &[("shortcut", &crate::keys::shortcut_text(&crate::keys::UNDO, i18n.locale()))])}
+                    </span>
+                  })}
                   {match toast.tone {
                     ToastTone::Info => None,
                     ToastTone::Error { detail } => Some(view! {
@@ -740,6 +745,15 @@ fn handle_global_shortcut(ev: &web_sys::KeyboardEvent, state: AppState) {
       });
       return;
     }
+  }
+  // Ctrl/Cmd+Z takes back the newest delete or leave while its Undo toast shows. In a text field it
+  // stays the editor's own undo.
+  if crate::keys::UNDO.matches(ev, crate::keys::Platform::current())
+    && !is_text_input_focused()
+    && state.undo_newest()
+  {
+    ev.prevent_default();
+    return;
   }
   // Cmd+[ and Cmd+] go back and forward on the Mac, as in Safari and Finder; the desktop webview
   // does not map them itself. In a text field they stay the editor's.

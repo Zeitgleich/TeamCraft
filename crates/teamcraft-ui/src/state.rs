@@ -1615,6 +1615,27 @@ impl AppState {
     }
   }
 
+  /// Undoes the newest toast that offers it (the keyboard way to the Undo button, WCAG 2.2.1).
+  /// Returns whether there was one.
+  pub fn undo_newest(&self) -> bool {
+    let maybe_newest = self
+      .toasts
+      .try_with_untracked(|list| {
+        list
+          .iter()
+          .rev()
+          .find_map(|toast| toast.maybe_undo.map(|undo| (toast.id, undo)))
+      })
+      .flatten();
+    match maybe_newest {
+      Some((toast, undo)) => {
+        self.undo(toast, undo);
+        true
+      },
+      None => false,
+    }
+  }
+
   /// Runs the Undo of a toast and closes it.
   pub fn undo(&self, toast: u64, undo: Undo) {
     match undo {

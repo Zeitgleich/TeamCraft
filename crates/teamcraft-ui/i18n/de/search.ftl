@@ -20,6 +20,7 @@ search-chip-threads = Nur Threads
 search-chip-last-week = Letzte 7 Tage
 search-chip-more = Weitere Filter
 switcher-results = Ergebnisse
+switcher-unread = Ungelesen
 switcher-empty = Keine Treffer.
 switcher-group-recent = Zuletzt geöffnet
 switcher-group-people = Personen
