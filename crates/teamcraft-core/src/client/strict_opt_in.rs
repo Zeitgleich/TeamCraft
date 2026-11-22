@@ -518,7 +518,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   async fn run_strict_tasks_in(&mut self, conversation: ConversationId) -> Result<bool, CoreError> {
     if !self.has_group(conversation)? || self.strict_stop(conversation)?.is_some() {
       // Out of the group, or stopped (D4): nothing of this goes out.
-      return Ok(self.has_group(conversation)?);
+      return self.has_group(conversation);
     }
     let mut is_open = false;
     if let Some(record) = self.ready_record(conversation)? {

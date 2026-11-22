@@ -85,6 +85,7 @@ impl Database {
   ///
   /// The epoch counter is advanced with a conditional UPDATE in the same transaction as the insert,
   /// so of several commits for one epoch exactly one succeeds.
+  #[allow(clippy::too_many_arguments)]
   pub async fn post_mls_commit(
     &self,
     conversation: ConversationId,

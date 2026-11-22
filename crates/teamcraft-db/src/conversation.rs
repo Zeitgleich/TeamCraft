@@ -860,6 +860,21 @@ fn permission_names(set: &HashSet<Permission>) -> Vec<String> {
   names
 }
 
+fn strict_hint(
+  is_strict: bool,
+  maybe_version: Option<i64>,
+  maybe_hash: Option<Vec<u8>>,
+) -> Option<StrictHint> {
+  match (maybe_version, maybe_hash) {
+    (Some(version), Some(hash)) => Some(StrictHint {
+      is_strict,
+      version: u64::try_from(version).unwrap_or(0),
+      hash,
+    }),
+    _ => None,
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use teamcraft_proto::{Id, Snowflake};
@@ -881,20 +896,5 @@ mod tests {
       participants_key(&[user(4)]),
       participants_key(&[user(4), user(30)])
     );
-  }
-}
-
-fn strict_hint(
-  is_strict: bool,
-  maybe_version: Option<i64>,
-  maybe_hash: Option<Vec<u8>>,
-) -> Option<StrictHint> {
-  match (maybe_version, maybe_hash) {
-    (Some(version), Some(hash)) => Some(StrictHint {
-      is_strict,
-      version: u64::try_from(version).unwrap_or(0),
-      hash,
-    }),
-    _ => None,
   }
 }
