@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
   AdminSelfJoin, CallRecorders, DirectMediaMode, GuestDmStart, HistoryPolicy, LeaverRemovalMode,
-  ScreenShareResolution,
+  RecordingFiles, ScreenShareResolution,
 };
 
 use crate::components::admin_console::SectionHeader;
@@ -398,6 +398,23 @@ pub fn SecuritySection() -> impl IntoView {
           }
         />
         <p class="muted-text small">{move || i18n.t("policy-call-recording-limit")}</p>
+        // Saving as an unencrypted file on the device (#2116): allowed by default.
+        <CheckRow
+          name="call_recording_local_files"
+          label=Signal::derive(move || i18n.t("policy-call-recording-files"))
+          hint=Signal::derive(move || i18n.t("policy-call-recording-files-hint"))
+          checked=Signal::derive(move || draft.get().call_recording.allows_local_files())
+          disabled=Signal::derive(move || !draft.get().call_recording.is_enabled())
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.call_recording.local_files = if value {
+                RecordingFiles::Allowed
+              } else {
+                RecordingFiles::Forbidden
+              };
+            })
+          }
+        />
       </fieldset>
 
       <BugReportRecipients policy=policy />

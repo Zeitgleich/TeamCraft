@@ -88,6 +88,7 @@
     "allow-call-media-devices",
     "allow-call-action",
     "allow-call-recording-stage",
+    "allow-call-recording-save",
     "allow-call-watch-video",
     "allow-call-background-preview",
     "allow-call-unwatch-video",

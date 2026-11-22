@@ -4,8 +4,11 @@
 //!
 //! The writer streams: pages go to the output as they fill, so a long recording costs no memory.
 //! A page holds about a second of audio; the last one is marked as the end of the stream.
+//!
+//! A stream a crash cut (a call recording, #2116) is valid up to its last whole page:
+//! [`copy_whole_pages`] copies those and marks the last one kept as the end.
 
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 
 use crate::audio_frame::SAMPLE_RATE_HZ;
 
@@ -18,6 +21,19 @@ const VENDOR: &[u8] = b"TeamCraft";
 /// Header type flags of a page.
 const FIRST_PAGE: u8 = 0x02;
 const LAST_PAGE: u8 = 0x04;
+/// The fixed part of a page header, up to its segment count.
+const PAGE_HEADER_LEN: usize = 27;
+/// Where the checksum sits in a page.
+const CHECKSUM_AT: std::ops::Range<usize> = 22..26;
+
+/// What [`copy_whole_pages`] kept of a stream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeptOgg {
+  /// The bytes written.
+  pub bytes: u64,
+  /// The audio kept, without the pre-skip, in 48 kHz samples.
+  pub samples: u64,
+}
 
 /// An Ogg Opus stream being written; [`OggOpusWriter::finish`] writes the last page.
 pub struct OggOpusWriter<W: Write> {
@@ -85,6 +101,96 @@ impl<W: Write> OggOpusWriter<W> {
     self.sequence += 1;
     self.pending.clear();
     Ok(())
+  }
+}
+
+/// Copies an Ogg Opus stream that may have been cut short (a recording a crash left, #2116) from
+/// `input` to `output`: its pages, in order, while each is whole, has a matching checksum and
+/// continues the stream (serial and sequence), up to the first that doesn't or the end of the
+/// input. The last page kept is marked as the end of the stream, its checksum renewed, so players
+/// see a finished file. Holds one page at a time (at most about 64 KiB).
+///
+/// Fails with `InvalidData` when not even the two header pages and one page of audio are there;
+/// `output` may have got the header pages then. Read and write errors are passed on.
+pub fn copy_whole_pages(input: &mut impl Read, output: &mut impl Write) -> io::Result<KeptOgg> {
+  let mut maybe_held: Option<Vec<u8>> = None;
+  let mut kept = KeptOgg { bytes: 0, samples: 0 };
+  let mut maybe_serial = None;
+  let mut pre_skip = 0u16;
+  let mut sequence = 0u32;
+  while let Some(page) = read_whole_page(input)? {
+    let serial = u32::from_le_bytes([page[14], page[15], page[16], page[17]]);
+    let page_sequence = u32::from_le_bytes([page[18], page[19], page[20], page[21]]);
+    if page_sequence != sequence || maybe_serial.is_some_and(|known| known != serial) {
+      break;
+    }
+    let body = &page[PAGE_HEADER_LEN + usize::from(page[26])..];
+    match sequence {
+      0 if body.starts_with(b"OpusHead") && body.len() >= 19 => {
+        pre_skip = u16::from_le_bytes([body[10], body[11]]);
+        maybe_serial = Some(serial);
+      },
+      1 if body.starts_with(b"OpusTags") => {},
+      0 | 1 => break,
+      _ => {},
+    }
+    if let Some(held) = maybe_held.replace(page) {
+      output.write_all(&held)?;
+      kept.bytes += held.len() as u64;
+    }
+    sequence += 1;
+  }
+  let Some(mut last) = maybe_held.filter(|_| sequence > 2) else {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "no audio to recover in the stream",
+    ));
+  };
+  let granule = u64::from_le_bytes(last[6..14].try_into().unwrap_or_default());
+  last[5] |= LAST_PAGE;
+  last[CHECKSUM_AT].fill(0);
+  let checksum = crc32(&last);
+  last[CHECKSUM_AT].copy_from_slice(&checksum.to_le_bytes());
+  output.write_all(&last)?;
+  output.flush()?;
+  kept.bytes += last.len() as u64;
+  kept.samples = granule.saturating_sub(u64::from(pre_skip));
+  Ok(kept)
+}
+
+/// The next page of `input` if it is whole and its checksum matches; `None` at the end of the
+/// input, at a page cut short, and at anything that isn't a page.
+fn read_whole_page(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
+  let mut page = vec![0u8; PAGE_HEADER_LEN];
+  if !read_all_or_end(input, &mut page)? || &page[..4] != b"OggS" || page[4] != 0 {
+    return Ok(None);
+  }
+  let segment_count = usize::from(page[26]);
+  page.resize(PAGE_HEADER_LEN + segment_count, 0);
+  if !read_all_or_end(input, &mut page[PAGE_HEADER_LEN..])? {
+    return Ok(None);
+  }
+  let body_len: usize = page[PAGE_HEADER_LEN..]
+    .iter()
+    .map(|&segment| usize::from(segment))
+    .sum();
+  let body_at = page.len();
+  page.resize(body_at + body_len, 0);
+  if !read_all_or_end(input, &mut page[body_at..])? {
+    return Ok(None);
+  }
+  let stored = u32::from_le_bytes([page[22], page[23], page[24], page[25]]);
+  let mut unsummed = page.clone();
+  unsummed[CHECKSUM_AT].fill(0);
+  Ok((crc32(&unsummed) == stored).then_some(page))
+}
+
+/// Fills `buffer` from `input`; `false` when the input ends first.
+fn read_all_or_end(input: &mut impl Read, buffer: &mut [u8]) -> io::Result<bool> {
+  match input.read_exact(buffer) {
+    Ok(()) => Ok(true),
+    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+    Err(error) => Err(error),
   }
 }
 
@@ -184,7 +290,69 @@ mod tests {
     assert_eq!(crc32(b"123456789"), 0x89a1_897f);
   }
 
+  #[test]
+  fn a_stream_cut_anywhere_keeps_its_whole_pages_and_ends_cleanly() {
+    let stream = stream_of(120, 312);
+    let pages = pages_of(&stream);
+    let page_ends: Vec<usize> = pages
+      .iter()
+      .scan(0, |end, page| {
+        *end += page.len;
+        Some(*end)
+      })
+      .collect();
+    // Cut inside the fourth page (head, tags, one page of audio stay), right after the fourth
+    // page, and not at all.
+    for (cut, kept_pages) in [(page_ends[2] + 40, 3), (page_ends[3], 4), (stream.len(), 5)] {
+      let mut copy = Vec::new();
+      let kept = copy_whole_pages(&mut &stream[..cut], &mut copy).unwrap();
+      assert_eq!(kept.bytes, copy.len() as u64);
+      let copied = pages_of(&copy);
+      assert_eq!(copied.len(), kept_pages, "cut at {cut}");
+      let last = copied.last().unwrap();
+      assert_eq!(last.flags & LAST_PAGE, LAST_PAGE, "the end is marked");
+      assert_eq!(kept.samples, last.granule - 312);
+      // Everything before the last page is copied as it was.
+      assert_eq!(
+        copy[..page_ends[kept_pages - 2]],
+        stream[..page_ends[kept_pages - 2]]
+      );
+    }
+  }
+
+  #[test]
+  fn a_damaged_page_ends_the_copy_before_it() {
+    let mut stream = stream_of(120, 312);
+    let pages = pages_of(&stream);
+    let fourth = pages[0].len + pages[1].len + pages[2].len;
+    stream[fourth + 40] ^= 1;
+    let mut copy = Vec::new();
+    let kept = copy_whole_pages(&mut stream.as_slice(), &mut copy).unwrap();
+    assert_eq!(pages_of(&copy).len(), 3);
+    assert_eq!(kept.samples, 50 * 960);
+  }
+
+  #[test]
+  fn a_stream_without_audio_has_nothing_to_recover() {
+    let stream = stream_of(120, 312);
+    let pages = pages_of(&stream);
+    for cut in [0, 10, pages[0].len, pages[0].len + pages[1].len] {
+      let error = copy_whole_pages(&mut &stream[..cut], &mut Vec::new()).unwrap_err();
+      assert_eq!(error.kind(), io::ErrorKind::InvalidData, "cut at {cut}");
+    }
+    assert!(copy_whole_pages(&mut &b"not an ogg file at all"[..], &mut Vec::new()).is_err());
+  }
+
+  fn stream_of(packets: usize, pre_skip: u16) -> Vec<u8> {
+    let mut writer = OggOpusWriter::new(Vec::new(), pre_skip).unwrap();
+    for _ in 0..packets {
+      writer.push(vec![0xf8, 0xff, 0xfe], 960).unwrap();
+    }
+    writer.finish().unwrap()
+  }
+
   struct Page {
+    len: usize,
     flags: u8,
     granule: u64,
     sequence: u32,
@@ -206,6 +374,7 @@ mod tests {
       page[22..26].fill(0);
       assert_eq!(crc32(&page), stored, "checksum");
       pages.push(Page {
+        len,
         flags: bytes[5],
         granule: u64::from_le_bytes(bytes[6..14].try_into().unwrap()),
         sequence: u32::from_le_bytes(bytes[18..22].try_into().unwrap()),

@@ -804,7 +804,8 @@ pub struct OwnCallRecording {
 }
 
 /// A finished recording on this device, waiting for the user to post it into the call's
-/// conversation (encrypted, e2ee.md §8.3) or delete it. It outlives the call.
+/// conversation (encrypted, e2ee.md §8.3), save it as a file (#2116) or delete it. It outlives the
+/// call, and on the desktop also a crash or a quit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRecordingTake {
   /// The call's conversation: where posting puts it.
@@ -818,6 +819,20 @@ pub struct CallRecordingTake {
   /// in memory (#2114), before the policy's maximum.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_at_memory_limit: bool,
+  /// Left by the app's last run (a crash, a kill or a quit before it was posted, #2116); the
+  /// desktop app offers it again at its next start.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_left_over: Option<LeftOverRecording>,
+}
+
+/// A recording the app's last run left behind (#2116).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeftOverRecording {
+  /// When it started (wall clock).
+  pub started_at: TimestampMs,
+  /// A crash or kill cut it: what was written before is kept, the last seconds may be missing.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_unfinished: bool,
 }
 
 /// Why this device has no media keys in its call, and when joining again may help.

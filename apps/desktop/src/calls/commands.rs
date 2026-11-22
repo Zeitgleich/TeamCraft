@@ -32,6 +32,37 @@ pub async fn call_recording_stage(
   Ok(path.to_string_lossy().into_owned())
 }
 
+/// "Save as file…" on the finished call recording (#2116): asks where to save it in the system's
+/// save dialog, then writes an unencrypted copy there (the page warned about that). Answers
+/// `false` when the user cancelled the dialog. The verified policy decides, not the page: an
+/// organization that forbids local files gets none. The take stays, to post or delete.
+#[tauri::command(rename_all = "snake_case")]
+pub async fn call_recording_save(
+  window: tauri::WebviewWindow,
+  host: State<'_, CoreHost>,
+  calls: State<'_, Arc<CallHost>>,
+  file_name: String,
+) -> Result<bool, CommandError> {
+  if !host.current()?.call_recording_allows_files().await? {
+    return Err(CommandError::from(
+      teamcraft_client_api::failure::ActionFailure::other(
+        "your organization's policy doesn't allow saving recordings as files",
+      )
+      .to_wire(),
+    ));
+  }
+  let maybe_target = crate::core::commands::ask_save_path(&window, &file_name)
+    .await
+    .map_err(|error| CommandError::from(error.to_string()))?;
+  let Some(target) = maybe_target else {
+    return Ok(false);
+  };
+  // Never the path: it names the file.
+  tracing::info!("saving the call recording to the picked place");
+  calls.save_recording(target).await?;
+  Ok(true)
+}
+
 /// Lists microphones and speakers again; the snapshot keeps the result.
 #[tauri::command(rename_all = "snake_case")]
 pub async fn call_media_devices(calls: State<'_, Arc<CallHost>>) -> Result<MediaDevices, CommandError> {

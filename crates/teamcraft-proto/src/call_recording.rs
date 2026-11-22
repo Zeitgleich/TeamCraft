@@ -25,6 +25,19 @@ pub struct CallRecordingPolicy {
   pub recorders: CallRecorders,
   /// The longest recording: 1 to [`MAX_RECORDING_MINUTES`]; apps clamp a value outside.
   pub max_minutes: u16,
+  /// Whether the recorder may save a recording as a file on their device, unencrypted (#2116).
+  /// Posting it into the call's conversation is always offered.
+  pub local_files: RecordingFiles,
+}
+
+wire_enum! {
+  /// Whether a recording may be saved as a file on the recorder's device (#2116).
+  pub enum RecordingFiles {
+    /// "Save as file…" is offered, with a warning that the file is then unencrypted: the default.
+    Allowed => "allowed",
+    /// Only posting into the call's conversation (an encrypted attachment) and deleting.
+    Forbidden => "forbidden",
+  }
 }
 
 wire_enum! {
@@ -64,6 +77,7 @@ impl Default for CallRecordingPolicy {
     Self {
       recorders: CallRecorders::Off,
       max_minutes: DEFAULT_RECORDING_MINUTES,
+      local_files: RecordingFiles::Allowed,
     }
   }
 }
@@ -91,10 +105,17 @@ impl CallRecordingPolicy {
     u32::from(self.max_minutes.clamp(1, MAX_RECORDING_MINUTES)) * 60
   }
 
-  /// Whether owners' apps may sign it: the length in range and no unknown recorders.
+  /// Whether a finished recording may be saved as a file on the device. A value from a newer app
+  /// (`Unknown`) allows it nowhere.
+  pub fn allows_local_files(&self) -> bool {
+    matches!(self.local_files, RecordingFiles::Allowed)
+  }
+
+  /// Whether owners' apps may sign it: the length in range and no unknown values.
   pub fn is_valid(&self) -> bool {
     (1..=MAX_RECORDING_MINUTES).contains(&self.max_minutes)
       && !matches!(self.recorders, CallRecorders::Unknown(_))
+      && !matches!(self.local_files, RecordingFiles::Unknown(_))
   }
 }
 
@@ -110,9 +131,27 @@ mod tests {
       let policy = CallRecordingPolicy::default();
       assert_eq!(
         serde_json::to_string(&policy).unwrap(),
-        r#"{"recorders":"off","max_minutes":120}"#
+        r#"{"recorders":"off","max_minutes":120,"local_files":"allowed"}"#
       );
       assert_eq!(serde_json::from_str::<CallRecordingPolicy>("{}").unwrap(), policy);
+    }
+
+    #[test]
+    fn a_policy_from_before_local_files_allows_them() {
+      let policy: CallRecordingPolicy =
+        serde_json::from_str(r#"{"recorders":"members","max_minutes":60}"#).unwrap();
+      assert!(policy.allows_local_files());
+      assert!(policy.is_valid());
+    }
+
+    #[test]
+    fn local_files_can_be_forbidden_and_a_newer_value_forbids_them() {
+      let policy: CallRecordingPolicy = serde_json::from_str(r#"{"local_files":"forbidden"}"#).unwrap();
+      assert!(!policy.allows_local_files());
+      assert!(policy.is_valid());
+      let policy: CallRecordingPolicy = serde_json::from_str(r#"{"local_files":"encrypted_only"}"#).unwrap();
+      assert!(!policy.allows_local_files());
+      assert!(!policy.is_valid());
     }
 
     #[test]

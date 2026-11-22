@@ -1295,10 +1295,11 @@ Administration → People:
 Whether people may record calls is part of the signed workspace policy (`call_recording`, §2.3),
 under Administration → Security → Call recording. It is **off by default**.
 
-| Field         | Default | Meaning                                                                                 |
-|---------------|---------|-----------------------------------------------------------------------------------------|
-| `recorders`   | `off`   | Who may record: `off`, `admins` (owners and admins) or `members` (everybody but guests) |
-| `max_minutes` | `120`   | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480    |
+| Field         | Default   | Meaning                                                                                    |
+|---------------|-----------|--------------------------------------------------------------------------------------------|
+| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins) or `members` (everybody but guests)    |
+| `max_minutes` | `120`     | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480       |
+| `local_files` | `allowed` | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116) |
 
 - **How it works:** the server can't record (calls are end-to-end encrypted), so a participant's
   app records what it plays and its own microphone, and posts the file, encrypted, into the call's
@@ -1320,8 +1321,16 @@ under Administration → Security → Call recording. It is **off by default**.
   conversation, readable by its members only, and the conversation's retention applies to it.
   While a recording runs, the file is on the recorder's computer, encrypted, in the app's private
   folder (in the browser: the site's private storage, or memory where the browser has none), and it
-  is deleted there once posted or discarded. In the browser, closing or reloading the tab loses a
-  recording that wasn't posted.
+  is deleted there once posted or discarded. A desktop app that crashes, is killed or quits keeps
+  the recording, encrypted, and offers it again at its next start (an unfinished one up to a few
+  seconds before the crash); signing out deletes it. In the browser, closing or reloading the tab
+  loses a recording that wasn't posted.
+- **Saving as a file:** with `local_files` allowed (the default), the recorder can also save a
+  recording as a file on their device, after a warning that the file is then **unencrypted**:
+  from then on it is outside TeamCraft's encryption, retention and deletion, wherever they put it.
+  Turn it off where recordings must stay in the encrypted conversation; the desktop app checks
+  the signed setting itself. An owner app from before the setting re-signs without it, which
+  reads as allowed.
 - **Enforcement:** member apps apply the policy, like `screen_share`: the recording app checks it
   before it starts, and every app says so when somebody records whom the policy doesn't allow. A
   modified app can ignore it (see above). An owner app from before the setting re-signs without it,
@@ -1329,8 +1338,7 @@ under Administration → Security → Call recording. It is **off by default**.
 - **Audit:** the server sees that a recording notice passed through the SFU, not who may see it or
   what it says; an entry in the audit log is a later step.
 - **Later steps:** consent from everybody before a recording starts, and leaving people out of it
-  (#2115); saving as a local file, keeping a recording a crash
-  left, video (#2116); an audit entry and an unattended recorder bot (#2117).
+  (#2115); video (#2250); an audit entry and an unattended recorder bot (#2117).
 
 ### 3.14 Legal hold and compliance archive (issue #211)
 

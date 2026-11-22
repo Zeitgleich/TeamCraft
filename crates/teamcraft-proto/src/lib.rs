@@ -54,7 +54,7 @@ pub use call_media::{
 };
 pub use call_recording::{
   CallRecorders, CallRecordingPolicy, DEFAULT_RECORDING_MINUTES, MAX_RECORDING_MINUTES,
-  MAX_RECORDING_NOTICE_BYTES, RecorderRole,
+  MAX_RECORDING_NOTICE_BYTES, RecorderRole, RecordingFiles,
 };
 pub use calls::{
   AUDIO_SOCKET_SECRET_BYTES, CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallClientMessage,

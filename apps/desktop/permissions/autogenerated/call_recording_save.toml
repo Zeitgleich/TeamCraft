@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-call-recording-save"
+description = "Enables the call_recording_save command without any pre-configured scope."
+commands.allow = ["call_recording_save"]
+
+[[permission]]
+identifier = "deny-call-recording-save"
+description = "Denies the call_recording_save command without any pre-configured scope."
+commands.deny = ["call_recording_save"]

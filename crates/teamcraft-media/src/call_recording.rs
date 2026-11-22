@@ -8,28 +8,37 @@
 //!   one frame out per frame played.
 //! - The file grows on disk chunk by chunk, never in memory: about 14 MB an hour (32 kbit/s). It is
 //!   encrypted as it is written (`teamcraft-crypto::sealed_stream`, issue #2129) under a random key
-//!   only this process holds, which goes with the [`CallRecordingTake`]; the take decrypts only
-//!   while it is copied for the upload ([`CallRecordingTake::decrypt_to`]). A file whose key is
-//!   gone (the app quit or crashed) can't be read and is deleted at the next start
-//!   ([`clear_recordings`]). The queue to the thread is bounded; a stalled disk drops frames
-//!   instead of growing memory.
+//!   which goes with the [`CallRecordingTake`]; the take decrypts only while it is copied for the
+//!   upload or to a file the user picked ([`CallRecordingTake::decrypt_to`]). The queue to the
+//!   thread is bounded; a stalled disk drops frames instead of growing memory.
+//! - **After a crash (#2116):** the app may hand [`CallRecorder::start`] a key of the device's local
+//!   secrets ([`KeptKey`]); the recording's key is then kept next to the file, sealed under it with
+//!   the app's note (`<name>.key`), until the recording is posted, saved and deleted, or discarded.
+//!   At its next start the app lists the folder before it records anything ([`FolderAtStart`]) and
+//!   gets back what a crash or a quit left ([`FolderAtStart::recover`]): a finished take as it
+//!   was, an unfinished one up to its last chunk that verifies and its last whole Ogg page in it
+//!   (about 16 seconds may be lost: the chunk that was still in memory). A file without a kept key,
+//!   or whose key doesn't open, can't be read by anybody and is deleted.
 //! - The recording stops by itself at its maximum length, or when writing fails (a full disk):
 //!   [`RecordingSink::is_ended`] tells the call's loop, which tells the others it stopped.
 //! - The file is the app's to place in a private folder and to delete; nothing here uploads.
 //!   Nothing is logged about what was said or about the file, only that a recording started and
 //!   ended and how long it was.
 
-use std::fs::{self, File};
-use std::io::{self, BufReader, Write};
+use std::fs::{self, File, OpenOptions};
+use std::io::{self, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use rand_core::OsRng;
-use teamcraft_crypto::sealed_stream::{SealedStreamKey, SealedStreamReader, SealedStreamWriter};
+use teamcraft_crypto::sealed_stream::{
+  MAX_WRAP_NOTE_LEN, SealedStreamKey, SealedStreamReader, SealedStreamWriter,
+};
+use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -38,12 +47,20 @@ use crate::audio_codec::{
 };
 use crate::audio_frame::{FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
 use crate::call_recording_parts::{RECORDING_BITRATE_BPS, RecordingMixer, max_frames};
-use crate::ogg_opus::OggOpusWriter;
+use crate::ogg_opus::{KeptOgg, OggOpusWriter, copy_whole_pages};
 
 /// Frames queued for the recording thread (about ten seconds); beyond this, frames are dropped.
 const MAX_QUEUED_FRAMES: usize = 512;
 /// How often the recording thread looks whether it should stop while nothing arrives.
 const STOP_POLL: Duration = Duration::from_millis(100);
+/// The extension of a recording's kept key, next to it.
+const KEY_EXTENSION: &str = "key";
+/// The extension of a kept key being written.
+const KEY_TEMPORARY_EXTENSION: &str = "key.tmp";
+/// The extension of a recording.
+const RECORDING_EXTENSION: &str = "ogg";
+/// The largest kept key read back: the wrapped key and the longest note.
+const MAX_KEPT_KEY_BYTES: u64 = 1 + 24 + 32 + MAX_WRAP_NOTE_LEN as u64 + 16;
 
 /// A recording under way. Dropping it stops it and deletes the file.
 pub struct CallRecorder {
@@ -61,8 +78,9 @@ pub struct RecordingSink {
   shared: Arc<Shared>,
 }
 
-/// A finished recording, for the app to post or delete. The file at `path` is encrypted; only this
-/// value holds its key, so dropping it leaves the file unreadable (delete it too).
+/// A finished recording, for the app to post, save or delete. The file at `path` is encrypted;
+/// only this value (and, when the app kept it, the sealed key next to the file) holds its key, so
+/// delete the file with [`delete_recording`].
 #[derive(Debug)]
 pub struct CallRecordingTake {
   pub path: PathBuf,
@@ -70,6 +88,33 @@ pub struct CallRecordingTake {
   /// The size of the Ogg file once decrypted: what the posted attachment shows.
   pub size_bytes: u64,
   key: SealedStreamKey,
+  /// The file has its final chunk: the recording was finished, not cut by a crash.
+  is_complete: bool,
+}
+
+/// Keeps a recording readable after a crash (#2116): its key is sealed under `device_key`, a key
+/// of the device's local secrets, together with `note` (what the app needs to offer it again, at
+/// most 1 KiB), in a file next to the recording.
+pub struct KeptKey {
+  pub device_key: SymmetricKey,
+  pub note: Vec<u8>,
+}
+
+/// The files of a recording folder at the app's start, listed before anything new is recorded
+/// there: what a crash or a quit left.
+#[derive(Debug, Default)]
+pub struct FolderAtStart {
+  files: Vec<PathBuf>,
+}
+
+/// A recording a crash or a quit left, with its kept key and note.
+#[derive(Debug)]
+pub struct LeftoverRecording {
+  pub take: CallRecordingTake,
+  /// The note the app kept with the key.
+  pub note: SecretBytes,
+  /// When the file was last written: about when the recording ended.
+  pub maybe_modified: Option<SystemTime>,
 }
 
 #[derive(Debug, Error)]
@@ -109,8 +154,10 @@ struct Shared {
 }
 
 impl CallRecorder {
-  /// Starts writing to `path` (created or replaced); `max` is the policy's longest recording.
-  pub fn start(path: &Path, max: Duration) -> Result<Self, CallRecordingError> {
+  /// Starts writing to `path`, a new file; `max` is the policy's longest recording. With
+  /// `maybe_kept`, the recording's key is kept next to it, sealed (see [`KeptKey`]); a key that
+  /// can't be written (a full disk) is logged and the recording runs without it.
+  pub fn start(path: &Path, max: Duration, maybe_kept: Option<KeptKey>) -> Result<Self, CallRecordingError> {
     let mut encoder = OpusEncoder::new(OpusEncoderConfig {
       content: AudioContent::Voice,
       bitrate_bps: RECORDING_BITRATE_BPS as i32,
@@ -123,8 +170,27 @@ impl CallRecorder {
     let decoder = OpusDecoder::new(AudioChannels::Mono)?;
     let pre_skip = encoder.lookahead_samples()?;
     let key = SealedStreamKey::generate(&mut OsRng);
-    let sealed = SealedStreamWriter::new(&key, File::create(path)?, &mut OsRng)?;
-    let writer = OggOpusWriter::new(sealed, pre_skip)?;
+    if let Some(kept) = maybe_kept
+      && let Err(error) = keep_key(path, &key, &kept)
+    {
+      warn!(%error, "the call recording's key could not be kept: a crash would lose it");
+    }
+    let file = match OpenOptions::new().write(true).create_new(true).open(path) {
+      Ok(file) => file,
+      Err(error) => {
+        remove(&key_path(path));
+        return Err(CallRecordingError::File(error));
+      },
+    };
+    let opened =
+      SealedStreamWriter::new(&key, file, &mut OsRng).and_then(|sealed| OggOpusWriter::new(sealed, pre_skip));
+    let writer = match opened {
+      Ok(writer) => writer,
+      Err(error) => {
+        delete_recording(path);
+        return Err(CallRecordingError::File(error));
+      },
+    };
     let (frames, frame_rx) = mpsc::sync_channel(MAX_QUEUED_FRAMES);
     let shared = Arc::new(Shared::default());
     let thread_shared = Arc::clone(&shared);
@@ -139,7 +205,7 @@ impl CallRecorder {
     let thread = match spawned {
       Ok(thread) => thread,
       Err(error) => {
-        remove(path);
+        delete_recording(path);
         return Err(CallRecordingError::File(error));
       },
     };
@@ -180,32 +246,33 @@ impl CallRecorder {
     let written = match result {
       Ok(written) if written.samples > 0 => written,
       Ok(_) => {
-        remove(&path);
+        delete_recording(&path);
         return Err(CallRecordingError::Empty);
       },
       Err(error) => {
-        remove(&path);
+        delete_recording(&path);
         return Err(error);
       },
     };
     let Some(key) = self.maybe_key.take() else {
-      remove(&path);
+      delete_recording(&path);
       return Err(CallRecordingError::Thread);
     };
-    let duration_ms = written.samples * 1000 / u64::from(SAMPLE_RATE_HZ);
+    let duration_ms = duration_ms_of(written.samples);
     info!(duration_secs = duration_ms / 1000, "call recording finished");
     Ok(CallRecordingTake {
       path,
       duration_ms,
       size_bytes: written.plaintext_bytes,
       key,
+      is_complete: true,
     })
   }
 
   /// Stops and deletes the file.
   pub fn cancel(mut self) {
     drop(self.join());
-    remove(&std::mem::take(&mut self.path));
+    delete_recording(&std::mem::take(&mut self.path));
     info!("call recording discarded");
   }
 
@@ -223,19 +290,97 @@ impl Drop for CallRecorder {
       drop(self.join());
     }
     if !self.path.as_os_str().is_empty() {
-      remove(&self.path);
+      delete_recording(&self.path);
     }
   }
 }
 
 impl CallRecordingTake {
-  /// Writes the decrypted Ogg file to `output` (a new file in the core's upload staging folder),
-  /// streaming, never the whole file in memory; returns the bytes written. A take that doesn't
-  /// decrypt (the file was changed on disk) fails partway: the caller removes what `output` got.
-  /// The take itself stays: the app deletes it once the copy is done, or keeps offering it.
+  /// Writes the decrypted Ogg file to `output` (a new file in the core's upload staging folder, or
+  /// where the user saves it), streaming, never the whole file in memory; returns the bytes
+  /// written. A finished take that doesn't decrypt (the file was changed on disk) fails partway:
+  /// the caller removes what `output` got. An unfinished one ([`Self::is_unfinished`]) gives what
+  /// verifies, up to its last whole Ogg page, marked as the end. The take itself stays: the app
+  /// deletes it once the copy is done, or keeps offering it.
   pub fn decrypt_to(&self, output: &mut impl Write) -> Result<u64, CallRecordingError> {
-    let mut reader = SealedStreamReader::new(&self.key, BufReader::new(File::open(&self.path)?))?;
-    Ok(io::copy(&mut reader, output)?)
+    let file = BufReader::new(File::open(&self.path)?);
+    if self.is_complete {
+      let mut reader = SealedStreamReader::new(&self.key, file)?;
+      return Ok(io::copy(&mut reader, output)?);
+    }
+    let mut reader = SealedStreamReader::recovering(&self.key, file)?;
+    Ok(
+      copy_whole_pages(&mut reader, output)
+        .map_err(empty_if_invalid)?
+        .bytes,
+    )
+  }
+
+  /// A crash cut it: the file has no end, and decrypting keeps what was written before.
+  pub fn is_unfinished(&self) -> bool {
+    !self.is_complete
+  }
+}
+
+impl FolderAtStart {
+  /// The files in `folder` now (none when it doesn't exist).
+  pub fn list(folder: &Path) -> Self {
+    let files = fs::read_dir(folder)
+      .map(|entries| {
+        entries
+          .flatten()
+          .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+          .map(|entry| entry.path())
+          .collect()
+      })
+      .unwrap_or_default();
+    Self { files }
+  }
+
+  /// Whether a recording's key was kept: only then can anything be recovered, and only then does
+  /// the app need its local secrets for it.
+  pub fn has_kept_keys(&self) -> bool {
+    self.files.iter().any(|file| has_extension(file, KEY_EXTENSION))
+  }
+
+  /// Deletes the files: nothing can read them (no key was kept, or the device key is gone).
+  pub fn clear(self) {
+    for file in &self.files {
+      remove(file);
+    }
+  }
+
+  /// The recordings that can be read with their kept key sealed under `device_key`, oldest first.
+  /// Everything else is deleted: files without a key or whose key doesn't open, keys without a
+  /// file, keys half written, recordings without any audio. A file that can't be read now (a
+  /// disk error) stays for the next start. Reads every recording once (to know its length and
+  /// whether it was finished), chunk by chunk: call it off the async runtime.
+  pub fn recover(self, device_key: &SymmetricKey) -> Vec<LeftoverRecording> {
+    let mut found = Vec::new();
+    for file in &self.files {
+      if !has_extension(file, RECORDING_EXTENSION) {
+        // A kept key is read with its recording; anything else in the private folder goes.
+        let is_kept_key =
+          has_extension(file, KEY_EXTENSION) && file.with_extension(RECORDING_EXTENSION).exists();
+        if !is_kept_key {
+          remove(file);
+        }
+        continue;
+      }
+      match recover_one(file, device_key) {
+        Ok(Some(leftover)) => found.push(leftover),
+        Ok(None) => delete_recording(file),
+        Err(error) => warn!(%error, "a call recording left at the last run could not be read now"),
+      }
+    }
+    found.sort_by_key(|leftover| leftover.maybe_modified);
+    if !found.is_empty() {
+      info!(
+        recordings = found.len(),
+        "call recordings left at the last run were kept"
+      );
+    }
+    found
   }
 }
 
@@ -267,10 +412,13 @@ impl RecordingSink {
   }
 }
 
-/// Deletes recordings left in `folder` (by a crash, or an app killed while recording). The shells
-/// call it at start for their private recording folder (e2ee.md §8.3: a recording a crash left is
-/// not kept, and can't be read anyway: its key was only in the memory of the process that wrote
-/// it).
+/// Deletes a recording and its kept key, if there is one.
+pub fn delete_recording(path: &Path) {
+  remove(path);
+  remove(&key_path(path));
+}
+
+/// Deletes every file in `folder`: recordings and their kept keys (the user signs out).
 pub fn clear_recordings(folder: &Path) {
   let Ok(entries) = fs::read_dir(folder) else {
     return;
@@ -339,6 +487,101 @@ fn record(
   })
 }
 
+/// Where a recording's key is kept.
+fn key_path(recording: &Path) -> PathBuf {
+  recording.with_extension(KEY_EXTENSION)
+}
+
+fn has_extension(path: &Path, extension: &str) -> bool {
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name.ends_with(&format!(".{extension}")))
+}
+
+fn duration_ms_of(samples: u64) -> u64 {
+  samples * 1000 / u64::from(SAMPLE_RATE_HZ)
+}
+
+/// Writes the recording's key, sealed with the note, next to it: to a temporary file that is
+/// synced and then renamed, so a crash leaves the whole key or none.
+fn keep_key(recording: &Path, key: &SealedStreamKey, kept: &KeptKey) -> io::Result<()> {
+  let wrapped = key
+    .wrap(&kept.device_key, &kept.note, &mut OsRng)
+    .map_err(io::Error::other)?;
+  let temporary = recording.with_extension(KEY_TEMPORARY_EXTENSION);
+  let written = (|| {
+    let mut file = OpenOptions::new()
+      .write(true)
+      .create(true)
+      .truncate(true)
+      .open(&temporary)?;
+    file.write_all(&wrapped)?;
+    file.sync_all()?;
+    fs::rename(&temporary, key_path(recording))
+  })();
+  if written.is_err() {
+    remove(&temporary);
+  }
+  written
+}
+
+/// One recording a crash or a quit left: `None` when it can't be read (no key, a key that doesn't
+/// open, no audio), an error when the disk failed reading it.
+fn recover_one(path: &Path, device_key: &SymmetricKey) -> io::Result<Option<LeftoverRecording>> {
+  let mut wrapped = Vec::new();
+  match File::open(key_path(path)) {
+    Ok(file) => file.take(MAX_KEPT_KEY_BYTES + 1).read_to_end(&mut wrapped)?,
+    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+    Err(error) => return Err(error),
+  };
+  let Ok((key, note)) = SealedStreamKey::unwrap(device_key, &wrapped) else {
+    return Ok(None);
+  };
+  let file = File::open(path)?;
+  let maybe_modified = file.metadata().and_then(|metadata| metadata.modified()).ok();
+  let mut reader = match SealedStreamReader::recovering(&key, BufReader::new(file)) {
+    Ok(reader) => reader,
+    // Not even the header: nothing was recorded.
+    Err(error)
+      if matches!(
+        error.kind(),
+        io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData
+      ) =>
+    {
+      return Ok(None);
+    },
+    Err(error) => return Err(error),
+  };
+  let kept: KeptOgg = match copy_whole_pages(&mut reader, &mut io::sink()) {
+    Ok(kept) if kept.samples > 0 => kept,
+    Ok(_) => return Ok(None),
+    Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
+    Err(error) => return Err(error),
+  };
+  let is_complete = reader.is_complete();
+  Ok(Some(LeftoverRecording {
+    take: CallRecordingTake {
+      path: path.to_path_buf(),
+      duration_ms: duration_ms_of(kept.samples),
+      size_bytes: kept.bytes,
+      key,
+      is_complete,
+    },
+    note,
+    maybe_modified,
+  }))
+}
+
+/// A stream with no audio left to recover is an empty recording.
+fn empty_if_invalid(error: io::Error) -> CallRecordingError {
+  if error.kind() == io::ErrorKind::InvalidData {
+    CallRecordingError::Empty
+  } else {
+    CallRecordingError::File(error)
+  }
+}
+
 fn remove(path: &Path) {
   if let Err(error) = fs::remove_file(path)
     && error.kind() != std::io::ErrorKind::NotFound
@@ -355,7 +598,7 @@ mod tests {
   fn played_frames_and_the_own_voice_make_one_file_of_the_played_length() {
     let folder = folder("mix");
     let path = folder.join("take.ogg");
-    let recorder = CallRecorder::start(&path, Duration::from_secs(60)).unwrap();
+    let recorder = CallRecorder::start(&path, Duration::from_secs(60), None).unwrap();
     let sink = recorder.sink();
     let mut voice = OpusEncoder::new(OpusEncoderConfig::default()).unwrap();
     for index in 0..50 {
@@ -382,7 +625,7 @@ mod tests {
   #[test]
   fn a_take_changed_on_disk_does_not_decrypt() {
     let folder = folder("tampered");
-    let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_secs(60)).unwrap();
+    let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_secs(60), None).unwrap();
     for index in 0..50 {
       recorder.sink().push_playback(&tone(index, 440.0));
     }
@@ -398,7 +641,7 @@ mod tests {
   #[test]
   fn it_stops_at_its_maximum_length() {
     let folder = folder("full");
-    let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_millis(200)).unwrap();
+    let recorder = CallRecorder::start(&folder.join("take.ogg"), Duration::from_millis(200), None).unwrap();
     for index in 0..30 {
       recorder.sink().push_playback(&tone(index, 440.0));
     }
@@ -417,14 +660,159 @@ mod tests {
   fn an_empty_or_cancelled_recording_leaves_no_file() {
     let folder = folder("empty");
     let path = folder.join("take.ogg");
-    let recorder = CallRecorder::start(&path, Duration::from_secs(60)).unwrap();
+    let recorder = CallRecorder::start(&path, Duration::from_secs(60), None).unwrap();
     assert!(matches!(recorder.finish(), Err(CallRecordingError::Empty)));
     assert!(!path.exists());
-    let recorder = CallRecorder::start(&path, Duration::from_secs(60)).unwrap();
+    let recorder = CallRecorder::start(&path, Duration::from_secs(60), None).unwrap();
     recorder.sink().push_playback(&tone(0, 440.0));
     recorder.cancel();
     assert!(!path.exists());
     fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn a_crash_leaves_a_recording_that_is_recovered_up_to_its_last_whole_chunk() {
+    let folder = folder("crash");
+    let device_key = SymmetricKey::generate(&mut OsRng);
+    let path = folder.join("recording-1.ogg");
+    let written = crashed_recording(&path, &device_key, 2000);
+    let found = FolderAtStart::list(&folder);
+    assert!(found.has_kept_keys());
+    let mut leftovers = found.recover(&device_key);
+    assert_eq!(leftovers.len(), 1);
+    let leftover = leftovers.remove(0);
+    assert_eq!(leftover.note.expose_secret(), b"note");
+    let take = leftover.take;
+    assert!(take.is_unfinished());
+    // Two whole chunks of 64 KiB reached the disk; the rest died with the process.
+    assert!(
+      take.duration_ms > 10_000 && take.duration_ms < 40_000,
+      "{}",
+      take.duration_ms
+    );
+    let mut recovered = Vec::new();
+    assert_eq!(take.decrypt_to(&mut recovered).unwrap(), take.size_bytes);
+    assert_eq!(recovered.len() as u64, take.size_bytes);
+    assert!(recovered.len() < written && recovered.len() > 2 * 60_000);
+    // A valid stream: its pages copy over unchanged, the last one already marked as the end.
+    let mut again = Vec::new();
+    let kept = copy_whole_pages(&mut recovered.as_slice(), &mut again).unwrap();
+    assert_eq!(again, recovered);
+    assert_eq!(duration_ms_of(kept.samples), take.duration_ms);
+    delete_recording(&take.path);
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn a_finished_take_left_by_a_quit_is_recovered_whole() {
+    let folder = folder("quit");
+    let device_key = SymmetricKey::generate(&mut OsRng);
+    let path = folder.join("recording-1.ogg");
+    let kept = KeptKey {
+      device_key: device_key.duplicate(),
+      note: b"conversation".to_vec(),
+    };
+    let recorder = CallRecorder::start(&path, Duration::from_secs(60), Some(kept)).unwrap();
+    for index in 0..50 {
+      recorder.sink().push_playback(&tone(index, 440.0));
+    }
+    let take = recorder.finish().unwrap();
+    let mut posted = Vec::new();
+    take.decrypt_to(&mut posted).unwrap();
+    // The app quits: the take's key leaves memory, the kept one stays.
+    drop(take);
+    let leftovers = FolderAtStart::list(&folder).recover(&device_key);
+    assert_eq!(leftovers.len(), 1);
+    let take = &leftovers[0].take;
+    assert!(!take.is_unfinished());
+    assert_eq!(take.duration_ms, 1000);
+    assert_eq!(take.size_bytes, posted.len() as u64);
+    let mut recovered = Vec::new();
+    take.decrypt_to(&mut recovered).unwrap();
+    assert_eq!(recovered, posted);
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn the_leftover_scan_deletes_what_it_cannot_read() {
+    let folder = folder("scan");
+    let device_key = SymmetricKey::generate(&mut OsRng);
+    // A recording without a kept key, a key without a recording, a key half written, a stray
+    // file, a recording whose key is sealed under another device key, one with only a header.
+    fs::write(folder.join("recording-1.ogg"), b"sealed").unwrap();
+    fs::write(folder.join("recording-2.key"), b"key").unwrap();
+    fs::write(folder.join("recording-3.key.tmp"), b"key").unwrap();
+    fs::write(folder.join("stray"), b"?").unwrap();
+    crashed_recording(
+      &folder.join("recording-4.ogg"),
+      &SymmetricKey::generate(&mut OsRng),
+      2000,
+    );
+    crashed_recording(&folder.join("recording-5.ogg"), &device_key, 10);
+    assert!(FolderAtStart::list(&folder).recover(&device_key).is_empty());
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn without_kept_keys_the_folder_is_cleared() {
+    let folder = folder("no-keys");
+    fs::write(folder.join("recording-1.ogg"), b"sealed").unwrap();
+    let found = FolderAtStart::list(&folder);
+    assert!(!found.has_kept_keys());
+    found.clear();
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+    assert!(!FolderAtStart::list(&folder.join("missing")).has_kept_keys());
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn a_key_that_cannot_be_kept_does_not_stop_the_recording() {
+    let folder = folder("key-blocked");
+    let path = folder.join("recording-1.ogg");
+    // Something in the way of the key file: as a full disk would fail its write.
+    fs::create_dir_all(key_path(&path)).unwrap();
+    let kept = KeptKey {
+      device_key: SymmetricKey::generate(&mut OsRng),
+      note: Vec::new(),
+    };
+    let recorder = CallRecorder::start(&path, Duration::from_secs(60), Some(kept)).unwrap();
+    for index in 0..50 {
+      recorder.sink().push_playback(&tone(index, 440.0));
+    }
+    let take = recorder.finish().unwrap();
+    assert_eq!(take.duration_ms, 1000);
+    assert!(!folder.join("recording-1.key.tmp").exists());
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  #[test]
+  fn a_new_recording_never_replaces_a_file_that_is_there() {
+    let folder = folder("no-replace");
+    let path = folder.join("recording-1.ogg");
+    fs::write(&path, b"left over").unwrap();
+    assert!(CallRecorder::start(&path, Duration::from_secs(60), None).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"left over");
+    fs::remove_dir_all(folder).unwrap();
+  }
+
+  /// What a crash leaves: the kept key, and a sealed Ogg stream of `packets` 20 ms packets whose
+  /// writers were dropped without finishing. Returns the plaintext length written to them.
+  fn crashed_recording(path: &Path, device_key: &SymmetricKey, packets: usize) -> usize {
+    let key = SealedStreamKey::generate(&mut OsRng);
+    let kept = KeptKey {
+      device_key: device_key.duplicate(),
+      note: b"note".to_vec(),
+    };
+    keep_key(path, &key, &kept).unwrap();
+    let sealed = SealedStreamWriter::new(&key, File::create(path).unwrap(), &mut OsRng).unwrap();
+    let mut writer = OggOpusWriter::new(sealed, 312).unwrap();
+    for index in 0..packets {
+      writer.push(vec![(index % 251) as u8; 80], 960).unwrap();
+    }
+    // Pages of 50 packets (about 4 KiB each) plus the two header pages.
+    packets * 80 + packets / 50 * 80
   }
 
   fn to_i16(sample: f32) -> i16 {
@@ -442,6 +830,7 @@ mod tests {
 
   fn folder(name: &str) -> PathBuf {
     let folder = std::env::temp_dir().join(format!("teamcraft-call-recording-{name}-{}", std::process::id()));
+    drop(fs::remove_dir_all(&folder));
     fs::create_dir_all(&folder).unwrap();
     folder
   }

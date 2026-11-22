@@ -1,4 +1,4 @@
-# Manual test: call recording (issue #216)
+# Manual test: call recording (issues #216, #2116)
 
 What the automated tests can't show: the indicator, banner and tone on real screens, the file a
 real call produces, and what people who join late see. Design: [e2ee.md](../e2ee.md) §8.3, admin
@@ -45,9 +45,25 @@ Write down for every run: date, server and SFU version, app versions and platfor
 - [ ] "Delete" asks first, then the card goes and nothing is posted.
 - [ ] With the longest recording set to 30 minutes (or a debug build with a short limit), the
   recording stops by itself, the others see it stop, and the card says it stopped at the limit.
-- [ ] Quit the app while recording, start it again: no card, and the app's cache folder
-  `call-recordings` is empty. The others saw the recording end when A's device left the call.
+- [ ] Quit the app while recording, start it again: the card says "A recording from <time> was not
+  finished" (or "… is waiting" when the recording was stopped first), with "Post to conversation",
+  "Save as file…" and "Delete". The others saw the recording end when A's device left the call.
+- [ ] Kill the app while recording (`kill -9`, Task Manager → End task) after about a minute,
+  start it again: the card says "was not finished"; its length is up to about 16 seconds shorter
+  than what was recorded. "Post to conversation" posts an `.ogg` that B plays to its end.
+- [ ] Kill it during two recordings in a row (start, kill, start the app, record again without
+  answering the card, kill): at the next start the older recording is offered first, the newer
+  one after the first is posted or deleted.
+- [ ] Sign out with a recording left from a kill: at the next sign-in no card, and
+  `call-recordings` is empty.
 - [ ] Sign out after a recording without posting it: the take is gone.
+- [ ] "Save as file…" asks first and warns that the file is unencrypted; "Save unencrypted" opens
+  the system's save dialog (cancel: nothing happens). The saved `.ogg` plays in the system's
+  player; the card stays, and "Post to conversation" still works afterwards.
+- [ ] Save over an existing file on a nearly full disk (or a USB stick filled up): the error shows,
+  the old file is unchanged and no `.….partial` file stays next to it.
+- [ ] Administration → Security → Call recording: clear "Allow saving recordings as files". A's
+  card no longer offers "Save as file…" (after the policy reached A's app).
 - [ ] While recording and while the card waits, the file in `call-recordings` is not playable and
   doesn't start with `OggS` (it is encrypted, #2129); `strings` shows nothing readable. Posting still
   gives B a file that plays, and afterwards `call-recordings` is empty.
@@ -75,6 +91,8 @@ B records in the browser; repeat in Chrome, Firefox and Safari.
   recording set above two hours, it stops after two hours and the card says the browser can't keep
   more.
 - [ ] B leaves the call while recording: A and C see it stop; B gets the card.
+- [ ] B chooses "Save as file…", confirms the warning: the browser downloads
+  `call-recording-<date>-<time>.ogg`, which plays; the card stays.
 - [ ] B signs out with a take waiting: the take and B's folder are gone.
 - [ ] Two tabs of B's account: the recording runs in the active tab; making the other tab active
   (the app moves) ends it and deletes the take.

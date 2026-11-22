@@ -12,6 +12,12 @@
 //!   posts it into the call's conversation (an encrypted attachment) or deletes it. The desktop
 //!   shell stages its decrypted copy for the core; in the browser the call module hands over the
 //!   decrypted file, which goes to the core like a picked file.
+//! - **Save as file (#2116):** where the verified policy allows it, the card offers to save the
+//!   recording as a file on the device, after a warning that the file is then unencrypted. The
+//!   desktop shell asks where in the system's save dialog and checks the policy itself; the browser
+//!   downloads the decrypted file. The take stays, to post or delete.
+//! - **Left over (#2116):** on the desktop a recording a crash, a kill or a quit left is offered at
+//!   the next start ("A recording from … was not finished"), with the same choices.
 
 use std::collections::BTreeSet;
 
@@ -26,6 +32,7 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{CallRecordingPolicy, RecorderRole, Role, UserId};
 
 use crate::auth::tauri;
+use crate::clock::format_date_time;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
 use crate::media_layout::format_duration;
@@ -54,6 +61,14 @@ struct Recorder {
   is_allowed: bool,
   /// The server says they left, but their device may still hear the call.
   has_left: bool,
+}
+
+/// Where the take card is: its choices, or one of them waiting to be confirmed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TakeStep {
+  Choices,
+  ConfirmSave,
+  ConfirmDelete,
 }
 
 /// What the control bar needs for the record button.
@@ -203,22 +218,25 @@ pub fn RecordingBanner() -> impl IntoView {
   }
 }
 
-/// The finished recording, until the user posts or deletes it. Outside the call screen: it
-/// outlives the call.
+/// The finished recording, until the user posts or deletes it (or one the last run left, #2116).
+/// Outside the call screen: it outlives the call.
 #[component]
 pub fn CallRecordingTakeCard() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let take = Memo::new(move |_| state.read(|backend| backend.call_recording_take()));
+  let may_save =
+    Memo::new(move |_| state.read(|backend| backend.call_recording_policy().allows_local_files()));
   let is_posting = RwSignal::new(false);
-  let is_confirming_delete = RwSignal::new(false);
+  let is_saving = RwSignal::new(false);
+  let step = RwSignal::new(TakeStep::Choices);
   let post = move |take: CallRecordingTake| {
-    if is_posting.get_untracked() {
+    if is_posting.get_untracked() || is_saving.get_untracked() {
       return;
     }
     is_posting.set(true);
     spawn_local(async move {
-      match recording_source().await {
+      match recording_source(&take).await {
         Ok(source) => {
           // The card may be gone by now (the take left the snapshot): the app state outlives it.
           if state
@@ -231,6 +249,21 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
         Err(failure) => crate::feedback::report_failure(failure),
       }
       is_posting.try_set(false);
+    });
+  };
+  let save = move |take: CallRecordingTake| {
+    step.set(TakeStep::Choices);
+    if is_posting.get_untracked() || is_saving.get_untracked() {
+      return;
+    }
+    is_saving.set(true);
+    spawn_local(async move {
+      match save_recording(&take).await {
+        Ok(true) => state.show_brief_toast(i18n.t("call-recording-saved")),
+        Ok(false) => {},
+        Err(failure) => crate::feedback::report_failure(failure),
+      }
+      is_saving.try_set(false);
     });
   };
   // In the browser the take lives in the page: closing or reloading it loses the take.
@@ -248,51 +281,101 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
         ("size", &format_bytes(take.size_bytes)),
       ],
     );
+    let title = match take.maybe_left_over {
+      Some(left_over) => {
+        let key = if left_over.is_unfinished {
+          "call-recording-take-unfinished-title"
+        } else {
+          "call-recording-take-left-title"
+        };
+        let started = format_date_time(left_over.started_at, i18n.locale().tag());
+        i18n.t_with(key, &[("time", &started)])
+      },
+      None => i18n.t("call-recording-take-title"),
+    };
+    let is_unfinished = take
+      .maybe_left_over
+      .is_some_and(|left_over| left_over.is_unfinished);
+    let is_busy = move || is_posting.get() || is_saving.get();
     Some(view! {
       <section class="call-recording-take" role="region" aria-labelledby="call-recording-take-title">
         <Icon name=IconName::Record />
         <div class="call-recording-take-text">
-          <h2 id="call-recording-take-title">{i18n.t("call-recording-take-title")}</h2>
+          <h2 id="call-recording-take-title">{title}</h2>
           <p class="muted-text">{meta}</p>
+          {is_unfinished.then(|| view! { <p class="muted-text">{i18n.t("call-recording-take-unfinished")}</p> })}
           {take.is_at_limit.then(|| view! { <p class="muted-text">{i18n.t("call-recording-take-limit")}</p> })}
           {take.is_at_memory_limit.then(|| view! { <p class="muted-text">{i18n.t("call-recording-take-memory-limit")}</p> })}
           <p class="muted-text">{i18n.t(hint_key)}</p>
         </div>
-        <Show
-          when=move || is_confirming_delete.get()
-          fallback=move || view! {
+        {move || match step.get() {
+          TakeStep::Choices => view! {
             <div class="call-recording-actions">
               <button
                 type="button"
                 class="btn btn-small btn-primary"
-                disabled=move || is_posting.get()
+                disabled=is_busy
                 on:click=move |_| post(take)
               >
                 {move || i18n.t(if is_posting.get() { "call-recording-posting" } else { "call-recording-post" })}
               </button>
-              <button type="button" class="btn btn-small" on:click=move |_| is_confirming_delete.set(true)>
+              <Show when=move || may_save.get()>
+                <button
+                  type="button"
+                  class="btn btn-small"
+                  disabled=is_busy
+                  on:click=move |_| step.set(TakeStep::ConfirmSave)
+                >
+                  {move || i18n.t(if is_saving.get() { "call-recording-saving" } else { "call-recording-save" })}
+                </button>
+              </Show>
+              <button
+                type="button"
+                class="btn btn-small"
+                disabled=is_busy
+                on:click=move |_| step.set(TakeStep::ConfirmDelete)
+              >
                 {i18n.t("call-recording-delete")}
               </button>
             </div>
           }
-        >
-          <div class="call-recording-actions" role="group" aria-label=move || i18n.t("call-recording-delete-confirm")>
-            <p>{i18n.t("call-recording-delete-confirm")}</p>
-            <button type="button" class="btn btn-small" on:click=move |_| is_confirming_delete.set(false)>
-              {i18n.t("cancel")}
-            </button>
-            <button
-              type="button"
-              class="btn btn-small btn-danger"
-              on:click=move |_| {
-                is_confirming_delete.set(false);
-                state.write(|backend| backend.discard_call_recording());
-              }
-            >
-              {i18n.t("call-recording-delete")}
-            </button>
-          </div>
-        </Show>
+          .into_any(),
+          TakeStep::ConfirmSave => view! {
+            <div class="call-recording-actions" role="group" aria-label=move || i18n.t("call-recording-save-warning")>
+              <p role="alert">
+                <Icon name=IconName::Alert />
+                " "
+                {i18n.t("call-recording-save-warning")}
+              </p>
+              <button type="button" class="btn btn-small" on:click=move |_| step.set(TakeStep::Choices)>
+                {i18n.t("cancel")}
+              </button>
+              <button type="button" class="btn btn-small btn-primary" on:click=move |_| save(take)>
+                {i18n.t("call-recording-save-confirm")}
+              </button>
+            </div>
+          }
+          .into_any(),
+          TakeStep::ConfirmDelete => view! {
+            <div class="call-recording-actions" role="group" aria-label=move || i18n.t("call-recording-delete-confirm")>
+              <p>{i18n.t("call-recording-delete-confirm")}</p>
+              <button type="button" class="btn btn-small" on:click=move |_| step.set(TakeStep::Choices)>
+                {i18n.t("cancel")}
+              </button>
+              <button
+                type="button"
+                class="btn btn-small btn-danger"
+                on:click=move |_| {
+                  step.set(TakeStep::Choices);
+                  state.write(|backend| backend.discard_call_recording());
+                }
+              >
+                {i18n.t("call-recording-delete")}
+              </button>
+            </div>
+          }
+          .into_any(),
+        }}
       </section>
     })
   }
@@ -366,31 +449,78 @@ fn names_of(i18n: I18n, recorders: &[Recorder]) -> String {
 
 /// The decrypted recording as the core uploads it: the desktop shell's staged copy, or the file
 /// the browser's call module hands over (registered with the core like a picked file).
-async fn recording_source() -> Result<FileSource, ActionFailure> {
+async fn recording_source(take: &CallRecordingTake) -> Result<FileSource, ActionFailure> {
   if tauri::is_available() {
     let path = tauri::call::<String>("call_recording_stage", &json!({}))
       .await
       .map_err(ActionFailure::other)?;
     return Ok(FileSource::Path { path });
   }
-  browser_recording_source().await
+  browser_recording_source(take).await
+}
+
+/// Saves the recording as a file (#2116): on the desktop where the user picks in the save dialog
+/// (`false`: cancelled), in the browser as a download. The take stays.
+async fn save_recording(take: &CallRecordingTake) -> Result<bool, ActionFailure> {
+  let file_name = recording_file_name(take);
+  if tauri::is_available() {
+    return tauri::call::<bool>("call_recording_save", &json!({ "file_name": file_name }))
+      .await
+      .map_err(ActionFailure::other);
+  }
+  browser_save_recording(&file_name).await.map(|()| true)
 }
 
 #[cfg(target_arch = "wasm32")]
-async fn browser_recording_source() -> Result<FileSource, ActionFailure> {
+async fn browser_recording_source(take: &CallRecordingTake) -> Result<FileSource, ActionFailure> {
   let blob = crate::web_calls::recording_file().await?;
   let bag = web_sys::FilePropertyBag::new();
   bag.set_type("audio/ogg");
-  let file =
-    web_sys::File::new_with_blob_sequence_and_options(&js_sys::Array::of1(&blob), &file_name_now(), &bag)
-      .map_err(|_| ActionFailure::other("the recording could not be made a file"))?;
+  let file = web_sys::File::new_with_blob_sequence_and_options(
+    &js_sys::Array::of1(&blob),
+    &recording_file_name(take),
+    &bag,
+  )
+  .map_err(|_| ActionFailure::other("the recording could not be made a file"))?;
   crate::large_files::source_of(&crate::large_files::LargeFile::Picked(file))
     .await
     .map_err(ActionFailure::other)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn browser_recording_source() -> Result<FileSource, ActionFailure> {
+async fn browser_recording_source(_take: &CallRecordingTake) -> Result<FileSource, ActionFailure> {
+  Err(ActionFailure::other("calls run in the browser only on the web"))
+}
+
+/// Downloads the decrypted take under `file_name`: the browser saves it where it saves downloads
+/// (or asks, as the user set it up).
+#[cfg(target_arch = "wasm32")]
+async fn browser_save_recording(file_name: &str) -> Result<(), ActionFailure> {
+  use wasm_bindgen::JsCast;
+
+  /// Long enough for the browser to start reading the file; the copy is the page's until then.
+  const OBJECT_URL_LIFETIME: std::time::Duration = std::time::Duration::from_secs(60);
+  let blob = crate::web_calls::recording_save_file().await?;
+  let url = web_sys::Url::create_object_url_with_blob(&blob)
+    .map_err(|_| ActionFailure::other("the recording could not be handed to the browser"))?;
+  let anchor: web_sys::HtmlAnchorElement = web_sys::window()
+    .and_then(|window| window.document())
+    .and_then(|document| document.create_element("a").ok())
+    .and_then(|element| element.dyn_into().ok())
+    .ok_or_else(|| ActionFailure::other("no document to download from"))?;
+  anchor.set_href(&url);
+  anchor.set_download(file_name);
+  anchor.set_rel("noopener");
+  anchor.click();
+  set_timeout(
+    move || drop(web_sys::Url::revoke_object_url(&url)),
+    OBJECT_URL_LIFETIME,
+  );
+  Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn browser_save_recording(_file_name: &str) -> Result<(), ActionFailure> {
   Err(ActionFailure::other("calls run in the browser only on the web"))
 }
 
@@ -408,7 +538,7 @@ fn recording_message(take: CallRecordingTake, source: FileSource) -> OutgoingMes
     is_silent: false,
     also_send_to_channel: false,
     files: vec![OutgoingFile {
-      file_name: file_name_now(),
+      file_name: recording_file_name(&take),
       media_type: "audio/ogg".to_owned(),
       source,
       maybe_thumbnail: None,
@@ -421,9 +551,13 @@ fn recording_message(take: CallRecordingTake, source: FileSource) -> OutgoingMes
   }
 }
 
-/// `call-recording-20261117-1405.ogg`, in local time.
-fn file_name_now() -> String {
-  let date = js_sys::Date::new_0();
+/// `call-recording-20261117-1405.ogg`, in local time: when a recording the last run left started,
+/// else now.
+fn recording_file_name(take: &CallRecordingTake) -> String {
+  let date = match take.maybe_left_over {
+    Some(left_over) => js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(left_over.started_at as f64)),
+    None => js_sys::Date::new_0(),
+  };
   format!(
     "call-recording-{:04}{:02}{:02}-{:02}{:02}.ogg",
     date.get_full_year(),

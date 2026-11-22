@@ -8,9 +8,12 @@
 //! - The file is encrypted while it is recorded and while it waits, under a key only this page
 //!   holds. Posting decrypts it into a copy next to it, which the page hands the client core like a
 //!   picked file (the core keeps its own copy for a reload, as for every attachment), and deletes
-//!   the sealed file. One take at a time: a new recording replaces a take nobody posted.
+//!   the sealed file. "Save as file…" (#2116) decrypts such a copy for the page to download and
+//!   keeps the take. One take at a time: a new recording replaces a take nobody posted.
 //! - A page closed, reloaded or discarded while recording loses the recording (its key dies with
-//!   the page); the next call module of the origin deletes what it left. Signing out, or the app
+//!   the page); the next call module of the origin deletes what it left. The key isn't kept
+//!   anywhere else on purpose (#2116): the browser has no store the disk doesn't show, so a key
+//!   kept next to the sealed pieces would protect nothing (e2ee.md §8.3). Signing out, or the app
 //!   moving to another tab, deletes this page's recordings.
 //! - Nothing about the file is logged.
 
@@ -139,6 +142,8 @@ impl Recordings {
       size_bytes: recorded.size_bytes,
       is_at_limit: recorded.is_at_limit,
       is_at_memory_limit: recorded.is_at_memory_limit,
+      // A page's recordings never outlive it: their key is only in its memory (e2ee.md §8.3).
+      maybe_left_over: None,
     };
     let maybe_previous = self.maybe_take.replace(Some(Take { shown, recorded }));
     if let Some(previous) = maybe_previous {
@@ -188,6 +193,35 @@ impl Recordings {
         Err(ActionFailure::other(error.to_string()))
       },
     }
+  }
+
+  /// The take decrypted, for the page to download as a file the user keeps (#2116). The take stays
+  /// offered: the user can still post or delete it. The copy stays in this page's folder like a
+  /// copy for posting, until sign-out or the next sweep.
+  pub(crate) async fn file_for_save(&self) -> Result<Blob, ActionFailure> {
+    let take = self
+      .maybe_take
+      .borrow_mut()
+      .take()
+      .ok_or_else(|| ActionFailure::other("no recording to save"))?;
+    let session = self.session.get();
+    let result = take.recorded.decrypt(&self.folder).await;
+    if self.session.get() != session {
+      take.recorded.delete().await;
+      return Err(ActionFailure::other(
+        "signed out while the recording was prepared for saving",
+      ));
+    }
+    if self.maybe_take.borrow().is_none() {
+      self.maybe_take.replace(Some(take));
+    } else {
+      // A newer take finished meanwhile and is the one offered; this one goes.
+      take.recorded.delete().await;
+    }
+    result.map_err(|error| {
+      tracing::warn!(%error, "the call recording could not be prepared for saving");
+      ActionFailure::other(error.to_string())
+    })
   }
 
   /// Ends the session's recordings: a running one is cancelled, the take and this page's folder

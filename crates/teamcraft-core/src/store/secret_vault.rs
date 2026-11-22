@@ -73,6 +73,10 @@ const KEYS: SealedFile = SealedFile {
 };
 const DATABASE_KEY_KIND: &str = "database-key";
 const BACKUP_KEY_KIND: &str = "backup-key";
+/// The key call recordings' keys are sealed under while a recording waits (e2ee.md §8.3, #2116):
+/// one for the device, not for an account. Only in the secrets file: losing it costs only the
+/// recordings a crash left.
+const RECORDING_KEY_NAME: &str = "call-recording-key@device";
 /// The old keychain entries of an account's keys, deleted once the files hold the keys.
 const OLD_KEY_ENTRIES: [(&str, &str); 2] = [
   (DATABASE_KEY_KIND, DATABASE_KEY_SERVICE),
@@ -509,6 +513,47 @@ impl SecretVault {
     let key = SymmetricKey::from_slice(&bytes).ok_or(KeySourceError::InvalidKey(bytes.len()))?;
     self.take_old_key(&mut state, account, &name, &key)?;
     Ok(Some(key))
+  }
+
+  /// The key call recordings' keys are sealed under so a recording survives a crash (e2ee.md §8.3,
+  /// #2116), made on first use. It lives only in the secrets file, which is written once when it
+  /// is new; a write that fails fails the call and keeps nothing, as a key that isn't on disk
+  /// couldn't open anything after a restart.
+  pub fn recording_key(&self) -> Result<SymmetricKey, KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let contents = contents_of(&mut state)?;
+    if let Some(key) = stored_key(contents, RECORDING_KEY_NAME)? {
+      return Ok(key);
+    }
+    let key = SymmetricKey::generate(&mut OsRng);
+    // Never in the keychain: nothing to move or clean up there.
+    replace_secret(contents, RECORDING_KEY_NAME, encode_key(&key));
+    state.is_dirty = true;
+    if let Err(error) = flush(&mut state) {
+      forget_secret(contents_of(&mut state)?, RECORDING_KEY_NAME);
+      return Err(error);
+    }
+    Ok(key)
+  }
+
+  /// The recording key if one was made, without making one: what a start that finds recordings
+  /// left behind opens their keys with.
+  pub fn existing_recording_key(&self) -> Result<Option<SymmetricKey>, KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    stored_key(contents_of(&mut state)?, RECORDING_KEY_NAME)
+  }
+
+  /// Forgets the recording key (sign-out): a recording's kept key that a deletion missed can't be
+  /// opened any more. The next recording makes a new one.
+  pub fn forget_recording_key(&self) -> Result<(), KeySourceError> {
+    let mut state = self.lock();
+    self.ensure_open(&mut state)?;
+    let contents = contents_of(&mut state)?;
+    let had_key = forget_secret(contents, RECORDING_KEY_NAME);
+    state.is_dirty |= had_key;
+    flush(&mut state)
   }
 
   fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -1566,6 +1611,51 @@ mod tests {
       fake.reset_counts();
       vault.database_key(ACCOUNT_B).unwrap();
       assert_eq!(fake.counts(), Counts::default());
+    }
+  }
+
+  mod recording_key {
+    use super::*;
+
+    #[test]
+    fn it_is_made_once_kept_across_starts_and_never_touches_the_keychain() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      assert!(
+        vault.existing_recording_key().unwrap().is_none(),
+        "none until asked for"
+      );
+      fake.reset_counts();
+      let key = vault.recording_key().unwrap();
+      assert!(vault.recording_key().unwrap().is_same_key(&key));
+      assert_eq!(fake.counts(), Counts::default());
+      let vault = reopen(&fake, &directory);
+      let kept = vault.existing_recording_key().unwrap().unwrap();
+      assert!(kept.is_same_key(&key));
+    }
+
+    #[test]
+    fn forgetting_it_leaves_no_key_and_the_next_one_is_new() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let key = vault.recording_key().unwrap();
+      vault.forget_recording_key().unwrap();
+      assert!(vault.existing_recording_key().unwrap().is_none());
+      let vault = reopen(&fake, &directory);
+      assert!(vault.existing_recording_key().unwrap().is_none());
+      assert!(!vault.recording_key().unwrap().is_same_key(&key));
+    }
+
+    #[test]
+    fn removing_an_account_keeps_it() {
+      let fake = Fake::new();
+      let directory = TestDir::new();
+      let vault = start(&fake, &directory);
+      let key = vault.recording_key().unwrap();
+      vault.forget_server(SERVER_A).unwrap();
+      assert!(vault.existing_recording_key().unwrap().unwrap().is_same_key(&key));
     }
   }
 
