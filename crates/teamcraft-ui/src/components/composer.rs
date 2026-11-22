@@ -478,7 +478,9 @@ pub fn Composer(
       })
       .collect::<Vec<(usize, String, Option<String>, bool)>>()
   };
-  // Thumbnails of files that were removed or sent free their object URL.
+  // Thumbnails of files that were removed free their object URL. Those of sent files were handed
+  // to their message's row (`local_previews`), which frees them.
+  let handed_over = StoredValue::new(Vec::<String>::new());
   Effect::new(move |previous: Option<Vec<String>>| {
     let current: Vec<String> = attachments.with(|list| {
       list
@@ -486,12 +488,21 @@ pub fn Composer(
         .filter_map(|file| file.maybe_preview_url.clone())
         .collect()
     });
-    for url in previous
+    let gone = previous
       .unwrap_or_default()
-      .iter()
-      .filter(|url| !current.contains(url))
-    {
-      drop(web_sys::Url::revoke_object_url(url));
+      .into_iter()
+      .filter(|url| !current.contains(url));
+    for url in gone {
+      let was_handed_over = handed_over
+        .try_update_value(|handed| {
+          let before = handed.len();
+          handed.retain(|kept| *kept != url);
+          handed.len() != before
+        })
+        .unwrap_or(false);
+      if !was_handed_over {
+        drop(web_sys::Url::revoke_object_url(&url));
+      }
     }
     current
   });
@@ -774,6 +785,13 @@ pub fn Composer(
       gone.extend(local.iter().map(|file| file.draft_id.clone()));
       gone.extend(others.iter().map(|item| item.id.clone()));
     });
+    // The row of the message shows the chips' pictures until its own are there (#2269).
+    for file in &local {
+      if let Some(url) = &file.maybe_preview_url {
+        crate::local_previews::offer(&file.draft_id, url.clone());
+        handed_over.update_value(|handed| handed.push(url.clone()));
+      }
+    }
     // The core takes the draft's upload where it has one, and reads the file named here otherwise.
     for file in local {
       if let Some(upload) = draft_upload(&file) {

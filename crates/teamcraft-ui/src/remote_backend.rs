@@ -18,9 +18,10 @@ use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
 use serde_json::json;
 use teamcraft_client_api::actions::{
-  BrowsableChannel, CategoryInfo, ChannelChanges, DownloadControl, DownloadEntry, FileInfo, LinkedMessage,
-  MediaAnchor, MediaPage, MessageExtras, MessagePriority, NewChannel, NewSpace, OutgoingMessage,
-  PermalinkTarget, ReplyPreview, SavedItem, ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
+  BrowsableChannel, CategoryInfo, ChannelChanges, DownloadControl, DownloadEntry, FileInfo, FileSource,
+  FileTransfer, LinkedMessage, MediaAnchor, MediaPage, MessageExtras, MessagePriority, NewChannel, NewSpace,
+  OutgoingFile, OutgoingMessage, PermalinkTarget, PixelSize, ReplyAttachmentPreview, ReplyPreview, SavedItem,
+  ShareLink, ShareLinkOptions, SpaceChanges, SpaceInvite,
 };
 use teamcraft_client_api::backend::{ChatBackend, SearchBackend};
 use teamcraft_client_api::calls::BackgroundImageInfo;
@@ -30,7 +31,8 @@ use teamcraft_client_api::markdown;
 use teamcraft_client_api::model::{
   Conversation, ConversationId, CustomStatus, GapEdge, HistoryGap, InviteId, JoinableSpace, Message,
   MessageId, MessageKind, OlderHistory, PendingInvite, PresenceStatus, Space, SpaceId, SpaceRole,
-  SpaceRoster, ThreadId, ThreadSummary, UnseenReactions, User, UserId, is_pending, pending_message_id,
+  SpaceRoster, ThreadId, ThreadSummary, TimestampMs, UnseenReactions, User, UserId, is_pending,
+  pending_message_id,
 };
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
@@ -515,6 +517,20 @@ struct PendingRow {
   conversation: ConversationId,
   maybe_thread: Option<ThreadId>,
   id: MessageId,
+  /// Shown in the conversation's feed: a top-level message, or a thread reply also posted there
+  /// when the feed could take it.
+  is_in_feed: bool,
+}
+
+/// The picture of an album a reply quotes, as far as the mirror can tell
+/// ([`RemoteChat::quoted_picture`]).
+enum QuotedPicture {
+  /// No picture: the reply quotes no album's picture, or the quoted message has one file at most
+  /// (the core then quotes it whole).
+  None,
+  Picture(ReplyAttachmentPreview),
+  /// The quoted message's files aren't held: the core's answer shows the quote.
+  Unknown,
 }
 
 /// What a pending row shows beyond its text ([`Mirror::pending_extras_of`]).
@@ -618,26 +634,48 @@ impl Mirror {
   /// What the row of `message`, shown as `id`, shows beyond its text, as the core will show it: the
   /// quote from the quoted row the mirror holds (the core's rule: `reply_ref`), the marks from the
   /// composer.
-  fn pending_extras_of(&self, message: &OutgoingMessage, id: MessageId) -> PendingExtras {
+  /// `quoted_picture` is the album's picture the reply quotes, if any. Files show as going up, with
+  /// the thumbnail the app made and the size read from the picture's header.
+  fn pending_extras_of(
+    &self,
+    message: &OutgoingMessage,
+    id: MessageId,
+    quoted_picture: QuotedPicture,
+  ) -> PendingExtras {
+    let maybe_picture = match quoted_picture {
+      QuotedPicture::None => None,
+      QuotedPicture::Picture(picture) => Some(picture),
+      QuotedPicture::Unknown => return PendingExtras::Unknown,
+    };
     let maybe_reply = match message.maybe_reply_to {
       None => None,
-      Some(quoted) => match self.quotable_row(message.conversation, quoted) {
-        Some(row) => Some(ReplyPreview {
-          maybe_message: Some(row.id),
-          author: row.author,
-          excerpt: markdown::readable_tables(&row.body)
-            .chars()
-            .take(REPLY_EXCERPT_CHARS)
-            .collect(),
-          maybe_attachment: None,
-        }),
+      Some(quoted) => match self.quotable_row(message.conversation, quoted, maybe_picture.is_some()) {
+        Some(row) => {
+          // The core's rule (`reply_ref`): a picture quoted from an album without text is named.
+          let text = match &maybe_picture {
+            Some(picture) if row.body.trim().is_empty() => picture.file_name.as_str(),
+            _ => row.body.as_str(),
+          };
+          Some(ReplyPreview {
+            maybe_message: Some(row.id),
+            author: row.author,
+            excerpt: markdown::readable_tables(text)
+              .chars()
+              .take(REPLY_EXCERPT_CHARS)
+              .collect(),
+            maybe_attachment: maybe_picture,
+          })
+        },
         None => return PendingExtras::Unknown,
       },
     };
+    let is_also_in_channel = message.also_send_to_channel && message.maybe_thread.is_some();
     let is_plain = maybe_reply.is_none()
       && message.priority == MessagePriority::Normal
       && !message.wants_acknowledgement
-      && !message.is_silent;
+      && !message.is_silent
+      && !is_also_in_channel
+      && message.files.is_empty();
     if is_plain {
       return PendingExtras::Plain;
     }
@@ -646,12 +684,36 @@ impl Mirror {
     extras.priority = message.priority;
     extras.wants_acknowledgement = message.wants_acknowledgement;
     extras.is_silent = message.is_silent;
+    extras.is_also_in_channel = is_also_in_channel;
+    let sent_at = crate::clock::now_ms();
+    extras.files = message
+      .files
+      .iter()
+      .enumerate()
+      .map(|(place, file)| {
+        pending_file(
+          message.conversation,
+          id,
+          self.snapshot.me.id,
+          sent_at,
+          place,
+          file,
+        )
+      })
+      .collect();
     PendingExtras::Held(Box::new(extras))
   }
 
   /// A row of `conversation` (its feed or one of its threads) a quote can be made from here: a
-  /// user's text message. Anything else (files, imported, polls, placeholders) is quoted by the core.
-  fn quotable_row(&self, conversation: ConversationId, id: MessageId) -> Option<&Message> {
+  /// user's text message, also one without text when the quote is of an album's picture
+  /// (`is_picture_quoted`). Anything else (single files, imported, polls, placeholders) is quoted
+  /// by the core.
+  fn quotable_row(
+    &self,
+    conversation: ConversationId,
+    id: MessageId,
+    is_picture_quoted: bool,
+  ) -> Option<&Message> {
     let feed_rows = self
       .feeds
       .get(&conversation)
@@ -668,7 +730,7 @@ impl Mirror {
         && row.maybe_imported.is_none()
         && row.maybe_placeholder.is_none()
         && row.maybe_poll.is_none()
-        && !row.body.trim().is_empty()
+        && (is_picture_quoted || !row.body.trim().is_empty())
         && !is_pending(row.id)
     })
   }
@@ -698,6 +760,61 @@ impl Mirror {
         .filter(|held| asked.contains(&held.message))
         .cloned(),
     );
+  }
+}
+
+/// What the composer handed a file's picture over as ([`crate::local_previews`]): its draft ID, and
+/// its name.
+fn local_preview_key(file: &OutgoingFile) -> (Option<&str>, &str) {
+  let maybe_draft_id = match &file.source {
+    FileSource::Draft { id } => Some(id.as_str()),
+    _ => file.maybe_draft_id.as_deref(),
+  };
+  (maybe_draft_id, file.file_name.as_str())
+}
+
+/// A file of a message just sent, as its row shows it until the core answers: going up, with the
+/// thumbnail the app made (a video's poster, a picture the core can't decode) and, for a picture
+/// read into memory, its size from the header, so the row takes the space the sent picture will.
+fn pending_file(
+  conversation: ConversationId,
+  message: MessageId,
+  me: UserId,
+  sent_at: TimestampMs,
+  place: usize,
+  file: &OutgoingFile,
+) -> FileInfo {
+  let (size_bytes, maybe_dimensions) = match &file.source {
+    FileSource::Bytes { bytes } => (
+      bytes.len() as u64,
+      teamcraft_core::thumbnail::image_dimensions(bytes, &file.media_type)
+        .map(|(width, height)| PixelSize { width, height }),
+    ),
+    FileSource::Picked { size_bytes, .. } => (*size_bytes, None),
+    // The size is the core's to read (a staged path, a draft's file from another device).
+    FileSource::Path { .. } | FileSource::Draft { .. } => (0, None),
+  };
+  FileInfo {
+    conversation,
+    message,
+    file_id: format!("pending-{place}"),
+    file_name: file.file_name.clone(),
+    media_type: file.media_type.clone(),
+    size_bytes,
+    maybe_thumbnail_png: file.maybe_thumbnail.clone(),
+    transfer: FileTransfer::Uploading {
+      done_bytes: 0,
+      total_bytes: size_bytes,
+      failed_attempts: 0,
+    },
+    maybe_sender: Some(me),
+    maybe_sent_at: Some(sent_at),
+    maybe_imported_author: None,
+    maybe_dimensions,
+    maybe_duration_ms: file.maybe_duration_ms,
+    maybe_waveform: file.maybe_waveform.clone(),
+    maybe_content_sha256: None,
+    maybe_motion: None,
   }
 }
 
@@ -820,7 +937,8 @@ impl Feed {
           && is_pending(previous.id)
           && !is_pending(message.id)
         {
-          // The server took a message sent from here (perf.rs).
+          // The server took a message sent from here (perf.rs); its pictures stay on screen.
+          crate::local_previews::moved(previous.id, message.id);
           crate::perf::end_pending(
             crate::perf::PerfOperation::MessageSend,
             &previous.id.to_string(),
@@ -1507,33 +1625,26 @@ impl RemoteChat {
 
   /// Puts a message the user just sent into the mirror, in the same frame: its row is the outbox
   /// message the core writes under the same client ID, so the core's answer replaces it in place
-  /// (issue #778). A reply's quote, urgency, an asked acknowledgement and silence show at once too,
-  /// from [`Mirror::pending_extras`]. Messages with files, a quoted picture of an album, a quote of a
-  /// message the mirror doesn't hold, or a thread reply also posted to the conversation appear with
-  /// the core's answer.
+  /// (issue #778). A reply's quote (also of an album's picture), urgency, an asked acknowledgement,
+  /// silence and files going up show at once too, from [`Mirror::pending_extras`] (#2269); a thread
+  /// reply also posted to the conversation shows in both. A quote of a message the mirror doesn't
+  /// hold (or whose files it doesn't) appears with the core's answer.
   fn show_pending(&self, message: &OutgoingMessage, id: ClientMessageId) -> Option<PendingRow> {
-    let is_shown_at_once = message.files.is_empty()
-      && message.maybe_reply_attachment.is_none()
-      && !message.also_send_to_channel
-      && !message.body.trim().is_empty();
-    if !is_shown_at_once {
+    if message.files.is_empty() && message.body.trim().is_empty() {
       return None;
     }
-    let pending = PendingRow {
-      conversation: message.conversation,
-      maybe_thread: message.maybe_thread,
-      id: pending_message_id(id),
-    };
-    let is_shown = {
+    let quoted_picture = self.quoted_picture(message);
+    let id = pending_message_id(id);
+    let maybe_pending = {
       let mut mirror = self.mirror.borrow_mut();
-      let maybe_extras = match mirror.pending_extras_of(message, pending.id) {
+      let maybe_extras = match mirror.pending_extras_of(message, id, quoted_picture) {
         PendingExtras::Plain => None,
         PendingExtras::Held(extras) => Some(*extras),
         PendingExtras::Unknown => return None,
       };
       let row = Message {
         maybe_sticker: None,
-        id: pending.id,
+        id,
         conversation: message.conversation,
         author: mirror.snapshot.me.id,
         kind: MessageKind::User,
@@ -1551,27 +1662,66 @@ impl RemoteChat {
         mentions_me: false,
         maybe_poll: None,
       };
-      let is_shown = match message.maybe_thread {
-        Some(thread) => mirror
+      let is_in_thread = message.maybe_thread.is_some_and(|thread| {
+        mirror
           .threads
           .get_mut(&(message.conversation, thread))
-          .map(|replies| replies.push(row))
-          .is_some(),
-        None => mirror
+          .map(|replies| replies.push(row.clone()))
+          .is_some()
+      });
+      let wants_feed = message.maybe_thread.is_none() || message.also_send_to_channel;
+      let is_in_feed = wants_feed
+        && mirror
           .feeds
           .get_mut(&message.conversation)
-          .is_some_and(|feed| feed.push_pending(row)),
-      };
+          .is_some_and(|feed| feed.push_pending(row));
+      let is_shown = is_in_thread || is_in_feed;
       if is_shown && let Some(extras) = maybe_extras {
         mirror.hold_pending_extras(extras);
       }
-      is_shown
+      is_shown.then_some(PendingRow {
+        conversation: message.conversation,
+        maybe_thread: message.maybe_thread,
+        id,
+        is_in_feed,
+      })
     };
-    if is_shown {
+    if maybe_pending.is_some() {
       self.changed();
-      Some(pending)
-    } else {
-      None
+    }
+    maybe_pending
+  }
+
+  /// The album's picture `message` quotes, from the quoted message's files the UI read last; the
+  /// core's rule (`reply_ref`): only a message with several files quotes one of them.
+  fn quoted_picture(&self, message: &OutgoingMessage) -> QuotedPicture {
+    let (Some(quoted), Some(attachment)) = (message.maybe_reply_to, message.maybe_reply_attachment) else {
+      return QuotedPicture::None;
+    };
+    let answers = self.answers.borrow();
+    let maybe_files = answers.values().find_map(|slot| match &slot.maybe_answer {
+      Some(ChatAnswer::MessageExtras { extras }) => extras
+        .iter()
+        .find(|held| held.message == quoted)
+        .map(|held| &held.files),
+      _ => None,
+    });
+    let Some(files) = maybe_files else {
+      return QuotedPicture::Unknown;
+    };
+    if files.len() < 2 {
+      return QuotedPicture::None;
+    }
+    let file_id = attachment.to_string();
+    match files.iter().find(|file| file.file_id == file_id) {
+      Some(file) => QuotedPicture::Picture(ReplyAttachmentPreview {
+        file_id,
+        file_name: file.file_name.clone(),
+        maybe_thumbnail_png: file.maybe_thumbnail_png.clone(),
+        can_open: true,
+      }),
+      // Not (or no longer) one of its files: the core quotes the message whole.
+      None => QuotedPicture::None,
     }
   }
 
@@ -1583,17 +1733,15 @@ impl RemoteChat {
     );
     let mut mirror = self.mirror.borrow_mut();
     mirror.pending_extras.retain(|held| held.message != pending.id);
-    match pending.maybe_thread {
-      Some(thread) => {
-        if let Some(replies) = mirror.threads.get_mut(&(pending.conversation, thread)) {
-          replies.retain(|row| row.id != pending.id);
-        }
-      },
-      None => {
-        if let Some(feed) = mirror.feeds.get_mut(&pending.conversation) {
-          feed.withdraw_pending(pending.id);
-        }
-      },
+    if let Some(thread) = pending.maybe_thread
+      && let Some(replies) = mirror.threads.get_mut(&(pending.conversation, thread))
+    {
+      replies.retain(|row| row.id != pending.id);
+    }
+    if pending.is_in_feed
+      && let Some(feed) = mirror.feeds.get_mut(&pending.conversation)
+    {
+      feed.withdraw_pending(pending.id);
     }
   }
 
@@ -1636,12 +1784,12 @@ impl ChatBackend for RemoteChat {
     let id = *message
       .maybe_client_message_id
       .get_or_insert_with(ClientMessageId::random);
+    // The pictures the composer handed over show in the row from its first frame (#2269).
+    let files: Vec<(Option<&str>, &str)> = message.files.iter().map(local_preview_key).collect();
+    crate::local_previews::bind(pending_message_id(id), &files);
     let maybe_pending = self.show_pending(&message, id);
     // Performance data: until the server's answer replaces the pending row (`Feed::store`).
-    if let Some(pending) = maybe_pending
-      .as_ref()
-      .filter(|pending| pending.maybe_thread.is_none())
-    {
+    if let Some(pending) = maybe_pending.as_ref().filter(|pending| pending.is_in_feed) {
       crate::perf::begin_pending(crate::perf::PerfOperation::MessageSend, &pending.id.to_string());
     }
     self.act_showing(ChatAction::SendMessage { message }, maybe_pending);
@@ -3951,22 +4099,9 @@ mod tests {
       let mut album_reply = outgoing("hello", id);
       album_reply.maybe_reply_to = Some(id_from_raw(1));
       album_reply.maybe_reply_attachment = Some(id_from_raw(4));
-      let mut also_in_channel = outgoing("hello", id);
-      also_in_channel.also_send_to_channel = true;
-      let mut file = outgoing("hello", id);
-      file.files.push(teamcraft_client_api::actions::OutgoingFile {
-        file_name: "a.txt".into(),
-        media_type: "text/plain".into(),
-        source: teamcraft_client_api::actions::FileSource::Bytes { bytes: vec![1] },
-        maybe_thumbnail: None,
-        maybe_duration_ms: None,
-        maybe_waveform: None,
-        maybe_draft_id: None,
-        maybe_motion: None,
-      });
       let blank = outgoing("   ", id);
 
-      for message in [reply_to_unknown, album_reply, also_in_channel, file, blank] {
+      for message in [reply_to_unknown, album_reply, blank] {
         assert!(backend.show_pending(&message, id).is_none());
       }
       assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 1);
@@ -4113,13 +4248,6 @@ mod tests {
         assert_eq!(mirror.pending_extras.len(), MAX_PENDING_EXTRAS);
         assert_eq!(mirror.pending_extras[0].message, id_from_raw(1005));
       }
-
-      fn held_extras(backend: &RemoteChat, id: MessageId) -> MessageExtras {
-        let mut extras = Vec::new();
-        backend.mirror.borrow_mut().add_pending_extras(&mut extras, &[id]);
-        assert_eq!(extras.len(), 1, "one held entry for the row");
-        extras.remove(0)
-      }
     }
 
     #[test]
@@ -4183,6 +4311,266 @@ mod tests {
 
       backend.withdraw_pending(pending);
       assert!(backend.thread(conversation, thread).is_empty());
+    }
+
+    mod files {
+      use teamcraft_client_api::actions::{FileSource, FileTransfer, OutgoingFile, PixelSize};
+
+      use super::*;
+
+      /// A PNG of one pixel: its header names its size.
+      const PIXEL_PNG: [u8; 67] = [
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00,
+        0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00,
+        0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01,
+        0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+      ];
+
+      #[test]
+      fn a_picture_shows_at_once_going_up_at_its_size() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut message = outgoing("", id);
+        message.files.push(file(
+          "pixel.png",
+          "image/png",
+          FileSource::Bytes {
+            bytes: PIXEL_PNG.to_vec(),
+          },
+        ));
+
+        let pending = backend.show_pending(&message, id).expect("shown without text");
+
+        assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 2);
+        let extras = held_extras(&backend, pending.id);
+        let [shown] = extras.files.as_slice() else {
+          panic!("one file: {:?}", extras.files);
+        };
+        assert_eq!(shown.message, pending.id);
+        assert_eq!(shown.file_name, "pixel.png");
+        assert_eq!(shown.size_bytes, 67);
+        assert_eq!(shown.maybe_dimensions, Some(PixelSize { width: 1, height: 1 }));
+        assert_eq!(shown.maybe_sender, Some(backend.mirror.borrow().snapshot.me.id));
+        assert_eq!(
+          shown.transfer,
+          FileTransfer::Uploading {
+            done_bytes: 0,
+            total_bytes: 67,
+            failed_attempts: 0,
+          }
+        );
+      }
+
+      #[test]
+      fn a_large_file_shows_its_size_and_the_apps_thumbnail() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut message = outgoing("the clip", id);
+        let mut video = file(
+          "clip.mp4",
+          "video/mp4",
+          FileSource::Picked {
+            handle: "h".into(),
+            size_bytes: 70_000_000,
+          },
+        );
+        video.maybe_thumbnail = Some(vec![1, 2, 3]);
+        video.maybe_duration_ms = Some(4_000);
+        message.files.push(video);
+        message.files.push(file(
+          "notes.pdf",
+          "application/pdf",
+          FileSource::Draft { id: "d".into() },
+        ));
+
+        let pending = backend.show_pending(&message, id).expect("shown");
+
+        let extras = held_extras(&backend, pending.id);
+        assert_eq!(extras.files.len(), 2);
+        assert_eq!(extras.files[0].size_bytes, 70_000_000);
+        assert_eq!(extras.files[0].maybe_thumbnail_png, Some(vec![1, 2, 3]));
+        assert_eq!(extras.files[0].maybe_duration_ms, Some(4_000));
+        assert_eq!(extras.files[0].maybe_dimensions, None);
+        assert_eq!(extras.files[1].file_id, "pending-1");
+        assert_eq!(extras.files[1].size_bytes, 0, "the core reads a draft's file");
+      }
+
+      #[test]
+      fn a_refused_file_message_goes_with_its_files() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut message = outgoing("", id);
+        message
+          .files
+          .push(file("a.txt", "text/plain", FileSource::Bytes { bytes: vec![1] }));
+        let pending = backend.show_pending(&message, id).expect("shown");
+
+        backend.withdraw_pending(pending);
+
+        assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 1);
+        assert!(backend.mirror.borrow().pending_extras.is_empty());
+      }
+
+      fn file(name: &str, media_type: &str, source: FileSource) -> OutgoingFile {
+        OutgoingFile {
+          file_name: name.into(),
+          media_type: media_type.into(),
+          source,
+          maybe_thumbnail: None,
+          maybe_duration_ms: None,
+          maybe_waveform: None,
+          maybe_draft_id: None,
+          maybe_motion: None,
+        }
+      }
+    }
+
+    mod album_quotes {
+      use teamcraft_client_api::actions::FileTransfer;
+
+      use super::*;
+
+      #[test]
+      fn a_reply_to_an_albums_picture_quotes_it_at_once() {
+        let backend = backend_with_feed(&[""]);
+        hold_files(&backend, id_from_raw(1), &["4", "5"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("nice", id);
+        reply.maybe_reply_to = Some(id_from_raw(1));
+        reply.maybe_reply_attachment = Some(id_from_raw(5));
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        let quote = held_extras(&backend, pending.id).maybe_reply.expect("the quote");
+        // The core's rule (`reply_ref`): an album without text is quoted by the picture's name.
+        assert_eq!(quote.excerpt, "picture-5.jpg");
+        let picture = quote.maybe_attachment.expect("the picture");
+        assert_eq!(picture.file_id, "5");
+        assert_eq!(picture.maybe_thumbnail_png, Some(vec![5]));
+        assert!(picture.can_open);
+      }
+
+      #[test]
+      fn a_message_with_one_file_is_quoted_whole() {
+        let backend = backend_with_feed(&["the caption"]);
+        hold_files(&backend, id_from_raw(1), &["4"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("nice", id);
+        reply.maybe_reply_to = Some(id_from_raw(1));
+        reply.maybe_reply_attachment = Some(id_from_raw(4));
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        let quote = held_extras(&backend, pending.id).maybe_reply.expect("the quote");
+        assert_eq!(quote.excerpt, "the caption");
+        assert!(quote.maybe_attachment.is_none());
+      }
+
+      /// The answer the UI read for `message`'s extras: these files.
+      fn hold_files(backend: &RemoteChat, message: MessageId, file_ids: &[&str]) {
+        let mut extras = MessageExtras::new(message);
+        extras.files = file_ids
+          .iter()
+          .map(|file_id| FileInfo {
+            conversation: id_from_raw(CONVERSATION),
+            message,
+            file_id: (*file_id).to_owned(),
+            file_name: format!("picture-{file_id}.jpg"),
+            media_type: "image/jpeg".into(),
+            size_bytes: 10,
+            maybe_thumbnail_png: file_id.parse::<u8>().ok().map(|byte| vec![byte]),
+            transfer: FileTransfer::Remote,
+            maybe_sender: None,
+            maybe_sent_at: None,
+            maybe_imported_author: None,
+            maybe_dimensions: None,
+            maybe_duration_ms: None,
+            maybe_waveform: None,
+            maybe_content_sha256: None,
+            maybe_motion: None,
+          })
+          .collect();
+        backend.answers.borrow_mut().insert(
+          "extras".into(),
+          Slot {
+            maybe_answer: Some(ChatAnswer::MessageExtras { extras: vec![extras] }),
+            ..Slot::default()
+          },
+        );
+      }
+    }
+
+    mod also_in_channel {
+      use super::*;
+
+      #[test]
+      fn a_thread_reply_also_posted_shows_in_the_thread_and_the_feed() {
+        let backend = backend_with_feed(&["a"]);
+        let (conversation, thread) = held_thread(&backend);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("for everyone", id);
+        reply.maybe_thread = Some(thread);
+        reply.also_send_to_channel = true;
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        assert!(pending.is_in_feed);
+        assert_eq!(backend.thread(conversation, thread).len(), 1);
+        assert_eq!(backend.message_count(conversation), 2);
+        assert!(held_extras(&backend, pending.id).is_also_in_channel);
+
+        backend.withdraw_pending(pending);
+        assert!(backend.thread(conversation, thread).is_empty());
+        assert_eq!(backend.message_count(conversation), 1);
+      }
+
+      #[test]
+      fn a_thread_reply_not_posted_stays_out_of_the_feed() {
+        let backend = backend_with_feed(&["a"]);
+        let (conversation, thread) = held_thread(&backend);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("only here", id);
+        reply.maybe_thread = Some(thread);
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        assert!(!pending.is_in_feed);
+        assert_eq!(backend.message_count(conversation), 1);
+      }
+
+      #[test]
+      fn it_shows_in_the_feed_while_the_thread_is_not_held() {
+        let backend = backend_with_feed(&["a"]);
+        let id = ClientMessageId::from_bytes([3; 16]);
+        let mut reply = outgoing("for everyone", id);
+        reply.maybe_thread = Some(crate::model::thread_id_of(id_from_raw(70)));
+        reply.also_send_to_channel = true;
+
+        let pending = backend.show_pending(&reply, id).expect("shown");
+
+        assert!(pending.is_in_feed);
+        assert_eq!(backend.message_count(id_from_raw(CONVERSATION)), 2);
+      }
+
+      fn held_thread(backend: &RemoteChat) -> (ConversationId, ThreadId) {
+        let (conversation, thread) = (
+          id_from_raw(CONVERSATION),
+          crate::model::thread_id_of(id_from_raw(70)),
+        );
+        backend
+          .mirror
+          .borrow_mut()
+          .threads
+          .insert((conversation, thread), Vec::new());
+        (conversation, thread)
+      }
+    }
+
+    fn held_extras(backend: &RemoteChat, id: MessageId) -> MessageExtras {
+      let mut extras = Vec::new();
+      backend.mirror.borrow_mut().add_pending_extras(&mut extras, &[id]);
+      assert_eq!(extras.len(), 1, "one held entry for the row");
+      extras.remove(0)
     }
 
     fn outgoing(body: &str, id: ClientMessageId) -> OutgoingMessage {

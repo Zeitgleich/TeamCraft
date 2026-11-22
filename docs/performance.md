@@ -1776,9 +1776,11 @@ client ID, for both). A send the core refuses takes the row back, and the
 same ID sent twice is one message, also when the first has been sent by then. A reply, an urgent
 message, one that asks for acknowledgement and a silent one show at once as well: the mirror holds
 what the row shows beyond its text (`Mirror::pending_extras`) until the core's answer for the row
-has it, with the quote made from the quoted row by the core's rule (`reply_ref`). A message with
-files, a quote of an album's picture or of a row the mirror doesn't hold, and a thread reply also
-posted to the conversation appear with the core's answer as before. Edits, deletes, reactions, pins and forwards are outbox writes like a new message
+has it, with the quote made from the quoted row by the core's rule (`reply_ref`). Files (issue #2269) show
+at once as going up, with the picture the user picked instead of a blurred thumbnail
+(`local_previews`, handed over by the composer), and so do a quote of an album's picture (from the
+quoted message's files the UI read) and a thread reply also posted to the conversation (in the
+thread and the feed). Only a quote of a row the mirror doesn't hold appears with the core's answer. Edits, deletes, reactions, pins and forwards are outbox writes like a new message
 (`ChatAction::is_outbox_write`): the core answers once they are stored and sends them afterwards,
 also while a connection or an upload holds the client.
 
@@ -1797,6 +1799,19 @@ PENDING_ECHO_RUNS=20 E2E_REQUIRED=1 cargo test -p teamcraft-e2e --features brows
 |---------------------------------------------------------|-----------------------|-----------------------|-------------|
 | Enter until the pending row is in the DOM, median / p95 | 35.0 / 43.9 ms        | 9.6 / 41.1 ms         | one frame   |
 | Reaction while the connection waits, until its chip     | 18,063 ms             | 45 ms                 | one frame   |
+
+A message with a 12 MP photo (#2269, same test, 10 sends, `PENDING_ECHO_FILE_RUNS`; "before" is `main`
+90adcefb5 with 5 sends):
+
+| What                                                    | Before                | After                 | Budget      |
+|---------------------------------------------------------|-----------------------|-----------------------|-------------|
+| Enter until the photo's row is in the DOM, median / p95 | 13.8 / 14.5 ms        | 16.0 / 22.4 ms        | one frame   |
+| What the row shows of the photo                         | blurred thumbnail     | the photo picked      |             |
+
+On the web the core in the page answers in the same task, and the photo went up with the draft
+already, so "before" was quick there; the gain is the picture itself. The desktop app's core answers
+through the shell, two round trips more (see above): there the row no longer waits for them. The
+desktop app was not measured.
 
 "Before" is `main` 4167ebd6 with the same test (three more runs: medians 35.6, 36.7, 36.9 ms, p95 43 to
 52 ms, one 213 ms). The p95 of "after" is its first send, with the page's code still being compiled;
@@ -1817,7 +1832,7 @@ is the framework's work.
   (`a_read_clears_the_badge_before_the_client_is_free`). Live events move the sync heads now (see
   "Starting from the cached account").
 - **Left:** reactions and edits still read the conversation to find their target and its reactions
-  (a keyed lookup for reactions needs an index of them), and files show with the core's answer. Covered by tests: `chosen_ids::*` (core),
+  (a keyed lookup for reactions needs an index of them). Covered by tests: `chosen_ids::*` (core),
   `pending_rows::*` (UI mirror), `changes_that_live_in_the_outbox_answer_before_the_network`
   (client API) and the browser test above, which also sends offline, reloads the page with the
   message queued and checks that it goes out once when the network is back.
