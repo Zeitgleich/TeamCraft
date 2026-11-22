@@ -336,7 +336,8 @@ fn verified_claims(token: &str, jwks_json: &[u8]) -> Result<Value, AttestationEr
 }
 
 /// The account's names in verified `claims`, see [`AccountNames`]. An e-mail address counts only where
-/// the provider says it verified it; a blank or overlong name, or one with control characters, is none.
+/// the provider says it verified it; a blank or overlong name, or one with a character that hides how it
+/// reads ([`is_deceptive_char`]), is none.
 fn account_names(claims: &Value) -> AccountNames {
   let name = |claim: &str| {
     claims
@@ -346,7 +347,7 @@ fn account_names(claims: &Value) -> AccountNames {
       .filter(|name| {
         !name.is_empty()
           && name.chars().count() <= MAX_ACCOUNT_NAME_CHARS
-          && !name.chars().any(char::is_control)
+          && !name.chars().any(is_deceptive_char)
       })
       .map(str::to_string)
   };
@@ -355,6 +356,17 @@ fn account_names(claims: &Value) -> AccountNames {
     maybe_username: name("preferred_username"),
     maybe_email: name("email").filter(|_| is_email_verified),
   }
+}
+
+/// Characters that change how a name looks without showing themselves: controls (Cc), bidi marks,
+/// embeddings, overrides and isolates, and zero-width characters. With them one account's name can be
+/// made to look like another's, which is what an owner reads these names to tell apart.
+fn is_deceptive_char(character: char) -> bool {
+  character.is_control()
+    || matches!(
+      character,
+      '\u{061C}' | '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2069}' | '\u{FEFF}'
+    )
 }
 
 fn check_claims(
@@ -636,7 +648,21 @@ mod tests {
     #[test]
     fn refuses_blank_overlong_and_control_names() {
       let long = "a".repeat(MAX_ACCOUNT_NAME_CHARS + 1);
-      for bad in [json!("  "), json!(long), json!("a\u{202e}b\nc"), json!(42)] {
+      let bad_names = [
+        json!("  "),
+        json!(long),
+        json!("a\nb"),
+        // A bidi override alone, an isolate, a mark, and zero-width characters, none with a control.
+        json!("jdoe\u{202e}eod"),
+        json!("j\u{2066}doe\u{2069}"),
+        json!("jdoe\u{200f}"),
+        json!("j\u{200b}doe"),
+        json!("j\u{200d}doe"),
+        json!("\u{feff}jdoe"),
+        json!("j\u{061c}doe"),
+        json!(42),
+      ];
+      for bad in bad_names {
         let names = names_in(json!({ "preferred_username": bad }));
         assert_eq!(names.maybe_username, None, "{bad}");
       }
