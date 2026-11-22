@@ -36,10 +36,6 @@ const QUIET_PHASE: Duration = Duration::from_secs(12);
 /// A typing frame per this: the server forwards one per 3 s and conversation.
 const TYPING_INTERVAL: Duration = Duration::from_secs(3);
 const TYPING_FRAMES: usize = 4;
-/// How long the import may take to be read to its beginning.
-/// Rounds at the top of the list without a page arriving that end the reading: the oldest page
-/// stays on "Waiting for this message" (#2263), so the beginning of the import is not on screen.
-const ROUNDS_WITHOUT_NEWS: u32 = 30;
 /// Long enough for a reader to scroll up through the whole import in steps.
 const READING_DEADLINE: Duration = Duration::from_secs(240);
 const PAGING_DEADLINE: Duration = Duration::from_secs(120);
@@ -313,12 +309,11 @@ async fn scenario() {
   let following = take_stats(&page).await;
 
   // (d) A reader scrolling up reads the imported history page by page, and what is on screen stays
-  // where it is while a page arrives above it. The reading ends at the beginning of the import, or
-  // when the reader is at the top and nothing more arrives.
+  // where it is while a page arrives above it. The reading ends at the beginning of the import
+  // (#2263: the oldest pages once stayed on "Waiting for this message").
   let deadline = Instant::now() + READING_DEADLINE;
   let mut reading = FeedStats::default();
-  let mut rounds_without_news = 0;
-  while !body_text(&page).await.contains(OLDEST_IMPORTED) && rounds_without_news < ROUNDS_WITHOUT_NEWS {
+  while !body_text(&page).await.contains(OLDEST_IMPORTED) {
     assert!(
       Instant::now() < deadline,
       "the beginning of the import was not reached: {reading:?}"
@@ -328,11 +323,6 @@ async fn scenario() {
     tokio::time::sleep(Duration::from_millis(700)).await;
     let round = take_stats(&page).await;
     assert_still_while_reading(round);
-    rounds_without_news = if round.count_changes == 0 && is_at_top(&page).await {
-      rounds_without_news + 1
-    } else {
-      0
-    };
     reading = reading.plus(round);
   }
 
@@ -625,15 +615,6 @@ async fn prepare_import(rig: &mut Rig, importer: &mut Peer, dm: ConversationId) 
     importer.client.has_group(dm).unwrap(),
     "the import account never joined"
   );
-}
-
-async fn is_at_top(page: &Page) -> bool {
-  page
-    .evaluate("document.querySelector('.message-list').scrollTop === 0")
-    .await
-    .ok()
-    .and_then(|value| value.into_value::<bool>().ok())
-    .unwrap_or(false)
 }
 
 async fn take_stats(page: &Page) -> FeedStats {
