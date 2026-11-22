@@ -48,6 +48,8 @@ const MAX_TOKEN_BYTES: usize = 16 * 1024;
 /// of work for a signature a hostile server can make it check.
 const MIN_RSA_BITS: usize = 2048;
 const MAX_RSA_BITS: usize = 8192;
+/// Longest account name kept from a token (characters): names longer than this are no use on screen.
+const MAX_ACCOUNT_NAME_CHARS: usize = 256;
 
 /// What a token must state to attest an identity key.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +78,31 @@ pub struct RoleEvidence {
   /// that isn't a role name or a list of them, which says nothing about the person: the realm may
   /// simply not map roles into ID tokens.
   pub maybe_roles: Option<Vec<String>>,
+  /// How the provider names the account, for an owner to tell accounts apart (e2ee.md §3.1.4).
+  pub names: AccountNames,
+}
+
+/// How the identity provider names an account in a verified token: `preferred_username`, and `email`
+/// where the provider verified it (`email_verified`). Shown to owners next to the account (`sub`),
+/// never used for a decision: the person, or a provider admin, may be able to edit both. Personal
+/// data: kept only on the owners' devices, never signed or logged, so `Debug` doesn't print them.
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct AccountNames {
+  pub maybe_username: Option<String>,
+  pub maybe_email: Option<String>,
+}
+
+impl AccountNames {
+  /// Whether the token named the account at all.
+  pub fn is_empty(&self) -> bool {
+    self.maybe_username.is_none() && self.maybe_email.is_none()
+  }
+}
+
+impl std::fmt::Debug for AccountNames {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    formatter.write_str("AccountNames([redacted])")
+  }
 }
 
 /// What a token claims, before anybody checked its signature. Only for a token this device got
@@ -160,6 +187,7 @@ pub fn verify_role_evidence(
     subject: verified.subject,
     issued_at,
     maybe_roles: roles_in(&claims, expected.audience, roles_claim),
+    names: account_names(&claims),
   })
 }
 
@@ -199,6 +227,7 @@ pub fn verify_role_loss(
       .ok_or(AttestationError::NoIssueTime)?,
     maybe_roles: roles_claim_is_usable(roles_claim)
       .then(|| roles_in(&claims, expected.audience, roles_claim).unwrap_or_default()),
+    names: account_names(&claims),
   })
 }
 
@@ -304,6 +333,28 @@ fn verified_claims(token: &str, jwks_json: &[u8]) -> Result<Value, AttestationEr
     });
   }
   Ok(claims)
+}
+
+/// The account's names in verified `claims`, see [`AccountNames`]. An e-mail address counts only where
+/// the provider says it verified it; a blank or overlong name, or one with control characters, is none.
+fn account_names(claims: &Value) -> AccountNames {
+  let name = |claim: &str| {
+    claims
+      .get(claim)
+      .and_then(Value::as_str)
+      .map(str::trim)
+      .filter(|name| {
+        !name.is_empty()
+          && name.chars().count() <= MAX_ACCOUNT_NAME_CHARS
+          && !name.chars().any(char::is_control)
+      })
+      .map(str::to_string)
+  };
+  let is_email_verified = claims.get("email_verified").and_then(Value::as_bool) == Some(true);
+  AccountNames {
+    maybe_username: name("preferred_username"),
+    maybe_email: name("email").filter(|_| is_email_verified),
+  }
 }
 
 fn check_claims(
@@ -565,6 +616,64 @@ mod tests {
         check(json!({ "iss": ISSUER, "aud": CLIENT, "azp": "other", "iat": 1, ATTESTATION_CLAIM: claim })),
         Err(AttestationError::WrongAudience)
       ));
+    }
+
+    #[test]
+    fn names_the_account_with_a_verified_email_only() {
+      let names = names_in;
+      let both =
+        names(json!({ "preferred_username": " jdoe ", "email": "j@example.com", "email_verified": true }));
+      assert_eq!(both.maybe_username.as_deref(), Some("jdoe"));
+      assert_eq!(both.maybe_email.as_deref(), Some("j@example.com"));
+      // An address the provider didn't verify is the person's own word: not shown.
+      let unverified = names(json!({ "preferred_username": "jdoe", "email": "j@example.com" }));
+      assert_eq!(unverified.maybe_email, None);
+      let said_false = names(json!({ "email": "j@example.com", "email_verified": false }));
+      assert!(said_false.is_empty());
+      assert!(names(json!({})).is_empty());
+    }
+
+    #[test]
+    fn refuses_blank_overlong_and_control_names() {
+      let long = "a".repeat(MAX_ACCOUNT_NAME_CHARS + 1);
+      for bad in [json!("  "), json!(long), json!("a\u{202e}b\nc"), json!(42)] {
+        let names = names_in(json!({ "preferred_username": bad }));
+        assert_eq!(names.maybe_username, None, "{bad}");
+      }
+      let longest = "a".repeat(MAX_ACCOUNT_NAME_CHARS);
+      assert_eq!(
+        names_in(json!({ "preferred_username": longest })).maybe_username,
+        Some(longest)
+      );
+    }
+
+    #[test]
+    fn debug_never_prints_the_names() {
+      let names = names_in(json!({ "preferred_username": "jdoe" }));
+      assert!(!format!("{names:?}").contains("jdoe"));
+    }
+
+    /// The names a verified ID token with `extra` claims gives.
+    fn names_in(extra: Value) -> AccountNames {
+      let provider = Provider::new();
+      let identity = IdentityKeyPair::generate(&mut OsRng).public_key();
+      let mut claims = json!({
+        "iss": ISSUER, "aud": CLIENT, "sub": "abc", "iat": 1_000,
+        ATTESTATION_CLAIM: attestation_claim(ALICE, &identity),
+      });
+      for (name, value) in extra.as_object().unwrap() {
+        claims[name] = value.clone();
+      }
+      verify_role_evidence(
+        &provider.token(claims),
+        &provider.jwks(),
+        &expectations(),
+        &[],
+        ALICE,
+        &identity,
+      )
+      .unwrap()
+      .names
     }
 
     fn path(names: &[&str]) -> Vec<String> {
