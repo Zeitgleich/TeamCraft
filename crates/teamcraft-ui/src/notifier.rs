@@ -248,6 +248,11 @@ pub fn preview(body: &str) -> String {
 #[derive(Default)]
 pub struct Notifier {
   seen_message: RefCell<HashMap<ConversationId, MessageId>>,
+  /// When the newest message of each conversation was sent, as of its last look that left nothing
+  /// to look at again (its newest message readable). Until that moves, the conversation's rows
+  /// aren't read: reading every conversation's newest rows on every change made the desktop page
+  /// hold a page of each (#1708).
+  settled: RefCell<HashMap<ConversationId, crate::model::TimestampMs>>,
   seen_replies: RefCell<HashMap<(ConversationId, ThreadId), usize>>,
   /// The newest message the server confirmed in any conversation, as of the previous look.
   maybe_newest_seen: Cell<Option<MessageId>>,
@@ -301,15 +306,32 @@ impl Notifier {
     if count == 0 {
       return;
     }
+    let maybe_last_activity = backend.last_activity(conversation.id);
+    if is_unmoved(
+      self.settled.borrow().get(&conversation.id).copied(),
+      maybe_last_activity,
+    ) {
+      return;
+    }
     let start = count.saturating_sub(WATCH_WINDOW);
+    let rows = backend.messages(conversation.id, start, WATCH_WINDOW);
+    // A placeholder newest fills in later without moving the mark: looked at again until it has.
+    let is_settled = rows
+      .last()
+      .is_some_and(|message| message.maybe_placeholder.is_none());
     // Placeholders of messages not readable yet notify nothing and aren't counted as seen: one
     // that fills in later and is newer than everything seen notifies then, with its text, while
     // older history that fills in on a newly linked device stays quiet (issue #888).
-    let window = readable(backend.messages(conversation.id, start, WATCH_WINDOW));
+    let window = readable(rows);
     let Some(newest) = window.last().map(|message| message.id) else {
       // Still loading, or nothing readable yet; try again on the next change.
       return;
     };
+    if let Some(last_activity) = maybe_last_activity.filter(|_| is_settled) {
+      self.settled.borrow_mut().insert(conversation.id, last_activity);
+    } else {
+      self.settled.borrow_mut().remove(&conversation.id);
+    }
     let maybe_previous = self.seen_message.borrow_mut().insert(conversation.id, newest);
     let new = new_messages(
       window,
@@ -402,6 +424,15 @@ fn new_replies(thread: Vec<Message>, previous: usize) -> Vec<Message> {
 
 /// The messages this device can read: a placeholder (issue #888) has no text to show and may turn
 /// out to be a reaction or an edit.
+/// Whether a conversation's newest message is still the one of its last settled look. A backend
+/// that doesn't know when that was sent is always looked at.
+fn is_unmoved(
+  maybe_settled: Option<crate::model::TimestampMs>,
+  maybe_last_activity: Option<crate::model::TimestampMs>,
+) -> bool {
+  matches!((maybe_settled, maybe_last_activity), (Some(settled), Some(now)) if settled == now)
+}
+
 fn readable(messages: Vec<Message>) -> Vec<Message> {
   messages
     .into_iter()
@@ -609,6 +640,29 @@ mod tests {
           maybe_space: Some(id_from_raw(3)),
         }
       );
+    }
+  }
+
+  /// #1708: a conversation is read again only when its newest message moved.
+  mod unmoved {
+    use super::*;
+
+    #[test]
+    fn the_same_newest_message_needs_no_look() {
+      assert!(is_unmoved(Some(5), Some(5)));
+    }
+
+    #[test]
+    fn a_newer_or_a_deleted_newest_message_is_looked_at() {
+      assert!(!is_unmoved(Some(5), Some(6)));
+      assert!(!is_unmoved(Some(5), Some(4)));
+    }
+
+    #[test]
+    fn without_a_settled_look_or_a_known_time_it_is_looked_at() {
+      assert!(!is_unmoved(None, Some(5)));
+      assert!(!is_unmoved(Some(5), None));
+      assert!(!is_unmoved(None, None));
     }
   }
 
