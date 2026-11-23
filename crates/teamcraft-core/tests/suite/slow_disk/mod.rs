@@ -126,14 +126,16 @@ pub struct Turn {
   pub syncs: DiskTally,
 }
 
-/// Runs `turn` and measures it on `disk`.
+/// Runs `turn` and measures it on `disk`. Its syncs are the calling thread's only: the store's
+/// purge writes the log back on a thread of its own at any moment, and its syncs don't hold the
+/// turn up (#2335). A purge that ran on the writer's connection would run on this thread.
 pub fn measure(disk: &SlowDisk, turn: impl FnOnce() -> Result<(), StoreError>) -> Turn {
-  let before = disk.tally();
+  let before = disk.thread_tally();
   let started = Instant::now();
   turn().unwrap();
   Turn {
     took: started.elapsed(),
-    syncs: disk.tally().since(before),
+    syncs: disk.thread_tally().since(before),
   }
 }
 

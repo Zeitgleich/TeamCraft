@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::thread::{self, ThreadId};
 use std::time::Duration;
 
 use sqlite_plugin::flags::{AccessFlags, CreateMode, LockLevel, OpenKind, OpenMode, OpenOpts, ShmLockMode};
@@ -51,6 +52,9 @@ struct DiskState {
   database_syncs: AtomicU64,
   log_syncs: AtomicU64,
   reads: AtomicU64,
+  /// The same counts per thread that made them: a measured turn of the writer counts its own
+  /// syncs, not those of the purge's thread that run at the same time (#2335).
+  per_thread: Mutex<HashMap<ThreadId, DiskTally>>,
   /// Locks and shared memory per database file, shared by every connection to it.
   databases: Mutex<HashMap<PathBuf, Arc<Database>>>,
   next_handle: AtomicU64,
@@ -111,6 +115,7 @@ impl SlowDisk {
       database_syncs: AtomicU64::new(0),
       log_syncs: AtomicU64::new(0),
       reads: AtomicU64::new(0),
+      per_thread: Mutex::default(),
       databases: Mutex::default(),
       next_handle: AtomicU64::new(0),
     });
@@ -137,6 +142,15 @@ impl SlowDisk {
       log_syncs: self.state.log_syncs.load(Ordering::Relaxed),
       reads: self.state.reads.load(Ordering::Relaxed),
     }
+  }
+
+  /// What the calling thread's connections counted so far: syncs and reads that other threads
+  /// (the store's purge) make at the same time are not in it.
+  pub fn thread_tally(&self) -> DiskTally {
+    lock(&self.state.per_thread)
+      .get(&thread::current().id())
+      .copied()
+      .unwrap_or_default()
   }
 
   /// From now on syncs wait `sync_delay` and reads of the database and the log `read_delay`: a
@@ -263,6 +277,7 @@ impl Vfs for SlowVfs {
   fn read(&self, handle: &mut SlowFile, offset: usize, data: &mut [u8]) -> VfsResult<usize> {
     if matches!(handle.kind, OpenKind::MainDb | OpenKind::Wal) {
       self.state.reads.fetch_add(1, Ordering::Relaxed);
+      self.state.count_on_thread(|tally| tally.reads += 1);
       wait(&self.state.read_delay_nanos);
     }
     let file = handle.file()?;
@@ -362,11 +377,13 @@ impl Vfs for SlowVfs {
 
   /// The slow part: the data is in the page cache already; the wait is what a phone's flash costs.
   fn sync(&self, handle: &mut SlowFile) -> VfsResult<()> {
-    let counter = match handle.kind {
-      OpenKind::Wal => &self.state.log_syncs,
-      _ => &self.state.database_syncs,
-    };
-    counter.fetch_add(1, Ordering::Relaxed);
+    if matches!(handle.kind, OpenKind::Wal) {
+      self.state.log_syncs.fetch_add(1, Ordering::Relaxed);
+      self.state.count_on_thread(|tally| tally.log_syncs += 1);
+    } else {
+      self.state.database_syncs.fetch_add(1, Ordering::Relaxed);
+      self.state.count_on_thread(|tally| tally.database_syncs += 1);
+    }
     wait(&self.state.sync_delay_nanos);
     Ok(())
   }
@@ -507,6 +524,13 @@ impl VfsHandle for SlowFile {
 
   fn in_memory(&self) -> bool {
     false
+  }
+}
+
+impl DiskState {
+  /// Adds to the calling thread's own tally.
+  fn count_on_thread(&self, count: impl FnOnce(&mut DiskTally)) {
+    count(lock(&self.per_thread).entry(thread::current().id()).or_default());
   }
 }
 
