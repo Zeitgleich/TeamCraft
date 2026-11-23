@@ -1726,11 +1726,11 @@ mod tests {
       fn the_best_wanted_layer_that_fits_and_the_lowest_when_none_does() {
         let camera = track(1, false, Some(2), None);
         assert_eq!(
-          direct_video_layers(5_000_000, &[camera.clone()]),
+          direct_video_layers(5_000_000, std::slice::from_ref(&camera)),
           vec![(MediaStreamId(1), Some(2))]
         );
         assert_eq!(
-          direct_video_layers(1_000_000, &[camera.clone()]),
+          direct_video_layers(1_000_000, std::slice::from_ref(&camera)),
           vec![(MediaStreamId(1), Some(1))]
         );
         assert_eq!(
