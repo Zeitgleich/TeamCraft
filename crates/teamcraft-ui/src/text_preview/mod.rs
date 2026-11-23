@@ -13,6 +13,7 @@ pub mod json;
 pub mod layout;
 pub mod log;
 pub mod search;
+pub mod table;
 
 use std::ops::Range;
 

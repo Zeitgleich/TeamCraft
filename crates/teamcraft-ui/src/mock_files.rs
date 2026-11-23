@@ -16,6 +16,10 @@ const LARGE_LOG_ID: &str = "9000013";
 /// The message the large log is attached to, counted from the newest.
 const LARGE_LOG_AT: usize = 9;
 static LARGE_LOG: LazyLock<Vec<u8>> = LazyLock::new(large_log);
+/// A generated table of this many rows (about 6 MB), for the table view's virtualized rows (#2341).
+const LARGE_CSV_ROWS: usize = 100_000;
+const LARGE_CSV_ID: &str = "9000018";
+static LARGE_CSV: LazyLock<Vec<u8>> = LazyLock::new(large_csv);
 
 /// A file of the demo, its full bytes and its thumbnail.
 struct DemoFile {
@@ -111,6 +115,16 @@ const SETTINGS_JSON: DemoFile = DemoFile {
   maybe_thumbnail: None,
 };
 
+/// A semicolon-separated export with a byte order mark, quoted fields and empty cells, for the
+/// table view (#2341).
+const STATIONS_CSV: DemoFile = DemoFile {
+  id: "9000016",
+  name: "stations.csv",
+  media_type: "text/csv",
+  bytes: include_bytes!("../demo-media/stations.csv"),
+  maybe_thumbnail: None,
+};
+
 /// A recording that plays in the conversation (#802), with its length as the sender's metadata.
 const STANDUP_NOTES: DemoFile = DemoFile {
   id: "9000014",
@@ -138,7 +152,7 @@ const ATTACHED: [(usize, &[DemoFile]); 10] = [
   (6, &[PHOTO]),
   (3, &[BOUNCE]),
   (5, &[CLIP]),
-  (7, &[SERVER_LOG, SETTINGS_JSON]),
+  (7, &[SERVER_LOG, SETTINGS_JSON, STATIONS_CSV]),
   (8, &[DUNES]),
   (10, &[STANDUP_NOTES, VOICE_MEMO]),
 ];
@@ -180,6 +194,13 @@ pub(super) fn demo_files(conversation: ConversationId, messages: &[Message]) -> 
     .and_then(|index| messages.get(index));
   if let Some(message) = maybe_large_log_message {
     files.push(FileInfo {
+      file_id: format!("{LARGE_CSV_ID}{LARGE_LOG_AT}"),
+      file_name: "readings.csv".to_owned(),
+      media_type: "text/csv".to_owned(),
+      size_bytes: LARGE_CSV.len() as u64,
+      ..generated_file(conversation, message)
+    });
+    files.push(FileInfo {
       conversation,
       message: message.id,
       file_id: format!("{LARGE_LOG_ID}{LARGE_LOG_AT}"),
@@ -206,6 +227,9 @@ pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
   if file_id.starts_with(LARGE_LOG_ID) {
     return Some(LARGE_LOG.as_slice());
   }
+  if file_id.starts_with(LARGE_CSV_ID) {
+    return Some(LARGE_CSV.as_slice());
+  }
   [
     LAKE,
     DUNES,
@@ -218,6 +242,7 @@ pub fn demo_bytes(file_id: &str) -> Option<&'static [u8]> {
     PHOTO,
     SERVER_LOG,
     SETTINGS_JSON,
+    STATIONS_CSV,
     STANDUP_NOTES,
     VOICE_MEMO,
   ]
@@ -248,6 +273,55 @@ fn large_log() -> Vec<u8> {
     if line % 25_000 == 12_345 {
       let _ = writeln!(text, "payload of item {line}: {}", "abcdefghij".repeat(2_000));
     }
+  }
+  text.into_bytes()
+}
+
+/// A generated file's metadata, attached to `message`; name, type, size and ID are the caller's.
+fn generated_file(conversation: ConversationId, message: &Message) -> FileInfo {
+  FileInfo {
+    conversation,
+    message: message.id,
+    file_id: String::new(),
+    file_name: String::new(),
+    media_type: String::new(),
+    size_bytes: 0,
+    maybe_thumbnail_png: None,
+    transfer: FileTransfer::Remote,
+    maybe_sender: Some(message.author),
+    maybe_sent_at: Some(message.sent_at),
+    maybe_imported_author: None,
+    maybe_dimensions: None,
+    maybe_duration_ms: None,
+    maybe_waveform: None,
+    maybe_content_sha256: None,
+    maybe_motion: None,
+  }
+}
+
+/// The large table: a reading per row, comma-separated, with a quoted note now and then.
+fn large_csv() -> Vec<u8> {
+  let mut text = String::with_capacity(LARGE_CSV_ROWS * 64);
+  text.push_str("reading,point,time,energy_kwh,power_kw,note\n");
+  for row in 0..LARGE_CSV_ROWS {
+    let note = match row % 11 {
+      0 => "\"restarted, then resumed\"",
+      5 => "",
+      _ => "ok",
+    };
+    // Writing to a String can't fail.
+    let _ = writeln!(
+      text,
+      "{row},P-{:04}-{:02},2026-11-{:02}T{:02}:{:02}:00Z,{}.{:02},{},{note}",
+      row % 40 / 4 + 1,
+      row % 4 + 1,
+      row / 4000 % 28 + 1,
+      row / 60 % 24,
+      row % 60,
+      row % 977,
+      row % 100,
+      [11, 22, 50, 150][row % 4],
+    );
   }
   text.into_bytes()
 }

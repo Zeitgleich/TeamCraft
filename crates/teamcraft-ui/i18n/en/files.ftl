@@ -122,6 +122,38 @@ text-preview-truncated = Only the first { $count } lines are shown. Download the
 text-preview-encoding-repaired = Some bytes are not valid UTF-8 and are shown as replacement characters.
 text-preview-encoding-utf16 = Read as UTF-16.
 text-preview-encoding-latin1 = Not UTF-8, so it is read as Latin-1 (Windows-1252).
+table-preview-view = View
+table-preview-table = Table
+table-preview-text = Text
+table-preview-parsing = Reading the table…
+table-preview-content = Table of { $name }
+table-preview-delimiter = Separator
+table-preview-delimiter-auto = Automatic ({ $detected })
+table-preview-delimiter-auto-none = Automatic
+table-preview-delimiter-comma = Comma
+table-preview-delimiter-semicolon = Semicolon
+table-preview-delimiter-tab = Tab
+table-preview-delimiter-pipe = Vertical bar
+table-preview-delimiter-colon = Colon
+table-preview-delimiter-custom = Other…
+table-preview-delimiter-custom-label = Characters between fields
+table-preview-delimiter-custom-invalid = Use up to 8 characters, without quotation marks or line breaks.
+table-preview-header = First row is header
+table-preview-wrap = Wrap cells
+table-preview-go-to-row = Go to row
+table-preview-row = Row
+table-preview-row-number = Row number
+table-preview-copy-cell = Copy cell
+table-preview-copy-row = Copy row
+table-preview-copy-all = Copy the selection, or the whole file
+table-preview-truncated = Only the first { $count } rows are shown. Download the file to see all of it.
+table-preview-columns-dropped = Only the first { $count } columns are shown.
+table-preview-refused-not-delimited = No separator splits every line into the same columns, so the file is shown as text.
+table-preview-refused-quote = A quoted field from line { $line } is never closed, so the file is shown as text.
+table-preview-refused-ragged = { $count ->
+    [one] { $count } of { $rows } rows has a different number of columns, so the file is shown as text.
+   *[other] { $count } of { $rows } rows have a different number of columns, so the file is shown as text.
+  }
 file-share = Share link…
 
 # Workspace management

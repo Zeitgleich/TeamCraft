@@ -216,7 +216,29 @@
   .audio-scrubber::-webkit-slider-thumb, .audio-volume::-webkit-slider-thumb { transition: none; }
 }
 /* The preview of a Markdown, HTML or PDF file (#557) */
-.modal.file-preview { width: min(960px, 100%); height: min(88vh, 900px); max-height: none; }
+.modal.file-preview { position: relative; width: min(960px, 100%); height: min(88vh, 900px); max-width: calc(100vw - 32px); max-height: calc(100vh - 32px); }
+/* A preview is nearly as tall as the window: centred, not hung 12vh from the top (which pushed its
+   foot against the window's bottom edge). Compact layouts show it as a full-screen sheet instead. */
+:root:not([data-layout="compact"]) .modal-backdrop:has(> .modal.file-preview) { align-items: center; padding-block: 16px; }
+/* A floating window: moved by its header, resized at its edges and corners (preview_resize.rs).
+   The edges are thin strips inside the dialog's border; corners take precedence over edges. */
+:root:not([data-layout="compact"]) .modal.file-preview .preview-head { cursor: grab; touch-action: none; user-select: none; }
+:root:not([data-layout="compact"]) .modal.file-preview .preview-head:active { cursor: grabbing; }
+.modal.file-preview .preview-head :is(button, input, select, a) { cursor: pointer; }
+.preview-resize-anchor { display: none; }
+.preview-resize { position: absolute; z-index: 5; touch-action: none; }
+.preview-resize.is-n, .preview-resize.is-s { left: 12px; right: 12px; height: 6px; cursor: ns-resize; }
+.preview-resize.is-n { top: 0; }
+.preview-resize.is-s { bottom: 0; }
+.preview-resize.is-e, .preview-resize.is-w { top: 12px; bottom: 12px; width: 6px; cursor: ew-resize; }
+.preview-resize.is-e { right: 0; }
+.preview-resize.is-w { left: 0; }
+.preview-resize:is(.is-ne, .is-nw, .is-se, .is-sw) { z-index: 6; width: 14px; height: 14px; }
+.preview-resize.is-ne { top: 0; right: 0; cursor: nesw-resize; }
+.preview-resize.is-sw { bottom: 0; left: 0; cursor: nesw-resize; }
+.preview-resize.is-nw { top: 0; left: 0; cursor: nwse-resize; }
+.preview-resize.is-se { bottom: 0; right: 0; cursor: nwse-resize; }
+:root[data-layout="compact"] .preview-resize { display: none; }
 .preview-head { gap: 12px; justify-content: flex-start; }
 .preview-name { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .preview-size { flex: none; color: var(--text-muted); font-size: var(--text-xs); }

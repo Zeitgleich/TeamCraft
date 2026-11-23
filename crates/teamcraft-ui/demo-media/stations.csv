@@ -1,0 +1,41 @@
+﻿serial;point;location_id;location_name;status;power_kw;target_url
+SN0001;P-0001-01;LOC0001;Location A;not created;22,0;wss://connect.example.com/00000001/P-0001-01
+SN0002;P-0001-02;LOC0001;Location A;connected;50,0;wss://connect.example.com/00000002/P-0001-02
+SN0003;P-0001-03;LOC0001;Location A;not created (serial at P-0011-02);150,0;wss://connect.example.com/00000003/P-0001-03
+SN0004;P-0001-04;LOC0001;Location A;;11,0;wss://connect.example.com/00000004/P-0001-04
+SN0005;P-0002-01;LOC0002;Location B;"created, never connected";22,0;wss://connect.example.com/00000005/P-0002-01
+SN0006;P-0002-02;LOC0002;Location B;not created;50,0;wss://connect.example.com/00000006/P-0002-02
+SN0007;P-0002-03;LOC0002;Location B;connected;150,0;wss://connect.example.com/00000007/P-0002-03
+SN0008;P-0002-04;LOC0002;Location B;not created (serial at P-0011-02);11,0;wss://connect.example.com/00000008/P-0002-04
+SN0009;P-0003-01;LOC0003;"Location C; north gate";;;wss://connect.example.com/00000009/P-0003-01
+SN0010;P-0003-02;LOC0003;"Location C; north gate";"created, never connected";50,0;wss://connect.example.com/0000000a/P-0003-02
+SN0011;P-0003-03;LOC0003;"Location C; north gate";not created;150,0;wss://connect.example.com/0000000b/P-0003-03
+SN0012;P-0003-04;LOC0003;"Location C; north gate";connected;11,0;wss://connect.example.com/0000000c/P-0003-04
+SN0013;P-0004-01;LOC0004;Location D;not created (serial at P-0011-02);22,0;wss://connect.example.com/0000000d/P-0004-01
+SN0014;P-0004-02;LOC0004;Location D;;50,0;wss://connect.example.com/0000000e/P-0004-02
+SN0015;P-0004-03;LOC0004;Location D;"created, never connected";150,0;wss://connect.example.com/0000000f/P-0004-03
+SN0016;P-0004-04;LOC0004;Location D;not created;11,0;wss://connect.example.com/00000010/P-0004-04
+;P-0005-01;LOC0005;"Depot ""East""";connected;22,0;wss://connect.example.com/00000011/P-0005-01
+SN0018;P-0005-02;LOC0005;"Depot ""East""";not created (serial at P-0011-02);;wss://connect.example.com/00000012/P-0005-02
+SN0019;P-0005-03;LOC0005;"Depot ""East""";;150,0;wss://connect.example.com/00000013/P-0005-03
+SN0020;P-0005-04;LOC0005;"Depot ""East""";"created, never connected";11,0;wss://connect.example.com/00000014/P-0005-04
+SN0021;P-0006-01;LOC0006;Location F;not created;22,0;wss://connect.example.com/00000015/P-0006-01
+SN0022;P-0006-02;LOC0006;Location F;connected;50,0;wss://connect.example.com/00000016/P-0006-02
+SN0023;P-0006-03;LOC0006;Location F;not created (serial at P-0011-02);150,0;wss://connect.example.com/00000017/P-0006-03
+SN0024;P-0006-04;LOC0006;Location F;;11,0;wss://connect.example.com/00000018/P-0006-04
+SN0025;P-0007-01;LOC0007;Location G;"created, never connected";22,0;wss://connect.example.com/00000019/P-0007-01
+SN0026;P-0007-02;LOC0007;Location G;not created;50,0;wss://connect.example.com/0000001a/P-0007-02
+SN0027;P-0007-03;LOC0007;Location G;connected;;wss://connect.example.com/0000001b/P-0007-03
+SN0028;P-0007-04;LOC0007;Location G;not created (serial at P-0011-02);11,0;wss://connect.example.com/0000001c/P-0007-04
+SN0029;P-0008-01;LOC0008;Location H;;22,0;wss://connect.example.com/0000001d/P-0008-01
+SN0030;P-0008-02;LOC0008;Location H;"created, never connected";50,0;wss://connect.example.com/0000001e/P-0008-02
+SN0031;P-0008-03;LOC0008;Location H;not created;150,0;wss://connect.example.com/0000001f/P-0008-03
+SN0032;P-0008-04;LOC0008;Location H;connected;11,0;wss://connect.example.com/00000020/P-0008-04
+SN0033;P-0009-01;LOC0009;Location I;not created (serial at P-0011-02);22,0;wss://connect.example.com/00000021/P-0009-01
+SN0034;P-0009-02;LOC0009;Location I;;50,0;wss://connect.example.com/00000022/P-0009-02
+SN0035;P-0009-03;LOC0009;Location I;"created, never connected";150,0;wss://connect.example.com/00000023/P-0009-03
+SN0036;P-0009-04;LOC0009;Location I;not created;;wss://connect.example.com/00000024/P-0009-04
+SN0037;P-0010-01;LOC0010;Location J;connected;22,0;wss://connect.example.com/00000025/P-0010-01
+SN0038;P-0010-02;LOC0010;Location J;not created (serial at P-0011-02);50,0;wss://connect.example.com/00000026/P-0010-02
+SN0039;P-0010-03;LOC0010;Location J;;150,0;wss://connect.example.com/00000027/P-0010-03
+SN0040;P-0010-04;LOC0010;Location J;"created, never connected";11,0;wss://connect.example.com/00000028/P-0010-04
