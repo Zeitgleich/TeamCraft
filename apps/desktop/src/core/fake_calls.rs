@@ -183,6 +183,8 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     maybe_encryption_failure: None,
     recorders: Vec::new(),
     maybe_own_recording: None,
+    reactions: Vec::new(),
+    is_hand_raised: false,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),
