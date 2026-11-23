@@ -3026,6 +3026,28 @@ mod tests {
       held.release().await;
     }
 
+    /// Issue #2354: the engine held by a sync loop that waits on a dead connection; a read marker
+    /// answers anyway.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_marker_answers_while_the_engine_thread_is_held() {
+      let directory = TestDir::new("held-mark-read");
+      enroll(&directory).await;
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      let held = hold_engine(&core);
+
+      let answered = tokio::time::timeout(Duration::from_secs(10), async {
+        core.mark_read(CONVERSATION.into()).await.unwrap();
+        core
+          .mark_read_notified(CONVERSATION.into(), "42".into())
+          .await
+          .unwrap();
+      })
+      .await;
+      assert!(answered.is_ok(), "the actions waited for the engine");
+
+      held.release().await;
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_shows_before_the_engine_thread_is_free() {
       let directory = TestDir::new("held-send");
