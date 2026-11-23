@@ -48,6 +48,9 @@ const MAX_CELL_CHARS: usize = 1_000;
 const MAX_WRAPPED_LINES: u32 = 8;
 /// A cell's horizontal padding, both sides together (the stylesheet's `.tt td`).
 const CELL_PADDING_PX: f64 = 20.0;
+/// Starting widths count characters this much wider than the measured average: capitals and
+/// digits, which IDs and numbers are made of, are wider than the average letter.
+const WIDE_CHAR_SHARE: f64 = 1.25;
 /// How narrow and how wide a column can be dragged.
 const MIN_COLUMN_PX: f64 = 40.0;
 const MAX_COLUMN_PX: f64 = 1_600.0;
@@ -167,7 +170,8 @@ pub struct TableOptions {
 /// A parsed table and what the view needs to know about it.
 struct Parsed {
   table: Table,
-  dialect: Dialect,
+  /// The separator the sniffer found, which "Automatic" names.
+  maybe_detected: Option<Delimiter>,
   looks_like_header: bool,
   /// The columns with the first row as data, and as a header.
   profiles: [Vec<ColumnProfile>; 2],
@@ -418,7 +422,7 @@ async fn parse(
   let profiles = [table.profile(&doc.text, false), table.profile(&doc.text, true)];
   Some(Ok(Parsed {
     table,
-    dialect,
+    maybe_detected: maybe_sniffed.map(|found| found.dialect.delimiter),
     looks_like_header,
     profiles,
   }))
@@ -455,7 +459,7 @@ fn ready_view(
   let looks_like_header = parsed.looks_like_header;
   let is_truncated = parsed.table.is_truncated;
   let has_dropped_columns = parsed.table.has_dropped_columns;
-  let detected = parsed.dialect.delimiter;
+  let maybe_detected = parsed.maybe_detected;
   let text_bytes = doc.text.len();
   let doc = StoredValue::new_local(doc);
   let parsed = StoredValue::new_local(parsed);
@@ -516,7 +520,7 @@ fn ready_view(
     let start: Vec<f64> = parsed.with_value(|parsed| {
       parsed.profiles[1]
         .iter()
-        .map(|column| f64::from(column.width_chars) * char_px + CELL_PADDING_PX)
+        .map(|column| column_px(column.width_chars, char_px))
         .collect()
     });
     widths.set(start.clone());
@@ -744,7 +748,7 @@ fn ready_view(
     });
   };
   let on_resize_end = move |_ev: web_sys::PointerEvent| {
-    if drag.get_value().take().is_some() {
+    if drag.get_value().is_some() {
       drag.set_value(None);
       settled_widths.set(widths.get_untracked());
     }
@@ -798,10 +802,13 @@ fn ready_view(
   };
   let delimiter_option = move |slug: &'static str| {
     let label = move || match slug {
-      "auto" => i18n.t_with(
-        "table-preview-delimiter-auto",
-        &[("detected", &delimiter_name(i18n, detected))],
-      ),
+      "auto" => match maybe_detected {
+        Some(detected) => i18n.t_with(
+          "table-preview-delimiter-auto",
+          &[("detected", &delimiter_name(i18n, detected))],
+        ),
+        None => i18n.t("table-preview-delimiter-auto-none"),
+      },
       CUSTOM_SLUG => i18n.t("table-preview-delimiter-custom"),
       _ => Delimiter::from_slug(slug)
         .map(|fixed| delimiter_name(i18n, fixed))
@@ -816,18 +823,16 @@ fn ready_view(
   };
   let number_px = move || {
     let sizes = metrics.get();
-    f64::from(digit_count(body_rows.get())) * sizes.char_px + CELL_PADDING_PX
+    number_column_px(body_rows.get(), sizes.char_px)
   };
   let table_px = move || number_px() + widths.with(|all| all.iter().sum::<f64>());
   let label = i18n.t_with("table-preview-content", &[("name", &name)]);
 
   let header_cells = move || {
-    let stamp = (
-      has_header.get(),
-      found.with(|result| Rc::as_ptr(result) as usize),
-      maybe_current.get(),
-    );
-    let _ = stamp;
+    // Drawn anew when the header switches or the matches change (they are marked in it too).
+    has_header.track();
+    found.track();
+    maybe_current.track();
     (0..column_count)
       .map(|column| {
         let content = if has_header.get_untracked() {
@@ -838,7 +843,7 @@ fn ready_view(
         let is_numeric = view_state.is_numeric(column);
         view! {
           <th scope="col" class="tt-head" class:is-numeric=is_numeric data-r=has_header.get_untracked().then_some("0") data-c=column.to_string()>
-            <span class="tt-head-text">{content}</span>
+            <span class="tt-head-text" title=has_header.get_untracked().then(|| hover_text(&view_state.cell_text(0, column)))>{content}</span>
             <span
               class="tt-resize"
               aria-hidden="true"
@@ -1034,7 +1039,9 @@ impl TableView {
         } else {
           self.cell_content(row, column)
         };
-        view! { <td class=class data-r=row.to_string() data-c=column.to_string()><div class="tt-cell">{content}</div></td> }
+        // The whole text on hover, for a cell cut off with an ellipsis.
+        let maybe_title = (!is_missing && !is_empty).then(|| hover_text(&self.cell_text(row, column)));
+        view! { <td class=class title=maybe_title data-r=row.to_string() data-c=column.to_string()><div class="tt-cell">{content}</div></td> }
       })
       .collect_view();
     let lines = if stamp.is_wrapped && self.metrics.get_untracked().line_px > 0.0 {
@@ -1049,7 +1056,6 @@ impl TableView {
       <tr
         class:is-selected=is_row_selected
         aria-rowindex=(body_row + 2).to_string()
-        aria-selected=is_row_selected.then_some("true")
         style:height=stamp.is_wrapped.then(|| format!("{height}px"))
         style:--tt-lines=lines.to_string()
       >
@@ -1215,7 +1221,7 @@ impl TableView {
           all.get(column).copied().unwrap_or(0.0),
         )
       });
-      let number_px = f64::from(digit_count(self.body_rows())) * sizes.char_px + CELL_PADDING_PX;
+      let number_px = number_column_px(self.body_rows(), sizes.char_px);
       let visible = sizes.width_px - number_px;
       let scroll_left = f64::from(element.scroll_left());
       if left_px < scroll_left || left_px + width_px.min(visible) > scroll_left + visible {
@@ -1311,6 +1317,14 @@ impl TableView {
   }
 }
 
+/// A cell's text for its tooltip: at most [`MAX_CELL_CHARS`] characters.
+fn hover_text(cell: &str) -> String {
+  match cell.char_indices().nth(MAX_CELL_CHARS) {
+    Some((end, _)) => format!("{}…", &cell[..end]),
+    None => cell.to_owned(),
+  }
+}
+
 /// The classes of a body cell.
 fn cell_class(is_numeric: bool, is_empty: bool, is_missing: bool, is_selected: bool) -> String {
   let mut class = String::from("tt-td");
@@ -1341,7 +1355,7 @@ fn delimiter_name(i18n: I18n, delimiter: Delimiter) -> String {
 }
 
 /// A file's type for the kept choices: its extension in lower case, `txt` without one.
-fn file_type_of(name: &str) -> String {
+pub(crate) fn file_type_of(name: &str) -> String {
   name
     .rsplit_once('.')
     .map(|(_, extension)| extension.to_ascii_lowercase())
@@ -1434,6 +1448,16 @@ fn observe_size(
   on_cleanup(move || {
     handle.try_with_value(|(observer, _)| observer.disconnect());
   });
+}
+
+/// A column's starting width for `chars` characters, padding and border included.
+fn column_px(chars: u32, char_px: f64) -> f64 {
+  (f64::from(chars) * char_px * WIDE_CHAR_SHARE + CELL_PADDING_PX + 1.0).ceil()
+}
+
+/// The width of the row numbers' column for `rows` rows.
+fn number_column_px(rows: usize, char_px: f64) -> f64 {
+  column_px(digit_count(rows) + 1, char_px)
 }
 
 /// The height rows have below the sticky header.

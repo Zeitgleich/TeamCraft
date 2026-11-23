@@ -586,6 +586,15 @@ pub fn org_recovery_request_key(user: impl std::fmt::Display) -> String {
   format!("teamcraft.onboarding.org-recovery.{user}")
 }
 
+/// Removes a setting from `localStorage`; failures only mean it stays.
+pub fn remove(key: &str) {
+  if let Some(storage) = local_storage()
+    && storage.remove_item(key).is_err()
+  {
+    tracing::debug!(key, "could not remove value");
+  }
+}
+
 /// Writes a raw string setting to `localStorage`; failures only mean it will not persist.
 pub fn store_string(key: &str, value: &str) {
   if let Some(storage) = local_storage()

@@ -129,6 +129,7 @@ table-preview-parsing = Tabelle wird gelesen…
 table-preview-content = Tabelle von { $name }
 table-preview-delimiter = Trennzeichen
 table-preview-delimiter-auto = Automatisch ({ $detected })
+table-preview-delimiter-auto-none = Automatisch
 table-preview-delimiter-comma = Komma
 table-preview-delimiter-semicolon = Semikolon
 table-preview-delimiter-tab = Tabulator

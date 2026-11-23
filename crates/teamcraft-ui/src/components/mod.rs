@@ -149,6 +149,7 @@ pub mod persistence_prompt;
 pub mod picture_editor;
 pub mod poll_card;
 pub mod poll_dialog;
+pub mod preview_resize;
 pub mod profile_views;
 pub mod progress_ring;
 pub mod quick_switcher;

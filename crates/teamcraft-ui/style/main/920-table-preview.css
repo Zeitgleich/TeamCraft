@@ -163,10 +163,16 @@
   .tt tbody tr:not(.tt-spacer):hover > td.is-selected { background: var(--accent-soft); }
 }
 
-/* At phone width the toolbar's options share rows. */
+/* At phone width the toolbar takes three rows: view and find; row and separator; header, wrap and
+   copy. */
 @media (max-width: 600px) {
-  .tt-delimiter { flex: 1 1 10rem; }
-  .tt-delimiter select { flex: 1; }
+  .tt-pane .tv-find { flex: 1 1 12rem; }
+  .tt-pane .tv-find-count:empty { display: none; }
+  .tt-pane .tt-view-switch button { padding: 0 8px; }
+  .tt-pane .tv-go-to-input { width: 4.5em; }
+  .tt-delimiter { flex: 1 1 9rem; min-width: 0; }
+  .tt-delimiter select { flex: 1; min-width: 0; }
+  .tt-pane .tv-toggles { margin-left: auto; }
 }
 
 @media (prefers-reduced-motion: reduce) {

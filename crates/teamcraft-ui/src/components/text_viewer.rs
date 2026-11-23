@@ -22,11 +22,12 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_text;
-use crate::components::table_viewer::{TableOptions, ViewMode, table_pane};
+use crate::components::table_viewer::{TableOptions, ViewMode, file_type_of, table_pane};
 use crate::i18n::I18n;
 use crate::model::LogLevel;
 use crate::preview::TextFormat;
 use crate::reactive::SetIfAlive;
+use crate::settings;
 use crate::state::AppState;
 use crate::text_preview::ansi::{AnsiStyle, Attributes};
 use crate::text_preview::decode::{self, TextDecodeError, TextEncoding};
@@ -285,8 +286,11 @@ fn text_pane(
   let formatted: StoredValue<Option<Rc<TextDoc>>, LocalStorage> = StoredValue::new_local(None);
   let json_view = RwSignal::new(JsonView::Original);
   let min_level = RwSignal::new(LogLevel::Debug);
-  // Prose reads better wrapped; logs and data keep their columns.
-  let is_wrapped = RwSignal::new(!is_log && !is_json && !is_table && maybe_table.is_none());
+  // Prose reads better wrapped; logs and data keep their columns. The user's choice is kept per
+  // file type.
+  let file_type = file_type_of(&name);
+  let wraps_by_default = !is_log && !is_json && !is_table && maybe_table.is_none();
+  let is_wrapped = RwSignal::new(load_wrap(&file_type).unwrap_or(wraps_by_default));
   let has_colors = RwSignal::new(true);
   let metrics = RwSignal::new(Metrics::default());
   let scroll_top = RwSignal::new(0.0f64);
@@ -436,6 +440,7 @@ fn text_pane(
   let toggle_wrap = move |_| {
     let anchor = view_state.top_row();
     is_wrapped.update(|on| *on = !*on);
+    store_wrap(&file_type, is_wrapped.get_untracked());
     // Keeps the row at the top in place once the heights follow (an animation frame later).
     request_animation_frame(move || view_state.scroll_to_row_top(anchor));
   };
@@ -683,6 +688,18 @@ fn text_pane(
     </div>
   }
   .into_any()
+}
+
+/// Where the text view keeps whether lines wrap, followed by the file type (`log`, `txt`).
+const WRAP_KEY_PREFIX: &str = "teamcraft.text_preview.wrap.";
+
+/// Whether lines of this file type wrap, as the user last chose; `None` before any choice.
+fn load_wrap(file_type: &str) -> Option<bool> {
+  settings::load_json(&format!("{WRAP_KEY_PREFIX}{file_type}"))
+}
+
+fn store_wrap(file_type: &str, is_wrapped: bool) {
+  settings::store_json(&format!("{WRAP_KEY_PREFIX}{file_type}"), &is_wrapped);
 }
 
 /// Characters in the probe that measures a character's width.
