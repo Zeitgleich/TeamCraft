@@ -130,6 +130,8 @@ import uniffi.teamcraft_ffi.ServerEntryException
 import uniffi.teamcraft_ffi.SignInPageInfo
 import uniffi.teamcraft_ffi.StoreProblem
 import uniffi.teamcraft_ffi.StoredServer
+import uniffi.teamcraft_ffi.StrictChannelItem
+import uniffi.teamcraft_ffi.StrictStepItem
 import uniffi.teamcraft_ffi.checkServerInfo
 import uniffi.teamcraft_ffi.normalizeServerAddress
 import uniffi.teamcraft_ffi.signInPage
@@ -996,6 +998,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** Whether the channel can't be read on this device (the anchor refused the group it was offered). */
   suspend fun isChannelUnreachable(conversationId: String): Boolean = readChat { isChannelUnreachable(conversationId) } ?: false
+
+  /** A private channel's strict mode (#1897); `null` while this app doesn't implement it, or no answer. */
+  suspend fun strictChannel(conversationId: String): StrictChannelItem? = readChat { strictChannel(conversationId) }
+
+  /** The channel's members opened: its strict mode is read afresh, as on desktop and web. */
+  suspend fun refreshStrictChannel(conversationId: String) {
+    readChat { refreshStrictChannel(conversationId) }
+  }
+
+  /** Runs a strict channel step; `false` after a failure, shown as [lastFailure]. */
+  suspend fun strictStep(conversationId: String, step: StrictStepItem): Boolean =
+    try {
+      chat.strictStep(conversationId, step)
+      true
+    } catch (failure: TeamCraftException) {
+      failures.value = errorText(failure)
+      false
+    }
 
   /** Confirms the roles a workspace admin looked at; `null` after a failure, shown as [lastFailure]. */
   suspend fun signReviewedChannelRoles(conversationId: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome? =

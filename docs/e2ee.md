@@ -3442,7 +3442,14 @@ decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and 
 - `teamcraft-server`: the rewind in one transaction, with its audit row and permission; stock replacement
   of key packages if it isn't there.
 - Clients: the setting, the list of who blocks it, the notice, the admin's decision, permission gates,
-  and the console's signed assignment, on desktop, web, Android and iOS.
+  and the console's signed assignment, on desktop, web, Android and iOS. Done in #1897 except the
+  console: the core keeps a view of each private channel's strict mode in the store (made from the
+  group after every commit, stop, held welcome and strict step), and
+  `teamcraft_client_api::strict_channel` decides what is offered (`StrictGates`: the context's roles
+  or the fresh roster *and* the server's permission) and who loses what (D1, D2). No view is made
+  while the build's leaves don't announce the capability, so no app shows the setting or claims the
+  protection before `strict-channels` is on. The "has to update" of an older app is the anchor's
+  (`MustUpdate`): the group's `required_capabilities` names both extensions.
 - Tests: every role and action combination against the pure verdict; malicious commits refused alike on
   all members; a fresh-group commit; older and capable clients in one group; race and rewind convergence.
 

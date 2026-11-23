@@ -19,6 +19,9 @@ struct ChannelMembersView: View {
   @State private var isAdding = false
   /// A forked anchor grants nothing: a workspace admin's look at the roles says so (#1842).
   @State private var maybeFork: ChannelAnchorForkItem?
+  /// Who may change the members of a private channel (#1897); `nil` while the app doesn't
+  /// implement strict channels.
+  @State private var maybeStrict: StrictChannelItem?
 
   var body: some View {
     NavigationStack {
@@ -39,6 +42,9 @@ struct ChannelMembersView: View {
             } header: {
               Text("channel_roles_review_title")
             }
+          }
+          if let strict = maybeStrict {
+            StrictChannelSection(conversationId: conversationId, strict: strict)
           }
           Section {
             ForEach(info.members, id: \.userId) { member in
@@ -68,10 +74,12 @@ struct ChannelMembersView: View {
     .task(id: conversationId) {
       await model.refreshChannelMembers(conversationId)
       await model.refreshChannelAnchor(conversationId)
+      await model.refreshStrictChannel(conversationId)
     }
     .task(id: model.changeCount) {
       maybeInfo = await model.channelMembers(conversationId) ?? maybeInfo
       maybeFork = await model.channelAnchorMarks(conversationId)?.maybeFork
+      maybeStrict = await model.strictChannel(conversationId)
       canAdd = await model.browseSnapshot()?.conversations?.first { $0.id == conversationId }?.canAddMembers ?? canAdd
     }
     .sheet(isPresented: $isAdding) {

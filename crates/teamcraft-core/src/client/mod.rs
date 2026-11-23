@@ -85,6 +85,7 @@ mod strict_opt_in;
 #[cfg(not(any(not(target_arch = "wasm32"), feature = "strict-channels")))]
 #[path = "strict_channels_off.rs"]
 mod strict_channels;
+mod strict_view;
 mod sync;
 mod sync_progress;
 mod sync_trace;
@@ -216,6 +217,10 @@ pub use space_deletion::{
 pub use strict_channels::{StrictRejoinHold, StrictRejoinPrompt, StrictStop};
 #[cfg(any(not(target_arch = "wasm32"), feature = "strict-channels"))]
 pub use strict_opt_in::{StrictAskStatus, StrictReadiness};
+pub use strict_view::{
+  StrictStep, StrictView, StrictViewReadiness, StrictViewRejoin, StrictViewRole, StrictViewStop,
+  stored_strict_view,
+};
 pub use sync_progress::{SyncProgressSignal, notify_sync_progress_during};
 pub use sync_trace::SyncPhase;
 use teamcraft_crypto::membership::ChangeId;

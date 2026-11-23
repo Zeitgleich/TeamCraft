@@ -350,6 +350,7 @@ struct ChatPane: View {
       // Only this conversation's own mark (issue #1457); a thread's pane follows its channel's.
       SyncingLine(isCatchingUp: conversation.isCatchingUp)
       if isChannel { ChannelUnreachableBanner(conversationId: conversation.id) }
+      if isChannel { StrictChannelNotice(conversationId: conversation.id) }
       // Admins asking to join this channel, when the user owns it (admin.md §2.4.1).
       if threadId == nil { JoinRequestBanner(conversationId: conversation.id) }
       // Messages here wait for their keys (a newly linked device, issue #888): they show as

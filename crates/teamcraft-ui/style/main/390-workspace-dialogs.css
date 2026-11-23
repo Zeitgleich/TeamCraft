@@ -95,3 +95,8 @@
 .space-deletion-list { list-style: none; margin: 0 0 var(--space-2); padding: 0; max-height: 14rem; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
 .space-deletion-list li { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
 .space-deletion-name { font-weight: 600; overflow-wrap: anywhere; }
+
+/* Strict channels (issue #1897): the roles, who loses what and the waiting devices, one row each. */
+.strict-list { margin-bottom: var(--space-2); }
+.strict-list .muted-text { margin-left: var(--space-2); }
+.strict-notice .inline-actions { flex-wrap: wrap; }
