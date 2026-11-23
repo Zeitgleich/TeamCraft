@@ -1945,17 +1945,17 @@
 
 /* In-call reactions (#2324): the picker, and reactions rising over the stage. Transform and
    opacity only, so the rise stays on the compositor. */
-.reaction-popover {
+.call-reaction-popover {
   width: auto;
   padding: 8px;
 }
 
-.reaction-options {
+.call-reaction-options {
   display: flex;
   gap: 4px;
 }
 
-.reaction-option {
+.call-reaction-option {
   display: grid;
   place-items: center;
   width: 44px;
@@ -1969,15 +1969,15 @@
   transition: transform var(--dur-fast) var(--ease-standard), background-color var(--dur-fast) var(--ease-standard);
 }
 
-.reaction-option:hover {
+.call-reaction-option:hover {
   background: rgb(255 255 255 / 0.08);
 }
 
-.reaction-option:active {
+.call-reaction-option:active {
   transform: scale(0.92);
 }
 
-.reaction-option:focus-visible {
+.call-reaction-option:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
@@ -1991,7 +1991,7 @@
 
 .floating-reaction {
   position: absolute;
-  left: var(--reaction-x, 50%);
+  left: var(--reaction-x);
   bottom: 12px;
   display: flex;
   flex-direction: column;
@@ -2054,7 +2054,7 @@
     animation-name: reaction-fade;
   }
 
-  .reaction-option {
+  .call-reaction-option {
     transition: none;
   }
 }

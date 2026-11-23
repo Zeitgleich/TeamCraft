@@ -50,7 +50,7 @@ DEFAULT_STYLESHEET_DIR = pathlib.Path("crates/teamcraft-ui/style/main")
 DEFAULT_LOADER_STYLESHEET = pathlib.Path("crates/teamcraft-ui/style/loader.css")
 DEFAULT_RUST_DIR = pathlib.Path("crates/teamcraft-ui/src")
 # Set on elements at runtime: from Rust (`style:--x=…`, `style.setProperty`) or loader.js.
-RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|strip-size|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*|tv-digits|tv-columns|downloads-progress|md-head-shift)$")
+RUNTIME_VARIABLES = re.compile(r"^--(vv-.*|indicator-.*|hue|media-.*|cols|strip-size|banners-h|window-controls-.*|tok-.*|tc-loader-.*|link-menu-.*|date-jump-.*|rail-menu-.*|setup-.*|tv-digits|tv-columns|downloads-progress|md-head-shift|reaction-x)$")
 # Keyframes that are known duplicates, each with the issue that removes it.
 KNOWN_DUPLICATE_KEYFRAMES = {
 }
@@ -67,6 +67,8 @@ FIXED_FONT_SIZES = {
     ".avatar-xl": "initials sized to the pre-join tile's avatar",
     ".sheet-reaction": "an emoji in a 44 px button",
     ".emoji-grid li": "an emoji in a 34 px cell",
+    ".call-reaction-option": "an emoji in a 44 px button (#2324)",
+    ".floating-reaction-emoji": "an emoji rising over the call's stage (#2324)",
     ".approval-code": "a verification code sized to its card",
 }
 # Selectors that may set `will-change`, with the reason: only elements that move under the user's

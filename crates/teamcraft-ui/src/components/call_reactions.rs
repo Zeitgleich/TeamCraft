@@ -43,9 +43,9 @@ pub fn ReactionPicker(on_close: Callback<()>) -> impl IntoView {
   let i18n = use_i18n();
   let call = state.call;
   view! {
-    <CallPopover class="effects-popover reaction-popover" labelled_by="reaction-menu-title" on_close=on_close>
+    <CallPopover class="effects-popover call-reaction-popover" labelled_by="reaction-menu-title" on_close=on_close>
       <h2 id="reaction-menu-title" class="visually-hidden">{move || i18n.t("call-reactions")}</h2>
-      <div class="reaction-options">
+      <div class="call-reaction-options">
         {CallReaction::ALL
           .into_iter()
           .filter_map(|reaction| reaction.emoji().map(|emoji| (reaction, emoji)))
@@ -54,7 +54,7 @@ pub fn ReactionPicker(on_close: Callback<()>) -> impl IntoView {
             view! {
               <button
                 type="button"
-                class="reaction-option"
+                class="call-reaction-option"
                 aria-label=label.clone()
                 title=label
                 on:click=move |_| call.send_reaction(reaction.clone())
