@@ -362,7 +362,7 @@ impl InnerWebView {
         if let Some(pending_scripts) = pending_scripts_.take() {
           let cancellable: Option<&Cancellable> = None;
           for script in pending_scripts {
-            webview.run_javascript(&script, cancellable, |_| ());
+            webview.evaluate_javascript(&script, None, None, cancellable, |_| ());
           }
         }
       }
@@ -589,9 +589,8 @@ impl InnerWebView {
           let is_audio = media_request.is_for_audio_device();
           let is_video = media_request.is_for_video_device();
 
-          #[cfg(feature = "v2_42")]
-          let is_display = media_request.is_for_display_device();
-          #[cfg(not(feature = "v2_42"))]
+          // The webkit2gtk bindings have no `is_for_display_device`; a request for neither
+          // audio nor video is a display capture request.
           let is_display = !is_audio && !is_video;
 
           if is_display {
@@ -791,14 +790,14 @@ impl InnerWebView {
       #[cfg(feature = "tracing")]
       let span = SendEnteredSpan(tracing::debug_span!("wry::eval").entered());
 
-      self.webview.run_javascript(js, cancellable, |result| {
+      self.webview.evaluate_javascript(js, None, None, cancellable, |result| {
         #[cfg(feature = "tracing")]
         drop(span);
 
         if let Some(callback) = callback {
           let result = result
-            .map(|r| r.js_value().and_then(|js| js.to_json(0)))
-            .unwrap_or_default()
+            .ok()
+            .and_then(|value| value.to_json(0))
             .unwrap_or_default()
             .to_string();
 
