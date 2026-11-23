@@ -53,6 +53,12 @@ const EXPIRING_GUESTS_MIN_REFRESH_MS: i64 = 5_000;
 /// not hold the reconnect loop forever. Generous: on a saturated link one round trip can take
 /// seconds, and an answer that comes late is still an answer (issue #1064).
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+/// The longest one frame may take to go out. A gateway frame is small: a send that waits longer has
+/// a socket whose buffer doesn't drain, which is a half-open connection after a network change (the
+/// kernel reports it only when its retransmissions give up, minutes later). The caller then replaces
+/// the connection, as after any failed send. Long against a slow link's round trip, short against the
+/// heartbeat, so a dead connection is noticed within one heartbeat interval.
+pub const GATEWAY_SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A gateway connection that finished its handshake.
 pub struct GatewayStart<G> {
@@ -507,7 +513,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           heartbeat_interval_ms,
         },
       ) => {
-        connection.send(first).await?;
+        send_within(&mut connection, first, GATEWAY_SEND_TIMEOUT).await?;
         Ok((connection, Duration::from_millis(heartbeat_interval_ms)))
       },
       (_, other) => Err(CoreError::Gateway(format!("expected hello, got {other:?}"))),
@@ -640,7 +646,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Some(Some(frame)) => self.handle_frame(frame?).await?,
         Some(None) => return Ok(()),
         None => {
-          connection.send(&GatewayClientMessage::Heartbeat).await?;
+          send_within(connection, &GatewayClientMessage::Heartbeat, GATEWAY_SEND_TIMEOUT).await?;
           tick = Box::pin(platform::sleep(heartbeat));
         },
       }
@@ -1100,7 +1106,9 @@ pub async fn keep_alive<G: GatewayConnection, T>(
       KeepAliveStep::Heartbeat => {
         // A closed connection gets no more heartbeats; the caller replaces it afterwards.
         if !held.with_held(|held| held.is_closed).unwrap_or(true) {
-          let sent = connection.send(&GatewayClientMessage::Heartbeat).await;
+          // Bounded: the work waits while the heartbeat goes out, so a socket that doesn't drain
+          // (half-open after a network change) must not hold it for minutes.
+          let sent = send_within(connection, &GatewayClientMessage::Heartbeat, GATEWAY_SEND_TIMEOUT).await;
           held.with_held(|held| match sent {
             Ok(()) => held.heartbeats_sent = held.heartbeats_sent.saturating_add(1),
             Err(error) => held.hold(Some(Err(error))),
@@ -1125,6 +1133,27 @@ async fn receive<G: GatewayConnection>(
   match within(timeout, connection.receive()).await? {
     Some(frame) => Ok(frame?),
     None => Err(CoreError::Gateway("connection closed during handshake".into())),
+  }
+}
+
+/// Sends `message`, or fails once `timeout` has passed ([`GATEWAY_SEND_TIMEOUT`]): a send that
+/// doesn't finish is a dead connection, reported like any failed send so the caller replaces it.
+pub(crate) async fn send_within<G: GatewayConnection>(
+  connection: &mut G,
+  message: &GatewayClientMessage,
+  timeout: Duration,
+) -> Result<(), ApiError> {
+  match select(
+    Box::pin(connection.send(message)),
+    Box::pin(platform::sleep(timeout)),
+  )
+  .await
+  {
+    Either::Left((sent, _)) => sent,
+    Either::Right(((), _)) => Err(ApiError::Network(format!(
+      "a frame to the gateway didn't go out within {} s",
+      timeout.as_secs()
+    ))),
   }
 }
 
@@ -1162,6 +1191,64 @@ fn rejected(error: ErrorBody) -> CoreError {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  mod a_socket_that_does_not_drain {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn a_heartbeat_that_does_not_go_out_closes_the_connection_and_frees_the_work() {
+      let mut held = HeldFrames::default();
+      let started = tokio::time::Instant::now();
+      // The heartbeat is due at once and its send never finishes, as on a half-open TCP connection
+      // whose send buffer is full: the kernel would report it minutes later.
+      let output = keep_alive(
+        &mut StuckGateway,
+        Duration::ZERO,
+        Duration::from_secs(25),
+        HeldLimits::default(),
+        &mut held,
+        async {
+          platform::sleep(Duration::from_secs(1)).await;
+          "done"
+        },
+      )
+      .await;
+      assert_eq!(output, "done");
+      assert!(held.is_closed, "the dead connection is reported");
+      assert!(
+        started.elapsed() <= GATEWAY_SEND_TIMEOUT + Duration::from_secs(1),
+        "the work waited {:?}",
+        started.elapsed()
+      );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_frame_that_does_not_go_out_is_a_failed_send() {
+      let started = tokio::time::Instant::now();
+      let error = send_within(
+        &mut StuckGateway,
+        &GatewayClientMessage::Heartbeat,
+        GATEWAY_SEND_TIMEOUT,
+      )
+      .await
+      .unwrap_err();
+      assert!(matches!(error, ApiError::Network(_)), "{error}");
+      assert_eq!(started.elapsed(), GATEWAY_SEND_TIMEOUT);
+    }
+
+    /// A connection whose sends never finish and that never hears anything.
+    struct StuckGateway;
+
+    impl GatewayConnection for StuckGateway {
+      async fn send(&mut self, _message: &GatewayClientMessage) -> Result<(), ApiError> {
+        std::future::pending().await
+      }
+
+      async fn receive(&mut self) -> Option<Result<GatewayServerMessage, ApiError>> {
+        std::future::pending().await
+      }
+    }
+  }
 
   #[test]
   fn a_refused_proof_is_not_a_refused_token() {

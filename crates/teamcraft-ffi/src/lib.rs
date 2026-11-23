@@ -910,9 +910,13 @@ impl TeamCraft {
       .await
   }
 
+  /// Marks the conversation read. Answers once the marker is queued with the engine, never after
+  /// the network: a read marker waiting for a dead connection held every action behind it
+  /// (Android, opened from a notification).
   pub async fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {
     self
-      .act_locally(move |reads| reads.mark_read(conversation_id))
+      .read_queue()?
+      .command(move |reads| reads.mark_read(conversation_id))
       .await
   }
 
@@ -926,7 +930,8 @@ impl TeamCraft {
     message_id: String,
   ) -> Result<(), TeamCraftError> {
     self
-      .act_locally(move |reads| reads.mark_read_notified(conversation_id, message_id))
+      .read_queue()?
+      .command(move |reads| reads.mark_read_notified(conversation_id, message_id))
       .await
   }
 
