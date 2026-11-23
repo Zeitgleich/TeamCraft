@@ -1162,6 +1162,18 @@ impl ReadStamp {
   }
 }
 
+/// The one conversation a query's answer depends on, when nothing outside it can change the
+/// answer: a message link's preview (#319) and whether the conversation has guests (#1708; its
+/// members are part of its entry, so a join or leave touches it). Every sidebar row asks the
+/// latter, and asking them all again on every change cost dozens of calls per channel switch.
+fn only_conversation_read(query: &ChatQuery) -> Option<ConversationId> {
+  match query {
+    ChatQuery::LinkedMessage { link } => Route::from_permalink(link).and_then(|route| route.conversation()),
+    ChatQuery::HasExternalPeople { conversation } => Some(*conversation),
+    _ => None,
+  }
+}
+
 /// Drops the idle answers read longest ago while more than [`MAX_HELD_ROW_ANSWERS`] are held: down to
 /// three quarters of it, so the sort runs once per few hundred new answers, not on every one.
 fn evict_idle_answers(answers: &mut HashMap<String, Slot>, now_ms: f64) {
@@ -1350,9 +1362,20 @@ impl RemoteChat {
     existing
   }
 
-  /// Everything fetched so far may be out of date.
+  /// Everything fetched so far may be out of date, except answers about one conversation
+  /// ([`only_conversation_read`]): the refresh after the user's action applied its changes, and
+  /// [`Self::plan_refresh`] asked those of the conversations it touched again. Switching channels
+  /// (a read marker each time) asked every sidebar row's guest flag again otherwise (#1708).
   fn mark_answers_stale(&self) {
     for slot in self.answers.borrow_mut().values_mut() {
+      if slot
+        .maybe_query
+        .as_ref()
+        .and_then(only_conversation_read)
+        .is_some()
+      {
+        continue;
+      }
       slot.is_stale = true;
       // An answer in flight may predate the change: asked again when it arrives.
       slot.is_outdated |= slot.is_loading;
@@ -1607,13 +1630,13 @@ impl RemoteChat {
     };
     for (key, slot) in self.answers.borrow_mut().iter_mut() {
       let maybe_query = slot.maybe_query.clone();
-      // A message link's preview only changes with its own conversation: other changes keep
-      // the answer it has (#319, no rescans on every message elsewhere).
-      if let Some(ChatQuery::LinkedMessage { link }) = &maybe_query
-        && slot.maybe_answer.is_some()
+      // An answer about one conversation only changes with it: other changes keep the answer it
+      // has (#319, #1708: no rescans on every message elsewhere).
+      if slot.maybe_answer.is_some()
         && !slot.is_loading
-        && Route::from_permalink(link)
-          .and_then(|route| route.conversation())
+        && maybe_query
+          .as_ref()
+          .and_then(only_conversation_read)
           .is_some_and(|conversation| !applied.touches(conversation))
       {
         continue;
@@ -4973,6 +4996,72 @@ mod tests {
 
         assert!(backend.take_due_queries().is_empty());
         assert!(backend.answers.borrow().values().all(|slot| slot.is_outdated));
+      }
+
+      /// Every sidebar row asks it; a change elsewhere asked them all again (#1708).
+      #[test]
+      fn a_guest_flag_is_asked_again_only_when_its_conversation_changed() {
+        let backend = backend();
+        insert_guest_flag(&backend, id_from_raw(7));
+        insert_guest_flag(&backend, id_from_raw(8));
+
+        let plan = backend.plan_refresh(
+          SnapshotChanges {
+            feeds: vec![id_from_raw(8)],
+            ..SnapshotChanges::default()
+          },
+          10_000.0,
+        );
+
+        let asked: Vec<ChatQuery> = plan.queries.into_iter().map(|(_, query)| query).collect();
+        assert_eq!(
+          asked,
+          vec![ChatQuery::HasExternalPeople {
+            conversation: id_from_raw(8)
+          }]
+        );
+      }
+
+      #[test]
+      fn the_users_own_action_keeps_the_guest_flags() {
+        let backend = backend();
+        insert_guest_flag(&backend, id_from_raw(7));
+        insert_slot(&backend, false, 0.0);
+        backend
+          .answers
+          .borrow_mut()
+          .get_mut("activity")
+          .unwrap()
+          .maybe_answer = Some(ChatAnswer::Flag { value: false });
+
+        backend.mark_answers_stale();
+
+        let answers = backend.answers.borrow();
+        let is_stale = |query: &ChatQuery| {
+          answers
+            .values()
+            .find(|slot| slot.maybe_query.as_ref() == Some(query))
+            .unwrap()
+            .is_stale
+        };
+        assert!(!is_stale(&ChatQuery::HasExternalPeople {
+          conversation: id_from_raw(7)
+        }));
+        assert!(is_stale(&ChatQuery::Activity));
+      }
+
+      fn insert_guest_flag(backend: &RemoteChat, conversation: ConversationId) {
+        let query = ChatQuery::HasExternalPeople { conversation };
+        backend.answers.borrow_mut().insert(
+          serde_json::to_string(&query).unwrap(),
+          Slot {
+            maybe_query: Some(query),
+            maybe_answer: Some(ChatAnswer::Flag { value: false }),
+            is_used: true,
+            maybe_asked_ms: Some(0.0),
+            ..Slot::default()
+          },
+        );
       }
 
       fn insert_slot(backend: &RemoteChat, is_loading: bool, asked_ms: f64) {
