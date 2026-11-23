@@ -69,6 +69,10 @@ canvas-page-delete-title = „{ $title }“ löschen?
 canvas-page-delete-body = Die Seite wird für alle im Kanal gelöscht, mit ihrem Versionsverlauf.
 canvas-page-delete-confirm = Seite löschen
 canvas-page-needs-update = Um diese Seite zu bearbeiten, braucht dieses Gerät eine neuere Version von TeamCraft.
+canvas-open-by = { $count ->
+    [one] { $names } hat diese Seite offen
+   *[other] { $names } haben diese Seite offen
+  }
 canvas-editing = { $count ->
     [one] { $names } bearbeitet gerade
    *[other] { $names } bearbeiten gerade

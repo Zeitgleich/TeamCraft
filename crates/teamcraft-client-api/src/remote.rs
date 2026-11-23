@@ -1313,6 +1313,11 @@ pub enum ChatAction {
     #[serde(default)]
     deleted: Vec<teamcraft_proto::CanvasPageId>,
   },
+  /// [`ChatBackend::announce_canvas`]: passing like typing ([`Self::canvas_announcement`]).
+  AnnounceCanvas {
+    conversation: ConversationId,
+    note: crate::model::CanvasPresenceNote,
+  },
   /// [`ChatBackend::compact_canvas`].
   CompactCanvas {
     conversation: ConversationId,
@@ -1459,6 +1464,16 @@ impl ChatAction {
         | Self::VoteInPoll { .. }
         | Self::ClosePoll { .. }
     )
+  }
+
+  /// A word about the notes a page's editor shows ([`ChatBackend::announce_canvas`]). Passing like
+  /// typing: the host seals and sends it on the open gateway connection right away, tells the UI of
+  /// no change, and drops it while offline or busy connecting (a late word would be wrong).
+  pub fn canvas_announcement(&self) -> Option<(ConversationId, &crate::model::CanvasPresenceNote)> {
+    match self {
+      Self::AnnounceCanvas { conversation, note } => Some((*conversation, note)),
+      _ => None,
+    }
   }
 
   /// Where a typing announcement is: its conversation, and the thread for a reply. It is passing
@@ -1797,6 +1812,7 @@ impl ChatAction {
         listed,
         deleted,
       } => backend.note_canvas_pages(conversation, &listed, &deleted),
+      Self::AnnounceCanvas { conversation, note } => backend.announce_canvas(conversation, note),
       Self::CompactCanvas {
         conversation,
         maybe_page,
@@ -1908,6 +1924,12 @@ pub enum ChatQuery {
   },
   /// [`ChatBackend::canvas`].
   Canvas {
+    conversation: ConversationId,
+    #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+    maybe_page: Option<teamcraft_proto::CanvasPageId>,
+  },
+  /// [`ChatBackend::canvas_peers`].
+  CanvasPeers {
     conversation: ConversationId,
     #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
     maybe_page: Option<teamcraft_proto::CanvasPageId>,
@@ -2199,6 +2221,10 @@ pub enum ChatAnswer {
     #[serde(default)]
     state: crate::canvas::CanvasState,
   },
+  CanvasPeers {
+    #[serde(default)]
+    peers: Vec<crate::model::CanvasPeer>,
+  },
   ConversationFile {
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     // Boxed: a file is far larger than the other answers.
@@ -2414,6 +2440,12 @@ impl ChatQuery {
         maybe_page,
       } => ChatAnswer::Canvas {
         state: backend.canvas(conversation, maybe_page.as_ref()),
+      },
+      Self::CanvasPeers {
+        conversation,
+        maybe_page,
+      } => ChatAnswer::CanvasPeers {
+        peers: backend.canvas_peers(conversation, maybe_page.as_ref()),
       },
       Self::ConversationFile {
         conversation,

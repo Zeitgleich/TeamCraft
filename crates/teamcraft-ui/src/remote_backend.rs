@@ -3765,6 +3765,37 @@ impl ChatBackend for RemoteChat {
     });
   }
 
+  /// Asked again whenever the core changed (every word arriving is a change); the editor drops an
+  /// entry that ran out by its `heard_at_ms` meanwhile.
+  fn canvas_peers(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> Vec<teamcraft_client_api::model::CanvasPeer> {
+    match self.ask(ChatQuery::CanvasPeers {
+      conversation,
+      maybe_page: maybe_page.cloned(),
+    }) {
+      Some(ChatAnswer::CanvasPeers { peers }) => peers,
+      _ => Vec::new(),
+    }
+  }
+
+  /// Not an [`Self::act`], like typing: it changes nothing to read again, and a failure is nothing
+  /// for the user to act on (the editor says it again on its next refresh).
+  fn announce_canvas(
+    &self,
+    conversation: ConversationId,
+    note: teamcraft_client_api::model::CanvasPresenceNote,
+  ) {
+    spawn_local(async move {
+      let action = ChatAction::AnnounceCanvas { conversation, note };
+      if let Err(error) = core_action(action).await {
+        tracing::debug!(%error, "canvas presence not announced");
+      }
+    });
+  }
+
   fn note_canvas_pages(
     &self,
     conversation: ConversationId,

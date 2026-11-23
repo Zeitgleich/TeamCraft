@@ -80,6 +80,13 @@ indicator is wrong anyway). Clients keep the highest `seq` they saw, so `0` leav
 A `typing` frame may name the thread a reply is typed in (`thread_id`, optional); `typing_start` then carries
 it, and clients show it in that thread only (#882). Without it (older clients) typing shows in the conversation.
 
+`canvas_presence` is ephemeral the same way (#1456): a device with a page of a channel's notes open sends a
+`canvas_presence` frame (`conversation_id`, `sealed`: a word sealed with the channel's content key and signed by the
+device, e2ee.md §4.11), and the other members connected at that moment get `canvas_presence` with the sender's
+`user_id` and `device_id` (the connection's device, never the client's claim) and the sealed bytes. The server
+relays it only from members, at most one per 500 ms per connection and conversation and up to 1 KiB; anything else is
+dropped without an answer.
+
 When the server shuts down (SIGTERM) it closes every gateway and relay socket with close code **1012**
 ("service restart"); clients reconnect at once (with jitter) and resume or, after a restart, sync afresh.
 A late `detach` of a connection the client already replaced by a resume never closes the resumed one.
@@ -100,6 +107,7 @@ to everyone online when an admin changes it; `GET /api/v1/me` returns the curren
 | Frame          | Effect                                                                                       |
 |----------------|----------------------------------------------------------------------------------------------|
 | `typing`       | `typing_start` to the other members (members only, throttled to one per 3 s per conversation and thread) |
+| `canvas_presence` | `canvas_presence` to the other members (members only, sealed, at most 1 KiB, one per 500 ms per conversation) |
 | `set_activity` | the device is `active` or `idle`; feeds presence                                              |
 | `heartbeat`    | keeps the connection alive                                                                    |
 | `delivered`    | a device stored a DM's or group DM's messages up to `message_id`; may send `delivery_update` (notifications.md, "Delivered") |

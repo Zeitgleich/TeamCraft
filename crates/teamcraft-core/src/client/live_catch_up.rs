@@ -95,7 +95,9 @@ pub(super) fn is_live_now(
     | GatewayEvent::MembershipAdd { conversation_id, .. }
     | GatewayEvent::MembershipRemove { conversation_id, .. }
     | GatewayEvent::ConversationUpdate { conversation_id } => caught_up.contains(conversation_id),
-    GatewayEvent::TypingStart { .. } | GatewayEvent::PresenceUpdate { .. } => true,
+    GatewayEvent::TypingStart { .. }
+    | GatewayEvent::CanvasPresence { .. }
+    | GatewayEvent::PresenceUpdate { .. } => true,
     _ => false,
   }
 }

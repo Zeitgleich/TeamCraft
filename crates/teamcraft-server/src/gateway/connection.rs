@@ -3,8 +3,9 @@ use std::time::Duration;
 
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use teamcraft_proto::{
-  ConversationId, DeviceActivity, DeviceId, GATEWAY_PATH, GatewayClientMessage, GatewayEvent,
-  GatewayServerMessage, MessageId, Permission, ThreadId, UserId,
+  Base64Bytes, CANVAS_PRESENCE_SERVER_GAP_MS, ConversationId, DeviceActivity, DeviceId, GATEWAY_PATH,
+  GatewayClientMessage, GatewayEvent, GatewayServerMessage, MAX_CANVAS_PRESENCE_BYTES, MessageId, Permission,
+  ThreadId, UserId,
 };
 use tokio::time::{Instant, sleep_until, timeout};
 use tracing::{debug, warn};
@@ -22,6 +23,11 @@ use crate::state::AppState;
 const TYPING_THROTTLE: Duration = Duration::from_secs(3);
 /// Conversations a connection tracks typing for; more is ignored until entries age out.
 const MAX_TRACKED_TYPING: usize = 256;
+/// Minimum time between two relayed words of one connection about a conversation's notes (who has a
+/// page open, issue #1456); a quicker one is dropped.
+const CANVAS_PRESENCE_THROTTLE: Duration = Duration::from_millis(CANVAS_PRESENCE_SERVER_GAP_MS);
+/// Conversations a connection tracks those words for; more is ignored until entries age out.
+const MAX_TRACKED_CANVAS_PRESENCE: usize = 64;
 /// Conversations a connection remembers its last `delivered` report for; beyond that the memory is
 /// cleared (a repeated report then costs one lookup, nothing more).
 const MAX_TRACKED_DELIVERED: usize = 256;
@@ -357,6 +363,13 @@ async fn handle_client_message(
       last_typing.insert(place, now);
       true
     },
+    GatewayClientMessage::CanvasPresence {
+      conversation_id,
+      sealed,
+    } => {
+      relay_canvas_presence(state, caller, attached, connection, conversation_id, sealed).await;
+      true
+    },
     GatewayClientMessage::Delivered {
       conversation_id,
       message_id,
@@ -430,6 +443,74 @@ async fn publish_typing(
   Ok(())
 }
 
+/// Relays a device's sealed word about a conversation's notes to the other members connected now
+/// (e2ee.md §4.11, "Who has the page open"). The server can't read it; it checks only that the
+/// caller is a member, the size and the pace. Nothing is kept and nothing is told back: a dropped
+/// word is replaced by the device's next one.
+async fn relay_canvas_presence(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  attached: &Attached,
+  connection: &mut ConnectionState,
+  conversation: ConversationId,
+  sealed: Base64Bytes,
+) {
+  if sealed.as_slice().is_empty() || sealed.as_slice().len() > MAX_CANVAS_PRESENCE_BYTES {
+    return;
+  }
+  let now = Instant::now();
+  let last = &mut connection.last_canvas_presence;
+  if last
+    .get(&conversation)
+    .is_some_and(|at| now.duration_since(*at) < CANVAS_PRESENCE_THROTTLE)
+  {
+    return;
+  }
+  if last.len() >= MAX_TRACKED_CANVAS_PRESENCE {
+    last.retain(|_, at| now.duration_since(*at) < CANVAS_PRESENCE_THROTTLE);
+    if last.len() >= MAX_TRACKED_CANVAS_PRESENCE {
+      return;
+    }
+  }
+  match canvas_presence_audience(state, caller, conversation).await {
+    Ok(members) => {
+      last.insert(conversation, now);
+      state.hub.publish(
+        members,
+        &GatewayEvent::CanvasPresence {
+          conversation_id: conversation,
+          user_id: caller.user.id,
+          device_id: attached.device,
+          sealed,
+        },
+      );
+    },
+    // Not a member (or the lookup failed): nothing goes out, and the client isn't told, as it
+    // would be for a typing frame; its next word tries again.
+    Err(error) => debug!(conversation_id = %conversation, %error, "canvas presence not relayed"),
+  }
+}
+
+/// The members a word about the notes goes to: everybody in the conversation but the caller, and
+/// only when the caller is a member (a visitor of a public channel holds no key to say anything).
+async fn canvas_presence_audience(
+  state: &AppState,
+  caller: &AuthenticatedUser,
+  conversation: ConversationId,
+) -> Result<Vec<UserId>, ApiError> {
+  let access = load_conversation(state, caller, conversation).await?;
+  if !access.is_member() {
+    return Err(ApiError::conversation_not_found());
+  }
+  let members = state.database.conversation_member_ids(conversation).await?;
+  Ok(
+    members
+      .into_iter()
+      .filter(|member| *member != caller.user.id)
+      .collect(),
+  )
+}
+
 /// What arrived on the socket.
 enum Frame {
   Message(GatewayClientMessage),
@@ -470,6 +551,8 @@ async fn next_client_message(socket: &mut WebSocket) -> Option<GatewayClientMess
 struct ConnectionState {
   /// Per conversation, and per thread for replies.
   last_typing: HashMap<(ConversationId, Option<ThreadId>), Instant>,
+  /// When the connection's last word about a conversation's notes went out.
+  last_canvas_presence: HashMap<ConversationId, Instant>,
   maybe_last_activity_change: Option<Instant>,
   /// The last `delivered` report per conversation, so repeats cost nothing.
   last_delivered: HashMap<ConversationId, MessageId>,

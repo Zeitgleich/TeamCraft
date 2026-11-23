@@ -891,6 +891,9 @@ pub struct CoreChatBackend<S> {
   commands: Rc<RefCell<Vec<CoreCommand>>>,
   /// Who types where; shared with the client when [`Self::with_typing`] was given its state.
   typing: crate::TypingState,
+  /// Who has which page of the notes open; shared with the client when
+  /// [`Self::with_canvas_presence`] was given it.
+  canvas_presence: crate::CanvasPresenceState,
   /// File transfers in flight; shared with the client when [`Self::with_transfers`] was given them.
   transfers: crate::transfers::Transfers,
   /// When reads last asked the server for something, so the UI's repeated reads don't flood it.
@@ -1010,6 +1013,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       clock,
       commands: Rc::new(RefCell::new(Vec::new())),
       typing: crate::TypingState::default(),
+      canvas_presence: crate::CanvasPresenceState::default(),
       transfers: crate::transfers::Transfers::new(),
       requests: RefCell::default(),
       mentions: RefCell::default(),
@@ -1036,6 +1040,12 @@ impl<S: LocalStore> CoreChatBackend<S> {
   #[must_use]
   pub fn with_typing(mut self, typing: crate::TypingState) -> Self {
     self.typing = typing;
+    self
+  }
+
+  /// Reads who has a page of the notes open from the client's state.
+  pub fn with_canvas_presence(mut self, canvas_presence: crate::CanvasPresenceState) -> Self {
+    self.canvas_presence = canvas_presence;
     self
   }
 
@@ -4199,6 +4209,16 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     is_snapshot: bool,
   ) {
     self.ui_edit_canvas(conversation, maybe_page, update, is_snapshot);
+  }
+
+  fn canvas_peers(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> Vec<teamcraft_client_api::model::CanvasPeer> {
+    self
+      .canvas_presence
+      .peers(conversation, maybe_page, self.me, self.clock.now_ms())
   }
 
   fn note_canvas_pages(

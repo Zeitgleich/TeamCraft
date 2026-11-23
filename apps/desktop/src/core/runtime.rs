@@ -11,7 +11,7 @@ use std::time::Duration;
 use secrecy::ExposeSecret;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::data_export::{DataExportProgress, DataExportRequest, DataExportStatus};
-use teamcraft_client_api::model::{Message, ThreadId};
+use teamcraft_client_api::model::{CanvasPresenceNote, Message, ThreadId};
 use teamcraft_client_api::remote::AttachmentPriority;
 use teamcraft_client_api::remote::{
   ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreStatus, EnrollRequest, EnrollSecret,
@@ -21,6 +21,7 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
+use teamcraft_core::canvas_presence::CanvasPresenceAnnouncer;
 use teamcraft_core::client::files::{BlobUpload, sweep_staged_copies};
 use teamcraft_core::client::{
   CatchUpFocus, HistoryBackfill, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel,
@@ -1064,6 +1065,8 @@ struct Core {
   is_idle: bool,
   /// The user's own typing, sent on the gateway at most every few seconds (#733).
   typing: TypingAnnouncer,
+  /// The words of the page of notes open here, numbered (e2ee.md §4.11, "Who has the page open").
+  canvas_presence: CanvasPresenceAnnouncer,
   /// Set while opening waits for an access token.
   maybe_open_retry: Option<OpenRetry>,
   /// The unreadable database was set aside: setup explains why it is asked for again.
@@ -1185,6 +1188,7 @@ impl Core {
       maybe_attention: None,
       is_idle: false,
       typing: TypingAnnouncer::default(),
+      canvas_presence: CanvasPresenceAnnouncer::default(),
       maybe_open_retry: None,
       was_store_set_aside: false,
       maybe_has_kept_backup_key: None,
@@ -1502,6 +1506,7 @@ impl Core {
     self.backend = Some(
       CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
         .with_typing(client.typing_state())
+        .with_canvas_presence(client.canvas_presence_state())
         .with_transfers(client.transfers()),
     );
     self.maybe_composer_fetches = Some(ComposerFetches::new(
@@ -1745,6 +1750,11 @@ impl Core {
         // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
         if let Some((conversation, maybe_thread)) = action.typing_place() {
           self.announce_typing(conversation, maybe_thread).await;
+          drop(reply.send(Ok(())));
+          return;
+        }
+        if let Some((conversation, note)) = action.canvas_announcement() {
+          self.announce_canvas(conversation, note.clone()).await;
           drop(reply.send(Ok(())));
           return;
         }
@@ -2944,6 +2954,22 @@ impl Core {
     }
   }
 
+  /// Tells the other members connected now about the page of notes open here (dropped offline).
+  async fn announce_canvas(&mut self, conversation: ConversationId, note: CanvasPresenceNote) {
+    if let Some(client) = self.client.as_ref() {
+      self
+        .canvas_presence
+        .announce(
+          client,
+          &mut self.connection,
+          conversation,
+          note,
+          SystemClock.now_ms(),
+        )
+        .await;
+    }
+  }
+
   /// How long until a typing indicator runs out (`None`: nobody types, or there is no client).
   fn typing_change(&self) -> Option<Duration> {
     let at_ms = self.client.as_ref()?.typing_change_at_ms()?;
@@ -3262,6 +3288,8 @@ impl ReadsWhileBusy<'_> {
       },
       // Typing arriving while the client is busy would go out late: dropped.
       Request::Action(action, reply) if action.typing_place().is_some() => drop(reply.send(Ok(()))),
+      // So would a word about the notes; the editor's next refresh says it again.
+      Request::Action(action, reply) if action.canvas_announcement().is_some() => drop(reply.send(Ok(()))),
       Request::Action(action, reply) if action.is_outbox_write() => {
         let Some(backend) = self.backend else {
           drop(reply.send(Err(not_set_up())));

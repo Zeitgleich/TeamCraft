@@ -69,6 +69,10 @@ canvas-page-delete-title = Delete “{ $title }”?
 canvas-page-delete-body = The page is deleted for everyone in the channel, with its version history.
 canvas-page-delete-confirm = Delete page
 canvas-page-needs-update = This page needs a newer version of TeamCraft on this device to be edited.
+canvas-open-by = { $count ->
+    [one] { $names } has this page open
+   *[other] { $names } have this page open
+  }
 canvas-editing = { $count ->
     [one] { $names } is editing
    *[other] { $names } are editing

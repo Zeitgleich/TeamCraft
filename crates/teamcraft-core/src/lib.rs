@@ -10,6 +10,7 @@ pub mod attestation;
 pub mod call_answer;
 pub mod call_group_wait;
 pub mod canvas;
+pub mod canvas_presence;
 pub mod channel_roles;
 #[cfg(feature = "ui")]
 pub mod chat_list_pass;
@@ -118,6 +119,7 @@ pub mod workspace;
 mod convert;
 mod trust;
 
+pub use canvas_presence::CanvasPresenceState;
 pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   DirectMediaInputs, EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess,

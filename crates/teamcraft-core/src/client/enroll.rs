@@ -218,6 +218,7 @@ impl PendingEnrollment {
       group_loads: 0,
       sync,
       typing: Default::default(),
+      canvas_presence: Default::default(),
       delivered: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),

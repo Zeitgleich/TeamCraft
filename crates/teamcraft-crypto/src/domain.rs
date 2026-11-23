@@ -11,6 +11,9 @@ pub(crate) const DEVICE_CERTIFICATE: &str = "TeamCraft-v1 device certificate";
 pub(crate) const IDENTITY_FINGERPRINT: &str = "TeamCraft-v1 identity fingerprint";
 pub(crate) const MESSAGE_AAD: &str = "TeamCraft-v1 message";
 pub(crate) const MESSAGE_SIGNATURE: &str = "TeamCraft-v1 message signature";
+/// Associated data of an ephemeral signal sealed with a content key (e2ee.md §4.11, who has a page open).
+pub(crate) const EPHEMERAL_AAD: &str = "TeamCraft-v1 ephemeral signal";
+pub(crate) const EPHEMERAL_SIGNATURE: &str = "TeamCraft-v1 ephemeral signal signature";
 pub(crate) const ATTACHMENT_AAD: &str = "TeamCraft-v1 attachment chunk";
 pub(crate) const KEY_BAG_AAD: &str = "TeamCraft-v1 key bag";
 pub(crate) const BACKUP_KEY_WRAP_AAD: &str = "TeamCraft-v1 backup key wrap";
@@ -105,11 +108,13 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 55] = [
+  const ALL_LABELS: [&str; 57] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
     MESSAGE_SIGNATURE,
+    EPHEMERAL_AAD,
+    EPHEMERAL_SIGNATURE,
     ATTACHMENT_AAD,
     KEY_BAG_AAD,
     BACKUP_KEY_WRAP_AAD,
