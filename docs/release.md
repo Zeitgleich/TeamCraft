@@ -146,6 +146,11 @@ candidates, prereleases and special cases.
 A failed run can be re-run from the Actions UI; the last job uploads into the existing draft with
 `--clobber`. Never move a published tag. If a release is broken, publish a new patch version.
 
+To build one part of an existing release again (its job failed, or a fix had to go onto the tag),
+run `gh workflow run release.yml --ref vX.Y.Z -f only=android` (or `ios`): only that build and its
+attach job run; images, desktop, web and the draft release are left as they are. `only=all` (the
+default, and every tag push) builds everything.
+
 Android doesn't hold up the rest (#696): the `release` job (draft release) needs the images and the
 desktop workflow only, so the server can be deployed (it reads the web bundle's line in
 `SHA256SUMS`) while the Android build runs or is re-run. `android-release` then uploads the APKs and
