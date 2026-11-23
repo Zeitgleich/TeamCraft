@@ -3,9 +3,13 @@
 //! A device tells everybody else in a call that it reacted or raised its hand. The signal goes
 //! through the SFU to every other device, sealed under a key only members of the call's current
 //! DAVE epoch hold: the MLS exporter secret of [`CALL_SIGNAL_EXPORTER_LABEL`], expanded with
-//! HKDF-SHA256. The associated data binds a signal to its call, epoch and sender, so the SFU can't
-//! read it, forge one, move it into another call or epoch, or pass one device's signal off as
+//! HKDF-SHA256. The associated data binds a signal to its call, epoch and sender, so the SFU alone
+//! can't read it, forge one, move it into another call or epoch, or pass one device's signal off as
 //! another's. It learns only that a device sent something, and how large it is.
+//!
+//! Signals are not signed: every member of the epoch holds the same key. A member working with a
+//! malicious SFU (which sets the sender's device ID it relays) can therefore make a signal look like
+//! another member's. Accepted for reactions and raised hands, which carry no content.
 //!
 //! Wire format: version (1 byte) ‖ epoch (8 bytes, big endian) ‖ nonce (24 bytes) ‖ ciphertext.
 

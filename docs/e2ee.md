@@ -7360,8 +7360,8 @@ the media: the SFU relays them and learns only that a device sent something.
   or joined later can't read the epoch's signals (`teamcraft_crypto::call_signal`). It is not the
   direct path's key: another exporter label.
 - **Seal:** XChaCha20-Poly1305 with a random 192-bit nonce. Associated data: a version byte, the call
-  ID, the epoch and the sender's device ID, so the SFU can't move a signal into another call or epoch
-  or pass one device's signal off as another's.
+  ID, the epoch and the sender's device ID, so the SFU on its own can't move a signal into another
+  call or epoch or pass one device's signal off as another's.
 - **Wire format:** version (1 byte, `1`) ‖ epoch (8 bytes, big endian) ‖ nonce (24 bytes) ‖
   ciphertext, in a `sealed_signal` message (at most 512 bytes) that the SFU sends on to every other
   device in the call as `sealed_signal` with the sender's device ID.
@@ -7379,10 +7379,17 @@ the media: the SFU relays them and learns only that a device sent something.
 see when and how often a device sends one, and its size. It can't read which reaction or whether a
 hand went up or down, forge or alter one, replay one, or show one to a device of another call.
 
+**Not signed.** Every member of the epoch holds the same signal key, and signals carry no signature.
+A member working together with a malicious SFU (which sets the `from_device_id` it relays) can seal
+a signal under another member's device ID and have the SFU relay it as theirs: a reaction or a raised
+hand that looks like someone else's. This is accepted: reactions and hands carry no content and have
+low impact. Anything that must be attributable (messages, recording notices) is signed.
+
 **What a hostile member can do.** Send reactions and raise its hand, as everybody can, within the
 SFU's limit per sender (`sealed_signal_burst`, `sealed_signals_per_second`, 8 at once and 2 a second
-by default) and the app's own pace (5 reactions in 2 s). It can't name another device as sender: the
-SFU sets the sender, and the associated data binds it.
+by default) and the app's own pace (5 reactions in 2 s). On its own it can't name another device as
+sender: the SFU sets the sender, and the associated data binds it. Together with a malicious SFU it
+can (see "Not signed" above).
 
 **Logs.** Neither the apps nor the SFU log a signal's content; the SFU logs dropped ones by count.
 
