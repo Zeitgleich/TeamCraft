@@ -28,6 +28,8 @@ pub struct SyncedAppSettings {
   /// Ask before `@channel` in conversations with more members than this; 0 never asks.
   pub confirm_channel_over: u32,
   pub call_status_sounds: CallStatusSounds,
+  /// "Connect directly in calls" (#127); hand it to [`TeamCraft::set_call_direct_connections`] too.
+  pub call_direct_connections: bool,
   /// The colour theme (#202), as stored: `color_theme_tokens` turns it into colours.
   pub color_theme: String,
   /// The interface font (#1494), as stored: its wire name (`system`, `inter`, …); an unknown one
@@ -156,6 +158,7 @@ impl From<SyncedAppSettings> for MobileSettings {
         CallStatusSounds::OwnOnly => CallStatusSoundsApi::OwnOnly,
         CallStatusSounds::Off => CallStatusSoundsApi::Off,
       },
+      call_direct_connections: app.call_direct_connections,
       color_theme: match app.color_theme.parse() {
         Ok(theme) => theme,
       },
@@ -202,6 +205,7 @@ impl From<MobileSettings> for SyncedAppSettings {
         // `adopt` never takes the catch-all, so it can only be the default here.
         CallStatusSoundsApi::All | CallStatusSoundsApi::Unknown => CallStatusSounds::All,
       },
+      call_direct_connections: settings.call_direct_connections,
       color_theme: settings.color_theme.to_string(),
       font: settings.font.to_string(),
       favorite_order: settings.favorite_order.iter().map(ToString::to_string).collect(),

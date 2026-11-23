@@ -14,7 +14,7 @@ private final class FakeStores: SettingsSyncStores {
   static let defaults = SyncedAppSettings(
     listLayout: .spaces, listGrouping: .mixed, favoritesSort: .alphabetical, animatedImages: .autoplay, sharesTyping: true,
     firstNameIsMention: true, channelMentionsNotify: true, keywords: [], confirmChannelOver: 10,
-    callStatusSounds: .all, colorTheme: "brand", font: "system", favoriteOrder: [])
+    callStatusSounds: .all, callDirectConnections: true, colorTheme: "brand", font: "system", favoriteOrder: [])
 
   func current() async -> SyncedAppSettings { settings }
 

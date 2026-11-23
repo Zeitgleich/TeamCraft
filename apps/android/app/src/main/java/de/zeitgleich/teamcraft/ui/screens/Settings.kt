@@ -321,6 +321,7 @@ private fun ChatsPage(viewModel: MainViewModel) {
   }
   SettingsGroup(R.string.settings_group_calls) {
     row { CallStatusSoundsSetting(it) }
+    row { CallDirectConnectionsSetting(it) }
   }
   SearchPrefetchGroup(viewModel.segmentPrefetch)
 }

@@ -2409,6 +2409,38 @@
         }
       }
     },
+    "call_direct_connections": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect directly in calls"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In Anrufen direkt verbinden"
+          }
+        }
+      }
+    },
+    "call_direct_connections_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In a call between two people, send audio and video straight to the other side when possible: less delay. Calls stay end-to-end encrypted, but the other side sees your IP addresses. Off: your calls always go through the server."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In einem Anruf zwischen zwei Personen Ton und Bild wenn möglich direkt an die andere Seite senden: weniger Verzögerung. Anrufe bleiben Ende-zu-Ende-verschlüsselt, aber die andere Seite sieht deine IP-Adressen. Aus: Deine Anrufe laufen immer über den Server."
+          }
+        }
+      }
+    },
     "call_status_sounds_hint": {
       "localizations": {
         "en": {

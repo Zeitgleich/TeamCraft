@@ -65,6 +65,22 @@
         }
       }
     },
+    "NSLocalNetworkUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft connects a call directly to the other device when you are on the same network, and asks your router to let a call's direct connection in."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft verbindet einen Anruf direkt mit dem anderen Gerät, wenn ihr im selben Netzwerk seid, und bittet deinen Router, die direkte Verbindung eines Anrufs hereinzulassen."
+          }
+        }
+      }
+    },
     "NSMicrophoneUsageDescription": {
       "localizations": {
         "en": {

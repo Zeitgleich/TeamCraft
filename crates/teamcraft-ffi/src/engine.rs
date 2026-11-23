@@ -2298,6 +2298,7 @@ async fn prepare_call(
   client.ensure_call_group(conversation).await?;
   let join = client.call_join_token(conversation).await?;
   let devices = client.verified_call_devices(conversation).await?;
+  let maybe_direct_media = client.direct_media_inputs(&devices);
   Ok(CallPreparation {
     conversation,
     join,
@@ -2307,6 +2308,7 @@ async fn prepare_call(
     devices,
     // Before a workspace was verified: the default policy, as the desktop takes it.
     screen_policy: teamcraft_core::workspace::screen_share_policy(client.store()).unwrap_or_default(),
+    maybe_direct_media,
   })
 }
 

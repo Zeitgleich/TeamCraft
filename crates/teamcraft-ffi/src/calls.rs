@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::StreamExt;
-use teamcraft_core::client::CallKeySigner;
+use teamcraft_core::client::{CallKeySigner, DirectMediaInputs};
 use teamcraft_core::connection::{ConnectionState as CoreConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
 use teamcraft_crypto::identity::VerifiedDevice;
@@ -23,8 +23,8 @@ use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
 use teamcraft_media::call_cues::StatusCues;
 use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnPublication, OwnVideoEnd};
 use teamcraft_media::call_native::{
-  JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture, TrustFuture, TrustSource,
-  measure_link,
+  DirectPathConfig, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
+  TrustFuture, TrustSource, measure_link,
 };
 use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError, ResilienceConfig};
 use teamcraft_media::datagram::SimulcastLayer;
@@ -42,7 +42,7 @@ use teamcraft_proto::{
   MediaStreamId, ScreenContentMode, ScreenSharePolicy, ScreenShareResolution, UserId, VideoCodec,
   VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
 use crate::engine::Job;
@@ -367,6 +367,8 @@ pub(crate) struct CallPreparation {
   pub(crate) devices: Vec<VerifiedDevice>,
   /// How large screen shares may be under the verified workspace policy (#565).
   pub(crate) screen_policy: ScreenSharePolicy,
+  /// What a direct path of a 1:1 call goes by (#127); `None` keeps the call on the SFU.
+  pub(crate) maybe_direct_media: Option<DirectMediaInputs>,
 }
 
 /// Where call events meet the app's listener: the engine feeds it gateway events, call threads
@@ -703,6 +705,7 @@ pub(crate) async fn join(
   preparation: CallPreparation,
   is_muted: bool,
   maybe_prior_link: Option<PriorLink>,
+  direct_connections: watch::Receiver<bool>,
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
   network: &NetworkChanges,
@@ -712,7 +715,8 @@ pub(crate) async fn join(
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
   let screen_policy = preparation.screen_policy.clone();
-  let mut config = native_config(preparation, &jobs)?;
+  let does_user_allow_direct = *direct_connections.borrow();
+  let mut config = native_config(preparation, does_user_allow_direct, &jobs)?;
   config.is_muted_at_start = is_muted;
   config.maybe_prior_link = maybe_prior_link;
   config.maybe_ticket_source = Some(Arc::new(EngineJoinTickets { jobs, conversation }));
@@ -786,7 +790,15 @@ pub(crate) async fn join(
           hub: thread_hub,
           connection,
         };
-        run_call(call, control_rx, network_rx, &context, &mut state).await;
+        run_call(
+          call,
+          control_rx,
+          network_rx,
+          direct_connections,
+          &context,
+          &mut state,
+        )
+        .await;
       });
     });
   if let Err(error) = spawned {
@@ -838,6 +850,7 @@ async fn run_call(
   mut call: NativeCall,
   mut controls: mpsc::UnboundedReceiver<Control>,
   mut network: NetworkChangeStream,
+  mut direct_connections: watch::Receiver<bool>,
   context: &CallContext,
   state: &mut CallStateInfo,
 ) {
@@ -874,6 +887,10 @@ async fn run_call(
       },
       // The same signal the gateway reconnects on: the call checks its path or rejoins at once.
       Some(()) = network.next() => call.network_changed(),
+      // The handle lives as long as the app's client; a call outliving it keeps the last value.
+      Ok(()) = direct_connections.changed() => {
+        call.set_direct_connections(*direct_connections.borrow_and_update());
+      },
       maybe_event = call.next_event() => match maybe_event {
         Some(event) => {
           if is_own_screen_end(&event) {
@@ -1585,6 +1602,7 @@ fn phone_video_decoders(is_ios: bool, has_openh264: bool) -> Vec<VideoCodec> {
 /// roster is refreshed through `jobs` when a device added during the call joins.
 fn native_config(
   preparation: CallPreparation,
+  does_user_allow_direct: bool,
   jobs: &mpsc::UnboundedSender<Job>,
 ) -> Result<NativeCallConfig, TeamCraftError> {
   let video_decoders = phone_video_decoders(cfg!(target_os = "ios"), openh264_library::is_available());
@@ -1607,6 +1625,13 @@ fn native_config(
     .map_err(|error| TeamCraftError::Call(error.to_string()))?;
   let ticket = JoinTicket::from(preparation.join);
   let mut config = NativeCallConfig::device_bound(ticket.sfu_url, ticket.token, engine, authenticator);
+  // #127: a 1:1 call's media may go straight to the other device, as on desktop.
+  config.maybe_direct = preparation.maybe_direct_media.map(|inputs| DirectPathConfig {
+    policy: inputs.policy,
+    does_user_allow: does_user_allow_direct,
+    own: inputs.own,
+    standings: inputs.standings,
+  });
   config.maybe_trust_source = Some(Arc::new(EngineTrust {
     jobs: jobs.clone(),
     conversation: preparation.conversation,
