@@ -1,6 +1,6 @@
 # Builds the web client (crates/teamcraft-ui) with trunk, for the browser e2e tests (tests/e2e/README.md).
 # Same Rust as dev/wasm-test/Dockerfile; trunk downloads the wasm-bindgen version of Cargo.lock itself.
-FROM docker.io/library/rust:1.99.1-trixie
+FROM docker.io/library/rust:1.100.0-trixie
 
 # The image's Rust is what rust-toolchain.toml's "stable" means today; use it instead of downloading.
 ENV RUSTUP_TOOLCHAIN=1.99.1

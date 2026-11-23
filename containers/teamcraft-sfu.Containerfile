@@ -9,7 +9,7 @@
 # bumps both in the FROM lines; by hand, take the index digest
 # (`docker buildx imagetools inspect <image>`, the top-level Digest), never a single-platform one.
 
-FROM docker.io/library/rust:1.99.1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS build
+FROM docker.io/library/rust:1.100.0-trixie@sha256:223cc32ddca8f3ee90c436dbc94b6b5f052ea7f9653c5201e9612f08ad7d21b8 AS build
 ENV CARGO_INCREMENTAL=0 \
     CARGO_PROFILE_RELEASE_STRIP=symbols
 WORKDIR /src
@@ -22,7 +22,7 @@ RUN --mount=type=cache,id=teamcraft-cargo-registry,target=/usr/local/cargo/regis
     cargo build --release --locked -p teamcraft-sfu --bin teamcraft-sfu \
  && install -D target/release/teamcraft-sfu /out/teamcraft-sfu
 
-FROM gcr.io/distroless/cc-debian13:nonroot@sha256:cb87acc574abe719b6e5c547384defa2f7b1f24af9605d3f618cf852495d8be2
+FROM gcr.io/distroless/cc-debian13:nonroot@sha256:532c7a94f9e96ba9db75eb9388f4227751131c7cb0a411d1a8521af4096135de
 LABEL org.opencontainers.image.title="teamcraft-sfu" \
       org.opencontainers.image.description="TeamCraft WebTransport SFU for calls" \
       org.opencontainers.image.source="https://github.com/Zeitgleich/TeamCraft" \

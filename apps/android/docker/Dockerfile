@@ -1,7 +1,7 @@
 # Android build image for apps/android (README.md, "Build"). Kept small on purpose: the SDK
 # packages, the NDK and the Gradle and Cargo caches live in a mounted cache directory
 # (/android), installed on first use by scripts/build.sh.
-FROM rust:1.99.1-slim-trixie
+FROM rust:1.100.0-slim-trixie
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \

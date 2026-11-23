@@ -1,5 +1,5 @@
 # Runs wasm-bindgen-test suites in headless Chromium (crates/teamcraft-core/README.md, "Browser tests").
-FROM rust:1.99.1-trixie
+FROM rust:1.100.0-trixie
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends chromium chromium-driver \
