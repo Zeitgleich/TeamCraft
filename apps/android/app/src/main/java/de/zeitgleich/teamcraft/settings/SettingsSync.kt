@@ -110,6 +110,7 @@ class SettingsSync(
       keywords = mention.keywords,
       confirmChannelOver = mentions.confirmChannelOver.coerceAtLeast(0).toUInt(),
       callStatusSounds = CallSoundPrefs.prefs(appContext).statusSounds,
+      callDirectConnections = CallSoundPrefs.prefs(appContext).isDirectAllowed,
       colorTheme = appearance.colorThemeValue.value,
       font = appearance.fontValue.value,
       favoriteOrder = FavoriteOrder.of(appContext).order.value,
@@ -162,6 +163,9 @@ class SettingsSync(
       mentions.setConfirmChannelOver(settings.confirmChannelOver.coerceAtMost(Int.MAX_VALUE.toUInt()).toInt())
     }
     if (settings.callStatusSounds != before.callStatusSounds) CallSoundPrefs.prefs(appContext).setStatusSounds(settings.callStatusSounds)
+    if (settings.callDirectConnections != before.callDirectConnections) {
+      CallSoundPrefs.prefs(appContext).setDirectAllowed(settings.callDirectConnections)
+    }
     if (settings.colorTheme != before.colorTheme) appearance.setColorTheme(settings.colorTheme)
     if (settings.font != before.font) appearance.setFont(settings.font)
     if (settings.favoriteOrder != before.favoriteOrder) FavoriteOrder.of(appContext).set(settings.favoriteOrder)

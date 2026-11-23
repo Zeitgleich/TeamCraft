@@ -27,7 +27,7 @@ use teamcraft_client_api::video_stats::VideoStatsReport;
 use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage,
-  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
+  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia, ErrorBody, ErrorCode,
   LEGACY_SIMULCAST_LAYERS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
   ScreenAudioTrack, ScreenShareTakeover, TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo,
   VideoPublicationId, VideoTrack, VideoTrackKind,
@@ -144,8 +144,17 @@ pub struct CallEngine {
   pending_publications: VecDeque<PendingPublication>,
   /// Layers of own tracks the SFU asked for; without an entry, all of them.
   sfu_layers: HashMap<StreamId, Vec<u8>>,
-  /// Layers of own tracks the driver was last told to send.
+  /// Layers of own tracks the driver was last told to send: those for the SFU and the direct
+  /// path's.
   sent_layers: HashMap<StreamId, Vec<u8>>,
+  /// Layers of own tracks that go to the SFU; without an entry, all that are sent.
+  sfu_bound_layers: HashMap<StreamId, Vec<u8>>,
+  /// The layer of each own track the direct path of a 1:1 call carries (#127).
+  direct_layers: HashMap<StreamId, u8>,
+  /// Received tracks whose keyframe this device asked for, for the direct path to ask too (#127).
+  direct_keyframe_asks: Vec<MediaStreamId>,
+  /// Missing packets of received tracks this device asked for, for the direct path (#127).
+  direct_nacks: Vec<DirectNack>,
   uplink_layers: UplinkLayers,
   /// Own tracks whose encoders follow the uplink's bitrate per layer
   /// ([`CallEngine::publish_adaptive_video`]).
@@ -176,6 +185,8 @@ pub struct CallEngine {
   maybe_retransmit: Option<RetransmitConfig>,
   /// What the uplink may carry of own packets sent again.
   retransmit_budget: RetransmitBudget,
+  /// What own video the direct path's receiver may have sent again (#127), apart from the SFU's.
+  direct_retransmit_budget: RetransmitBudget,
   /// What moves the current session to another connection without a rejoin (#1309), from the
   /// SFU's last `joined`; `None` from an SFU that sends none, and while away.
   maybe_switch_secret: Option<Base64Bytes>,
@@ -207,8 +218,8 @@ pub struct CallEngine {
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// The other device's direct path offers (#127), until the driver takes them.
   direct_offers: Vec<RelayedDirectOffer>,
-  /// What the driver says of its direct path; the SFU hears it again after every (re)join.
-  is_direct_path_active: bool,
+  /// What the driver says its direct path carries; the SFU hears it again after every (re)join.
+  maybe_direct_media: Option<DirectPathMedia>,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
   verified_keys: HashMap<DeviceId, Vec<u8>>,
   /// DAVE keys of devices that left this call: never accepted again in it, so the SFU can't bring a
@@ -339,6 +350,19 @@ pub struct CallEngineConfig {
   pub bwe: BweConfig,
 }
 
+/// The most NACKs that wait for the direct path between two of its looks: older ones are dropped
+/// (the packets they name are late by then anyway).
+const MAX_WAITING_DIRECT_NACKS: usize = 16;
+
+/// Packets of a received track this device misses (#127): `layer` of `stream_id`, by RTP sequence
+/// number, for the direct path to ask its sender for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectNack {
+  pub stream_id: MediaStreamId,
+  pub layer: u8,
+  pub sequence_numbers: Vec<u16>,
+}
+
 /// Something the driver has to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineOutput {
@@ -346,6 +370,9 @@ pub enum EngineOutput {
   Signal(CallClientMessage),
   /// Send as a QUIC datagram.
   Datagram(Vec<u8>),
+  /// Send on the direct path of a 1:1 call only (#127): an own video packet of the layer the direct
+  /// path carries, without a transport sequence number (the SFU's uplink estimate never sees it).
+  DirectDatagram(Vec<u8>),
   /// Tell the app.
   Event(CallEngineEvent),
 }
@@ -779,6 +806,10 @@ impl CallEngine {
       pending_publications: VecDeque::new(),
       sfu_layers: HashMap::new(),
       sent_layers: HashMap::new(),
+      sfu_bound_layers: HashMap::new(),
+      direct_layers: HashMap::new(),
+      direct_keyframe_asks: Vec::new(),
+      direct_nacks: Vec::new(),
       uplink_layers,
       adaptive_tracks: HashMap::new(),
       bitrates_announced: HashMap::new(),
@@ -791,6 +822,7 @@ impl CallEngine {
       maybe_nack: None,
       maybe_retransmit: None,
       retransmit_budget: RetransmitBudget::default(),
+      direct_retransmit_budget: RetransmitBudget::default(),
       maybe_switch_secret: None,
       maybe_decodable: None,
       decodable_by_some: Vec::new(),
@@ -805,7 +837,7 @@ impl CallEngine {
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       direct_offers: Vec::new(),
-      is_direct_path_active: false,
+      maybe_direct_media: None,
       verified_keys: HashMap::new(),
       retired_keys: RetiredKeys::default(),
       keys_before_reconnect: HashMap::new(),
@@ -1440,15 +1472,128 @@ impl CallEngine {
     self.signal(CallClientMessage::DirectOffer { to_device_id, sealed });
   }
 
-  /// Tells the SFU whether the direct path carries this device's media now; it hears it again
-  /// after every rejoin while it does (ARCHITECTURE.md §6.7, "Switching paths").
-  pub fn report_direct_path(&mut self, is_active: bool) {
-    if self.is_direct_path_active == is_active {
+  /// Tells the SFU whether the direct path carries this device's media now, and whether its video
+  /// too (`None`: nothing); it hears it again after every rejoin while it does (ARCHITECTURE.md
+  /// §6.7, "Switching paths").
+  pub fn report_direct_path(&mut self, maybe_media: Option<DirectPathMedia>) {
+    if self.maybe_direct_media == maybe_media {
       return;
     }
-    self.is_direct_path_active = is_active;
+    self.maybe_direct_media = maybe_media;
     if matches!(self.phase, Phase::Joined { .. }) {
-      self.signal(CallClientMessage::DirectPath { is_active });
+      self.signal(CallClientMessage::DirectPath {
+        is_active: maybe_media.is_some(),
+        media: maybe_media.unwrap_or_default(),
+      });
+    }
+  }
+
+  /// The layer of an own track the direct path carries from now on (#127), `None` for none: the
+  /// driver encodes it besides the layers the SFU needs, and its first picture is a keyframe.
+  pub fn set_direct_video_layer(&mut self, stream_id: MediaStreamId, maybe_layer: Option<u8>) {
+    let stream = StreamId(stream_id.0);
+    let maybe_layer = maybe_layer.filter(|layer| {
+      self
+        .own_tracks
+        .get(&stream)
+        .is_some_and(|track| track.layers.iter().any(|info| info.layer == *layer))
+    });
+    let previous = match maybe_layer {
+      Some(layer) => self.direct_layers.insert(stream, layer),
+      None => self.direct_layers.remove(&stream),
+    };
+    if previous == maybe_layer {
+      return;
+    }
+    self.announce_layers(false);
+    if let Some(layer) = maybe_layer {
+      self.request_own_keyframes(stream_id, &[layer]);
+    }
+  }
+
+  /// The direct path's receiver asks for a keyframe of an own track (#127): on the layer it
+  /// carries, if it carries one. The caller limits how often.
+  pub fn request_direct_keyframe(&mut self, stream_id: MediaStreamId) {
+    if let Some(layer) = self.direct_layers.get(&StreamId(stream_id.0)).copied() {
+      self.request_own_keyframes(stream_id, &[layer]);
+    }
+  }
+
+  /// The own video tracks that have layers, for the direct path's choice of layer (#127).
+  pub fn own_video_tracks(&self) -> Vec<&VideoTrack> {
+    let mut tracks: Vec<&VideoTrack> = self
+      .own_tracks
+      .values()
+      .filter(|track| !track.layers.is_empty())
+      .collect();
+    tracks.sort_unstable_by_key(|track| track.stream_id.0);
+    tracks
+  }
+
+  /// The tracks of `sender` this device receives, with the highest layer it takes of each: what
+  /// the direct path tells that device (#127).
+  pub fn video_wants_of(&self, sender: DeviceId) -> Vec<(MediaStreamId, u8)> {
+    let mut wants: Vec<(MediaStreamId, u8)> = self
+      .subscriptions
+      .iter()
+      .filter(|(stream, _)| {
+        self
+          .remote_video
+          .get(stream)
+          .is_some_and(|track| track.sender == sender)
+      })
+      .map(|(stream, max_layer)| (MediaStreamId(stream.0), *max_layer))
+      .collect();
+    wants.sort_unstable_by_key(|(stream_id, _)| stream_id.0);
+    wants
+  }
+
+  /// The received tracks whose keyframe was asked for since the last call (#127).
+  pub fn take_direct_keyframe_asks(&mut self) -> Vec<MediaStreamId> {
+    std::mem::take(&mut self.direct_keyframe_asks)
+  }
+
+  /// The missing packets asked for since the last call (#127).
+  pub fn take_direct_nacks(&mut self) -> Vec<DirectNack> {
+    std::mem::take(&mut self.direct_nacks)
+  }
+
+  /// The direct path's receiver misses packets of an own track (#127): those still kept go out
+  /// again on the direct path, if `layer` is the one it carries, within a budget of `budget_bps`.
+  pub fn resend_direct_video(
+    &mut self,
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: &[u16],
+    budget_bps: u32,
+    now: Instant,
+  ) {
+    let stream = StreamId(stream_id.0);
+    if self.direct_layers.get(&stream) != Some(&layer) {
+      return;
+    }
+    let (Some(config), Some(track), Ok(simulcast_layer)) = (
+      self.maybe_retransmit,
+      self.own_video.get(&stream),
+      SimulcastLayer::new(layer),
+    ) else {
+      return;
+    };
+    let mut packets = Vec::new();
+    for &sequence_number in sequence_numbers.iter().take(MAX_NACK_SEQUENCE_NUMBERS) {
+      let Some(packet) = track.sent_packet(layer, sequence_number, now, config.window) else {
+        continue;
+      };
+      if !self
+        .direct_retransmit_budget
+        .try_spend(packet.len(), budget_bps, now, &config)
+      {
+        break;
+      }
+      packets.push(packet.to_vec());
+    }
+    for packet in packets {
+      self.send_direct_media(stream, simulcast_layer, &packet);
     }
   }
 
@@ -1773,13 +1918,19 @@ impl CallEngine {
       self.count_dropped_video(stream);
       return VideoSendOutcome::WrongCodec;
     }
+    let layer = frame.layer.value();
     let is_layer_sent = self
       .sent_layers
       .get(&stream)
-      .is_none_or(|layers| layers.contains(&frame.layer.value()));
+      .is_none_or(|layers| layers.contains(&layer));
     if !is_layer_sent {
       return VideoSendOutcome::LayerPaused;
     }
+    let is_sfu_bound = self
+      .sfu_bound_layers
+      .get(&stream)
+      .is_none_or(|layers| layers.contains(&layer));
+    let is_direct = self.direct_layers.get(&stream) == Some(&layer);
     let Some(dave) = self.media_dave() else {
       self.count_dropped_video(stream);
       return VideoSendOutcome::NotSecured;
@@ -1819,7 +1970,12 @@ impl CallEngine {
       self.maybe_burst_sent_at = Some(now);
     }
     for rtp in packets {
-      self.send_media(stream, frame.layer, &rtp, now);
+      if is_direct {
+        self.send_direct_media(stream, frame.layer, &rtp);
+      }
+      if is_sfu_bound {
+        self.send_media(stream, frame.layer, &rtp, now);
+      }
     }
     VideoSendOutcome::Sent
   }
@@ -2366,6 +2522,7 @@ impl CallEngine {
     // needs (it does so right after `joined`), and the SFU hears what the uplink carries.
     self.sfu_layers.clear();
     self.sent_layers.clear();
+    self.sfu_bound_layers.clear();
     self.uplink_announced.clear();
     self.reconcile_own_video(&state.video_tracks);
     // No keyframes yet: nothing goes out before the call is secured, which asks for them.
@@ -2567,6 +2724,8 @@ impl CallEngine {
     self.own_tracks.remove(&stream);
     self.sfu_layers.remove(&stream);
     self.sent_layers.remove(&stream);
+    self.sfu_bound_layers.remove(&stream);
+    self.direct_layers.remove(&stream);
     self.uplink_announced.remove(&stream);
     self.encoder_top_layers.remove(&stream);
     self.uplink_layers.remove(stream);
@@ -3198,7 +3357,8 @@ impl CallEngine {
   }
 
   /// Tells the driver which layers of each own track to encode: those the SFU needs and the uplink
-  /// carries. Layers the uplink takes back get a keyframe, so receivers can decode them at once.
+  /// carries, and the one the direct path carries (#127). Layers the uplink takes back get a
+  /// keyframe, so receivers can decode them at once.
   fn announce_layers(&mut self, with_keyframes: bool) {
     let mut streams: Vec<StreamId> = self.own_tracks.keys().copied().collect();
     streams.sort_unstable();
@@ -3232,6 +3392,14 @@ impl CallEngine {
         && !layers.contains(&top)
       {
         layers.push(top);
+        layers.sort_unstable();
+      }
+      // The direct path's layer is encoded as well, but goes to the other device alone (#127).
+      self.sfu_bound_layers.insert(stream, layers.clone());
+      if let Some(direct) = self.direct_layers.get(&stream).copied()
+        && !layers.contains(&direct)
+      {
+        layers.push(direct);
         layers.sort_unstable();
       }
       let previous = self.sent_layers.get(&stream).cloned().unwrap_or_default();
@@ -3778,8 +3946,11 @@ impl CallEngine {
 
   /// Tells the SFU what the direct path does, if it carries the media (a new slot starts without).
   fn announce_direct_path(&mut self) {
-    if self.is_direct_path_active {
-      self.signal(CallClientMessage::DirectPath { is_active: true });
+    if let Some(media) = self.maybe_direct_media {
+      self.signal(CallClientMessage::DirectPath {
+        is_active: true,
+        media,
+      });
     }
   }
 
@@ -3954,9 +4125,19 @@ impl CallEngine {
       packets = request.sequence_numbers.len(),
       "asking for missing video packets"
     );
+    let stream_id = MediaStreamId(stream.0);
+    let layer = request.layer.value();
+    if self.direct_nacks.len() >= MAX_WAITING_DIRECT_NACKS {
+      self.direct_nacks.remove(0);
+    }
+    self.direct_nacks.push(DirectNack {
+      stream_id,
+      layer,
+      sequence_numbers: request.sequence_numbers.clone(),
+    });
     self.signal(CallClientMessage::Nack {
-      stream_id: MediaStreamId(stream.0),
-      layer: request.layer.value(),
+      stream_id,
+      layer,
       sequence_numbers: request.sequence_numbers,
     });
   }
@@ -4144,9 +4325,12 @@ impl CallEngine {
       return;
     }
     debug!(stream_id = stream.0, "asking for a keyframe");
-    self.signal(CallClientMessage::RequestKeyframe {
-      stream_id: MediaStreamId(stream.0),
-    });
+    let stream_id = MediaStreamId(stream.0);
+    self.signal(CallClientMessage::RequestKeyframe { stream_id });
+    // At most one per track: the asks are rate-limited above, and the driver takes them often.
+    if !self.direct_keyframe_asks.contains(&stream_id) {
+      self.direct_keyframe_asks.push(stream_id);
+    }
   }
 
   fn add_video_track(&mut self, track: VideoTrack) {
@@ -4453,6 +4637,23 @@ impl CallEngine {
         device_id,
         is_shared: false,
       });
+    }
+  }
+
+  /// Wraps one RTP packet of an own track for the direct path alone (#127): no transport sequence
+  /// number, since the SFU never sees it.
+  fn send_direct_media(&mut self, stream: StreamId, layer: SimulcastLayer, rtp: &[u8]) {
+    let datagram = MediaDatagram {
+      header: DatagramHeader {
+        stream_id: stream,
+        layer,
+        maybe_transport_seq: None,
+      },
+      rtp,
+    };
+    match datagram.to_bytes(MAX_DATAGRAM_BYTES) {
+      Ok(bytes) => self.outputs.push_back(EngineOutput::DirectDatagram(bytes)),
+      Err(error) => warn!(%error, "direct media datagram too large"),
     }
   }
 
@@ -5242,6 +5443,221 @@ mod tests {
           _ => None,
         })
         .collect()
+    }
+  }
+
+  /// #127 part 4: the own video on the direct path of a 1:1 call.
+  mod direct_video {
+    use super::*;
+
+    const STREAM: MediaStreamId = MediaStreamId(50);
+
+    /// The SFU needs nothing of the track (the pair's video goes directly): the direct layer alone
+    /// is encoded, and goes out as the direct path's own output, unstamped; the SFU gets nothing.
+    #[test]
+    fn the_direct_layer_is_encoded_and_goes_to_the_direct_path_alone() {
+      let now = Instant::now();
+      let (mut alice, _bob) = publishing_pair(now);
+      let needed = CallEvent::LayersNeeded {
+        stream_id: STREAM,
+        layers: Vec::new(),
+      };
+      alice.handle_signal(event(7, needed), now).unwrap();
+      drain(&mut alice);
+      alice.set_direct_video_layer(STREAM, Some(1));
+      let outputs = drain(&mut alice);
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::LayersNeeded {
+          stream_id: STREAM,
+          layers: vec![1],
+        })),
+        "{outputs:?}"
+      );
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::KeyframeRequested {
+          stream_id: STREAM,
+          layer: 1,
+        })),
+        "its first picture is a keyframe"
+      );
+
+      assert_eq!(
+        alice.send_video(STREAM, &frame_on(1), now),
+        VideoSendOutcome::Sent
+      );
+      let outputs = drain(&mut alice);
+      assert!(
+        !outputs
+          .iter()
+          .any(|output| matches!(output, EngineOutput::Datagram(_)))
+      );
+      let direct: Vec<MediaDatagram<'_>> = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::DirectDatagram(bytes) => MediaDatagram::parse(bytes).ok(),
+          _ => None,
+        })
+        .collect();
+      assert!(!direct.is_empty());
+      assert!(
+        direct
+          .iter()
+          .all(|datagram| datagram.header.maybe_transport_seq.is_none() && datagram.header.layer.value() == 1)
+      );
+      assert_eq!(
+        alice.send_video(STREAM, &frame_on(0), now),
+        VideoSendOutcome::LayerPaused,
+        "nobody takes layer 0"
+      );
+    }
+
+    /// A layer both take goes to each once; the direct path's ends with its own output.
+    #[test]
+    fn a_layer_the_sfu_needs_too_goes_both_ways() {
+      let now = Instant::now();
+      let (mut alice, _bob) = publishing_pair(now);
+      alice.set_direct_video_layer(STREAM, Some(0));
+      drain(&mut alice);
+      assert_eq!(
+        alice.send_video(STREAM, &frame_on(0), now),
+        VideoSendOutcome::Sent
+      );
+      let outputs = drain(&mut alice);
+      let stamped = outputs
+        .iter()
+        .filter(|output| matches!(output, EngineOutput::Datagram(_)))
+        .count();
+      let direct = outputs
+        .iter()
+        .filter(|output| matches!(output, EngineOutput::DirectDatagram(_)))
+        .count();
+      assert!(stamped > 0 && stamped == direct, "{stamped} {direct}");
+
+      alice.set_direct_video_layer(STREAM, None);
+      drain(&mut alice);
+      assert_eq!(
+        alice.send_video(STREAM, &frame_on(0), now),
+        VideoSendOutcome::Sent
+      );
+      assert!(
+        !drain(&mut alice)
+          .iter()
+          .any(|output| matches!(output, EngineOutput::DirectDatagram(_)))
+      );
+    }
+
+    #[test]
+    fn a_layer_the_track_lacks_or_an_unknown_track_is_ignored() {
+      let now = Instant::now();
+      let (mut alice, _bob) = publishing_pair(now);
+      alice.set_direct_video_layer(STREAM, Some(7));
+      alice.set_direct_video_layer(MediaStreamId(99), Some(0));
+      assert!(drain(&mut alice).is_empty());
+      alice.request_direct_keyframe(STREAM);
+      assert!(drain(&mut alice).is_empty(), "no direct layer: no keyframe");
+      alice.set_direct_video_layer(STREAM, Some(0));
+      drain(&mut alice);
+      alice.request_direct_keyframe(STREAM);
+      assert_eq!(
+        drain(&mut alice),
+        vec![EngineOutput::Event(CallEngineEvent::KeyframeRequested {
+          stream_id: STREAM,
+          layer: 0,
+        })]
+      );
+    }
+
+    /// The receiver tells the direct path what it takes of the other device, and its keyframe asks
+    /// go there too.
+    #[test]
+    fn the_receiver_s_wants_and_keyframe_asks() {
+      let now = Instant::now();
+      let (_alice, mut bob) = publishing_pair(now);
+      assert!(bob.video_wants_of(device(1)).is_empty());
+      bob.subscribe_video(STREAM, Some(1));
+      assert_eq!(bob.video_wants_of(device(1)), vec![(STREAM, 1)]);
+      assert!(bob.video_wants_of(device(2)).is_empty());
+      bob.request_keyframe(STREAM, now);
+      bob.request_keyframe(STREAM, now);
+      assert_eq!(bob.take_direct_keyframe_asks(), vec![STREAM]);
+      assert!(bob.take_direct_keyframe_asks().is_empty());
+    }
+
+    #[test]
+    fn the_sfu_hears_what_the_direct_path_carries_and_again_after_a_rejoin() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.report_direct_path(Some(DirectPathMedia::AudioAndVideo));
+      alice.report_direct_path(Some(DirectPathMedia::AudioAndVideo));
+      let reports: Vec<EngineOutput> = drain(&mut alice)
+        .into_iter()
+        .filter(|output| matches!(output, EngineOutput::Signal(CallClientMessage::DirectPath { .. })))
+        .collect();
+      assert_eq!(
+        reports,
+        vec![EngineOutput::Signal(CallClientMessage::DirectPath {
+          is_active: true,
+          media: DirectPathMedia::AudioAndVideo,
+        })]
+      );
+      alice.report_direct_path(None);
+      assert!(
+        drain(&mut alice).contains(&EngineOutput::Signal(CallClientMessage::DirectPath {
+          is_active: false,
+          media: DirectPathMedia::Audio,
+        }))
+      );
+    }
+
+    /// What the direct path's receiver missed goes out again there, of the direct layer only, and
+    /// the receiver's own asks wait for the direct path to take them.
+    #[test]
+    fn missing_packets_are_sent_again_on_the_direct_path() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = publishing_pair(now);
+      alice.set_retransmit_window(Some(500));
+      alice.set_direct_video_layer(STREAM, Some(1));
+      drain(&mut alice);
+      alice.send_video(STREAM, &frame_on(1), now);
+      let first = drain(&mut alice)
+        .iter()
+        .find_map(|output| match output {
+          EngineOutput::DirectDatagram(bytes) => Some(bytes.clone()),
+          _ => None,
+        })
+        .unwrap();
+      let parsed = MediaDatagram::parse(&first).unwrap();
+      let (rtp, _) = RtpHeader::parse(parsed.rtp).unwrap();
+      let number = rtp.sequence_number.0;
+
+      alice.resend_direct_video(STREAM, 0, &[number], 1_000_000, now);
+      assert!(drain(&mut alice).is_empty(), "not the direct layer");
+      alice.resend_direct_video(STREAM, 1, &[number], 1_000_000, now);
+      assert_eq!(drain(&mut alice), vec![EngineOutput::DirectDatagram(first)]);
+
+      bob.set_retransmit_window(Some(500));
+      assert!(bob.take_direct_nacks().is_empty());
+    }
+
+    /// Alice publishes a camera of three layers; Bob knows it.
+    fn publishing_pair(now: Instant) -> (CallEngine, CallEngine) {
+      let (mut alice, mut bob) = secured_pair(now);
+      let track = video_track(STREAM.0, 1, 3);
+      ask_for(&mut alice, &track);
+      let published = CallEvent::VideoPublished { track };
+      alice.handle_signal(event(6, published.clone()), now).unwrap();
+      bob.handle_signal(event(4, published), now).unwrap();
+      drain(&mut alice);
+      drain(&mut bob);
+      (alice, bob)
+    }
+
+    fn frame_on(layer: u8) -> EncodedVideoFrame {
+      EncodedVideoFrame {
+        layer: SimulcastLayer::new(layer).unwrap(),
+        data: [&[0, 0, 0, 1, 0x65][..], &[0x88; 64]].concat(),
+        ..video_frame()
+      }
     }
   }
 

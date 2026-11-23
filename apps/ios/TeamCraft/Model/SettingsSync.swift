@@ -199,6 +199,7 @@ final class AppSettingsStores: SettingsSyncStores {
       keywords: mentions.keywords,
       confirmChannelOver: Self.confirmChannelOver(in: defaults),
       callStatusSounds: CallStatusSoundsSetting.stored(defaults.string(forKey: CallStatusSoundsSetting.key)).sounds,
+      callDirectConnections: CallDirectSetting.stored(in: defaults),
       colorTheme: ColorThemeSetting.stored(in: defaults),
       font: defaults.string(forKey: Self.fontKey) ?? Self.defaultFont,
       favoriteOrder: FavoriteOrder.ids(defaults.string(forKey: FavoriteOrder.key) ?? "")
@@ -223,6 +224,10 @@ final class AppSettingsStores: SettingsSyncStores {
     }
     if settings.callStatusSounds != before.callStatusSounds {
       defaults.set(CallStatusSoundsSetting.raw(settings.callStatusSounds), forKey: CallStatusSoundsSetting.key)
+    }
+    if settings.callDirectConnections != before.callDirectConnections {
+      // Read at the next join; only a change made on this device reaches a running call.
+      defaults.set(settings.callDirectConnections, forKey: CallDirectSetting.key)
     }
     if settings.confirmChannelOver != before.confirmChannelOver {
       defaults.set(settings.confirmChannelOver, forKey: Self.confirmChannelOverKey)

@@ -132,6 +132,8 @@
   <string name="typing_several">Mehrere Personen schreiben</string>
   <string name="typing_direct">schreibt</string>
   <string name="share_typing">Anderen zeigen, wenn ich schreibe</string>
+  <string name="call_direct_connections">In Anrufen direkt verbinden</string>
+  <string name="call_direct_connections_hint">In einem Anruf zwischen zwei Personen Ton und Bild wenn möglich direkt an die andere Seite senden: weniger Verzögerung. Anrufe bleiben Ende-zu-Ende-verschlüsselt, aber die andere Seite sieht deine IP-Adressen. Aus: Deine Anrufe laufen immer über den Server.</string>
   <string name="call_status_sounds">Statustöne im Anruf</string>
   <string name="call_status_sounds_hint">Ein leiser Ton wiederholt sich, solange deine Verbindung unterbrochen ist; kurze Töne zeigen, wenn sie wieder steht oder der Anruf beendet ist. Nur du hörst sie, über die Audioausgabe des Anrufs.</string>
   <string name="call_status_sounds_all">Meine und die der anderen</string>

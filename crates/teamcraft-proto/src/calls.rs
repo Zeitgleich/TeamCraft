@@ -303,10 +303,15 @@ pub enum CallClientMessage {
   /// Whether this device's direct path to the other device of a 1:1 call carries its media now
   /// (#127, ARCHITECTURE.md §6.7). The SFU stops forwarding the two devices' audio to each other only
   /// while both say `true` and the room has exactly these two; `false`, a third device, or either
-  /// one's lost connection forwards it again at once. Sent after every change and again after every
-  /// join or switch. Older SFUs ignore it and keep forwarding.
+  /// one's lost connection forwards it again at once. `media` says whether the video goes directly
+  /// too: the SFU stops forwarding it between the two, and asks neither publisher for layers only
+  /// the other one received, only while both say [`DirectPathMedia::AudioAndVideo`]. Sent after
+  /// every change and again after every join or switch. Older SFUs ignore it and keep forwarding;
+  /// a report without `media` (an older client) is audio only.
   DirectPath {
     is_active: bool,
+    #[serde(default, skip_serializing_if = "DirectPathMedia::is_audio")]
+    media: DirectPathMedia,
   },
   /// First message of a short QUIC connection from this device's direct path socket (#127): `secret`
   /// is the session's [`CallServerMessage::AudioSocket`] secret. The SFU answers
@@ -653,6 +658,31 @@ pub enum ScreenContentMode {
   Unknown,
 }
 
+/// What a device's direct path carries besides the audio ([`CallClientMessage::DirectPath`], #127).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DirectPathMedia {
+  /// The audio; the video goes through the SFU.
+  #[default]
+  Audio,
+  /// The audio and the video.
+  AudioAndVideo,
+  /// A newer client's value: taken as audio only.
+  #[serde(other)]
+  Unknown,
+}
+
+impl DirectPathMedia {
+  pub fn is_audio(&self) -> bool {
+    *self == Self::Audio
+  }
+
+  /// Whether the video goes over the direct path.
+  pub fn has_video(&self) -> bool {
+    *self == Self::AudioAndVideo
+  }
+}
+
 /// A device's signed call key binding (`teamcraft-crypto::call_binding`), relayed by the SFU.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DaveKeyBinding {
@@ -814,9 +844,10 @@ impl fmt::Debug for CallClientMessage {
         .field("to_device_id", to_device_id)
         .field("sealed_bytes", &sealed.len())
         .finish(),
-      Self::DirectPath { is_active } => f
+      Self::DirectPath { is_active, media } => f
         .debug_struct("DirectPath")
         .field("is_active", is_active)
+        .field("media", media)
         .finish(),
       Self::Reflect { .. } => f.debug_struct("Reflect").field("secret", &"[redacted]").finish(),
       Self::Unknown => f.write_str("Unknown"),
@@ -1536,10 +1567,37 @@ mod tests {
   /// print.
   #[test]
   fn direct_path_and_reflect_wire_format() {
-    let report = CallClientMessage::DirectPath { is_active: true };
+    let report = CallClientMessage::DirectPath {
+      is_active: true,
+      media: DirectPathMedia::Audio,
+    };
     let json = serde_json::to_string(&report).unwrap();
     assert_eq!(json, r#"{"type":"direct_path","is_active":true}"#);
     assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), report);
+    let with_video = CallClientMessage::DirectPath {
+      is_active: true,
+      media: DirectPathMedia::AudioAndVideo,
+    };
+    let json = serde_json::to_string(&with_video).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"direct_path","is_active":true,"media":"audio_and_video"}"#
+    );
+    assert_eq!(
+      serde_json::from_str::<CallClientMessage>(&json).unwrap(),
+      with_video
+    );
+    // A newer client's value is audio only.
+    let newer: CallClientMessage =
+      serde_json::from_str(r#"{"type":"direct_path","is_active":true,"media":"audio_video_and_smell"}"#)
+        .unwrap();
+    assert!(matches!(
+      newer,
+      CallClientMessage::DirectPath {
+        media: DirectPathMedia::Unknown,
+        ..
+      }
+    ));
     let reflect = CallClientMessage::Reflect {
       secret: Base64Bytes::new(vec![1, 2]),
     };

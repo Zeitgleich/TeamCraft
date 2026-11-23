@@ -349,6 +349,7 @@ private struct ChatsSettingsPage: View {
   @AppStorage(FavoritesSort.key) private var favoritesSort = FavoritesSort.alphabetical.rawValue
   @AppStorage(MessageLayout.key) private var messageLayout = MessageLayout.bubbles.rawValue
   @AppStorage(CallStatusSoundsSetting.key) private var statusSounds = CallStatusSoundsSetting.all.rawValue
+  @AppStorage(CallDirectSetting.key) private var isDirectAllowed = true
   @AppStorage(OriginalDownloadSetting.key) private var originalDownload = OriginalDownloadSetting.fallback.rawValue
   @AppStorage(AnimatedImagesSetting.key) private var animatedImages = AnimatedImagesSetting.fallback.rawValue
   @AppStorage(LivePhotoMotion.settingKey) private var isSendingLiveMotion = true
@@ -418,6 +419,14 @@ private struct ChatsSettingsPage: View {
         }
       } footer: {
         Text("call_status_sounds_hint")
+      }
+      Section {
+        Toggle("call_direct_connections", isOn: $isDirectAllowed)
+          .onChange(of: isDirectAllowed) {
+            Task { await model.followCallDirectSetting() }
+          }
+      } footer: {
+        Text("call_direct_connections_hint")
       }
       Section {
         Picker("original_download_title", selection: $originalDownload) {

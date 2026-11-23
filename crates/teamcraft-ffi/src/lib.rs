@@ -199,6 +199,8 @@ pub struct TeamCraft {
   link: Arc<calls::LinkMeasures>,
   /// Whether the app is in the foreground: only then does it measure its link.
   is_foreground: std::sync::atomic::AtomicBool,
+  /// "Connect directly in calls" (#127): read when a call starts, followed while it runs.
+  direct_connections: tokio::sync::watch::Sender<bool>,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android).
@@ -2079,6 +2081,14 @@ impl TeamCraft {
     self.join_call(conversation_id, is_muted, maybe_progress).await
   }
 
+  /// The user's "Connect directly in calls" (#127, ARCHITECTURE.md §6.7): on, a 1:1 call may carry
+  /// its media straight between the two devices where the workspace allows it; off keeps every
+  /// call on the call server and ends a direct path at once. Set it at start and whenever it
+  /// changes (also from settings sync); a running call follows. On until set. Cheap.
+  pub fn set_call_direct_connections(&self, is_allowed: bool) {
+    self.direct_connections.send_replace(is_allowed);
+  }
+
   /// Joins (or starts) the conversation's call; returns once connected. `is_muted`: the
   /// microphone stays muted from the first frame (a muted call moving into a meeting room), so
   /// nothing is sent before an unmute. `maybe_progress` hears when the join waits for this
@@ -2097,8 +2107,11 @@ impl TeamCraft {
     let maybe_prior_link = self.link.take_fresh(self.network.generation());
     calls::join(
       preparation,
-      is_muted,
-      maybe_prior_link,
+      calls::JoinChoices {
+        is_muted,
+        maybe_prior_link,
+        direct_connections: self.direct_connections.subscribe(),
+      },
       hub,
       self.engine_jobs()?.clone(),
       &self.network,
@@ -2424,6 +2437,7 @@ impl TeamCraft {
       command_failures,
       link: Arc::default(),
       is_foreground: std::sync::atomic::AtomicBool::new(true),
+      direct_connections: tokio::sync::watch::Sender::new(true),
     }))
   }
 

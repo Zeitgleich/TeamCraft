@@ -15,8 +15,8 @@ use teamcraft_media::rtp::{
   AudioLevel, PayloadType, RtpHeader, RtpPacket, RtpTimestamp, SequenceNumber, Ssrc,
 };
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, DaveTransitionMode, ErrorCode,
-  MediaCapabilities,
+  Base64Bytes, CallClientMessage, CallEvent, CallServerMessage, DaveTransitionMode, DirectPathMedia,
+  ErrorCode, MediaCapabilities,
 };
 use teamcraft_sfu::auth::DevTokenVerifier;
 use teamcraft_sfu::config::SfuConfig;
@@ -172,9 +172,11 @@ async fn the_voices_stop_only_while_both_report_a_direct_path() {
 
 impl Session {
   async fn report(&mut self, is_active: bool) {
-    write_message(&mut self.send, &CallClientMessage::DirectPath { is_active })
-      .await
-      .unwrap();
+    let report = CallClientMessage::DirectPath {
+      is_active,
+      media: DirectPathMedia::Audio,
+    };
+    write_message(&mut self.send, &report).await.unwrap();
   }
 }
 

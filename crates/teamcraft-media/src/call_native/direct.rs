@@ -16,11 +16,14 @@
 //! ports of the hard side's address from its direct path socket, and the first probe that arrives
 //! tells the hard side which socket to move its endpoint to and whom to dial.
 //!
-//! Only the audio takes the direct path in this step (the full voice and the screen's sound); the
-//! video keeps going through the SFU, which picks its layers per receiver. The audio keeps going to
-//! the SFU as well: its speaker selection and voice guard watch it, and the SFU forwards it again
-//! the moment either device reports its direct path down. Addresses are never logged.
+//! The audio (the full voice and the screen's sound) keeps going to the SFU as well: its speaker
+//! selection and voice guard watch it, and the SFU forwards it again the moment either device
+//! reports its direct path down. The video goes on one layer per track, the one the receiver takes
+//! (its `wants`) and the direct connection carries (`DirectVideoBudget`), through a send queue so it
+//! never holds the voice up; while both devices say their path carries the video, the SFU forwards
+//! none of it between them and the publisher sends it the SFU no more. Addresses are never logged.
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
@@ -30,7 +33,7 @@ use rand_core::RngCore;
 use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallPeerStanding, CallServerMessage, DIRECT_PROBE_TOKEN_BYTES, DeviceId,
-  DirectMediaPolicy, DirectNatKind, DirectOfferBody,
+  DirectMediaPolicy, DirectNatKind, DirectOfferBody, DirectPathMedia, MediaStreamId, VideoTrackKind,
 };
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -56,14 +59,17 @@ use super::{bind_wildcard, local_route_to, read_framed, with_trusted_roots, writ
 use crate::call_engine::{CallEngine, RelayedDirectOffer};
 use crate::direct_path::{
   BIRTHDAY_LINGER, BIRTHDAY_PROBE_INTERVAL, BIRTHDAY_PUNCHES, BIRTHDAY_SOCKETS, BIRTHDAY_TIMEOUT,
-  BirthdayBudget, BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DirectControl, DirectDatagram,
-  DirectPair, DirectPathInputs, DownReason, OfferInbox, OwnNat, PathChange, PathSelector, Pinger,
-  RelayArbiter, accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, dial_delay,
-  direct_copy, eligibility, is_birthday_probe, nat_kind, offer_epoch, open_offer, own_candidates,
+  BirthdayBudget, BirthdayRole, CERTIFICATE_HASH_LEN, DIAL_TIMEOUT, DIRECT_KEYFRAME_INTERVAL, DirectControl,
+  DirectDatagram, DirectPair, DirectPathInputs, DirectVideoBudget, DirectVideoTrack, DownReason, OfferInbox,
+  OwnNat, PathChange, PathReading, PathSelector, PathState, Pinger, RelayArbiter, WANTS_INTERVAL,
+  accepted_connection_wins, birthday_ports, birthday_probe, birthday_role, dial_delay, direct_copy,
+  direct_video_layers, eligibility, is_birthday_probe, nat_kind, offer_epoch, open_offer, own_candidates,
   read_direct, seal_offer,
 };
 #[cfg(feature = "port-mapping")]
 use crate::port_mapping::PortMapper;
+use crate::quic_send::QuicSender;
+use crate::send_queue::SendQueueConfig;
 use crate::sfu_address::{PinnedResolver, with_port};
 
 /// The direct connection's ALPN: only another TeamCraft direct path endpoint speaks it.
@@ -136,14 +142,38 @@ pub(super) struct DirectPath {
   maybe_reflecting: Option<JoinHandle<()>>,
   inputs_tx: mpsc::UnboundedSender<DirectInput>,
   inputs: mpsc::UnboundedReceiver<DirectInput>,
-  /// Where the own audio's direct copies go: shared with the sinks that send the media.
+  /// Where the own audio's direct copies and video go: shared with the sinks that send the media.
   sender: DirectSender,
+  /// The own video on the direct path (#127 part 4).
+  video: DirectVideo,
 }
 
-/// Sends the own audio's copies on the direct connection while it carries them.
+/// Sends the own audio's copies and video on the direct connection while it carries them.
 #[derive(Clone, Default)]
 pub(super) struct DirectSender {
-  maybe_connection: Arc<Mutex<Option<quinn::Connection>>>,
+  maybe_link: Arc<Mutex<Option<DirectLink>>>,
+}
+
+/// The direct connection as the media sinks send on it.
+#[derive(Clone)]
+struct DirectLink {
+  connection: quinn::Connection,
+  video: Arc<QuicSender>,
+}
+
+/// The video's side of the direct path: what the other device takes of the own tracks, the layer
+/// each goes on, and what this device takes of the other's.
+#[derive(Default)]
+struct DirectVideo {
+  budget: DirectVideoBudget,
+  /// The other device's tracks it takes, as its last `wants` said.
+  peer_wants: Vec<(MediaStreamId, u8)>,
+  /// The layer each own track goes on over the direct path.
+  layers: HashMap<MediaStreamId, u8>,
+  /// What this device last told the other one it takes, and when.
+  maybe_wants_sent: Option<(Vec<(MediaStreamId, u8)>, Instant)>,
+  /// When a keyframe of each own track was last made for the other device's ask.
+  keyframes_made_at: HashMap<MediaStreamId, Instant>,
 }
 
 /// Where the SFU's `reflect` goes: the session connection's SFU.
@@ -220,6 +250,8 @@ struct DirectConnection {
   connection: quinn::Connection,
   is_accepted: bool,
   reading: JoinHandle<()>,
+  /// The own video's queue on it.
+  video: Arc<QuicSender>,
 }
 
 /// Accepts exactly one certificate, by its SHA-256 hash: the one the other device's offer named
@@ -272,6 +304,7 @@ impl DirectPath {
       inputs_tx,
       inputs,
       sender: DirectSender::default(),
+      video: DirectVideo::default(),
     }
   }
 
@@ -374,6 +407,7 @@ impl DirectPath {
       }
     }
     self.maybe_dial(now);
+    self.forward_keyframe_asks(engine, now);
   }
 
   /// Handles what happened on the direct path; returns a datagram of the other device's media for
@@ -400,7 +434,7 @@ impl DirectPath {
         if !self.is_current(connection_id) {
           return None;
         }
-        self.on_datagram(bytes, read_at, now)
+        self.on_datagram(bytes, read_at, engine, now)
       },
       DirectInput::Closed { connection_id } => {
         if self.is_current(connection_id) {
@@ -454,7 +488,7 @@ impl DirectPath {
     if self.maybe_connection.is_some() {
       let due = self.pinger.poll(now);
       if let Some(ping) = due.maybe_send {
-        self.send_control(ping);
+        self.send_control(&ping);
       }
       for _ in 0..due.lost {
         let change = self.selector.on_ping_lost(now);
@@ -474,6 +508,8 @@ impl DirectPath {
     self.maybe_dial(now);
     self.maybe_birthday(now);
     self.publish_sender(now);
+    self.read_path(now);
+    self.follow_video(engine, now);
   }
 
   /// The network changed: the direct path is gone with it; a fresh socket, a new reflection and a
@@ -720,10 +756,19 @@ impl DirectPath {
     self.birthday.on_connected();
     info!(call_id = %pair.call_id, is_accepted, "direct connection up: proving it");
     let reading = tokio::spawn(read_direct_datagrams(connection.clone(), self.inputs_tx.clone()));
+    // One layer per track: a keyframe makes what waits of the track obsolete.
+    let video = Arc::new(QuicSender::spawn_direct(
+      connection.clone(),
+      SendQueueConfig::downlink(),
+    ));
+    // A new connection is measured afresh; the layers the engine has stay until chosen again.
+    self.video.budget = DirectVideoBudget::default();
+    self.video.maybe_wants_sent = None;
     self.maybe_connection = Some(DirectConnection {
       connection,
       is_accepted,
       reading,
+      video,
     });
     self.selector.on_connected(now);
     self.pinger.start(now);
@@ -742,17 +787,47 @@ impl DirectPath {
         .is_some_and(|dialing| !dialing.is_finished())
   }
 
-  fn on_datagram(&mut self, bytes: Bytes, read_at: Instant, now: Instant) -> Option<(Bytes, Instant)> {
+  fn on_datagram(
+    &mut self,
+    bytes: Bytes,
+    read_at: Instant,
+    engine: &mut CallEngine,
+    now: Instant,
+  ) -> Option<(Bytes, Instant)> {
     match read_direct(&bytes)? {
       DirectDatagram::Control(DirectControl::Ping(id)) => {
         self.selector.on_heard(now);
-        self.send_control(DirectControl::Pong(id));
+        self.send_control(&DirectControl::Pong(id));
         None
       },
       DirectDatagram::Control(DirectControl::Pong(id)) => {
         if self.pinger.on_pong(id, now) {
           self.selector.on_heard(now);
         }
+        None
+      },
+      DirectDatagram::Control(DirectControl::Wants(wants)) => {
+        self.selector.on_heard(now);
+        if self.video.peer_wants != wants {
+          self.video.peer_wants = wants;
+          self.follow_video(engine, now);
+        }
+        None
+      },
+      DirectDatagram::Control(DirectControl::Keyframe(stream_id)) => {
+        self.selector.on_heard(now);
+        self.make_keyframe(stream_id, engine, now);
+        None
+      },
+      DirectDatagram::Control(DirectControl::Nack {
+        stream_id,
+        layer,
+        sequence_numbers,
+      }) => {
+        self.selector.on_heard(now);
+        // Only the layer the direct path carries, and within the direct budget's share for repair.
+        let budget_bps = self.video.budget.budget_bps();
+        engine.resend_direct_video(stream_id, layer, &sequence_numbers, budget_bps, now);
         None
       },
       DirectDatagram::Media(media) => {
@@ -770,12 +845,13 @@ impl DirectPath {
     let call_id = self.maybe_pair.map(|pair| pair.call_id);
     match change {
       PathChange::Up => {
-        info!(?call_id, rtt_ms = ?self.pinger.rtt().map(|rtt| rtt.as_millis()), "direct path carries the audio");
-        engine.report_direct_path(true);
+        info!(?call_id, rtt_ms = ?self.pinger.rtt().map(|rtt| rtt.as_millis()), "direct path carries the media");
+        engine.report_direct_path(Some(DirectPathMedia::AudioAndVideo));
       },
       PathChange::Down(reason) => {
-        info!(?call_id, ?reason, "the audio goes through the SFU again");
-        engine.report_direct_path(false);
+        info!(?call_id, ?reason, "the media goes through the SFU again");
+        engine.report_direct_path(None);
+        self.stop_video(engine);
         self.arbiter.clear();
       },
     }
@@ -783,20 +859,145 @@ impl DirectPath {
 
   /// The sinks send direct copies exactly while the selector says so.
   fn publish_sender(&self, now: Instant) {
-    let maybe_connection = self
+    let maybe_link = self
       .maybe_connection
       .as_ref()
       .filter(|_| self.selector.sends_on_direct(now))
-      .map(|direct| direct.connection.clone());
-    *lock(&self.sender.maybe_connection) = maybe_connection;
+      .map(|direct| DirectLink {
+        connection: direct.connection.clone(),
+        video: Arc::clone(&direct.video),
+      });
+    *lock(&self.sender.maybe_link) = maybe_link;
   }
 
-  fn send_control(&self, control: DirectControl) {
+  fn send_control(&self, control: &DirectControl) {
     if let Some(direct) = &self.maybe_connection {
-      // A control datagram that doesn't fit or finds no room is a lost ping, which is counted.
-      let _ = direct
-        .connection
-        .send_datagram(Bytes::copy_from_slice(&control.to_bytes()));
+      // A control datagram that doesn't fit or finds no room is lost like any other: a ping is
+      // counted, `wants` go again, a keyframe is asked for again.
+      let _ = direct.connection.send_datagram(Bytes::from(control.to_bytes()));
+    }
+  }
+
+  /// Feeds the direct video budget what the connection did since the last look.
+  fn read_path(&mut self, now: Instant) {
+    let Some(direct) = self.maybe_connection.as_ref() else {
+      return;
+    };
+    let stats = direct.connection.stats();
+    self.video.budget.on_reading(PathReading {
+      at: now,
+      sent_packets: stats.path.sent_packets,
+      lost_packets: stats.path.lost_packets,
+      sent_bytes: stats.udp_tx.bytes,
+      rtt: stats.path.rtt,
+      queue_drops: direct.video.dropped_packets(),
+    });
+  }
+
+  /// The keyframes and missing packets this device asked for of tracks the direct path brings go
+  /// to the other device too: the SFU never had them. After every step of the call task (nothing to
+  /// do but take empty lists, mostly).
+  fn forward_keyframe_asks(&mut self, engine: &mut CallEngine, now: Instant) {
+    for stream_id in engine.take_direct_keyframe_asks() {
+      if self.maybe_connection.is_some() && self.arbiter.is_direct(stream_id, now) {
+        self.send_control(&DirectControl::Keyframe(stream_id));
+      }
+    }
+    for nack in engine.take_direct_nacks() {
+      if self.maybe_connection.is_some() && self.arbiter.is_direct(nack.stream_id, now) {
+        self.send_control(&DirectControl::Nack {
+          stream_id: nack.stream_id,
+          layer: nack.layer,
+          sequence_numbers: nack.sequence_numbers,
+        });
+      }
+    }
+  }
+
+  /// The video while the direct path carries the media: which own track goes on which layer, and
+  /// what this device takes of the other's (told again now and then). On the path's timer, every
+  /// [`crate::direct_path::PING_INTERVAL`] while connected, and when the other device's `wants`
+  /// change.
+  fn follow_video(&mut self, engine: &mut CallEngine, now: Instant) {
+    let Some(pair) = self.maybe_pair else {
+      return;
+    };
+    if self.maybe_connection.is_none() || self.selector.state() != PathState::Direct {
+      self.stop_video(engine);
+      return;
+    }
+    let wants = engine.video_wants_of(pair.peer);
+    let is_due = self
+      .video
+      .maybe_wants_sent
+      .as_ref()
+      .is_none_or(|(sent, at)| *sent != wants || now.saturating_duration_since(*at) >= WANTS_INTERVAL);
+    if is_due {
+      self.send_control(&DirectControl::Wants(wants.clone()));
+      self.video.maybe_wants_sent = Some((wants, now));
+    }
+    self.choose_layers(engine);
+  }
+
+  /// Puts each own track the other device takes on the best layer the budget fits.
+  fn choose_layers(&mut self, engine: &mut CallEngine) {
+    let tracks: Vec<DirectVideoTrack> = engine
+      .own_video_tracks()
+      .into_iter()
+      .map(|track| DirectVideoTrack {
+        stream_id: track.stream_id,
+        is_screen: track.kind == VideoTrackKind::Screen,
+        layers: track.layers.clone(),
+        maybe_want: self
+          .video
+          .peer_wants
+          .iter()
+          .find(|(stream_id, _)| *stream_id == track.stream_id)
+          .map(|(_, max_layer)| *max_layer),
+        maybe_current: self.video.layers.get(&track.stream_id).copied(),
+      })
+      .collect();
+    let chosen = direct_video_layers(self.video.budget.budget_bps(), &tracks);
+    // Tracks that are gone go off the direct path too.
+    self
+      .video
+      .layers
+      .retain(|stream_id, _| chosen.iter().any(|(chosen_id, _)| chosen_id == stream_id));
+    for (stream_id, maybe_layer) in chosen {
+      if self.video.layers.get(&stream_id).copied() == maybe_layer {
+        continue;
+      }
+      debug!(stream_id = stream_id.0, layer = ?maybe_layer, budget_bps = self.video.budget.budget_bps(), "direct video layer");
+      match maybe_layer {
+        Some(layer) => self.video.layers.insert(stream_id, layer),
+        None => self.video.layers.remove(&stream_id),
+      };
+      engine.set_direct_video_layer(stream_id, maybe_layer);
+    }
+  }
+
+  /// No own video on the direct path any more: the SFU's layers alone are encoded again.
+  fn stop_video(&mut self, engine: &mut CallEngine) {
+    for (stream_id, _) in self.video.layers.drain() {
+      engine.set_direct_video_layer(stream_id, None);
+    }
+    self.video.maybe_wants_sent = None;
+  }
+
+  /// The other device asked for a keyframe of an own track: made on the direct layer, at most every
+  /// [`DIRECT_KEYFRAME_INTERVAL`] per track.
+  fn make_keyframe(&mut self, stream_id: MediaStreamId, engine: &mut CallEngine, now: Instant) {
+    if !self.video.layers.contains_key(&stream_id) {
+      return;
+    }
+    let is_due = self
+      .video
+      .keyframes_made_at
+      .get(&stream_id)
+      .is_none_or(|at| now.saturating_duration_since(*at) >= DIRECT_KEYFRAME_INTERVAL);
+    if is_due {
+      self.video.keyframes_made_at.insert(stream_id, now);
+      engine.request_direct_keyframe(stream_id);
     }
   }
 
@@ -987,7 +1188,8 @@ impl DirectPath {
       direct.connection.close(DIRECT_CLOSE.into(), b"closed");
     }
     self.pinger.stop();
-    *lock(&self.sender.maybe_connection) = None;
+    *lock(&self.sender.maybe_link) = None;
+    self.video.peer_wants.clear();
   }
 
   fn close_socket(&mut self) {
@@ -1010,7 +1212,8 @@ impl DirectPath {
     }
     let change = self.selector.on_closed(now, DownReason::NotAllowed);
     self.apply_change(change, engine);
-    engine.report_direct_path(false);
+    engine.report_direct_path(None);
+    self.stop_video(engine);
     self.close_socket();
     self.maybe_pair = None;
     self.maybe_key = None;
@@ -1034,13 +1237,27 @@ impl Drop for DirectPath {
 impl DirectSender {
   /// Sends the direct copy of an own datagram, if it is audio and the direct path carries it now.
   pub(super) fn send(&self, datagram: &[u8]) {
-    let maybe_connection = lock(&self.maybe_connection).clone();
-    let Some(connection) = maybe_connection else {
+    let Some(copy) = direct_copy(datagram) else {
       return;
     };
-    if let Some(copy) = direct_copy(datagram) {
-      // Unreliable by design, as on the SFU path; the SFU's copy went out as well.
+    let maybe_connection = lock(&self.maybe_link)
+      .as_ref()
+      .map(|link| link.connection.clone());
+    if let Some(connection) = maybe_connection {
+      // Unreliable by design, as on the SFU path; the SFU's copy went out as well. Past the video's
+      // queue: it waits behind at most the little of the video QUIC holds.
       let _ = connection.send_datagram(Bytes::from(copy));
+    }
+  }
+
+  /// Sends a datagram of the own video's direct layer (`EngineOutput::DirectDatagram`), through
+  /// the video's queue, while the direct path carries the media.
+  pub(super) fn send_video(&self, datagram: &[u8]) {
+    let maybe_video = lock(&self.maybe_link)
+      .as_ref()
+      .map(|link| Arc::clone(&link.video));
+    if let Some(video) = maybe_video {
+      video.send_datagram(datagram);
     }
   }
 }

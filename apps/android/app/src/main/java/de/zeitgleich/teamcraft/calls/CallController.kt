@@ -180,7 +180,17 @@ class CallController(
     registerWithTelecom()
     core.core().setCallListener(Listener())
     moves.start()
+    followDirectSetting()
     isStarted = true
+  }
+
+  /** "Connect directly in calls" changed: a running call follows at once (#127). */
+  private fun followDirectSetting() {
+    scope.launch {
+      CallSoundPrefs.directAllowedChanges.collect { maybeAllowed ->
+        if (maybeAllowed != null) core.core().setCallDirectConnections(maybeAllowed)
+      }
+    }
   }
 
   /**
@@ -705,10 +715,13 @@ class CallController(
     val maybeAnswer = maybeAnswering?.takeIf { it.conversationId == conversationId }
     maybeAnswering = null
     val pending = scope.async {
+      val handle = core.core()
+      // Read at the join; a change during the call reaches it through [followDirectSetting].
+      handle.setCallDirectConnections(CallSoundPrefs.prefs(context).isDirectAllowed)
       if (maybeAnswer != null) {
-        core.core().answerCall(conversationId, maybeAnswer.maybeCallId, isMuted, progress)
+        handle.answerCall(conversationId, maybeAnswer.maybeCallId, isMuted, progress)
       } else {
-        core.core().joinCall(conversationId, isMuted, progress)
+        handle.joinCall(conversationId, isMuted, progress)
       }
     }
     maybePendingJoin = pending

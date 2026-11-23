@@ -1540,7 +1540,16 @@ final class AppModel {
   func joinCall(
     conversationId: String, isMuted: Bool = false, progress: JoinProgress? = nil
   ) async throws -> CallSession {
-    try await core().joinCall(conversationId: conversationId, isMuted: isMuted, maybeProgress: progress)
+    let core = try await core()
+    // Read at the join; a change during the call reaches it through `followCallDirectSetting`.
+    core.setCallDirectConnections(isAllowed: CallDirectSetting.isAllowed)
+    return try await core.joinCall(conversationId: conversationId, isMuted: isMuted, maybeProgress: progress)
+  }
+
+  /// "Connect directly in calls" changed (here or from the account): a running call follows (#127).
+  func followCallDirectSetting() async {
+    guard let core = try? await core() else { return }
+    core.setCallDirectConnections(isAllowed: CallDirectSetting.isAllowed)
   }
 
   /// Answers a ring: joins only while the call that rang (`maybeCallId`, when the ring named it)
@@ -1548,7 +1557,9 @@ final class AppModel {
   func answerCall(
     conversationId: String, maybeCallId: String?, isMuted: Bool = false, progress: JoinProgress? = nil
   ) async throws -> CallSession {
-    try await core().answerCall(
+    let core = try await core()
+    core.setCallDirectConnections(isAllowed: CallDirectSetting.isAllowed)
+    return try await core.answerCall(
       conversationId: conversationId, maybeCallId: maybeCallId, isMuted: isMuted, maybeProgress: progress)
   }
 

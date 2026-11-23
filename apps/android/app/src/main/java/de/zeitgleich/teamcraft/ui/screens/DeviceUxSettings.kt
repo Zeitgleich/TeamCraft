@@ -124,6 +124,26 @@ fun CallStatusSoundsSetting(shapes: ListItemShapes) {
 }
 
 /**
+ * "Connect directly in calls" (#127): a 1:1 call may send its media straight to the other device,
+ * which then sees this device's IP addresses. A running call follows a change at once.
+ */
+@Composable
+fun CallDirectConnectionsSetting(shapes: ListItemShapes) {
+  val context = LocalContext.current
+  val prefs = remember { CallSoundPrefs.prefs(context) }
+  var isOn by remember { mutableStateOf(prefs.isDirectAllowed) }
+  SettingsSwitchRow(
+    shapes,
+    stringResource(R.string.call_direct_connections),
+    isOn,
+    maybeSummary = stringResource(R.string.call_direct_connections_hint),
+  ) {
+    isOn = it
+    prefs.setDirectAllowed(it)
+  }
+}
+
+/**
  * When the image viewer fetches a picture's original by itself (#240): always, on Wi-Fi only, or
  * never ("Load original" then). The preview shows at once either way.
  */

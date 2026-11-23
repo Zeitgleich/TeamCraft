@@ -1338,39 +1338,62 @@ the path never changes what is encrypted or how. QUIC migration keeps the direct
 a change of the device's address where the peer can still reach it; otherwise the device falls back,
 sends a new offer, and the pair upgrades again when the new path is up.
 
-**Video.** One layer on the direct path: the sender's own bandwidth estimate of the direct
-connection (QUIC's) picks the simulcast layer the receiver's view needs, as the SFU would.
-Keyframe requests, NACKs and the voice's FEC work end to end as on the SFU path.
+**Video.** One layer per track on the direct path, the one the receiver takes and the direct
+connection carries. The receiver tells the sender, on the direct connection, which of its tracks it
+takes up to which layer (`wants`: the same as its subscription at the SFU, sent on a change and
+again every second, since datagrams may be lost); the sender puts each wanted track on the best
+of those layers that fits its budget for the direct connection (a screen share first) and makes a
+keyframe on it whenever the layer changes. The budget falls at once when the connection shows
+congestion (loss above 5 % of what was sent, a round trip 150 ms over its shortest, or the video's
+send queue dropping what waited too long) and grows by 8 % a second while it keeps up, which also
+tries the next layer up; after a congestion it holds for 2 s, doubling with each one in a row (up to
+30 s). The direct layer goes through a send queue of its own (`QuicSender`, §6.2), so the voice on
+the same connection waits behind at most 50 ms of video in QUIC. A receiver's keyframe asks for a
+track the direct path brings go to the sender there too (`keyframe`, at most one every 500 ms per
+track at the sender), and so do its NACKs (`nack`): the sender keeps what it sent of the direct
+layer for the retransmission window, as for the SFU, and sends what is still kept once more
+within the same kind of budget, so a lost packet costs a round trip of the direct connection, not a
+keyframe. Control messages on the direct connection (pings, `wants`, `keyframe`, `nack`) are QUIC
+datagrams whose first byte has the datagram version 3, which no media datagram
+has; they come only from the other device of the call (the connection is pinned to its
+certificate) and are still checked for size and count.
 
 **Status.** The call's connection details show "Direct" or "Through the server" (no badge on the
 call screen itself: the path is an implementation detail, the privacy choice is the setting).
 
-**This step: audio only.** The direct path carries the voice and the shared screen's sound (layer 0,
+**What goes where.** The direct path carries the voice and the shared screen's sound (layer 0,
 without the transport sequence number, whose numbers would mix with the SFU's in the receiver's
-feedback); the video still goes through the SFU, which picks each receiver's layers (the video's
-layer choice on the direct path is a follow-up). The audio also keeps going to the SFU: its
-speaker selection and voice guard watch it, and it is forwarded again the moment either device
-reports its path down, without waiting for the sender. While both devices report the direct path
-up, the SFU forwards neither one's audio to the other (`direct_path`, `Forwarder::is_direct_pair`);
-a third device, a lost connection or a rejoin makes it forward again until the devices report anew.
-A receiver drops the SFU's copy of a voice while the direct path brought that voice in the last
-100 ms (the SFU renumbers voices per receiver, so the copies can't be told apart by number).
-Liveness on the direct connection: pings and pongs as QUIC datagrams whose first byte has the
-datagram version 3, which no media datagram has.
+feedback) and the video's direct layers (made without a transport sequence number, so the SFU's
+uplink estimate never counts them). The audio also keeps going to the SFU: its speaker selection
+and voice guard watch it, and it is forwarded again the moment either device reports its path
+down, without waiting for the sender. While both devices report the direct path up, the SFU
+forwards neither one's audio to the other (`direct_path`, `Forwarder::is_direct_pair`); while both
+report that it carries the video as well (`media: audio_and_video`), it forwards none of their video
+to each other either, leaves the other device out of each publisher's `layers_needed` (so a track
+only the other device watched isn't sent to the SFU at all) and out of its downlink allocation.
+When either says otherwise, the SFU switches the two back to their layers at keyframes it asks
+for. A third device, a lost connection or a rejoin makes it forward again until the devices report
+anew. A receiver drops the SFU's copy of a voice while the direct path brought that voice in the
+last 100 ms (the SFU renumbers voices per receiver, so the copies can't be told apart by number),
+and of a video track while the direct path brought it in the last 2 s (the copies may be different
+layers, which mustn't mix in one decoder).
 
 **State of the implementation.** In place: the policy and the user setting, the encrypted offer
 (`teamcraft_crypto::direct_path`, the exporter in the vendored `davey`), the wire messages, the
-SFU's relay with its limits, `reflect` and the `direct_path` rule, the client's decision and
-path-switching logic (`teamcraft_media::direct_path`, sans I/O), and the native call engine's direct
-path (`teamcraft_media::call_native::direct`: the socket, the dual-role QUIC endpoint with mutually
-pinned certificates, the reflection over the same endpoint, offers, dialing rounds, pings, the
-switch of the audio), port mapping on the desktop (PCP, NAT-PMP, UPnP-IGD), the SFU's second
-reflection port, hard NAT detection and birthday probing. The desktop app passes the verified policy, the user's setting and the
-standing of the call's devices (`teamcraft_core::workspace::call_peer_standing`); the connection
-details ("Stats for nerds") show the audio's path. Measurements: docs/performance.md, "Direct
+SFU's relay with its limits, `reflect` and the `direct_path` rule for audio and video, the client's
+decision, path-switching, layer and budget logic (`teamcraft_media::direct_path`, sans I/O), and the
+native call engine's direct path (`teamcraft_media::call_native::direct`: the socket, the dual-role
+QUIC endpoint with mutually pinned certificates, the reflection over the same endpoint, offers,
+dialing rounds, pings, the switch of the audio, the video's layers and queue), port mapping (PCP,
+NAT-PMP, UPnP-IGD; desktop, Android and iOS, where UPnP's multicast search needs an entitlement the
+app doesn't have, so PCP and NAT-PMP ask), the SFU's second reflection port, hard NAT detection and
+birthday probing. The desktop, Android and iOS apps pass the verified policy, the user's setting
+and the standing of the call's devices (`teamcraft_core::workspace::call_peer_standing`); the
+phones have the setting in Settings → Chats, and iOS declares its local network use. The connection
+details ("Stats for nerds") show the media's path. Measurements: docs/performance.md, "Direct
 media" and "Direct media through NATs" (the success rate per NAT type). Still to come (issue
-#127's follow-ups): the Android and iOS engines' inputs and setting switch (with port mapping
-there), the video on the direct path, and PCP firewall pinholes for IPv6.
+#127's follow-ups): PCP firewall pinholes for IPv6, keeping the direct path across an SFU
+reconnect.
 
 ## 7. Clients
 

@@ -30,12 +30,13 @@ pub const KEY_CHANNEL_MENTIONS_NOTIFY: &str = "notifications.channel_mentions_no
 pub const KEY_KEYWORDS: &str = "notifications.keywords";
 pub const KEY_CONFIRM_CHANNEL_OVER: &str = "notifications.confirm_channel_over";
 pub const KEY_CALL_STATUS_SOUNDS: &str = "calls.status_sounds";
+pub const KEY_CALL_DIRECT_CONNECTIONS: &str = "calls.direct_connections";
 pub const KEY_COLOR_THEME: &str = "display.color_theme";
 pub const KEY_FONT: &str = "display.font";
 pub const KEY_FAVORITE_ORDER: &str = "favorite_order";
 
 /// Every account key the mobile apps read and write, in the order of [`MobileSettings`].
-pub const MOBILE_KEYS: [&str; 13] = [
+pub const MOBILE_KEYS: [&str; 14] = [
   KEY_LIST_LAYOUT,
   KEY_LIST_GROUPING,
   KEY_FAVORITES_SORT,
@@ -46,6 +47,7 @@ pub const MOBILE_KEYS: [&str; 13] = [
   KEY_KEYWORDS,
   KEY_CONFIRM_CHANNEL_OVER,
   KEY_CALL_STATUS_SOUNDS,
+  KEY_CALL_DIRECT_CONNECTIONS,
   KEY_COLOR_THEME,
   KEY_FONT,
   KEY_FAVORITE_ORDER,
@@ -69,6 +71,9 @@ pub struct MobileSettings {
   /// Ask before `@channel` in conversations with more members than this; 0 never asks.
   pub confirm_channel_over: u32,
   pub call_status_sounds: CallStatusSounds,
+  /// "Connect directly in calls" (#127): a 1:1 call may carry its media straight between the two
+  /// devices where the workspace allows it.
+  pub call_direct_connections: bool,
   /// The colours of the chrome and accent (#202); light or dark stays the device's.
   pub color_theme: ColorTheme,
   /// The interface font (#1494).
@@ -152,6 +157,7 @@ impl Default for MobileSettings {
       keywords: Vec::new(),
       confirm_channel_over: 10,
       call_status_sounds: CallStatusSounds::All,
+      call_direct_connections: true,
       color_theme: ColorTheme::Brand,
       font: UiFont::System,
       favorite_order: Vec::new(),
@@ -227,6 +233,7 @@ impl SyncedValues for MobileSettings {
       KEY_KEYWORDS => json!(self.keywords),
       KEY_CONFIRM_CHANNEL_OVER => json!(self.confirm_channel_over),
       KEY_CALL_STATUS_SOUNDS => serde_json::to_value(self.call_status_sounds).ok()?,
+      KEY_CALL_DIRECT_CONNECTIONS => json!(self.call_direct_connections),
       KEY_COLOR_THEME => serde_json::to_value(&self.color_theme).ok()?,
       KEY_FONT => serde_json::to_value(&self.font).ok()?,
       KEY_FAVORITE_ORDER => serde_json::to_value(&self.favorite_order).ok()?,
@@ -252,6 +259,7 @@ impl SyncedValues for MobileSettings {
       KEY_CONFIRM_CHANNEL_OVER => assign(&mut self.confirm_channel_over, value),
       // "unknown" is the catch-all's own name, never a value a client writes.
       KEY_CALL_STATUS_SOUNDS => value != &json!("unknown") && assign(&mut self.call_status_sounds, value),
+      KEY_CALL_DIRECT_CONNECTIONS => assign(&mut self.call_direct_connections, value),
       // A newer client's theme keeps the one this device shows.
       KEY_COLOR_THEME => {
         let is_known = value
@@ -313,6 +321,7 @@ mod tests {
         keywords: vec!["release".into()],
         confirm_channel_over: 25,
         call_status_sounds: CallStatusSounds::OwnOnly,
+        call_direct_connections: false,
         color_theme: "preset:pine".parse().unwrap(),
         font: UiFont::Lexend,
         favorite_order: vec![conversation(7), conversation(3)],
@@ -326,6 +335,7 @@ mod tests {
       assert_eq!(read(KEY_KEYWORDS), json!(["release"]));
       assert_eq!(read(KEY_CONFIRM_CHANNEL_OVER), json!(25));
       assert_eq!(read(KEY_CALL_STATUS_SOUNDS), json!("own_only"));
+      assert_eq!(read(KEY_CALL_DIRECT_CONNECTIONS), json!(false));
       assert_eq!(read(KEY_COLOR_THEME), json!("preset:pine"));
       assert_eq!(read(KEY_FONT), json!("lexend"));
       assert_eq!(
@@ -340,6 +350,7 @@ mod tests {
         list_layout: ListLayout::List,
         keywords: vec!["a".into(), "b".into()],
         call_status_sounds: CallStatusSounds::Off,
+        call_direct_connections: false,
         color_theme: "custom:#1b2233,#2f66e0,#2eb67d,#d1453b".parse().unwrap(),
         font: UiFont::Inter,
         favorite_order: vec![conversation(2), conversation(1)],
@@ -361,6 +372,7 @@ mod tests {
       assert!(!local.adopt(KEY_CALL_STATUS_SOUNDS, &json!("unknown")));
       assert!(!local.adopt(KEY_LIST_LAYOUT, &json!(3)));
       assert!(!local.adopt(KEY_CONFIRM_CHANNEL_OVER, &json!(-1)));
+      assert!(!local.adopt(KEY_CALL_DIRECT_CONNECTIONS, &json!("yes")));
       assert!(!local.adopt("display.density", &json!("compact")));
       assert!(!local.adopt(KEY_COLOR_THEME, &json!("preset:from-the-future")));
       assert!(!local.adopt(KEY_COLOR_THEME, &json!(1)));
