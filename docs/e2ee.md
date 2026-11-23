@@ -7273,8 +7273,8 @@ relays the same encrypted frames on the SFU path.
 or goes back to the SFU path); see that a direct path is in use. It can't make a device offer a
 direct path (each device decides from the signed policy and its user's setting), read the addresses
 in an offer, or keep a device's media from the SFU path: the SFU stops forwarding a device's media
-only while both devices report their direct path up, and a device that loses it reports so and is
-served again at once.
+only while both devices report their direct path up (its video only while both report that the
+path carries the video too), and a device that loses it reports so and is served again at once.
 
 **What a hostile peer can do.** Learn the addresses above, which is what the policy and the setting
 consent to. Put somebody else's address into its offer: the device then sends QUIC handshakes (at
@@ -7293,6 +7293,15 @@ another address (it is not a member, but it relays everything anyway): a hostile
 then direct the same bounded traffic elsewhere, which it can do more cheaply itself. A probe carries no
 key: its token (8 random bytes per socket, sealed in the offer) only tells the hard side that a
 probe is this call's, and the handshake that follows is pinned like every direct connection.
+
+The video's control messages come from the peer too (ARCHITECTURE.md §6.7, "Video"): `wants` names
+at most 8 tracks, each at most once, and the sender takes only its own tracks and layers it
+publishes, so a peer can ask for no more than it could watch through the SFU; `keyframe` makes at
+most one keyframe per track every 500 ms, so a peer can't keep the encoder making nothing else;
+`nack` names at most 256 packets of the layer the path carries, and what is sent again stays within
+a budget of the direct connection's rate, so a peer gets no more than it was sent once more.
+A malformed control message is dropped whole. Both are as visible to the peer as its subscription
+and keyframe requests on the SFU path, and carry no media.
 
 **What a hostile router can do.** Port mapping (PCP, NAT-PMP, UPnP-IGD) asks the default gateway,
 and anything on the local network can answer in its place. A device takes only the exact answer to

@@ -819,6 +819,17 @@ impl DirectPath {
         self.make_keyframe(stream_id, engine, now);
         None
       },
+      DirectDatagram::Control(DirectControl::Nack {
+        stream_id,
+        layer,
+        sequence_numbers,
+      }) => {
+        self.selector.on_heard(now);
+        // Only the layer the direct path carries, and within the direct budget's share for repair.
+        let budget_bps = self.video.budget.budget_bps();
+        engine.resend_direct_video(stream_id, layer, &sequence_numbers, budget_bps, now);
+        None
+      },
       DirectDatagram::Media(media) => {
         self.selector.on_heard(now);
         self.arbiter.on_direct(media, now);
@@ -883,13 +894,22 @@ impl DirectPath {
     });
   }
 
-  /// The keyframes this device asked for of tracks the direct path brings go to the other device
-  /// too: the SFU's ask would get one of the layer the SFU forwards. After every step of the call
-  /// task (nothing to do but take an empty list, mostly).
+  /// The keyframes and missing packets this device asked for of tracks the direct path brings go
+  /// to the other device too: the SFU never had them. After every step of the call task (nothing to
+  /// do but take empty lists, mostly).
   fn forward_keyframe_asks(&mut self, engine: &mut CallEngine, now: Instant) {
     for stream_id in engine.take_direct_keyframe_asks() {
       if self.maybe_connection.is_some() && self.arbiter.is_direct(stream_id, now) {
         self.send_control(&DirectControl::Keyframe(stream_id));
+      }
+    }
+    for nack in engine.take_direct_nacks() {
+      if self.maybe_connection.is_some() && self.arbiter.is_direct(nack.stream_id, now) {
+        self.send_control(&DirectControl::Nack {
+          stream_id: nack.stream_id,
+          layer: nack.layer,
+          sequence_numbers: nack.sequence_numbers,
+        });
       }
     }
   }

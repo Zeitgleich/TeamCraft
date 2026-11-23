@@ -23,7 +23,7 @@ use teamcraft_crypto::ids::DeviceId as BindingDeviceId;
 use teamcraft_proto::{
   Base64Bytes, CallId, CallPeerStanding, DIRECT_PROBE_TOKEN_BYTES, DeviceId, DirectCandidate,
   DirectCandidateKind, DirectMediaPolicy, DirectNatKind, DirectOfferBody, Id, MAX_DIRECT_CANDIDATES,
-  MAX_DIRECT_OFFER_BYTES, MediaStreamId, VideoLayerInfo,
+  MAX_DIRECT_OFFER_BYTES, MAX_NACK_SEQUENCE_NUMBERS, MediaStreamId, VideoLayerInfo,
 };
 use thiserror::Error;
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
@@ -98,6 +98,9 @@ const PING_TYPE: u8 = CONTROL_MARK | 1;
 const PONG_TYPE: u8 = CONTROL_MARK | 2;
 const WANTS_TYPE: u8 = CONTROL_MARK | 3;
 const KEYFRAME_TYPE: u8 = CONTROL_MARK | 4;
+const NACK_TYPE: u8 = CONTROL_MARK | 5;
+/// A [`DirectControl::Nack`] before its sequence numbers: type, stream, layer, count.
+const NACK_HEADER_LEN: usize = 8;
 const CONTROL_LEN: usize = 5;
 /// A track in a [`DirectControl::Wants`]: its stream ID and the highest layer taken.
 const WANT_LEN: usize = 5;
@@ -250,6 +253,13 @@ pub enum DirectControl {
   Wants(Vec<(MediaStreamId, u8)>),
   /// The receiver needs a keyframe of the track to decode it again.
   Keyframe(MediaStreamId),
+  /// Packets of a track's layer the receiver misses, by RTP sequence number: at most
+  /// [`MAX_NACK_SEQUENCE_NUMBERS`].
+  Nack {
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: Vec<u16>,
+  },
 }
 
 /// What arrived on the direct connection.
@@ -505,6 +515,7 @@ pub fn read_direct(datagram: &[u8]) -> Option<DirectDatagram<'_>> {
     PONG_TYPE => DirectControl::Pong(read_numbered(datagram)?),
     KEYFRAME_TYPE => DirectControl::Keyframe(MediaStreamId(read_numbered(datagram)?)),
     WANTS_TYPE => DirectControl::Wants(read_wants(datagram)?),
+    NACK_TYPE => read_nack(datagram)?,
     _ => return None,
   };
   Some(DirectDatagram::Control(control))
@@ -517,6 +528,27 @@ fn read_numbered(datagram: &[u8]) -> Option<u32> {
   }
   let bytes: [u8; 4] = datagram.get(1..CONTROL_LEN)?.try_into().ok()?;
   Some(u32::from_be_bytes(bytes))
+}
+
+/// A [`DirectControl::Nack`]: its count, at most [`MAX_NACK_SEQUENCE_NUMBERS`], matches its length.
+fn read_nack(datagram: &[u8]) -> Option<DirectControl> {
+  let id: [u8; 4] = datagram.get(1..5)?.try_into().ok()?;
+  let layer = *datagram.get(5)?;
+  let count_bytes: [u8; 2] = datagram.get(6..NACK_HEADER_LEN)?.try_into().ok()?;
+  let count = usize::from(u16::from_be_bytes(count_bytes));
+  if count == 0 || count > MAX_NACK_SEQUENCE_NUMBERS || datagram.len() != NACK_HEADER_LEN + count * 2 {
+    return None;
+  }
+  let sequence_numbers = datagram
+    .get(NACK_HEADER_LEN..)?
+    .chunks_exact(2)
+    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+    .collect();
+  Some(DirectControl::Nack {
+    stream_id: MediaStreamId(u32::from_be_bytes(id)),
+    layer,
+    sequence_numbers,
+  })
 }
 
 /// The tracks a [`DirectControl::Wants`] names: its count, at most [`MAX_DIRECT_WANTS`], matches
@@ -684,6 +716,23 @@ impl DirectControl {
       Self::Ping(id) => numbered(PING_TYPE, *id),
       Self::Pong(id) => numbered(PONG_TYPE, *id),
       Self::Keyframe(stream_id) => numbered(KEYFRAME_TYPE, stream_id.0),
+      Self::Nack {
+        stream_id,
+        layer,
+        sequence_numbers,
+      } => {
+        let numbers = &sequence_numbers[..sequence_numbers.len().min(MAX_NACK_SEQUENCE_NUMBERS)];
+        let mut bytes = Vec::with_capacity(NACK_HEADER_LEN + numbers.len() * 2);
+        bytes.push(NACK_TYPE);
+        bytes.extend_from_slice(&stream_id.0.to_be_bytes());
+        bytes.push(*layer);
+        // Invariant: at most MAX_NACK_SEQUENCE_NUMBERS, which fits 16 bits.
+        bytes.extend_from_slice(&u16::try_from(numbers.len()).unwrap_or(u16::MAX).to_be_bytes());
+        for number in numbers {
+          bytes.extend_from_slice(&number.to_be_bytes());
+        }
+        bytes
+      },
       Self::Wants(wants) => {
         let wants = &wants[..wants.len().min(MAX_DIRECT_WANTS)];
         let mut bytes = Vec::with_capacity(2 + wants.len() * WANT_LEN);
@@ -1448,6 +1497,11 @@ mod tests {
         DirectControl::Keyframe(MediaStreamId(12)),
         DirectControl::Wants(Vec::new()),
         DirectControl::Wants(vec![(MediaStreamId(12), 2), (MediaStreamId(u32::MAX), 0)]),
+        DirectControl::Nack {
+          stream_id: MediaStreamId(12),
+          layer: 1,
+          sequence_numbers: vec![0, 7, u16::MAX],
+        },
       ] {
         assert_eq!(
           read_direct(&control.to_bytes()),
@@ -1464,6 +1518,33 @@ mod tests {
 
     /// The other device names the tracks it takes; a datagram that lies about its count, names
     /// too many or one twice is dropped whole.
+    #[test]
+    fn malformed_nacks_are_refused() {
+      let nack = DirectControl::Nack {
+        stream_id: MediaStreamId(5),
+        layer: 0,
+        sequence_numbers: vec![9, 10],
+      }
+      .to_bytes();
+      assert_eq!(nack, vec![0xC5, 0, 0, 0, 5, 0, 0, 2, 0, 9, 0, 10]);
+      assert_eq!(read_direct(&nack[..11]), None, "truncated");
+      assert_eq!(read_direct(&[0xC5, 0, 0, 0, 5, 0, 0, 0]), None, "names none");
+      let mut too_many = vec![0xC5, 0, 0, 0, 5, 0, 1, 1];
+      too_many.extend(std::iter::repeat_n(0, 257 * 2));
+      assert_eq!(read_direct(&too_many), None, "too many");
+      let many = DirectControl::Nack {
+        stream_id: MediaStreamId(5),
+        layer: 0,
+        sequence_numbers: (0..1000).collect(),
+      };
+      let Some(DirectDatagram::Control(DirectControl::Nack { sequence_numbers, .. })) =
+        read_direct(&many.to_bytes())
+      else {
+        panic!("nack");
+      };
+      assert_eq!(sequence_numbers.len(), MAX_NACK_SEQUENCE_NUMBERS);
+    }
+
     #[test]
     fn malformed_wants_are_refused() {
       let one = DirectControl::Wants(vec![(MediaStreamId(5), 1)]).to_bytes();

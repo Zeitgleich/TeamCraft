@@ -1350,9 +1350,11 @@ tries the next layer up; after a congestion it holds for 2 s, doubling with each
 30 s). The direct layer goes through a send queue of its own (`QuicSender`, §6.2), so the voice on
 the same connection waits behind at most 50 ms of video in QUIC. A receiver's keyframe asks for a
 track the direct path brings go to the sender there too (`keyframe`, at most one every 500 ms per
-track at the sender); lost packets of the direct path aren't asked for again yet (NACK), a lost
-frame is repaired by the next keyframe. Control messages on the direct connection (pings, `wants`,
-`keyframe`) are QUIC datagrams whose first byte has the datagram version 3, which no media datagram
+track at the sender), and so do its NACKs (`nack`): the sender keeps what it sent of the direct
+layer for the retransmission window, as for the SFU, and sends what is still kept once more
+within the same kind of budget, so a lost packet costs a round trip of the direct connection, not a
+keyframe. Control messages on the direct connection (pings, `wants`, `keyframe`, `nack`) are QUIC
+datagrams whose first byte has the datagram version 3, which no media datagram
 has; they come only from the other device of the call (the connection is pinned to its
 certificate) and are still checked for size and count.
 
@@ -1390,8 +1392,8 @@ and the standing of the call's devices (`teamcraft_core::workspace::call_peer_st
 phones have the setting in Settings → Chats, and iOS declares its local network use. The connection
 details ("Stats for nerds") show the media's path. Measurements: docs/performance.md, "Direct
 media" and "Direct media through NATs" (the success rate per NAT type). Still to come (issue
-#127's follow-ups): NACKs on the direct path, PCP firewall pinholes for IPv6, keeping the direct
-path across an SFU reconnect.
+#127's follow-ups): PCP firewall pinholes for IPv6, keeping the direct path across an SFU
+reconnect.
 
 ## 7. Clients
 

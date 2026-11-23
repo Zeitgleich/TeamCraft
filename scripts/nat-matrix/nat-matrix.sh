@@ -10,6 +10,9 @@
 #   cargo test -p teamcraft-sfu --test suite --no-run       # prints the suite binary
 #   scripts/nat-matrix/nat-matrix.sh <suite binary> <out dir> [runs] [seconds]
 #
+# MEASURE_VIDEO=1 adds a camera from client A that client B watches (docs/performance.md, "Video on
+# the direct path"); MEASURE_DIRECT=0 keeps the calls on the SFU for comparison.
+#
 # NAT_MATRIX_COMBOS picks combinations ("a:b" profiles, space separated). Profiles:
 #   full_cone           endpoint-independent mapping and filtering
 #   address_restricted  endpoint-independent mapping, address-dependent filtering
@@ -250,7 +253,8 @@ run_one() {
         >/dev/null 2>&1 &
     done
   fi
-  local common=(env MEASURE_DIR="$RUN_DIR" MEASURE_SFU_HOST="$SFU_IP" MEASURE_SECS="$SECS" MEASURE_DIRECT=1
+  local common=(env MEASURE_DIR="$RUN_DIR" MEASURE_SFU_HOST="$SFU_IP" MEASURE_SECS="$SECS"
+    MEASURE_DIRECT="${MEASURE_DIRECT:-1}" MEASURE_VIDEO="${MEASURE_VIDEO:-0}"
     RUST_LOG="${RUST_LOG:-info,teamcraft_media::call_native::direct=debug}")
   ns inet "${common[@]}" MEASURE_ROLE=sfu MEASURE_REFLECT=1 MEASURE_FALLBACK=1 MEASURE_SFU_EXTRA_SECS=3 \
     "$BIN" --ignored --exact direct_measure::run --nocapture >"$RUN_DIR/sfu.out" 2>&1 &

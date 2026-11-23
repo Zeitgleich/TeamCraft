@@ -1056,12 +1056,37 @@ bytes (`teamcraft_sfu_forwarded_bytes_total`).
   come to about 2 s where the NAT opens on the first packet.
 - The SFU forwards none of the pair's audio while both report the direct path; it still receives
   it (its speaker selection and the voice guard watch it) and would forward it at once.
-- Video isn't part of this step (it stays on the SFU), so the SFU's saving in a call with cameras
-  is the audio's share only.
+- Video: below, "Video on the direct path".
 - Success per NAT type: below, "Direct media through NATs". Not measured yet: real mobile
   networks.
 - Since the NAT work (#127, part 3) a dialing round starts over when the other device's offer
   brings its reflexive address, so the voice goes direct about 2 s after the join instead of 9 s.
+
+### Video on the direct path (issue #127)
+
+The NAT matrix's harness (`scripts/nat-matrix/nat-matrix.sh`, `MEASURE_VIDEO=1`) with both clients
+behind port-restricted routers: client A sends a 720p test pattern camera in three simulcast layers
+(software H.264), client B watches it at full size. Links as above (SFU 25 ± 3 ms, peer 4 ± 1 ms,
+0.1 % loss), at a rate on a random walk around 10 Mbit/s (5–20) and around 2 Mbit/s (1–4).
+`MEASURE_DIRECT=0` keeps the same calls on the SFU. Four calls of 40 s each, seconds 15–35. The
+clients are debug builds: the encoder makes about 17.5 pictures a second, which caps both paths.
+
+| Link       | Path            | Round trip | Pictures decoded/s (lowest second) | SFU forwards | Voice frames/s |
+|------------|-----------------|------------|------------------------------------|--------------|----------------|
+| ~10 Mbit/s | direct          | 16 ms      | 17.3 (16)                          | 0            | 50             |
+| ~10 Mbit/s | through the SFU | 51 ms      | 17.4 (16)                          | 335 kbit/s   | 50             |
+| ~2 Mbit/s  | direct          | 16 ms      | 17.4 (16)                          | 0            | 50             |
+| ~2 Mbit/s  | through the SFU | 51 ms      | 17.6 (17)                          | 336 kbit/s   | 49             |
+
+- The camera goes direct with the voice, about 2 s after the join; the SFU forwards nothing of the
+  pair, video or voice, and the publisher sends it no video at all (nobody else needs a layer).
+- The direct path picks the layer the viewer takes: 1280 wide on both rates in most calls; one call
+  on the 2 Mbit/s walk stepped down to 640 and 320 for a while when the rate swung low, and the
+  budget's probe brought it back.
+- Without NACKs on the direct path (the first version), every lost packet (0.1 %) froze the
+  picture until the next keyframe: seconds with 0 pictures in two of three calls. Asking the sender
+  for the missing packets over the direct connection removed them.
+- Not measured: hardware encoders on the phones, real mobile networks.
 
 ### Direct media through NATs (issue #127)
 

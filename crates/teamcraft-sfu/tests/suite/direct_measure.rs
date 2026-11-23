@@ -11,6 +11,8 @@
 //! - `MEASURE_SECS`: how long the clients stay in the call
 //! - `MEASURE_REFLECT`: `1` gives the SFU its second port that only reflects (hard NATs show)
 //! - `MEASURE_FALLBACK`: `1` gives the SFU its WebSocket fallback, for networks that block UDP
+//! - `MEASURE_VIDEO`: `1` has client 1 send a 720p test pattern camera in three layers, which client 2
+//!   watches; client 2 logs the pictures it decoded each second and their width
 //!
 //! The NAT matrix (docs/performance.md, "Direct media through NATs") runs it in namespaces behind
 //! routers of each NAT type: `scripts/nat-matrix.sh`.
@@ -25,7 +27,7 @@ use std::{
   fmt::Write as _,
   net::{Ipv6Addr, SocketAddr},
   path::PathBuf,
-  sync::Arc,
+  sync::{Arc, Mutex},
   time::{Duration, Instant},
 };
 
@@ -41,8 +43,13 @@ use teamcraft_media::{
   call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator},
   call_engine::{CallEngineConfig, CallEngineEvent},
   call_native::{DirectPathConfig, NativeCall, NativeCallConfig},
+  video::{VideoResolution, simulcast_layers},
+  video_capture::{CaptureFormat, TestPatternCapture},
+  video_pipeline::{VideoSendConfig, software_encoders},
 };
-use teamcraft_proto::{CallPeerStanding, DeviceId, DirectMediaPolicy, MediaCapabilities};
+use teamcraft_proto::{
+  AudioCodec, CallPeerStanding, DeviceId, DirectMediaPolicy, MediaCapabilities, VideoCodec, VideoTrackKind,
+};
 use teamcraft_sfu::{auth::DevTokenVerifier, config::SfuConfig, metrics::SfuMetrics, server::Sfu};
 use wtransport::Identity;
 
@@ -110,10 +117,24 @@ async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
   let fallback_port = fields.next().unwrap_or("0");
   let host = std::env::var("MEASURE_SFU_HOST").unwrap();
   let is_direct_allowed = std::env::var("MEASURE_DIRECT").as_deref() == Ok("1");
+  let has_video = std::env::var("MEASURE_VIDEO").as_deref() == Ok("1");
+  let capabilities = if has_video {
+    MediaCapabilities {
+      audio_codecs: vec![AudioCodec::Opus],
+      video_encoders: vec![VideoCodec::H264],
+      video_decoders: vec![VideoCodec::H264],
+      max_simulcast_layers: 3,
+      max_frame_fragments: teamcraft_proto::MAX_VIDEO_FRAME_FRAGMENTS,
+      video_features: Vec::new(),
+      audio_features: Vec::new(),
+    }
+  } else {
+    MediaCapabilities::default()
+  };
   let engine = CallEngineConfig {
     user_id: id_of(device),
     device_id: id_of(device),
-    capabilities: MediaCapabilities::default(),
+    capabilities,
     bwe: BweConfig::default(),
   };
   let mut config = NativeCallConfig::new(
@@ -151,16 +172,37 @@ async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
       .collect(),
   });
   let mut call = NativeCall::join(config).await.unwrap();
+  if has_video && device == DEVICES[0] {
+    call.start_video(camera_config()).await.unwrap();
+  }
+  // Pictures decoded in the current second, and the width of the last one.
+  let pictures: Arc<Mutex<(u32, u32)>> = Arc::default();
   let start = Instant::now();
   let mut lines = String::new();
   while start.elapsed() < Duration::from_secs(secs) {
     let second_end = tokio::time::Instant::now() + Duration::from_secs(1);
     let mut heard = 0;
     while let Ok(Some(event)) = tokio::time::timeout_at(second_end, call.next_event()).await {
-      if matches!(event, CallEngineEvent::AudioFrame { .. }) {
-        heard += 1;
+      match event {
+        CallEngineEvent::AudioFrame { .. } => heard += 1,
+        CallEngineEvent::VideoPublished(track)
+          if has_video && track.device_id != id_of::<DeviceId>(device) =>
+        {
+          let sink = Arc::clone(&pictures);
+          call.watch_video(
+            track.stream_id,
+            None,
+            Box::new(move |frame| {
+              let mut counted = sink.lock().unwrap();
+              counted.0 += 1;
+              counted.1 = u32::from(frame.resolution().width);
+            }),
+          );
+        },
+        _ => {},
       }
     }
+    let (decoded, width) = std::mem::take(&mut *pictures.lock().unwrap());
     let report = call.video_stats().await.unwrap_or_default();
     let (path, direct_rtt) = match report.maybe_media_path {
       Some(MediaPath::Direct { maybe_rtt_ms }) => ("direct", maybe_rtt_ms),
@@ -168,7 +210,7 @@ async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
     };
     writeln!(
       lines,
-      "{} {path} sfu_rtt={} direct_rtt={} heard={heard}",
+      "{} {path} sfu_rtt={} direct_rtt={} heard={heard} pictures={decoded} width={width}",
       start.elapsed().as_secs(),
       report.maybe_rtt_ms.map_or("-".into(), |rtt| rtt.to_string()),
       direct_rtt.map_or("-".into(), |rtt| rtt.to_string()),
@@ -177,6 +219,28 @@ async fn run_client(dir: &std::path::Path, device: u64, secs: u64) {
     std::fs::write(dir.join(format!("client{device}.log")), &lines).unwrap();
   }
   call.leave().await.unwrap();
+}
+
+/// A 720p test pattern in three simulcast layers, as a camera.
+fn camera_config() -> VideoSendConfig {
+  let resolution = VideoResolution {
+    width: 1280,
+    height: 720,
+  };
+  VideoSendConfig {
+    maybe_layer_plan: None,
+    kind: VideoTrackKind::Camera,
+    capture: Box::new(TestPatternCapture::new(CaptureFormat {
+      resolution,
+      framerate: 30,
+    })),
+    layers: simulcast_layers(resolution, 30, 1_500_000, 3),
+    encoders: software_encoders(),
+    maybe_filter: None,
+    maybe_picture_tap: None,
+    maybe_idle_refresh: None,
+    maybe_screen_profile: None,
+  }
 }
 
 /// The same identities in every process: fixed secrets, test only.

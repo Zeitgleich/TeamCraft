@@ -153,6 +153,8 @@ pub struct CallEngine {
   direct_layers: HashMap<StreamId, u8>,
   /// Received tracks whose keyframe this device asked for, for the direct path to ask too (#127).
   direct_keyframe_asks: Vec<MediaStreamId>,
+  /// Missing packets of received tracks this device asked for, for the direct path (#127).
+  direct_nacks: Vec<DirectNack>,
   uplink_layers: UplinkLayers,
   /// Own tracks whose encoders follow the uplink's bitrate per layer
   /// ([`CallEngine::publish_adaptive_video`]).
@@ -183,6 +185,8 @@ pub struct CallEngine {
   maybe_retransmit: Option<RetransmitConfig>,
   /// What the uplink may carry of own packets sent again.
   retransmit_budget: RetransmitBudget,
+  /// What own video the direct path's receiver may have sent again (#127), apart from the SFU's.
+  direct_retransmit_budget: RetransmitBudget,
   /// What moves the current session to another connection without a rejoin (#1309), from the
   /// SFU's last `joined`; `None` from an SFU that sends none, and while away.
   maybe_switch_secret: Option<Base64Bytes>,
@@ -344,6 +348,19 @@ pub struct CallEngineConfig {
   pub device_id: DeviceId,
   pub capabilities: MediaCapabilities,
   pub bwe: BweConfig,
+}
+
+/// The most NACKs that wait for the direct path between two of its looks: older ones are dropped
+/// (the packets they name are late by then anyway).
+const MAX_WAITING_DIRECT_NACKS: usize = 16;
+
+/// Packets of a received track this device misses (#127): `layer` of `stream_id`, by RTP sequence
+/// number, for the direct path to ask its sender for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectNack {
+  pub stream_id: MediaStreamId,
+  pub layer: u8,
+  pub sequence_numbers: Vec<u16>,
 }
 
 /// Something the driver has to do.
@@ -792,6 +809,7 @@ impl CallEngine {
       sfu_bound_layers: HashMap::new(),
       direct_layers: HashMap::new(),
       direct_keyframe_asks: Vec::new(),
+      direct_nacks: Vec::new(),
       uplink_layers,
       adaptive_tracks: HashMap::new(),
       bitrates_announced: HashMap::new(),
@@ -804,6 +822,7 @@ impl CallEngine {
       maybe_nack: None,
       maybe_retransmit: None,
       retransmit_budget: RetransmitBudget::default(),
+      direct_retransmit_budget: RetransmitBudget::default(),
       maybe_switch_secret: None,
       maybe_decodable: None,
       decodable_by_some: Vec::new(),
@@ -1534,6 +1553,50 @@ impl CallEngine {
     std::mem::take(&mut self.direct_keyframe_asks)
   }
 
+  /// The missing packets asked for since the last call (#127).
+  pub fn take_direct_nacks(&mut self) -> Vec<DirectNack> {
+    std::mem::take(&mut self.direct_nacks)
+  }
+
+  /// The direct path's receiver misses packets of an own track (#127): those still kept go out
+  /// again on the direct path, if `layer` is the one it carries, within a budget of `budget_bps`.
+  pub fn resend_direct_video(
+    &mut self,
+    stream_id: MediaStreamId,
+    layer: u8,
+    sequence_numbers: &[u16],
+    budget_bps: u32,
+    now: Instant,
+  ) {
+    let stream = StreamId(stream_id.0);
+    if self.direct_layers.get(&stream) != Some(&layer) {
+      return;
+    }
+    let (Some(config), Some(track), Ok(simulcast_layer)) = (
+      self.maybe_retransmit,
+      self.own_video.get(&stream),
+      SimulcastLayer::new(layer),
+    ) else {
+      return;
+    };
+    let mut packets = Vec::new();
+    for &sequence_number in sequence_numbers.iter().take(MAX_NACK_SEQUENCE_NUMBERS) {
+      let Some(packet) = track.sent_packet(layer, sequence_number, now, config.window) else {
+        continue;
+      };
+      if !self
+        .direct_retransmit_budget
+        .try_spend(packet.len(), budget_bps, now, &config)
+      {
+        break;
+      }
+      packets.push(packet.to_vec());
+    }
+    for packet in packets {
+      self.send_direct_media(stream, simulcast_layer, &packet);
+    }
+  }
+
   pub fn privacy_code(&self) -> Option<String> {
     self.maybe_dave.as_ref()?.maybe_privacy_code().map(str::to_owned)
   }
@@ -1898,7 +1961,7 @@ impl CallEngine {
       },
     };
     track.count_sent(frame.layer, frame.is_keyframe, &packets);
-    if is_sfu_bound && let Some(config) = &self.maybe_retransmit {
+    if let Some(config) = &self.maybe_retransmit {
       track.keep_sent(frame.layer, &packets, now, config);
     }
     // Saturating float-to-int conversion is intended.
@@ -4062,9 +4125,19 @@ impl CallEngine {
       packets = request.sequence_numbers.len(),
       "asking for missing video packets"
     );
+    let stream_id = MediaStreamId(stream.0);
+    let layer = request.layer.value();
+    if self.direct_nacks.len() >= MAX_WAITING_DIRECT_NACKS {
+      self.direct_nacks.remove(0);
+    }
+    self.direct_nacks.push(DirectNack {
+      stream_id,
+      layer,
+      sequence_numbers: request.sequence_numbers.clone(),
+    });
     self.signal(CallClientMessage::Nack {
-      stream_id: MediaStreamId(stream.0),
-      layer: request.layer.value(),
+      stream_id,
+      layer,
       sequence_numbers: request.sequence_numbers,
     });
   }
@@ -5534,6 +5607,36 @@ mod tests {
           media: DirectPathMedia::Audio,
         }))
       );
+    }
+
+    /// What the direct path's receiver missed goes out again there, of the direct layer only, and
+    /// the receiver's own asks wait for the direct path to take them.
+    #[test]
+    fn missing_packets_are_sent_again_on_the_direct_path() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = publishing_pair(now);
+      alice.set_retransmit_window(Some(500));
+      alice.set_direct_video_layer(STREAM, Some(1));
+      drain(&mut alice);
+      alice.send_video(STREAM, &frame_on(1), now);
+      let first = drain(&mut alice)
+        .iter()
+        .find_map(|output| match output {
+          EngineOutput::DirectDatagram(bytes) => Some(bytes.clone()),
+          _ => None,
+        })
+        .unwrap();
+      let parsed = MediaDatagram::parse(&first).unwrap();
+      let (rtp, _) = RtpHeader::parse(parsed.rtp).unwrap();
+      let number = rtp.sequence_number.0;
+
+      alice.resend_direct_video(STREAM, 0, &[number], 1_000_000, now);
+      assert!(drain(&mut alice).is_empty(), "not the direct layer");
+      alice.resend_direct_video(STREAM, 1, &[number], 1_000_000, now);
+      assert_eq!(drain(&mut alice), vec![EngineOutput::DirectDatagram(first)]);
+
+      bob.set_retransmit_window(Some(500));
+      assert!(bob.take_direct_nacks().is_empty());
     }
 
     /// Alice publishes a camera of three layers; Bob knows it.
