@@ -7,6 +7,7 @@ use teamcraft_proto::{
 
 use crate::admin::AdminSection;
 use crate::clock::{format_relative, now_ms};
+use crate::components::admin_attention::AttentionCard;
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_scim::ScimClientsCard;
 use crate::components::copy_button::CopyButton;
@@ -29,6 +30,7 @@ pub fn HealthSection() -> impl IntoView {
       title=Signal::derive(move || i18n.t("admin-health-title"))
       subtitle=Signal::derive(move || i18n.t("admin-health-subtitle"))
     />
+    <AttentionCard />
     {move || match health.get() {
       None => view! { <p class="empty-state" role="status">{move || i18n.t("health-loading")}</p> }.into_any(),
       Some(health) => view! { <HealthContent health=health /> }.into_any(),

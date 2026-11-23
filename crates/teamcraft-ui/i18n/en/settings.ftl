@@ -510,8 +510,8 @@ settings-group-mail_texts-hint = Texts of the server's own mail. Placeholders: i
 settings-group-meeting_mail = Meeting mail
 settings-group-meeting_mail-hint = Meeting invitations. Placeholders: title, organizer, start, end, description, join_url.
 settings-f-invites_require_verified_email = Invitations need a verified e-mail address
-settings-f-default_spaces = Spaces every new member joins (IDs)
-settings-f-default_channels = Public channels they join with them (IDs)
+settings-f-default_spaces = Spaces every new member joins
+settings-f-default_channels = Public channels they join with them
 settings-f-remove_deactivated_after_days = Remove deactivated users from all chats after (empty: never)
 settings-f-admin_join_request_days = Admins' requests to join a private channel expire after
 settings-f-one_to_one_call_ends_for_both = 1:1 calls end for both when one side hangs up
@@ -969,3 +969,14 @@ crash-reports-notice-publisher-required = TeamCraft sends error reports to the a
 crash-reports-notice-organization-optional = TeamCraft sends error reports to your organization when it crashes. You can turn this off in Settings.
 crash-reports-notice-organization-required = TeamCraft sends error reports to your organization when it crashes. They contain no personal information and never chat content.
 crash-reports-notice-settings = Settings
+
+## Choosing spaces and channels by name (Limits and rules)
+settings-picker-spaces-search = Add a space…
+settings-picker-channels-search = Add a public channel…
+settings-picker-spaces-none = None chosen: new members start without a space.
+settings-picker-channels-none = None chosen: new members join no extra channel.
+settings-picker-spaces-no-match = No space with that name.
+settings-picker-channels-no-match = No public channel with that name.
+settings-picker-space-unknown = Unknown space
+settings-picker-channel-unknown = Unknown channel
+settings-picker-remove = Remove { $name }

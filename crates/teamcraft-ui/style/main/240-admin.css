@@ -607,3 +607,83 @@
     backdrop-filter: none;
   }
 }
+
+/* A person's actions that can't be taken back, apart from the rest (issue #958): each names what it
+   does before the click, and asks in place before it acts. */
+.danger-zone {
+  margin-top: 20px;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.danger-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px 14px;
+  padding: 10px 0;
+}
+
+.danger-row + .danger-row {
+  border-top: 1px solid var(--border);
+}
+
+.danger-row-text {
+  flex: 1 1 14rem;
+  min-width: 0;
+}
+
+.danger-row-text p {
+  margin: 2px 0 0;
+}
+
+.danger-row-start {
+  flex: none;
+  color: var(--danger);
+}
+
+.danger-row-confirm {
+  display: flex;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.danger-row-confirm span {
+  flex: 1 1 100%;
+  font-weight: var(--weight-medium);
+}
+
+/* What needs attention, above the health checks (issue #958): one line each, the way to fix it at
+   the end. */
+.attention-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.attention-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 14px;
+  padding: 10px 0;
+}
+
+.attention-item + .attention-item {
+  border-top: 1px solid var(--border);
+}
+
+.attention-item p {
+  flex: 1 1 16rem;
+  min-width: 0;
+  margin: 0;
+}
+
+.attention-item .btn svg {
+  width: 14px;
+  height: 14px;
+}
