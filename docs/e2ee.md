@@ -571,13 +571,29 @@ old nonce gets a `dpop_nonce` frame and `use_dpop_nonce`, then the connection en
 connects again.
 
 **Replay and restart.** Seen proofs of bound tokens are kept in memory for `max_age + 2 × leeway`,
-the longest time one can be fresh, as hashes of key and `jti`, up to `replay_cache_max_entries`. One
-account may hold `replay_cache_max_entries_per_user` of them and gets 429 past that, whichever keys it
-uses. A full cache refuses further proofs of bound tokens with 503 rather than forget one that could
-still be replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well
-leave the proof out, and anybody with a token could otherwise fill the cache with keys of their own
-making. What is left is several accounts working together, which takes 20 of them at the defaults and
-the per-address limits on top. A restart loses the
+the longest time one can be fresh, as hashes of key and `jti`, **per account**: a proof names the
+token it goes with (`ath`) and a bound token its account, so a proof can only be replayed with its own
+account's token and is compared with that account's proofs only. Room comes in two tiers, so that no
+group of accounts can fill the cache for everybody else:
+
+- **A reserve per account** (`replay_cache_reserved_per_user`, default 256: a burst of 256 requests,
+  or more than one a second for the whole window), which another account's flood never takes.
+- **A pool shared by all** above their reserves (`replay_cache_max_entries`, default 200 000), up to
+  `replay_cache_max_entries_per_user` (default 10 000) for one account. When the pool is full, the
+  accounts above their reserve get 429 until their entries expire; everybody within their reserve goes
+  on as before.
+
+The reserves together hold at most as many entries as the pool, so the cache stays bounded (some
+60 MiB at the defaults). Only when they are full too, which at the defaults takes some 780 accounts
+with bound tokens all sending more than a request a second at once, on top of the per-address
+limits, does the cache refuse further proofs of bound tokens with 503 rather than forget one that
+could still be replayed. Nothing live is ever evicted: that would let exactly those proofs be
+replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well leave the
+proof out, and anybody with a token could otherwise fill the cache with keys of their own making.
+Earlier the cache had a single shared limit, which 20 cooperating accounts at their own limit could
+fill for everybody (#120). A nonce-based freshness window wouldn't have helped: a nonce stays good
+for two rotations (10 minutes by default), longer than a proof's `iat` window, so `iat` decides how
+long an entry lives; an operator who wants it shorter lowers `proof_max_age_secs`. A restart loses the
 cache, and that is safe only because it loses the nonces too: every proof needs a nonce, nonces are
 random and kept only in memory, so a proof made before the restart gets a challenge, and a new proof
 takes the private key. Clients see one extra round trip.
@@ -602,7 +618,8 @@ bearer tokens.
 
 **Clients** (`teamcraft_core::api::dpop`; web: `store/browser/dpop_key.rs`, `auth/browser.rs`;
 desktop: `apps/desktop/src/auth`; iOS: `apps/ios/Shared/DeviceProofKey.swift`, `SessionProofs.swift`;
-Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`).
+Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`; the import tool:
+`crates/teamcraft-import/src/proof_key.rs`).
 
 - **Key.** Behind `DpopSigner`: a public key and "sign these bytes", so that a hardware-backed key
   fits. One per device and server. In the browser a non-extractable Web Crypto ES256 key pair in
@@ -721,12 +738,19 @@ Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`).
   is a plain new sign-in. Android has a single process for the app and push, so there is no
   extension's view to reconcile.
 
+- **The import tool** (`teamcraft-import`, `proof_key.rs`, `auth.rs`). A software P-256 key in its
+  state directory (`dpop.key`, readable by its user only, like the refresh token and the store's key
+  next to it: a server has no hardware key store, and whoever reads the directory has the rest
+  anyway). `login` binds the sign-in under the apps' rule (discovery names ES256 and a fresh
+  `server-info` has `DPoP-Nonce`), with a new key each time; the stored sign-in names the key it is
+  bound to, and a refresh sends that key's proof and never goes without it. A missing or different
+  key stops the tool with "run `login` again"; nothing goes to the provider. API requests and the
+  gateway's first frame carry proofs through the core as in the apps. A sign-in made before this
+  version stays unbound until the next `login`.
+
 **Not done yet** (the next steps of issue #120):
 
 - Secure Enclave for the macOS desktop: the key is software in the sealed file for now.
-- The identity provider: documented vendor-neutrally with the reference setup as example, and refresh
-  tokens bound for public clients.
-- Then the rollout in operations.md, "Binding tokens to devices".
 
 ### 3.2 Enrollment order and interruptions
 

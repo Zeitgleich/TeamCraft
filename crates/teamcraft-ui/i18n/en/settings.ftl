@@ -797,8 +797,9 @@ settings-dpop-off = Off: nothing is checked
 settings-f-proof_max_age_secs = Proofs are good for
 settings-f-proof_leeway_secs = Allowed clock difference
 settings-f-nonce_rotation_secs = The server's nonce changes every
-settings-f-replay_cache_max_entries = Proofs remembered, to refuse replays
-settings-f-replay_cache_max_entries_per_user = Of those, for one account
+settings-f-replay_cache_max_entries = Proofs remembered in the pool all accounts share, to refuse replays
+settings-f-replay_cache_max_entries_per_user = At most for one account
+settings-f-replay_cache_reserved_per_user = Kept for every account, whatever others send
 settings-unit-entries = entries
 
 settings-group-app_links = Links open in the apps

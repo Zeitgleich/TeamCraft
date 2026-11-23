@@ -226,6 +226,7 @@ const TOKEN_BINDING: &[FieldDef] = &[
   amount("nonce_rotation_secs", 1, 86_400, SECONDS),
   amount("replay_cache_max_entries", 1, 10_000_000, ENTRIES),
   amount("replay_cache_max_entries_per_user", 1, 10_000_000, ENTRIES),
+  amount("replay_cache_reserved_per_user", 16, 100_000, ENTRIES),
 ];
 const APP_LINKS: &[FieldDef] = &[
   flag("is_enabled"),

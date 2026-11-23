@@ -43,6 +43,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macr
 tracing.workspace = true
 tracing-subscriber.workspace = true
 url.workspace = true
+# Wipes the DPoP key's bytes after reading and writing its file.
+zeroize = "1.9.1"
 
 [dev-dependencies]
 teamcraft-core = { path = "../teamcraft-core", features = ["test-support"] }

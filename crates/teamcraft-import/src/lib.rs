@@ -10,5 +10,6 @@ pub mod files;
 pub mod mapping;
 pub mod plan;
 pub mod progress;
+pub mod proof_key;
 pub mod report;
 pub mod run;
