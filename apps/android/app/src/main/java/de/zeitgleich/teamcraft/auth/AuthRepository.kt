@@ -5,8 +5,6 @@ import android.content.Intent
 import android.net.Uri
 import de.zeitgleich.teamcraft.core.UiThreadGuard
 import java.io.File
-import java.net.HttpURLConnection
-import java.net.URL
 import java.util.Locale
 import java.util.concurrent.TimeUnit
 import kotlin.coroutines.resume
@@ -19,6 +17,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import net.openid.appauth.AppAuthConfiguration
 import net.openid.appauth.AuthState
@@ -28,27 +27,36 @@ import net.openid.appauth.AuthorizationResponse
 import net.openid.appauth.AuthorizationService
 import net.openid.appauth.AuthorizationServiceConfiguration
 import net.openid.appauth.ResponseTypeValues
+import net.openid.appauth.TokenRequest
+import net.openid.appauth.TokenResponse
 import net.openid.appauth.browser.AnyBrowserMatcher
 import net.openid.appauth.browser.BrowserMatcher
 import net.openid.appauth.browser.BrowserSelector
-import net.openid.appauth.connectivity.ConnectionBuilder
 import de.zeitgleich.teamcraft.BuildConfig
 import de.zeitgleich.teamcraft.R
-import de.zeitgleich.teamcraft.core.CoreHttpConnection
+import de.zeitgleich.teamcraft.security.DeviceKeyStore
 import de.zeitgleich.teamcraft.security.KeystoreBox
+import de.zeitgleich.teamcraft.security.KeystoreDeviceKeyVault
 import de.zeitgleich.teamcraft.security.SealedFile
 import de.zeitgleich.teamcraft.server.ServerStore
 import de.zeitgleich.teamcraft.server.StoragePaths
 import de.zeitgleich.teamcraft.server.isPlainHttpAllowed
+import uniffi.teamcraft_ffi.DeviceProofException
+import uniffi.teamcraft_ffi.DeviceProofKey
 import uniffi.teamcraft_ffi.StoredServer
 import uniffi.teamcraft_ffi.loginHintFromIdToken
 import uniffi.teamcraft_ffi.storedServerWithLoginHint
+import uniffi.teamcraft_ffi.tokenBoundKey
 
 /**
  * OIDC login with AppAuth (authorization code + PKCE) against the active server's identity provider,
  * as the server announced it (`StoredServer`: issuer, client, scopes), or a local account's sign-in
  * with e-mail and password ([signInLocal]). Either session is kept sealed with a Keystore key, one
  * file per server; the Rust core asks for access tokens through [accessToken].
+ *
+ * Identity provider sessions are bound to the device's key where both sides take DPoP (docs/e2ee.md
+ * §3.1.2): the code exchange and refreshes carry a proof ([DeviceProofs]), and the core signs its own
+ * requests with the same key ([deviceKey]). The key goes with the session.
  */
 class AuthRepository(
   private val context: Context,
@@ -109,6 +117,8 @@ class AuthRepository(
       session.state = AuthState()
     }
     session.file.delete()
+    // One session per server: the key the identity provider session was bound to goes with it.
+    withContext(Dispatchers.IO) { session.proofs.deleteKey() }
     session.localFile.write(outcome.session.encode())
     signedIn.value = true
     return outcome
@@ -155,15 +165,9 @@ class AuthRepository(
     val error = result?.let { AuthorizationException.fromIntent(it) }
     val fresh = AuthState(response, error)
     if (response == null) throw error ?: IllegalStateException(LOGIN_CANCELLED)
-    val tokens = suspendCancellableCoroutine { continuation ->
-      session.service.performTokenRequest(response.createTokenExchangeRequest()) { tokenResponse, exception ->
-        if (tokenResponse != null) {
-          continuation.resume(tokenResponse)
-        } else {
-          continuation.resumeWithException(exception ?: IllegalStateException("no token response"))
-        }
-      }
-    }
+    val providerTakesProofs = DeviceProofs.providerTakesProofs(response.request.configuration)
+    val proof = withContext(Dispatchers.IO) { session.proofs.forSignIn(providerTakesProofs) }
+    val tokens = exchange(session, response.createTokenExchangeRequest(), proof)
     fresh.update(tokens, null)
     synchronized(this) {
       // The user changed the server while the browser was open: this login is for the old one.
@@ -176,6 +180,33 @@ class AuthRepository(
     rememberLoginHint(session, tokens.idToken)
     signedIn.value = true
   }
+
+  /**
+   * The code exchange with [proof]. A key that can't sign doesn't cost the sign-in: nothing was spent
+   * yet (the signature comes before the request), the key goes so that the next sign-in makes a new
+   * one, and this session stays unbound.
+   */
+  private suspend fun exchange(session: Session, request: TokenRequest, proof: TokenProof): TokenResponse {
+    val (outcome, maybeKeyFailure) = session.connections.tokenRequest(proof) {
+      runCatching { performTokenRequest(session, request) }
+    }
+    if (maybeKeyFailure != null && proof is TokenProof.With) {
+      withContext(Dispatchers.IO) { session.proofs.discardUnusableKey() }
+      return exchange(session, request, TokenProof.None)
+    }
+    return outcome.getOrThrow()
+  }
+
+  private suspend fun performTokenRequest(session: Session, request: TokenRequest): TokenResponse =
+    suspendCancellableCoroutine { continuation ->
+      session.service.performTokenRequest(request) { tokenResponse, exception ->
+        if (tokenResponse != null) {
+          continuation.resume(tokenResponse)
+        } else {
+          continuation.resumeWithException(exception ?: IllegalStateException("no token response"))
+        }
+      }
+    }
 
   /** The account the ID token names, prefilled at this server's next sign-in (issue #448). */
   private fun rememberLoginHint(session: Session, maybeIdToken: String?) {
@@ -226,6 +257,12 @@ class AuthRepository(
     return synchronized(this) { if (session.maybeLocal == null) session.state.idToken else null }
   }
 
+  /**
+   * What the core signs with: the active server's device key, read anew for each use. A token that
+   * isn't bound (a local account, a session from before) never asks for it.
+   */
+  fun deviceKey(): DeviceProofKey? = session()?.proofs?.keys?.proofKey
+
   /** The next [accessToken] refreshes first: an ID token naming something just written is wanted. */
   fun refreshTokensSoon() {
     val session = session() ?: return
@@ -255,6 +292,10 @@ class AuthRepository(
     session.file.delete()
     session.localFile.delete()
     if (maybeSession === session) signedIn.value = false
+    // The device key goes with its session, so the next sign-in starts with a new one (docs/e2ee.md
+    // §3.1.2). In the background: the Keystore may take a moment, and a sign-out can come on the
+    // main thread (AppAuth's callback).
+    background.launch { session.proofs.deleteKey() }
     // An expired token is already dead on the server; only a live one is worth a request.
     maybeLocal?.takeIf { it.isValid(System.currentTimeMillis()) }?.let { local ->
       background.launch { LocalLoginClient.logout(session.server.address.origin, local) }
@@ -273,7 +314,7 @@ class AuthRepository(
 
   private fun open(server: StoredServer): Session {
     val isInsecureHttpAllowed = BuildConfig.DEBUG
-    val connections = CoreConnectionBuilder(isInsecureHttpAllowed)
+    val connections = ProofConnectionBuilder(isInsecureHttpAllowed)
     val issuer = Uri.parse(server.issuer)
     val service = AuthorizationService(
       context,
@@ -287,7 +328,11 @@ class AuthRepository(
     val storageKey = server.address.storageKey
     val file = SealedFile(File(context.filesDir, StoragePaths.sessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
     val localFile = SealedFile(File(context.filesDir, StoragePaths.localSessionFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
-    return Session(server, file, localFile, service, connections, loadState(file), loadLocal(localFile))
+    val keyFile = SealedFile(File(context.filesDir, StoragePaths.deviceKeyFile(storageKey)), KeystoreBox(SESSION_KEY_ALIAS))
+    val keys = DeviceKeyStore(KeystoreDeviceKeyVault(StoragePaths.deviceKeyAlias(storageKey), keyFile))
+    val serverInfoUrl = server.address.serverInfoUrl
+    val proofs = DeviceProofs(keys) { DeviceProofs.askServer(serverInfoUrl) }
+    return Session(server, file, localFile, service, connections, proofs, loadState(file), loadLocal(localFile))
   }
 
   /**
@@ -306,7 +351,29 @@ class AuthRepository(
     } ?: AnyBrowserMatcher.INSTANCE
   }
 
-  private suspend fun refresh(session: Session, current: AuthState): String? =
+  /**
+   * The refresh with the proof it calls for. A bound session whose key is gone or can't be used sends
+   * nothing to the provider: its token comes back as it is, also an expired one, and the core holds
+   * it back and says why (sign in again for a lost key, a wait otherwise). `null` would read as a
+   * refresh that failed for now, retried forever. A key made to bind an unbound session that then
+   * can't sign goes, and the refresh goes on as it always did.
+   */
+  private suspend fun refresh(session: Session, current: AuthState): String? {
+    val maybeBoundKey = current.accessToken?.let(::tokenBoundKey)
+    val providerTakesProofs = DeviceProofs.providerTakesProofs(current.authorizationServiceConfiguration)
+    val proof = try {
+      session.proofs.forRefresh(maybeBoundKey, providerTakesProofs)
+    } catch (keyFailure: DeviceProofException) {
+      return current.accessToken
+    }
+    val (accessToken, maybeKeyFailure) = session.connections.tokenRequest(proof) { refreshWithAppAuth(session, current) }
+    if (maybeKeyFailure == null) return accessToken
+    if (maybeBoundKey != null) return current.accessToken
+    session.proofs.discardUnusableKey()
+    return session.connections.tokenRequest(TokenProof.None) { refreshWithAppAuth(session, current) }.first
+  }
+
+  private suspend fun refreshWithAppAuth(session: Session, current: AuthState): String? =
     suspendCancellableCoroutine { continuation ->
       // AppAuth runs one refresh per AuthState and hands its result to every caller waiting
       // meanwhile, so the engine and other threads never use a rotated refresh token twice.
@@ -374,26 +441,12 @@ class AuthRepository(
     val file: SealedFile,
     val localFile: SealedFile,
     val service: AuthorizationService,
-    val connections: ConnectionBuilder,
+    val connections: ProofConnectionBuilder,
+    val proofs: DeviceProofs,
     var state: AuthState,
     var maybeLocal: LocalSession?,
   ) {
     fun isSignedIn(): Boolean = maybeLocal != null || state.isAuthorized
-  }
-
-  /**
-   * AppAuth's requests (discovery, code exchange, token refresh) through the core's HTTP client
-   * (issue #433), with AppAuth's own timeouts and without following redirects. HTTPS everywhere;
-   * plain HTTP only to the device itself, or anywhere in development builds: the core refuses the
-   * rest, since the network security config doesn't apply to it.
-   */
-  private class CoreConnectionBuilder(private val isInsecureHttpAllowed: Boolean) : ConnectionBuilder {
-    override fun openConnection(uri: Uri): HttpURLConnection =
-      CoreHttpConnection(URL(uri.toString()), isInsecureHttpAllowed).apply {
-        connectTimeout = TimeUnit.SECONDS.toMillis(15).toInt()
-        readTimeout = TimeUnit.SECONDS.toMillis(10).toInt()
-        instanceFollowRedirects = false
-      }
   }
 
   private companion object {

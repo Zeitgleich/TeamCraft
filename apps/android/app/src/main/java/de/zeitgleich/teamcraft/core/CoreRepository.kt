@@ -97,11 +97,14 @@ class CoreRepository(
       onAccountClosed()
     }
     val tokens = Tokens(auth)
+    // The server's device key for DPoP proofs (e2ee.md §3.1.2): the core reads it when a bound token
+    // first needs it, never for an unbound one.
+    val deviceKey = auth.deviceKey() ?: throw NotSignedInException("no server")
     val core = withContext(Dispatchers.IO) {
       // The application sets it off the main thread at start; here too, so no core can name a
       // deleted account before it is set (#1066).
       setDeletedUserName(context.getString(R.string.user_deleted_name))
-      TeamCraft.open(
+      TeamCraft.withDeviceKey(
         AppConfig(
           serverUrl = server.address.origin,
           dataDir = File(context.filesDir, StoragePaths.storeDir(storageKey)).absolutePath,
@@ -110,6 +113,7 @@ class CoreRepository(
           pushGatewayUrl = BuildConfig.PUSH_GATEWAY_URL.ifEmpty { null },
         ),
         tokens,
+        deviceKey,
         Changes {
           changes.update { it + 1 }
           connection.value = maybeCore?.connectionState()
