@@ -31,6 +31,14 @@ bookkeeping files); `git log -p -- crates/vendor/wry` shows every change since.
    what it holds to the `WebContext` builder; nothing set, nothing changes.
 2. `src/webkitgtk/mod.rs`, `src/lib.rs`: export it on the GTK platforms (`wry::set_memory_pressure_settings`).
 3. Added this file and `UPSTREAM_PR.md`.
+4. Warning-free build (#2316): `src/webkitgtk/mod.rs` and `src/webkitgtk/synthetic_mouse_events.rs`
+   call `evaluate_javascript` (WebKitGTK ≥ 2.40) instead of the deprecated `run_javascript`; the
+   result is `Value::to_json(0)` as before (an error still gives an empty string). `Cargo.toml` asks
+   `webkit2gtk` for `v2_40` (was `v2_38`). The dead `#[cfg(feature = "v2_42")]` in the permission
+   handler is removed: the `webkit2gtk` 2.0.2 bindings have no such feature and no
+   `is_for_display_device`, so the kept branch (neither audio nor video means display capture) is the
+   one that always compiled. Our minimum is far above 2.40: the deb and rpm are built on Debian 13
+   (WebKitGTK 2.48+) and the Flatpak brings its own runtime (`apps/desktop/packaging/linux`).
 
 The desktop shell calls it before it builds its first window (`apps/desktop/src/webview_memory.rs`).
 
