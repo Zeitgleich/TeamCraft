@@ -4,22 +4,15 @@
 # compile-only mode, so the cache keys, toolchains, flags and features are exactly the release's.
 #
 # rust-cache keeps the compiled dependencies, not the workspace crates, and its key covers the
-# lockfile, the manifests, the toolchain and the compiler flags. Hence the path filter: other changes
-# would not change what is cached. The nightly run catches a new stable Rust and changes pushed with `[skip ci]`; when the
-# key already exists it only restores the cache (which also keeps it from expiring) and skips the
-# compile.
+# lockfile, the manifests, the toolchain and the compiler flags. It runs once a night, before the
+# nightly release (04:30 Berlin), not on every dependency change: each run restores and saves about
+# 6.5 GB of release caches, which then count as the newest in the repository's 10 GB cache budget and
+# pushed CI's own caches out, so CI's test job compiled from scratch and ran out of memory (#2344).
+# When the key already exists it only restores the cache (which also keeps it from expiring) and
+# skips the compile; after a dependency change a release can be warmed by hand (workflow_dispatch).
 name: Desktop cache
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "Cargo.lock"
-      - "**/Cargo.toml"
-      - ".cargo/config.toml"
-      - "rust-toolchain*"
-      - ".github/workflows/desktop-cache.yml"
-      - ".github/workflows/desktop-release.yml"
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

@@ -295,13 +295,43 @@ jobs:
           cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
+      - name: More swap for the build's memory peak
+        # At the end of a cold build the big test crates are compiled side by side at 4 to 6 GB each;
+        # the 16 GB runner went 2.9 GB into its 4 GB of swap with under 2 GB left, and runs were
+        # killed there (exit 137 or a lost runner, #2344). Fewer compiler processes didn't lower the
+        # peak (each grows larger) and cost minutes. The peak lasts a few minutes; swap carries it.
+        # Swap is the host's (privileged container). A runner without room for it builds as before.
+        run: |
+          swapfile="$RUNNER_TEMP/swapfile"
+          if fallocate -l 8G "$swapfile" && chmod 600 "$swapfile" && mkswap "$swapfile" > /dev/null && swapon "$swapfile"; then
+            grep -E '^Swap(Total|Free):' /proc/meminfo
+          else
+            echo "::warning::Could not add swap; building with the runner's own (#2344)"
+            rm -f "$swapfile"
+          fi
       - name: Test
         env:
           # The test thread polls the whole test body, and in a debug build the futures of the bridge's
           # end-to-end tests don't fit the default 2 MiB (as in scripts/e2e.sh). Set here, not on the
           # job: rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
           RUST_MIN_STACK: "16777216"
-        run: cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
+        # The resource lines go into this step's log as they come: a run that loses its runner keeps
+        # them up to the end, and shows what ran out (#2344).
+        run: |
+          scripts/ci-resources.sh 30 "$GITHUB_WORKSPACE" &
+          # At a lower priority than the runner's own processes: runs also lost their runner in the
+          # middle of the tests ("lost communication"), which starving it of CPU causes (#2344).
+          nice -n 10 cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
+      - name: Test durations
+        # Every test's duration, per test binary (nextest's JUnit report), to see which suites to
+        # group or move to the nightly run.
+        if: ${{ !cancelled() && matrix.arch == 'x86_64' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-durations
+          path: target/nextest/ci/junit.xml
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Doctests
         run: cargo test --workspace --doc
 
