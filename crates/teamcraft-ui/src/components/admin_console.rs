@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::admin::{AdminGroup, AdminSection, admin_error_i18n_key};
+use crate::admin::{AdminGroup, AdminSection};
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
@@ -17,6 +17,7 @@ use crate::components::admin_notetaker::NotetakerSection;
 use crate::components::admin_people::PeopleSection;
 use crate::components::admin_permissions::PermissionsSection;
 use crate::components::admin_retention::RetentionSection;
+use crate::components::admin_save::refusal_text;
 use crate::components::admin_security::SecuritySection;
 use crate::components::admin_settings::SettingsSection;
 use crate::components::admin_stickers::StickersSection;
@@ -62,10 +63,7 @@ pub fn AdminConsole(section: AdminSection) -> impl IntoView {
         <RosterBanner />
         {move || {
           maybe_error.get().map(|detail| {
-            let text = match admin_error_i18n_key(&detail) {
-              Some(key) => i18n.t(key),
-              None => i18n.t_with("admin-error", &[("detail", &detail)]),
-            };
+            let text = refusal_text(i18n, Some(detail));
             // Sticky: a save refused far down the page still shows (forms.md, #1054).
             view! { <p class="auth-alert admin-error" role="alert">{text}</p> }
           })

@@ -12,6 +12,7 @@ use crate::components::admin_fields::{
   is_email_address, parse_number,
 };
 use crate::components::admin_policy::SelectRow;
+use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -34,13 +35,21 @@ pub fn MailSection() -> impl IntoView {
   let smtp = Memo::new(move |_| current.get().and_then(|mail| mail.maybe_smtp));
   let draft = RwSignal::new(MailDraft::from_settings(smtp.get_untracked().as_ref()));
   let show_errors = RwSignal::new(false);
+  let tracker = use_save_tracker();
   // Follow the server when the stored settings change (after a save or a reset).
   Effect::new(move |previous: Option<()>| {
     let latest = smtp.get();
     if previous.is_some() {
       draft.set(MailDraft::from_settings(latest.as_ref()));
       show_errors.set(false);
+      tracker.settled();
     }
+  });
+  let is_dirty =
+    Signal::derive(move || draft.with(|draft| *draft != MailDraft::from_settings(smtp.get().as_ref())));
+  let discard = Callback::new(move |()| {
+    draft.set(MailDraft::from_settings(smtp.get_untracked().as_ref()));
+    show_errors.set(false);
   });
   let can_store_secrets = Memo::new(move |_| current.get().is_some_and(|mail| mail.can_store_secrets));
   let source = Memo::new(move |_| current.get().map_or(SettingSource::Config, |mail| mail.source));
@@ -95,6 +104,7 @@ pub fn MailSection() -> impl IntoView {
     let request = draft.with_untracked(|draft| draft.to_request(can_store_secrets.get_untracked()));
     if let Some(request) = request {
       state.write(|backend| backend.save_mail_settings(request));
+      tracker.begin();
     }
   };
   let status = Signal::derive(move || {
@@ -190,8 +200,7 @@ pub fn MailSection() -> impl IntoView {
           on_input=from_name.on_input
           error=from_name.error
         />
-        <div class="policy-footer">
-          <button type="submit" class="btn btn-primary">{move || i18n.t("admin-save")}</button>
+        <SaveBar tracker=tracker is_dirty=is_dirty on_discard=discard>
           <button
             type="button"
             class="btn"
@@ -200,7 +209,7 @@ pub fn MailSection() -> impl IntoView {
           >
             {move || i18n.t("admin-reset-to-config")}
           </button>
-        </div>
+        </SaveBar>
       </fieldset>
     </form>
     <section class="policy-group policy-form" aria-label=move || i18n.t("admin-mail-status")>

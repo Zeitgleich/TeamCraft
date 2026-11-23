@@ -187,6 +187,9 @@ pub struct AdminData {
   /// Requests for on-demand data that are under way.
   loading: HashSet<String>,
   maybe_error: Option<String>,
+  /// Changes (not reads) that have had their answer, refused or not: the console's save bar tells
+  /// "saved" from "still saving" by it (issue #958).
+  writes_done: u64,
 }
 
 impl AdminLive {
@@ -1129,6 +1132,10 @@ impl AdminLive {
 
   pub fn maybe_error(&self) -> Option<String> {
     self.data.borrow().maybe_error.clone()
+  }
+
+  pub fn writes_done(&self) -> u64 {
+    self.data.borrow().writes_done
   }
 
   /// Owners and admins as the server lists them (active accounts only, each once): proposed for the
@@ -2178,6 +2185,11 @@ impl AdminLive {
   /// Runs a request of the console in the background. Its code and the answers' wire types are in
   /// the console's chunk (`areas::admin_task`), like the refresh.
   fn run(&self, task: AdminTask) {
+    if task.is_write() {
+      // A new change starts without the refusal of an earlier one: the banner and the save bar
+      // show what happens to this one. Changes start from `AppState::write`, which redraws.
+      self.data.borrow_mut().maybe_error = None;
+    }
     let live = self.clone();
     spawn_local(async move {
       match crate::areas::admin_task(live.clone(), task).await {
@@ -2193,6 +2205,15 @@ impl AdminLive {
 
   /// Does what [`Self::run`] was given.
   pub(crate) async fn perform(&self, task: AdminTask) {
+    let is_write = task.is_write();
+    self.perform_task(task).await;
+    if is_write {
+      self.data.borrow_mut().writes_done += 1;
+      self.changed();
+    }
+  }
+
+  async fn perform_task(&self, task: AdminTask) {
     match task {
       AdminTask::Send {
         method,
@@ -2284,6 +2305,16 @@ pub enum AdminTask {
     bytes: Vec<u8>,
     content_type: String,
   },
+}
+
+impl AdminTask {
+  /// Whether the task changes something on the server, as opposed to reading or testing.
+  fn is_write(&self) -> bool {
+    matches!(
+      self,
+      Self::Send { .. } | Self::SendEach { .. } | Self::SendStored { .. }
+    )
+  }
 }
 
 /// Which cached copy an answer replaces.

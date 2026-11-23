@@ -14,6 +14,7 @@ use crate::components::admin_mail::{
   DEFAULT_PORT, MAX_TEXT_CHARS, MailDelivery, SECURITY_MODES, is_plausible_host, secret_update,
 };
 use crate::components::admin_policy::SelectRow;
+use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -43,12 +44,20 @@ pub fn BrandMailServerForm(brand_id: String, response: Memo<Option<AdminBrandsRe
       .unwrap_or_else(|| MailServerDraft::from_server(None)),
   );
   let show_errors = RwSignal::new(false);
+  let tracker = use_save_tracker();
+  let stored_draft = move || saved.get().unwrap_or_else(|| MailServerDraft::from_server(None));
   Effect::new(move |previous: Option<()>| {
-    let latest = saved.get();
+    let latest = stored_draft();
     if previous.is_some() {
-      draft.set(latest.unwrap_or_else(|| MailServerDraft::from_server(None)));
+      draft.set(latest);
       show_errors.set(false);
+      tracker.settled();
     }
+  });
+  let is_dirty = Signal::derive(move || draft.with(|draft| *draft != stored_draft()));
+  let discard = Callback::new(move |()| {
+    draft.set(untrack(stored_draft));
+    show_errors.set(false);
   });
   let can_store_secrets = Memo::new(move |_| response.get().is_some_and(|all| all.can_store_secrets));
   let has_server = Memo::new(move |_| saved.get().is_some());
@@ -103,6 +112,7 @@ pub fn BrandMailServerForm(brand_id: String, response: Memo<Option<AdminBrandsRe
     if let Some(request) = request {
       let id = save_id.clone();
       state.write(|backend| backend.save_brand_mail_server(id, request));
+      tracker.begin();
     }
   };
   let remove_id = brand_id.clone();
@@ -176,10 +186,12 @@ pub fn BrandMailServerForm(brand_id: String, response: Memo<Option<AdminBrandsRe
           (!has_sender.get())
             .then(|| view! { <p class="auth-alert policy-blocked" role="status">{i18n.t("admin-brands-own-mail-needs-sender")}</p> })
         }}
-        <div class="policy-footer">
-          <button type="submit" class="btn btn-primary" prop:disabled=move || !has_sender.get() && !has_server.get()>
-            {move || i18n.t("admin-save")}
-          </button>
+        <SaveBar
+          tracker=tracker
+          is_dirty=is_dirty
+          on_discard=discard
+          is_locked=Signal::derive(move || !has_sender.get() && !has_server.get())
+        >
           <button
             type="button"
             class="btn"
@@ -191,7 +203,7 @@ pub fn BrandMailServerForm(brand_id: String, response: Memo<Option<AdminBrandsRe
           >
             {move || i18n.t("admin-brands-own-mail-remove")}
           </button>
-        </div>
+        </SaveBar>
       </fieldset>
     </form>
     <section class="policy-group policy-form" aria-label=move || i18n.t("admin-mail-status")>
