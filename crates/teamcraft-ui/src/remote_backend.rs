@@ -13,6 +13,7 @@ use std::time::Duration;
 use teamcraft_client_api::calls::{CallMoveOffer, OrgBackgroundRule};
 use teamcraft_proto::OrgBackgroundId;
 
+use futures_channel::oneshot;
 use futures_util::future::{join_all, join3};
 use leptos::prelude::set_timeout;
 use leptos::task::spawn_local;
@@ -67,8 +68,25 @@ const MIN_REQUERY_INTERVAL: Duration = Duration::from_secs(1);
 /// Pending rows whose quote or marks the mirror holds until the core answers: a few sends in a row.
 /// More would mean the core isn't answering, and the oldest then show with the core's answer.
 const MAX_PENDING_EXTRAS: usize = 32;
+/// Conversations whose rows the mirror keeps after the UI moved on: switching back to one of these
+/// shows its rows at once, an older one reads its page from the core again (a local call). Without
+/// a bound every conversation opened stayed in the page's memory, which a wasm heap never gives
+/// back (#1708).
+const MAX_HELD_FEEDS: usize = 10;
+/// Answers of message rows the mirror keeps. Each row asks for its own (reactions, files, quote),
+/// so without a bound every row ever shown stayed (#1708). The ones read longest ago go first.
+/// Answers about a conversation or the account are bounded by the workspace and stay: dropped,
+/// a row of the sidebar would ask again whenever its space is shown.
+const MAX_HELD_ROW_ANSWERS: usize = 1_000;
+/// A feed or answer read this recently stays whatever the bounds: what the UI shows is read on
+/// every change, and one loaded a moment ago is about to be read.
+const MIN_HOLD: Duration = Duration::from_secs(60);
+/// Messages asked for in one `message_extras` query of a batch ([`ExtrasBatch`]).
+const MAX_EXTRAS_BATCH: usize = 200;
 
 thread_local! {
+  /// Orders reads of feeds and answers, so the ones read longest ago are dropped first.
+  static READ_CLOCK: Cell<u64> = const { Cell::new(0) };
   /// The backend the core's events go to (#344). The page subscribes once; a new sign-in connects a
   /// new backend, which takes the events over, so listeners never stack and the old backend's
   /// mirror is not refreshed any more.
@@ -499,6 +517,8 @@ struct Feed {
   /// didn't change while it was read. While the snapshot still says that, the page's total is the
   /// newer word (issue #1951): a count above it would leave rows past the end that no read fills.
   maybe_counted_at_read: Option<usize>,
+  /// When the UI last read the feed; the feeds read longest ago are dropped first.
+  last_read: ReadStamp,
 }
 
 /// What [`Feed::apply`] did with a page.
@@ -611,6 +631,16 @@ struct Slot {
   /// The core changed less than [`MIN_REQUERY_INTERVAL`] after it was asked: asked again once the
   /// interval is over ([`RemoteChat::queue_requery`]).
   is_requery_due: bool,
+  /// When the UI last read it; the answers read longest ago are dropped first.
+  last_read: ReadStamp,
+}
+
+/// When a feed or an answer was read: a tick that orders the reads and the time
+/// ([`crate::perf::now_ms`]) that keeps recent ones ([`MIN_HOLD`]).
+#[derive(Clone, Copy, Debug, Default)]
+struct ReadStamp {
+  tick: u64,
+  at_ms: f64,
 }
 
 /// The receiver of events the page subscribed to once (see `CORE_EVENTS`).
@@ -628,9 +658,69 @@ pub struct RemoteChat {
   refresh_queued: Rc<Cell<bool>>,
   requery_queued: Rc<Cell<bool>>,
   answers: Rc<RefCell<HashMap<String, Slot>>>,
+  extras_batch: ExtrasBatch,
+}
+
+/// Message rows ask for their extras one each, and a change asks every row shown again: one IPC
+/// call per row, about 250 per channel switch in a large workspace, whose JSON the page and the
+/// shell parse and drop (#1708). The asks of one turn go to the core as one query per
+/// conversation; each slot gets its message's part of the answer, as if it had asked alone.
+#[derive(Clone, Default)]
+struct ExtrasBatch {
+  pending: Rc<RefCell<Vec<ExtrasAsk>>>,
+}
+
+/// One row's ask, waiting for the batch it is in.
+struct ExtrasAsk {
+  conversation: ConversationId,
+  message: MessageId,
+  reply: oneshot::Sender<Result<ChatAnswer, String>>,
 }
 
 impl Mirror {
+  /// The feed of `conversation`, a new one counting as read now.
+  fn feed_entry(&mut self, conversation: ConversationId) -> &mut Feed {
+    self.feeds.entry(conversation).or_insert_with(|| Feed {
+      last_read: ReadStamp::now(),
+      ..Feed::default()
+    })
+  }
+
+  /// Drops the rows (and the threads) of the idle feeds read longest ago while more than
+  /// [`MAX_HELD_FEEDS`] are held. A feed with a page on its way stays.
+  fn evict_idle_feeds(&mut self, now_ms: f64) {
+    if self.feeds.len() <= MAX_HELD_FEEDS {
+      return;
+    }
+    let loading: HashSet<ConversationId> = self
+      .loading
+      .iter()
+      .map(|key| match key {
+        LoadKey::Page(conversation, _) | LoadKey::Thread(conversation, _) => *conversation,
+      })
+      .collect();
+    let mut idle: Vec<(u64, ConversationId)> = self
+      .feeds
+      .iter()
+      .filter(|(conversation, feed)| feed.is_idle(now_ms) && !loading.contains(conversation))
+      .map(|(conversation, feed)| (feed.last_read.tick, *conversation))
+      .collect();
+    idle.sort_unstable();
+    let excess = self.feeds.len() - MAX_HELD_FEEDS;
+    let evicted: HashSet<ConversationId> = idle
+      .into_iter()
+      .take(excess)
+      .map(|(_, conversation)| conversation)
+      .collect();
+    self
+      .feeds
+      .retain(|conversation, _| !evicted.contains(conversation));
+    let used_threads = &self.used_threads;
+    self
+      .threads
+      .retain(|key, _| !evicted.contains(&key.0) || used_threads.contains(key));
+  }
+
   /// What the row of `message`, shown as `id`, shows beyond its text, as the core will show it: the
   /// quote from the quoted row the mirror holds (the core's rule: `reply_ref`), the marks from the
   /// composer.
@@ -819,6 +909,19 @@ fn pending_file(
 }
 
 impl Feed {
+  /// Whether dropping its rows loses nothing in use: not read lately, nothing asked for that hasn't
+  /// arrived, and no row the user just sent that the core hasn't answered.
+  fn is_idle(&self, now_ms: f64) -> bool {
+    !self.is_used
+      && self.last_read.is_older_than_hold(now_ms)
+      && !self.is_moving
+      && !self.is_expecting_older
+      && !self.is_asking_older
+      && self.maybe_gap_rows.is_none()
+      && !self.is_asking_gap
+      && !self.rows.values().any(|row| is_pending(row.id))
+  }
+
   /// Takes a page read from the core. A page from after a jump of the total that shows none of
   /// the rows held can't say where those went, and its rows would land among them at the wrong
   /// places: it is left out until the newest rows have told ([`Self::take_newest`]), and the
@@ -1024,6 +1127,140 @@ impl Slot {
     self.maybe_answer = Some(answer);
     true
   }
+
+  /// Whether it answers for message rows ([`MAX_HELD_ROW_ANSWERS`]).
+  fn is_row_answer(&self) -> bool {
+    matches!(self.maybe_query, Some(ChatQuery::MessageExtras { .. }))
+  }
+
+  /// Whether dropping it loses nothing in use: not on its way, not read lately and not due to be
+  /// asked again.
+  fn is_idle(&self, now_ms: f64) -> bool {
+    !self.is_loading
+      && !self.is_used
+      && !self.is_requery_due
+      && !self.is_outdated
+      && self.last_read.is_older_than_hold(now_ms)
+  }
+}
+
+impl ReadStamp {
+  fn now() -> Self {
+    let tick = READ_CLOCK.with(|clock| {
+      let tick = clock.get() + 1;
+      clock.set(tick);
+      tick
+    });
+    Self {
+      tick,
+      at_ms: crate::perf::now_ms(),
+    }
+  }
+
+  fn is_older_than_hold(&self, now_ms: f64) -> bool {
+    now_ms - self.at_ms >= MIN_HOLD.as_secs_f64() * 1_000.0
+  }
+}
+
+/// The one conversation a query's answer depends on, when nothing outside it can change the
+/// answer: a message link's preview (#319) and whether the conversation has guests (#1708; its
+/// members are part of its entry, so a join or leave touches it). Every sidebar row asks the
+/// latter, and asking them all again on every change cost dozens of calls per channel switch.
+fn only_conversation_read(query: &ChatQuery) -> Option<ConversationId> {
+  match query {
+    ChatQuery::LinkedMessage { link } => Route::from_permalink(link).and_then(|route| route.conversation()),
+    ChatQuery::HasExternalPeople { conversation } => Some(*conversation),
+    _ => None,
+  }
+}
+
+/// Drops the idle answers read longest ago while more than [`MAX_HELD_ROW_ANSWERS`] are held: down to
+/// three quarters of it, so the sort runs once per few hundred new answers, not on every one.
+fn evict_idle_answers(answers: &mut HashMap<String, Slot>, now_ms: f64) {
+  let rows = answers.values().filter(|slot| slot.is_row_answer()).count();
+  if rows <= MAX_HELD_ROW_ANSWERS {
+    return;
+  }
+  let mut idle: Vec<(u64, String)> = answers
+    .iter()
+    .filter(|(_, slot)| slot.is_row_answer() && slot.is_idle(now_ms))
+    .map(|(key, slot)| (slot.last_read.tick, key.clone()))
+    .collect();
+  idle.sort_unstable();
+  let excess = rows - MAX_HELD_ROW_ANSWERS * 3 / 4;
+  for (_, key) in idle.into_iter().take(excess) {
+    answers.remove(&key);
+  }
+}
+
+impl ExtrasBatch {
+  /// The extras of `message`, asked with the other asks of this turn.
+  async fn ask(&self, conversation: ConversationId, message: MessageId) -> Result<ChatAnswer, String> {
+    let (reply, answer) = oneshot::channel();
+    let is_first = {
+      let mut pending = self.pending.borrow_mut();
+      pending.push(ExtrasAsk {
+        conversation,
+        message,
+        reply,
+      });
+      pending.len() == 1
+    };
+    if is_first {
+      // A task of its own runs after the tasks already queued in this turn, which add theirs.
+      let batch = self.clone();
+      spawn_local(async move { batch.flush().await });
+    }
+    answer
+      .await
+      .unwrap_or_else(|_| Err("the batch of message extras was dropped".to_owned()))
+  }
+
+  async fn flush(&self) {
+    let asks = std::mem::take(&mut *self.pending.borrow_mut());
+    let mut by_conversation: BTreeMap<ConversationId, Vec<ExtrasAsk>> = BTreeMap::new();
+    for ask in asks {
+      by_conversation.entry(ask.conversation).or_default().push(ask);
+    }
+    let queries = by_conversation.into_iter().flat_map(|(conversation, mut asks)| {
+      let mut chunks = Vec::new();
+      while !asks.is_empty() {
+        let rest = asks.split_off(asks.len().min(MAX_EXTRAS_BATCH));
+        chunks.push((conversation, std::mem::replace(&mut asks, rest)));
+      }
+      chunks
+    });
+    join_all(queries.map(|(conversation, asks)| async move {
+      let mut messages: Vec<MessageId> = asks.iter().map(|ask| ask.message).collect();
+      messages.sort_unstable();
+      messages.dedup();
+      let outcome = core_query(ChatQuery::MessageExtras {
+        conversation,
+        messages,
+      })
+      .await;
+      for ask in asks {
+        // A row that went away meanwhile dropped its receiver; nothing waits for its part.
+        drop(ask.reply.send(extras_part(&outcome, ask.message)));
+      }
+    }))
+    .await;
+  }
+}
+
+/// `message`'s part of a batch's answer: what the core answers when asked for it alone.
+fn extras_part(outcome: &Result<ChatAnswer, String>, message: MessageId) -> Result<ChatAnswer, String> {
+  match outcome {
+    Ok(ChatAnswer::MessageExtras { extras }) => Ok(ChatAnswer::MessageExtras {
+      extras: extras
+        .iter()
+        .filter(|extras| extras.message == message)
+        .cloned()
+        .collect(),
+    }),
+    Ok(_) => Err("unexpected answer to message_extras".to_owned()),
+    Err(error) => Err(error.clone()),
+  }
 }
 
 impl<T: Clone> EventRoute<T> {
@@ -1078,6 +1315,7 @@ impl RemoteChat {
       refresh_queued: Rc::new(Cell::new(false)),
       requery_queued: Rc::new(Cell::new(false)),
       answers: Rc::new(RefCell::new(HashMap::new())),
+      extras_batch: ExtrasBatch::default(),
     };
     // async-ok: a thread-local, not a signal.
     let must_subscribe = CORE_EVENTS.with(|route| route.borrow_mut().route_to(backend.clone()));
@@ -1106,6 +1344,7 @@ impl RemoteChat {
       let slot = answers.entry(key.clone()).or_default();
       slot.maybe_query.get_or_insert_with(|| query.clone());
       slot.is_used = true;
+      slot.last_read = ReadStamp::now();
       let must_load = !slot.is_loading && (slot.maybe_answer.is_none() || slot.is_stale);
       if must_load {
         slot.is_loading = true;
@@ -1123,9 +1362,20 @@ impl RemoteChat {
     existing
   }
 
-  /// Everything fetched so far may be out of date.
+  /// Everything fetched so far may be out of date, except answers about one conversation
+  /// ([`only_conversation_read`]): the refresh after the user's action applied its changes, and
+  /// [`Self::plan_refresh`] asked those of the conversations it touched again. Switching channels
+  /// (a read marker each time) asked every sidebar row's guest flag again otherwise (#1708).
   fn mark_answers_stale(&self) {
     for slot in self.answers.borrow_mut().values_mut() {
+      if slot
+        .maybe_query
+        .as_ref()
+        .and_then(only_conversation_read)
+        .is_some()
+      {
+        continue;
+      }
       slot.is_stale = true;
       // An answer in flight may predate the change: asked again when it arrives.
       slot.is_outdated |= slot.is_loading;
@@ -1140,7 +1390,13 @@ impl RemoteChat {
       if let Some(slot) = self.answers.borrow_mut().get_mut(&key) {
         slot.maybe_asked_ms = Some(crate::perf::now_ms());
       }
-      let outcome = core_query(query.clone()).await;
+      let outcome = match &query {
+        ChatQuery::MessageExtras {
+          conversation,
+          messages,
+        } if messages.len() == 1 => self.extras_batch.ask(*conversation, messages[0]).await,
+        _ => core_query(query.clone()).await,
+      };
       let mut answers = self.answers.borrow_mut();
       let slot = answers.entry(key.clone()).or_default();
       slot.maybe_query.get_or_insert_with(|| query.clone());
@@ -1160,9 +1416,18 @@ impl RemoteChat {
     }
   }
 
+  /// Drops what the UI hasn't read for a while beyond the bounds ([`MAX_HELD_FEEDS`],
+  /// [`MAX_HELD_ROW_ANSWERS`]). Before a change resets what counts as used, so nothing read since the
+  /// last one goes.
+  fn evict_idle(&self, now_ms: f64) {
+    evict_idle_answers(&mut self.answers.borrow_mut(), now_ms);
+    self.mirror.borrow_mut().evict_idle_feeds(now_ms);
+  }
+
   /// Tells the UI to read again. What it reads is marked used anew, so a later refresh reloads
   /// only what is still shown.
   fn changed(&self) {
+    self.evict_idle(crate::perf::now_ms());
     for slot in self.answers.borrow_mut().values_mut() {
       slot.is_used = false;
     }
@@ -1365,13 +1630,13 @@ impl RemoteChat {
     };
     for (key, slot) in self.answers.borrow_mut().iter_mut() {
       let maybe_query = slot.maybe_query.clone();
-      // A message link's preview only changes with its own conversation: other changes keep
-      // the answer it has (#319, no rescans on every message elsewhere).
-      if let Some(ChatQuery::LinkedMessage { link }) = &maybe_query
-        && slot.maybe_answer.is_some()
+      // An answer about one conversation only changes with it: other changes keep the answer it
+      // has (#319, #1708: no rescans on every message elsewhere).
+      if slot.maybe_answer.is_some()
         && !slot.is_loading
-        && Route::from_permalink(link)
-          .and_then(|route| route.conversation())
+        && maybe_query
+          .as_ref()
+          .and_then(only_conversation_read)
           .is_some_and(|conversation| !applied.touches(conversation))
       {
         continue;
@@ -1407,7 +1672,7 @@ impl RemoteChat {
     let mut mirror = self.mirror.borrow_mut();
     let mirror = &mut *mirror;
     let is_snapshot_unmoved = mirror.snapshot.message_count(conversation) == count_before;
-    let feed = mirror.feeds.entry(conversation).or_default();
+    let feed = mirror.feed_entry(conversation);
     match outcome {
       Ok(window) => {
         feed.maybe_counted_at_read = count_before.filter(|_| is_snapshot_unmoved);
@@ -1510,7 +1775,7 @@ impl RemoteChat {
           let mut mirror = self.mirror.borrow_mut();
           let mirror = &mut *mirror;
           let is_snapshot_unmoved = mirror.snapshot.message_count(conversation) == count_before;
-          let feed = mirror.feeds.entry(conversation).or_default();
+          let feed = mirror.feed_entry(conversation);
           match feed.apply(window) {
             Applied::Taken(is_taken_changed) => {
               is_changed |= is_taken_changed;
@@ -3576,7 +3841,8 @@ impl ChatBackend for RemoteChat {
     let missing = {
       let mut mirror = self.mirror.borrow_mut();
       let end = start.saturating_add(len).min(total);
-      let feed = mirror.feeds.entry(conversation).or_default();
+      let feed = mirror.feed_entry(conversation);
+      feed.last_read = ReadStamp::now();
       feed.note_read(start, end);
       feed.missing_pages(start, end)
     };
@@ -3622,6 +3888,7 @@ impl ChatBackend for RemoteChat {
       let mut mirror = self.mirror.borrow_mut();
       let feed = mirror.feeds.get_mut(&conversation).map(|feed| {
         feed.is_used = true;
+        feed.last_read = ReadStamp::now();
         feed.note_shown(start, end);
         if std::mem::take(&mut feed.is_stale) {
           stale_pages = feed.held_pages();
@@ -4731,6 +4998,72 @@ mod tests {
         assert!(backend.answers.borrow().values().all(|slot| slot.is_outdated));
       }
 
+      /// Every sidebar row asks it; a change elsewhere asked them all again (#1708).
+      #[test]
+      fn a_guest_flag_is_asked_again_only_when_its_conversation_changed() {
+        let backend = backend();
+        insert_guest_flag(&backend, id_from_raw(7));
+        insert_guest_flag(&backend, id_from_raw(8));
+
+        let plan = backend.plan_refresh(
+          SnapshotChanges {
+            feeds: vec![id_from_raw(8)],
+            ..SnapshotChanges::default()
+          },
+          10_000.0,
+        );
+
+        let asked: Vec<ChatQuery> = plan.queries.into_iter().map(|(_, query)| query).collect();
+        assert_eq!(
+          asked,
+          vec![ChatQuery::HasExternalPeople {
+            conversation: id_from_raw(8)
+          }]
+        );
+      }
+
+      #[test]
+      fn the_users_own_action_keeps_the_guest_flags() {
+        let backend = backend();
+        insert_guest_flag(&backend, id_from_raw(7));
+        insert_slot(&backend, false, 0.0);
+        backend
+          .answers
+          .borrow_mut()
+          .get_mut("activity")
+          .unwrap()
+          .maybe_answer = Some(ChatAnswer::Flag { value: false });
+
+        backend.mark_answers_stale();
+
+        let answers = backend.answers.borrow();
+        let is_stale = |query: &ChatQuery| {
+          answers
+            .values()
+            .find(|slot| slot.maybe_query.as_ref() == Some(query))
+            .unwrap()
+            .is_stale
+        };
+        assert!(!is_stale(&ChatQuery::HasExternalPeople {
+          conversation: id_from_raw(7)
+        }));
+        assert!(is_stale(&ChatQuery::Activity));
+      }
+
+      fn insert_guest_flag(backend: &RemoteChat, conversation: ConversationId) {
+        let query = ChatQuery::HasExternalPeople { conversation };
+        backend.answers.borrow_mut().insert(
+          serde_json::to_string(&query).unwrap(),
+          Slot {
+            maybe_query: Some(query),
+            maybe_answer: Some(ChatAnswer::Flag { value: false }),
+            is_used: true,
+            maybe_asked_ms: Some(0.0),
+            ..Slot::default()
+          },
+        );
+      }
+
       fn insert_slot(backend: &RemoteChat, is_loading: bool, asked_ms: f64) {
         backend.answers.borrow_mut().insert(
           "activity".to_owned(),
@@ -4763,6 +5096,7 @@ mod tests {
         refresh_queued: Rc::new(Cell::new(false)),
         requery_queued: Rc::new(Cell::new(false)),
         answers: Rc::new(RefCell::new(HashMap::new())),
+        extras_batch: ExtrasBatch::default(),
       }
     }
   }
@@ -5248,6 +5582,263 @@ mod tests {
       assert!(!slot.settle(draft("x")));
       assert!(slot.settle(draft("y")));
       assert!(!slot.is_loading && !slot.is_stale);
+    }
+  }
+
+  /// #1708: the extras of the rows of one turn are asked in one query; each row gets its part.
+  mod extras_batch {
+    use super::*;
+
+    #[test]
+    fn each_row_gets_only_its_own_extras() {
+      let outcome = Ok(ChatAnswer::MessageExtras {
+        extras: vec![
+          MessageExtras::new(id_from_raw(1)),
+          MessageExtras::new(id_from_raw(2)),
+        ],
+      });
+
+      assert_eq!(
+        extras_part(&outcome, id_from_raw(2)),
+        Ok(ChatAnswer::MessageExtras {
+          extras: vec![MessageExtras::new(id_from_raw(2))],
+        })
+      );
+    }
+
+    /// As the core answers a row it has no message for (gone, or not stored yet).
+    #[test]
+    fn a_row_the_answer_leaves_out_gets_no_extras() {
+      let outcome = Ok(ChatAnswer::MessageExtras {
+        extras: vec![MessageExtras::new(id_from_raw(1))],
+      });
+
+      assert_eq!(
+        extras_part(&outcome, id_from_raw(3)),
+        Ok(ChatAnswer::MessageExtras { extras: Vec::new() })
+      );
+    }
+
+    #[test]
+    fn a_failed_batch_fails_every_row_and_another_answer_is_refused() {
+      let failed: Result<ChatAnswer, String> = Err("offline".to_owned());
+      assert_eq!(extras_part(&failed, id_from_raw(1)), Err("offline".to_owned()));
+      assert!(extras_part(&Ok(draft("x")), id_from_raw(1)).is_err());
+    }
+  }
+
+  /// #1708: the mirror keeps the rows of the conversations read last and the answers read last,
+  /// not of every one ever opened.
+  mod held_bounds {
+    use super::refresh_plan::backend;
+    use super::*;
+
+    /// Long enough after the reads (natively they happen at 0 ms) that none of them is recent.
+    const LATER_MS: f64 = 60_000.0;
+
+    #[test]
+    fn the_feeds_read_longest_ago_go_beyond_the_bound() {
+      let backend = backend();
+      for raw in 1..=(MAX_HELD_FEEDS as u64 + 3) {
+        hold_feed(&backend, raw);
+      }
+
+      backend.evict_idle(LATER_MS);
+
+      let mirror = backend.mirror.borrow();
+      assert_eq!(mirror.feeds.len(), MAX_HELD_FEEDS);
+      for raw in 1..=3 {
+        assert!(
+          !mirror.feeds.contains_key(&id_from_raw(raw)),
+          "feed {raw} was read longest ago"
+        );
+      }
+      assert!(mirror.feeds.contains_key(&id_from_raw(MAX_HELD_FEEDS as u64 + 3)));
+    }
+
+    /// What the UI shows is read on every change, and a page that just arrived is about to be.
+    #[test]
+    fn nothing_read_lately_goes() {
+      let backend = backend();
+      for raw in 1..=(MAX_HELD_FEEDS as u64 + 3) {
+        hold_feed(&backend, raw);
+      }
+      let mut answers: HashMap<String, Slot> = (0..=MAX_HELD_ROW_ANSWERS)
+        .map(|index| (format!("{index:05}"), idle_slot()))
+        .collect();
+
+      backend.evict_idle(LATER_MS - 1.0);
+      evict_idle_answers(&mut answers, LATER_MS - 1.0);
+
+      assert_eq!(backend.mirror.borrow().feeds.len(), MAX_HELD_FEEDS + 3);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS + 1);
+    }
+
+    #[test]
+    fn a_feed_in_use_loading_or_with_a_pending_row_stays() {
+      let backend = backend();
+      for raw in 1..=(MAX_HELD_FEEDS as u64 + 3) {
+        hold_feed(&backend, raw);
+      }
+      {
+        let mut mirror = backend.mirror.borrow_mut();
+        mirror.feeds.get_mut(&id_from_raw(1)).unwrap().is_used = true;
+        mirror.loading.insert(LoadKey::Page(id_from_raw(2), 0));
+        let pending = pending_message_id(ClientMessageId::random());
+        let feed = mirror.feeds.get_mut(&id_from_raw(3)).unwrap();
+        let mut row = feed.rows[&0].clone();
+        row.id = pending;
+        feed.rows.insert(2, row);
+      }
+
+      backend.mirror.borrow_mut().evict_idle_feeds(LATER_MS);
+
+      let mirror = backend.mirror.borrow();
+      assert_eq!(mirror.feeds.len(), MAX_HELD_FEEDS);
+      for raw in 1..=3 {
+        assert!(
+          mirror.feeds.contains_key(&id_from_raw(raw)),
+          "feed {raw} is in use"
+        );
+      }
+      for raw in 4..=6 {
+        assert!(
+          !mirror.feeds.contains_key(&id_from_raw(raw)),
+          "feed {raw} was idle"
+        );
+      }
+    }
+
+    #[test]
+    fn an_evicted_feed_takes_its_threads_unless_one_is_shown() {
+      let backend = backend();
+      let (shown, hidden) = (
+        crate::model::thread_id_of(id_from_raw(70)),
+        crate::model::thread_id_of(id_from_raw(71)),
+      );
+      for raw in 1..=(MAX_HELD_FEEDS as u64 + 1) {
+        hold_feed(&backend, raw);
+      }
+      {
+        let mut mirror = backend.mirror.borrow_mut();
+        mirror.threads.insert((id_from_raw(1), shown), Vec::new());
+        mirror.threads.insert((id_from_raw(1), hidden), Vec::new());
+        mirror.used_threads.insert((id_from_raw(1), shown));
+      }
+
+      backend.mirror.borrow_mut().evict_idle_feeds(LATER_MS);
+
+      let mirror = backend.mirror.borrow();
+      assert!(!mirror.feeds.contains_key(&id_from_raw(1)));
+      assert!(mirror.threads.contains_key(&(id_from_raw(1), shown)));
+      assert!(!mirror.threads.contains_key(&(id_from_raw(1), hidden)));
+    }
+
+    #[test]
+    fn the_answers_read_longest_ago_go_down_to_three_quarters_of_the_bound() {
+      let mut answers = HashMap::new();
+      for index in 0..=MAX_HELD_ROW_ANSWERS {
+        answers.insert(format!("{index:05}"), idle_slot());
+      }
+
+      evict_idle_answers(&mut answers, LATER_MS);
+
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4);
+      // Inserted in the order they were read: the first ones went.
+      let first_kept = format!("{:05}", MAX_HELD_ROW_ANSWERS + 1 - MAX_HELD_ROW_ANSWERS * 3 / 4);
+      assert_eq!(answers.keys().min(), Some(&first_kept));
+    }
+
+    #[test]
+    fn answers_in_use_on_their_way_or_due_stay() {
+      let mut answers = HashMap::new();
+      answers.insert(
+        "used".to_owned(),
+        Slot {
+          is_used: true,
+          ..idle_slot()
+        },
+      );
+      answers.insert(
+        "loading".to_owned(),
+        Slot {
+          is_loading: true,
+          ..idle_slot()
+        },
+      );
+      answers.insert(
+        "due".to_owned(),
+        Slot {
+          is_requery_due: true,
+          ..idle_slot()
+        },
+      );
+      answers.insert(
+        "outdated".to_owned(),
+        Slot {
+          is_outdated: true,
+          ..idle_slot()
+        },
+      );
+      for index in 0..MAX_HELD_ROW_ANSWERS {
+        answers.insert(format!("{index:05}"), idle_slot());
+      }
+
+      evict_idle_answers(&mut answers, LATER_MS);
+
+      for key in ["used", "loading", "due", "outdated"] {
+        assert!(answers.contains_key(key), "{key} stays");
+      }
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4);
+    }
+
+    #[test]
+    fn under_the_bound_nothing_goes() {
+      let mut answers: HashMap<String, Slot> = (0..MAX_HELD_ROW_ANSWERS)
+        .map(|index| (format!("{index:05}"), idle_slot()))
+        .collect();
+      evict_idle_answers(&mut answers, LATER_MS);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS);
+    }
+
+    /// A feed of two rows the UI read and moved on from (a change came since).
+    fn hold_feed(backend: &RemoteChat, raw: u64) {
+      let mut mirror = backend.mirror.borrow_mut();
+      let feed = mirror.feed_entry(id_from_raw(raw));
+      feed.apply(window(2, &["a", "b"]));
+      feed.last_read = ReadStamp::now();
+      feed.is_used = false;
+    }
+
+    #[test]
+    fn answers_about_a_conversation_stay() {
+      let mut answers: HashMap<String, Slot> = (0..=MAX_HELD_ROW_ANSWERS)
+        .map(|index| (format!("{index:05}"), idle_slot()))
+        .collect();
+      answers.insert(
+        "activity".to_owned(),
+        Slot {
+          maybe_query: Some(ChatQuery::Activity),
+          ..idle_slot()
+        },
+      );
+
+      evict_idle_answers(&mut answers, LATER_MS);
+
+      assert!(answers.contains_key("activity"));
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4 + 1);
+    }
+
+    fn idle_slot() -> Slot {
+      Slot {
+        maybe_query: Some(ChatQuery::MessageExtras {
+          conversation: id_from_raw(7),
+          messages: vec![id_from_raw(1)],
+        }),
+        maybe_answer: Some(draft("x")),
+        last_read: ReadStamp::now(),
+        ..Slot::default()
+      }
     }
   }
 
