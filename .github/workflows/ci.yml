@@ -319,7 +319,9 @@ jobs:
         # them up to the end, and shows what ran out (#2344).
         run: |
           scripts/ci-resources.sh 30 "$GITHUB_WORKSPACE" &
-          cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
+          # At a lower priority than the runner's own processes: runs also lost their runner in the
+          # middle of the tests ("lost communication"), which starving it of CPU causes (#2344).
+          nice -n 10 cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
       - name: Test durations
         # Every test's duration, per test binary (nextest's JUnit report), to see which suites to
         # group or move to the nightly run.
