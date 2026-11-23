@@ -13,7 +13,10 @@ use teamcraft_client_api::canvas::{self, Block, BlockKind, CanvasDoc};
 use teamcraft_core::api::fake::FakeServer;
 use teamcraft_core::client::Client;
 use teamcraft_core::ui_backend::CoreChatBackend;
-use teamcraft_proto::{ConversationId, GatewayEvent, Permission};
+use teamcraft_proto::{
+  Base64Bytes, CanvasCaret, CanvasPageState, CanvasPresence, ConversationId, GatewayClientMessage,
+  GatewayEvent, Permission,
+};
 
 #[tokio::test]
 async fn concurrent_edits_of_two_members_converge_on_both_devices() {
@@ -263,6 +266,67 @@ fn texts(blocks: &[Block]) -> Vec<String> {
 
 fn contains(haystack: &[u8], needle: &[u8]) -> bool {
   haystack.windows(needle.len()).any(|window| window == needle)
+}
+
+#[tokio::test]
+async fn who_has_the_page_open_arrives_sealed_and_only_from_its_device() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let bob_ui = backend_of(&bob).with_canvas_presence(bob.client.canvas_presence_state());
+  let word = CanvasPresence {
+    seq: 1,
+    maybe_page: None,
+    state: CanvasPageState::Open,
+    maybe_caret: Some(CanvasCaret {
+      block: "b1".to_owned(),
+      start: 3,
+      end: 3,
+    }),
+  };
+  let GatewayClientMessage::CanvasPresence { sealed, .. } =
+    alice.client.canvas_presence_frame(channel, &word).unwrap()
+  else {
+    panic!("not a canvas presence frame");
+  };
+  assert!(
+    !String::from_utf8_lossy(sealed.as_slice()).contains("b1"),
+    "the server sees no caret"
+  );
+
+  // Relabeled as another device of Alice's, or tampered with: dropped.
+  let mut tampered = sealed.as_slice().to_vec();
+  let last = tampered.len() - 1;
+  tampered[last] ^= 1;
+  for (device, bytes) in [
+    (bob.client.device_id(), sealed.as_slice().to_vec()),
+    (alice.client.device_id(), tampered),
+  ] {
+    server.publish_event(
+      &[bob.client.user_id()],
+      &GatewayEvent::CanvasPresence {
+        conversation_id: channel,
+        user_id: alice.client.user_id(),
+        device_id: device,
+        sealed: Base64Bytes::new(bytes),
+      },
+    );
+  }
+  settle(&mut [&mut bob]).await;
+  assert!(bob_ui.canvas_peers(channel, None).is_empty());
+
+  server.publish_event(
+    &[bob.client.user_id()],
+    &GatewayEvent::CanvasPresence {
+      conversation_id: channel,
+      user_id: alice.client.user_id(),
+      device_id: alice.client.device_id(),
+      sealed,
+    },
+  );
+  settle(&mut [&mut alice, &mut bob]).await;
+  let peers = bob_ui.canvas_peers(channel, None);
+  assert_eq!(peers.len(), 1);
+  assert_eq!(peers[0].user, alice.client.user_id());
+  assert_eq!(peers[0].maybe_caret.as_ref().map(|caret| caret.start), Some(3));
 }
 
 async fn channel_with_two() -> (FakeServer, Peer, Peer, ConversationId) {

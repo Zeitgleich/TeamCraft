@@ -14,6 +14,7 @@ mod backgrounds;
 pub mod bug_reports;
 mod call_lines;
 mod calls;
+pub mod canvas_presence;
 mod catch_up;
 mod channel_anchor;
 mod channel_roles;
@@ -547,6 +548,8 @@ pub struct Client<A, S> {
   group_loads: u64,
   sync: SyncState,
   typing: crate::typing::TypingState,
+  /// Who has which page of which channel's notes open (e2ee.md §4.11), from the gateway.
+  canvas_presence: crate::canvas_presence::CanvasPresenceState,
   /// Delivered reports waiting for the gateway (delivered ticks, issue #598).
   delivered: delivered::DeliveredReports,
   /// Refusals of earlier user actions found by a background flush, for the host to show
@@ -840,6 +843,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       group_loads: 0,
       sync,
       typing: Default::default(),
+      canvas_presence: Default::default(),
       delivered: Default::default(),
       background_failures: Vec::new(),
       transfers: crate::transfers::Transfers::new(),

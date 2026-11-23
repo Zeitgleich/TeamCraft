@@ -11,6 +11,7 @@ mod call_media;
 mod call_recording;
 mod calls;
 mod canvas_page;
+mod canvas_presence;
 pub mod channel_name;
 mod conversation;
 pub mod custom_emoji_set;
@@ -64,6 +65,11 @@ pub use calls::{
   ScreenContentMode, ScreenShareTakeover, UplinkFloor,
 };
 pub use canvas_page::{CanvasPageId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES};
+pub use canvas_presence::{
+  CANVAS_PRESENCE_INTERVAL_MS, CANVAS_PRESENCE_REFRESH_MS, CANVAS_PRESENCE_SERVER_GAP_MS,
+  CANVAS_PRESENCE_TIMEOUT_MS, CanvasCaret, CanvasPageState, CanvasPeer, CanvasPresence, CanvasPresenceNote,
+  MAX_CANVAS_PRESENCE_BYTES,
+};
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
 pub use gateway::{

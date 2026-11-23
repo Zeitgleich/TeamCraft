@@ -1044,6 +1044,20 @@ pub trait ChatBackend {
     _history: Vec<crate::canvas::CanvasMark>,
   ) {
   }
+  /// The other members' devices that have this page of the channel's notes open now, by user and
+  /// device (e2ee.md §4.11, "Who has the page open"). Asked again when the core changes and on the
+  /// editor's own tick, since an entry runs out without an event.
+  fn canvas_peers(
+    &self,
+    _conversation: ConversationId,
+    _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> Vec<crate::model::CanvasPeer> {
+    Vec::new()
+  }
+  /// Tells the other members connected now that this device has a page of the channel's notes
+  /// open, where its caret is, or that it closed the page: sealed with the channel's content key,
+  /// dropped while offline (a late word would be wrong). The editor paces it.
+  fn announce_canvas(&self, _conversation: ConversationId, _note: crate::model::CanvasPresenceNote) {}
   /// Removes a person from a conversation (and rotates its keys).
   fn remove_member(&self, _conversation: ConversationId, _user: UserId) {}
   /// Invites someone by email to a space, as member or guest.

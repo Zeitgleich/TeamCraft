@@ -11,8 +11,9 @@
 //!
 //! "Version history" (issue #1245) lists the page's versions as this device holds them, who made
 //! each and when ([`versions`]), shows one read-only and restores it as a new edit. The line under
-//! the toolbar names who else edited the page in the last minutes, from the same updates: no
-//! presence of its own goes to the server.
+//! the toolbar shows who else has the page open and draws their carets ([`canvas_peers`], from
+//! sealed, ephemeral words over the gateway), and names who edited it in the last minutes without
+//! having it open, from the updates.
 //!
 //! Each block is an element of its own that the browser edits ([`canvas_editor`]): after every
 //! input the view reads its text and writes the change to the document, and the document's content
@@ -36,14 +37,16 @@ use teamcraft_client_api::canvas::{
   caret_after_change, compaction, editors_since, is_page_link, merge_updates, numbered_position, page_at,
   typed_range, versions,
 };
+use teamcraft_client_api::model::CanvasPeer;
 use teamcraft_client_api::model::OlderHistory;
-use teamcraft_proto::CanvasPageId;
+use teamcraft_proto::{CanvasCaret, CanvasPageId};
 use wasm_bindgen::JsCast;
 
 use crate::components::canvas_editor::{self, Caret};
 use crate::components::canvas_file::{CanvasFile, CanvasFilePicker};
 use crate::components::canvas_move::{self, MoveTarget};
 use crate::components::canvas_pages::CanvasPages;
+use crate::components::canvas_peers::{self, PeerCarets, PeersLine};
 use crate::components::canvas_toolbar::{
   CanvasAction, CanvasActive, CanvasToolbar, canvas_action_for, kind_label, kind_of, mark_of,
 };
@@ -163,6 +166,8 @@ struct Canvas {
   drag: RwSignal<Option<Drag>>,
   /// Where the line showing its landing place is: before a block, or after the last one.
   drop_line: Memo<Option<DropLine>>,
+  /// The other members' devices with this page open, with their carets ([`canvas_peers`]).
+  peers: Memo<Vec<CanvasPeer>>,
 }
 
 /// The block a drop line is drawn at.
@@ -262,6 +267,20 @@ fn PageEditor(
     Memo::new(move |_| stored.with(|stored| page.with_value(|page| stored.maybe_page == *page)));
   let drag = RwSignal::new(None::<Drag>);
   let blocks = RwSignal::new(Vec::<Block>::new());
+  let selection = RwSignal::new(None::<BlockSelection>);
+  let can_edit = Memo::new(move |_| may_post.get() && is_supported.get());
+  // Where this device's caret is, for the others: only while it can edit.
+  let own_caret = Signal::derive(move || {
+    if !can_edit.get() {
+      return None;
+    }
+    selection.get().map(|selection| CanvasCaret {
+      block: selection.id,
+      start: selection.caret.start,
+      end: selection.caret.end,
+    })
+  });
+  let peers = canvas_peers::use_page_presence(state, conversation, page.get_value(), own_caret);
   let canvas = Canvas {
     state,
     i18n,
@@ -271,8 +290,8 @@ fn PageEditor(
     blocks,
     stored,
     older: Memo::new(move |_| state.read(|backend| backend.older_history(conversation))),
-    can_edit: Memo::new(move |_| may_post.get() && is_supported.get()),
-    selection: RwSignal::new(None),
+    can_edit,
+    selection,
     pending: RwSignal::new(PendingMarks::default()),
     link_target: RwSignal::new(None),
     can_undo: RwSignal::new(false),
@@ -283,6 +302,7 @@ fn PageEditor(
     announcement: RwSignal::new(String::new()),
     drag,
     drop_line: Memo::new(move |_| drop_line_of(drag, blocks)),
+    peers,
   };
 
   // Every change of the core's list: merged in, the caret kept, a long list compacted.
@@ -314,7 +334,7 @@ fn PageEditor(
   // Whatever waits goes out when the tab closes.
   on_cleanup(move || canvas.flush());
 
-  // Who else edited the page lately: "Anna is editing".
+  // Who else edited the page lately: "Ben is editing" when Ben doesn't have it open.
   let now = RwSignal::new(crate::clock::now_ms());
   crate::reactive::use_interval_while_visible(EDITING_CHECK_MS, move || {
     let _ = now.try_set(crate::clock::now_ms());
@@ -324,17 +344,6 @@ fn PageEditor(
     let since = now.get() - EDITING_WINDOW_MS;
     canvas.stored.with(|stored| editors_since(stored, since, me))
   });
-  let editing = move || {
-    let names: Vec<String> = editors
-      .get()
-      .into_iter()
-      .map(|user| name_of(state, i18n, user))
-      .collect();
-    (!names.is_empty()).then(|| {
-      let joined = names.join(", ");
-      i18n.t_count_with("canvas-editing", names.len(), &[("names", joined.as_str())])
-    })
-  };
 
   let show_history = RwSignal::new(false);
   let toggle_history = move |_| {
@@ -381,7 +390,7 @@ fn PageEditor(
           parts.join(" ")
         }}
       </p>
-      <p class="canvas-presence" aria-live="polite">{editing}</p>
+      <PeersLine state=state peers=canvas.peers editors=editors />
       <p class="visually-hidden" aria-live="polite">{move || canvas.announcement.get()}</p>
       <Show when=move || canvas.show_files.get() && canvas.can_edit.get() && !show_history.get() fallback=|| ()>
         <CanvasFilePicker conversation=conversation on_pick=pick_file on_close=close_files />
@@ -770,6 +779,15 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
   };
   let file_id = id.clone();
   let text_id = id.clone();
+  let caret_id = id.clone();
+  let block_text = Signal::derive(move || {
+    row.with(|row| {
+      row
+        .as_ref()
+        .map(|(block, _)| block.text.clone())
+        .unwrap_or_default()
+    })
+  });
   let is_file = move || kind() == BlockKind::File;
   view! {
     <div
@@ -879,6 +897,7 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
           }
         }
       ></div>
+      <PeerCarets state=canvas.state peers=canvas.peers block=caret_id field=field text=block_text />
     </div>
   }
 }

@@ -412,6 +412,22 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.note_canvas_pages(conversation, listed, deleted);
   }
 
+  fn canvas_peers(
+    &self,
+    conversation: ConversationId,
+    maybe_page: Option<&teamcraft_proto::CanvasPageId>,
+  ) -> Vec<teamcraft_client_api::model::CanvasPeer> {
+    self.chat.canvas_peers(conversation, maybe_page)
+  }
+
+  fn announce_canvas(
+    &self,
+    conversation: ConversationId,
+    note: teamcraft_client_api::model::CanvasPresenceNote,
+  ) {
+    self.chat.announce_canvas(conversation, note);
+  }
+
   fn compact_canvas(
     &self,
     conversation: ConversationId,

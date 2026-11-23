@@ -89,6 +89,42 @@ pub fn set_selection(element: &HtmlElement, caret: Caret) {
   drop(selection.set_base_and_extent(&anchor, anchor_offset, &focus, focus_offset));
 }
 
+/// Where a caret at `units` (UTF-16 units of the element's text, clamped to its end) is drawn,
+/// relative to the element's parent: left and top edge and height, in CSS pixels. Another
+/// member's caret is shown there (`canvas_peers`). An empty block has no text to measure: its
+/// first line's place stands in.
+pub fn caret_box(element: &HtmlElement, units: u32) -> Option<(f64, f64, f64)> {
+  let origin = element.parent_element()?.get_bounding_client_rect();
+  let document = element.owner_document()?;
+  let range = document.create_range().ok()?;
+  let (node, offset) = point_at(element, units);
+  range.set_start(&node, offset).ok()?;
+  range.collapse_with_to_start(true);
+  let rect = range.get_bounding_client_rect();
+  if rect.height() > 0.0 {
+    return Some((
+      rect.left() - origin.left(),
+      rect.top() - origin.top(),
+      rect.height(),
+    ));
+  }
+  let field = element.get_bounding_client_rect();
+  let style = web_sys::window()?.get_computed_style(element).ok()??;
+  let pixels = |property: &str| {
+    style
+      .get_property_value(property)
+      .ok()
+      .and_then(|value| value.trim_end_matches("px").parse::<f64>().ok())
+  };
+  let font_size = pixels("font-size").unwrap_or(16.0);
+  let line = pixels("line-height").unwrap_or(font_size * 1.4);
+  Some((
+    field.left() - origin.left() + pixels("padding-left").unwrap_or(0.0),
+    field.top() - origin.top() + pixels("padding-top").unwrap_or(0.0),
+    line.min(field.height()),
+  ))
+}
+
 /// The address of the link in an editable block under `target`.
 pub fn link_under(target: &Element) -> Option<String> {
   target

@@ -4,6 +4,8 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::ClientMessageId;
 use teamcraft_proto::Permission;
+/// Who has a page of a channel's notes open, and what the editor says about its own (e2ee.md §4.11).
+pub use teamcraft_proto::{CanvasPeer, CanvasPresenceNote};
 pub use teamcraft_proto::{ChannelRole, InviteId, JoinPolicy, LogLevel, SpaceRole};
 pub use teamcraft_proto::{ConversationId, DeviceId, Id, MessageId, Snowflake, SpaceId, ThreadId, UserId};
 

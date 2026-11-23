@@ -11,7 +11,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-  AdminJoinRequestChange, CallEndCause, CallId, CallRosterEntry, ConversationId, CustomStatus,
+  AdminJoinRequestChange, Base64Bytes, CallEndCause, CallId, CallRosterEntry, ConversationId, CustomStatus,
   DeviceActivity, DeviceId, DeviceLinkClosedReason, DeviceLinkRequest, ErrorBody, LobbyState, MeetingId,
   MessageId, MessageResponse, MlsMessageResponse, PresenceState, RecoveryRequestId, SignedChannelDeletion,
   SignedSpaceDeletion, SpaceId, SystemEventResponse, ThreadId, UnixMillis, UserGroupId, UserId, UserSummary,
@@ -57,6 +57,15 @@ pub enum GatewayClientMessage {
     conversation_id: ConversationId,
     #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
     maybe_thread_id: Option<ThreadId>,
+  },
+  /// This device has a page of the conversation's notes open, closed it, or moved its caret there
+  /// (issue #1456): a [`crate::CanvasPresence`] encrypted with the conversation's content key and
+  /// signed by the device (e2ee.md §4.11). The server relays it to the other members connected now,
+  /// unnumbered and unbuffered, at most one per [`crate::CANVAS_PRESENCE_SERVER_GAP_MS`] and
+  /// conversation; older servers ignore it.
+  CanvasPresence {
+    conversation_id: ConversationId,
+    sealed: Base64Bytes,
   },
   /// The device became active or idle.
   SetActivity {
@@ -381,6 +390,14 @@ pub enum GatewayEvent {
     #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
     maybe_thread_id: Option<ThreadId>,
   },
+  /// A device of another member says it has a page of the conversation's notes open, closed it or
+  /// moved its caret ([`GatewayClientMessage::CanvasPresence`]); only the device can read what.
+  CanvasPresence {
+    conversation_id: ConversationId,
+    user_id: UserId,
+    device_id: DeviceId,
+    sealed: Base64Bytes,
+  },
   PresenceUpdate {
     user_id: UserId,
     /// Busy and be-right-back go as online/away plus `detailed_state` for older clients.
@@ -446,6 +463,7 @@ impl GatewayEvent {
       Self::SpaceMemberAdd { .. } => "space_member_add",
       Self::SpaceMemberRemove { .. } => "space_member_remove",
       Self::TypingStart { .. } => "typing_start",
+      Self::CanvasPresence { .. } => "canvas_presence",
       Self::PresenceUpdate { .. } => "presence_update",
       Self::Unknown => "unknown",
     }
@@ -486,6 +504,14 @@ impl fmt::Debug for GatewayClientMessage {
         .debug_struct("Typing")
         .field("conversation_id", conversation_id)
         .field("maybe_thread_id", maybe_thread_id)
+        .finish(),
+      Self::CanvasPresence {
+        conversation_id,
+        sealed,
+      } => f
+        .debug_struct("CanvasPresence")
+        .field("conversation_id", conversation_id)
+        .field("sealed_bytes", &sealed.as_slice().len())
         .finish(),
       Self::SetActivity { activity } => f.debug_struct("SetActivity").field("activity", activity).finish(),
       Self::Attention { is_attentive } => f

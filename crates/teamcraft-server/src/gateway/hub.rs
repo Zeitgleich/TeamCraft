@@ -85,6 +85,8 @@ pub struct Attached {
   /// Which connection of the session this is: [`Hub::detach`] only detaches the current one, so a
   /// late detach of a replaced (half-open) connection leaves a resumed session alone.
   pub connection_id: u64,
+  /// The device the session belongs to: what the connection's relayed signals name as sender.
+  pub device: DeviceId,
   /// Buffered events the client missed, to be sent before anything from [`Self::next_outgoing`].
   pub replay: Vec<Outgoing>,
   receiver: mpsc::Receiver<Outgoing>,
@@ -240,7 +242,8 @@ impl Hub {
   pub fn open_session(&self, user: UserId, device: DeviceId, activity: DeviceActivity) -> Attached {
     let session_id = new_session_id();
     let mut inner = self.lock();
-    let (connection, attached) = new_connection(&mut inner.next_connection_id, &session_id, Vec::new(), 0);
+    let (connection, attached) =
+      new_connection(&mut inner.next_connection_id, &session_id, device, Vec::new(), 0);
     inner.next_created_seq += 1;
     let session = Session {
       created_seq: inner.next_created_seq,
@@ -297,7 +300,13 @@ impl Hub {
         event: event.clone(),
       })
       .collect();
-    let (connection, attached) = new_connection(&mut inner.next_connection_id, session_id, replay, last_seq);
+    let (connection, attached) = new_connection(
+      &mut inner.next_connection_id,
+      session_id,
+      device,
+      replay,
+      last_seq,
+    );
     // The previous connection (often a half-open one the client gave up on) is replaced: its
     // task stops at its next frame.
     session.maybe_connection = Some(connection);
@@ -624,7 +633,7 @@ impl Hub {
   }
 
   /// Numbers the event per session, buffers it and delivers it to connected sessions of `users`.
-  /// Typing goes out unnumbered and unbuffered ([`EPHEMERAL_SEQ`]).
+  /// Typing and who has a page open go out unnumbered and unbuffered ([`EPHEMERAL_SEQ`]).
   pub fn publish(&self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {
     let Some(shared) = SharedEvent::new(event) else {
       return;
@@ -1087,6 +1096,7 @@ impl Drop for Connection {
 fn new_connection(
   next_id: &mut u64,
   session_id: &str,
+  device: DeviceId,
   replay: Vec<Outgoing>,
   delivered_seq: u64,
 ) -> (Connection, Attached) {
@@ -1104,6 +1114,7 @@ fn new_connection(
   let attached = Attached {
     session_id: session_id.to_owned(),
     connection_id: *next_id,
+    device,
     replay,
     receiver,
     link,
@@ -1118,6 +1129,7 @@ fn is_ephemeral(event: &GatewayEvent) -> bool {
   matches!(
     event,
     GatewayEvent::TypingStart { .. }
+      | GatewayEvent::CanvasPresence { .. }
       | GatewayEvent::DeviceLinkRequested { .. }
       | GatewayEvent::DeviceLinkClosed { .. }
   )
@@ -1857,9 +1869,21 @@ mod tests {
       hub.publish([user(1)], &event(1));
       assert_eq!(seqs(&mut live), [vec![EPHEMERAL_SEQ; 10], vec![1]].concat());
 
+      // Who has a page of the notes open goes the same way.
+      let presence = GatewayEvent::CanvasPresence {
+        conversation_id: ConversationId::from_snowflake(Snowflake::new(1).unwrap()),
+        user_id: user(2),
+        device_id: device(2),
+        sealed: teamcraft_proto::Base64Bytes::new(vec![1]),
+      };
+      hub.publish([user(1)], &presence);
+      assert_eq!(seqs(&mut live), [EPHEMERAL_SEQ]);
+      assert_eq!(live.device, device(1));
+
       // A waiting session gets no typing at all, and its buffer holds only the real event.
       hub.detach(&live.session_id, live.connection_id);
       hub.publish([user(1)], &typing);
+      hub.publish([user(1)], &presence);
       let resumed = hub
         .resume_session(&live.session_id, user(1), device(1), 0)
         .unwrap();

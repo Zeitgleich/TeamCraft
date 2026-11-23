@@ -255,6 +255,8 @@ struct State {
   activity_reports: HashMap<UserId, Vec<DeviceActivity>>,
   /// `typing` frames per user, in order: the conversations typed in.
   typing_reports: HashMap<UserId, Vec<ConversationId>>,
+  /// `canvas_presence` frames in order: sender, conversation, sealed word.
+  canvas_presence_reports: Vec<(UserId, ConversationId, Vec<u8>)>,
   /// What `GET /unread` answers per user; without an entry nothing is unread.
   unread: HashMap<UserId, UnreadResponse>,
   /// A malicious server: the next registered device gets this ID instead of a fresh one.
@@ -1018,6 +1020,11 @@ impl FakeServer {
   /// The conversations of the `typing` frames `user`'s devices sent so far, in order.
   pub fn typing_reports(&self, user: UserId) -> Vec<ConversationId> {
     self.lock().typing_reports.get(&user).cloned().unwrap_or_default()
+  }
+
+  /// The `canvas_presence` frames sent so far: sender, conversation, sealed word.
+  pub fn canvas_presence_reports(&self) -> Vec<(UserId, ConversationId, Vec<u8>)> {
+    self.lock().canvas_presence_reports.clone()
   }
 
   /// While set, a captive portal answers this user's REST calls (hotel Wi-Fi before signing in).
@@ -7614,6 +7621,14 @@ impl GatewayConnection for FakeGateway {
         conversation_id,
         message_id,
       } => state.note_delivered(*conversation_id, self.user, *message_id),
+      // Kept for tests to hand to another client; the fake knows no session's device to relay
+      // them under (`Client::note_canvas_presence` takes them directly).
+      GatewayClientMessage::CanvasPresence {
+        conversation_id,
+        sealed,
+      } => state
+        .canvas_presence_reports
+        .push((self.user, *conversation_id, sealed.as_slice().to_vec())),
       GatewayClientMessage::Attention { .. } | GatewayClientMessage::Unknown => {},
     }
     Ok(())

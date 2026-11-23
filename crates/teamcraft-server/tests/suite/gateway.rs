@@ -11,7 +11,8 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::StatusCode;
 use serde_json::json;
 use teamcraft_proto::{
-  DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent, GatewayServerMessage, PresenceState,
+  Base64Bytes, DeviceActivity, DeviceId, GatewayClientMessage, GatewayEvent, GatewayServerMessage,
+  MAX_CANVAS_PRESENCE_BYTES, PresenceState,
 };
 use teamcraft_server::testing::{TestApp, TestUser};
 use tokio::net::TcpStream;
@@ -403,6 +404,68 @@ mod events {
         None => panic!("closed"),
       }
     }
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn canvas_presence_is_relayed_to_members_with_the_senders_device_and_never_from_outsiders() {
+    let app = app!();
+    let s = scene(&app).await;
+    let mut alice = Gateway::connect(&app, &s.alice, &s.alice_device).await;
+    let mut carol = Gateway::connect(&app, &s.carol, &s.carol_device).await;
+    let conversation = serde_json::from_value(json!(s.channel)).unwrap();
+
+    carol
+      .send(&GatewayClientMessage::CanvasPresence {
+        conversation_id: conversation,
+        sealed: Base64Bytes::new(vec![7; 32]),
+      })
+      .await;
+    let (sender, device, sealed) = alice
+      .event_where(|event| match event {
+        GatewayEvent::CanvasPresence {
+          user_id,
+          device_id,
+          sealed,
+          ..
+        } => Some((user_id.to_string(), device_id.to_string(), sealed.clone())),
+        _ => None,
+      })
+      .await;
+    assert_eq!(sender, s.carol_id);
+    assert_eq!(device, s.carol_device);
+    assert_eq!(sealed.as_slice(), [7; 32]);
+
+    // Oversized frames and outsiders' frames go nowhere; the outsider isn't told either.
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    carol
+      .send(&GatewayClientMessage::CanvasPresence {
+        conversation_id: conversation,
+        sealed: Base64Bytes::new(vec![1; MAX_CANVAS_PRESENCE_BYTES + 1]),
+      })
+      .await;
+    let outsider = member("dave");
+    let outsider_device = register_device(&app, &outsider).await;
+    let mut dave = Gateway::connect(&app, &outsider, &outsider_device).await;
+    dave
+      .send(&GatewayClientMessage::CanvasPresence {
+        conversation_id: conversation,
+        sealed: Base64Bytes::new(vec![2; 32]),
+      })
+      .await;
+    let leaked = tokio::time::timeout(Duration::from_millis(500), async {
+      loop {
+        if let Some(GatewayServerMessage::Event {
+          event: GatewayEvent::CanvasPresence { .. },
+          ..
+        }) = receive(&mut alice.socket).await
+        {
+          return;
+        }
+      }
+    })
+    .await;
+    assert!(leaked.is_err(), "an oversized or an outsider's word was relayed");
     app.stop().await;
   }
 

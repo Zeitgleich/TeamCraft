@@ -5099,10 +5099,40 @@ their changes stay in every later version, only their entry goes). A device has 
 updates it holds: one that joined later or was added from the join on starts at the first update or
 snapshot it got; updates kept before this history existed are the base of every version.
 
-**Who is editing.** The line under the toolbar names the other members whose edits arrived in the
-last two minutes, from the same origins. It is no presence of its own (no "has the page open", no
-carets) and sends nothing: an encrypted, ephemeral awareness channel over the gateway is left for
-later.
+**Who has the page open (issue #1456).** While a page is open, the editor says so to the other
+members connected at that moment, with where its caret is: a word (`CanvasPresence`: a counter,
+the page, open or closed, and the caret as block ID and UTF-16 offsets) that goes out when the page
+opens, when the caret moves (at most once a second), every 20 s while the window is visible, at once
+when another device appears, and as "closed" when the page is left. The core seals it with the
+channel's current content key and signs it with the device key (`teamcraft-crypto::ephemeral`), bound
+to conversation, sender user and device like a message (§4.4), under associated-data and signature
+labels of its own, so a word never opens as a message nor a message as a word. It travels in a
+`canvas_presence` gateway frame that the server relays to the other members connected now, unnumbered
+and unbuffered like typing, naming the connection's device as sender, and keeps nothing
+(docs/gateway.md). A receiving device opens it with any key of its ring and the sender device's key
+from its verified certificate, checks the page ID and block ID against the rules, and keeps it in
+memory only; a device it hears nothing from runs out after 50 s.
+
+What the server learns is what typing tells it: that a member's device sends small frames into a
+channel, how often and when (a burst of caret moves looks like typing). It learns neither that they
+are about notes, nor which page, nor where the caret is; it never sees a page ID or block ID. Who
+learns what among members: every member's device connected at the time learns which other members
+have which page open and where their caret is, also members who can only read. The setting "Show when
+I'm typing" covers it: with it off, a device sends no word (it still shows the others).
+
+What a malicious server can do: withhold words (the page then shows nobody, or somebody for up to
+50 s after they left), and replay a word it saw. A replay of a word older than the newest one a
+device heard from that sender is dropped (the counter only grows); a word replayed after the
+receiver forgot the sender shows them where they were for at most 50 s. It can't forge or change a
+word, move it to another channel or attribute it to another device. A malicious member can say
+anything about their own device (any page, any block, any offsets: the editor clamps the caret to the
+block's text and draws nothing for an unknown block) and nothing in anybody else's name; at most 512
+other devices are remembered at once.
+
+The line under the toolbar shows the avatars and names of the others who have the page open, and
+names the members whose edits arrived in the last two minutes without having it open (a phone, a
+client from before presence) as editing. The carets are thin bars in the hue of each member's
+avatar, with their name. The phones neither send nor show presence: they show the page read-only.
 
 **On the phones (issue #1456).** Android and iOS show a channel's pages read-only (the channel's
 menu, "Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document
@@ -5117,8 +5147,7 @@ page counts as unlisted and shares the 50 places above: the store stays bounded,
 made-up page IDs can push out a real page that nobody edited lately, as on a device whose editor
 never read the list.
 
-**Not in this step** (issue #1245 and its follow-up): presence beyond recent edits (who has the page
-open, carets), mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
+**Not in this step** (issue #1245 and its follow-up): presence on the phones, mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
 page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
 over pages, editing and the version history on the phones, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so

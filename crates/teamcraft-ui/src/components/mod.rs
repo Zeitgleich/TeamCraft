@@ -65,6 +65,7 @@ pub mod canvas_editor;
 pub mod canvas_file;
 pub mod canvas_move;
 pub mod canvas_pages;
+pub mod canvas_peers;
 pub mod canvas_toolbar;
 pub mod canvas_view;
 pub mod channel_glyph;

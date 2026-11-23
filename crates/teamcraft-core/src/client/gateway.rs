@@ -694,6 +694,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         if user_id == self.account.user_id {
           self.forget_conversation(conversation_id)
         } else {
+          self.canvas_presence.forget_user(conversation_id, user_id);
           // Only a hint: the server's word doesn't make this device sign a removal (security
           // review A8). The remover's client, or an admin's signed change, removes them from the
           // group; if neither comes, the admin console lists who is left in the group (#661).
@@ -798,6 +799,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         maybe_thread_id,
       } => {
         self.note_typing(conversation_id, maybe_thread_id, user_id);
+        Ok(())
+      },
+      GatewayEvent::CanvasPresence {
+        conversation_id,
+        user_id,
+        device_id,
+        sealed,
+      } => {
+        self.note_canvas_presence(conversation_id, user_id, device_id, sealed.as_slice());
         Ok(())
       },
       GatewayEvent::DeviceAdd { user_id, device_id } => self.queue_device_addition(user_id, device_id),

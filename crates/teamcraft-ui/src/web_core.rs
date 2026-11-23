@@ -33,7 +33,7 @@ use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{BackgroundEffect, OrgBackgrounds};
 use teamcraft_client_api::data_export::{DataExportRequest, DataExportStatus};
-use teamcraft_client_api::model::{Message, ThreadId};
+use teamcraft_client_api::model::{CanvasPresenceNote, Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
   CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, OrgRecoveryStatus,
@@ -42,6 +42,7 @@ use teamcraft_client_api::remote::{
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpServerApi, ServerApi};
+use teamcraft_core::canvas_presence::CanvasPresenceAnnouncer;
 use teamcraft_core::client::files::BlobUpload;
 use teamcraft_core::client::{
   CatchUpFocus, LinkAnnouncement, LinkApproval, LinkReceipt, LinkWait, LinkWaitCancel, LinkedSecrets,
@@ -1576,6 +1577,8 @@ struct Core {
   is_idle: bool,
   /// The user's own typing, sent on the gateway at most every few seconds (#733).
   typing: TypingAnnouncer,
+  /// The words of the page of notes open here, numbered (e2ee.md §4.11, "Who has the page open").
+  canvas_presence: CanvasPresenceAnnouncer,
   /// Whether IndexedDB keeps up with the cache, as of the last flush.
   store_health: StoreHealth,
   /// The flush [`Self::check_store`] waits for, while IndexedDB is still writing.
@@ -1678,6 +1681,7 @@ impl Core {
       maybe_attention: None,
       is_idle: false,
       typing: TypingAnnouncer::default(),
+      canvas_presence: CanvasPresenceAnnouncer::default(),
       store_health: StoreHealth::Saved,
       maybe_flush: None,
       is_sync_paused: false,
@@ -2107,6 +2111,7 @@ impl Core {
     self.backend = Some(
       CoreChatBackend::new(client.store().clone(), client.user_id(), Box::new(SystemClock))
         .with_typing(client.typing_state())
+        .with_canvas_presence(client.canvas_presence_state())
         .with_transfers(client.transfers()),
     );
     self.catch_up_focus = client.catch_up_focus();
@@ -2407,6 +2412,11 @@ impl Core {
         // Typing changes nothing shown: it goes out at once, and the UI is not told of a change.
         if let Some((conversation, maybe_thread)) = action.typing_place() {
           self.announce_typing(conversation, maybe_thread).await;
+          drop(reply.send(Ok(())));
+          return;
+        }
+        if let Some((conversation, note)) = action.canvas_announcement() {
+          self.announce_canvas(conversation, note.clone()).await;
           drop(reply.send(Ok(())));
           return;
         }
@@ -3535,6 +3545,16 @@ impl Core {
     }
   }
 
+  /// Tells the other members connected now about the page of notes open here (dropped offline).
+  async fn announce_canvas(&mut self, conversation: ConversationId, note: CanvasPresenceNote) {
+    if let Some(client) = self.client.as_ref() {
+      self
+        .canvas_presence
+        .announce(client, &mut self.connection, conversation, note, now_ms())
+        .await;
+    }
+  }
+
   /// Tells the other members that the user types (throttled; dropped while offline).
   async fn announce_typing(&mut self, conversation: ConversationId, maybe_thread: Option<ThreadId>) {
     if self.client.is_some() {
@@ -3720,6 +3740,11 @@ impl SyncReads<'_> {
       },
       // Typing arriving during a sync would go out late: dropped.
       Request::Action(action, reply) if action.typing_place().is_some() => {
+        drop(reply.send(Ok(())));
+        return None;
+      },
+      // So would a word about the notes; the editor's next refresh says it again.
+      Request::Action(action, reply) if action.canvas_announcement().is_some() => {
         drop(reply.send(Ok(())));
         return None;
       },
