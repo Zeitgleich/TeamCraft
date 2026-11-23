@@ -19,3 +19,7 @@ failure-output = "immediate-final"
 status-level = "fail"
 final-status-level = "slow"
 slow-timeout = { period = "120s" }
+
+# Every test's duration, uploaded by CI's test job (#2344): which suites are heavy or slow.
+[profile.ci.junit]
+path = "junit.xml"

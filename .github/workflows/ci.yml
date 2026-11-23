@@ -301,7 +301,21 @@ jobs:
           # end-to-end tests don't fit the default 2 MiB (as in scripts/e2e.sh). Set here, not on the
           # job: rust-cache hashes the job's RUST* variables into its key, and would miss main's cache.
           RUST_MIN_STACK: "16777216"
-        run: cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
+        # The resource lines go into this step's log as they come: a run that loses its runner keeps
+        # them up to the end, and shows what ran out (#2344).
+        run: |
+          scripts/ci-resources.sh 30 "$GITHUB_WORKSPACE" &
+          cargo nextest run --workspace --profile ci --features teamcraft-server/integration,teamcraft-db/integration
+      - name: Test durations
+        # Every test's duration, per test binary (nextest's JUnit report), to see which suites to
+        # group or move to the nightly run.
+        if: ${{ !cancelled() && matrix.arch == 'x86_64' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-durations
+          path: target/nextest/ci/junit.xml
+          retention-days: 14
+          if-no-files-found: ignore
       - name: Doctests
         run: cargo test --workspace --doc
 
