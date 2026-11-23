@@ -59,10 +59,10 @@ mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
-  IdbFailureHook, IndexedDbRecords, IndexedDbStore, OpfsOpening, OpfsRecords, OpfsStore,
-  browser_database_key, browser_database_key_without_upgrade, browser_dpop_prover,
-  browser_dpop_prover_or_new, own_sound_delete, own_sound_get, own_sound_put, set_idb_failure_hook,
-  vault_delete, vault_get, vault_put,
+  IdbFailureHook, IndexedDbRecords, IndexedDbStore, OpfsCopy, OpfsOpening, OpfsRecords, OpfsStore,
+  ServiceWorkerRecords, ServiceWorkerStore, browser_database_key, browser_database_key_without_upgrade,
+  browser_dpop_prover, browser_dpop_prover_or_new, own_sound_delete, own_sound_get, own_sound_put,
+  set_idb_failure_hook, vault_delete, vault_get, vault_put,
 };
 pub use commit_journal::{CommitJournal, CommitStamp};
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};
@@ -893,6 +893,10 @@ pub enum StoreError {
   /// A write of a group failed, so none of the group's writes was kept.
   #[error("the local database did not save a group of changes: {0}")]
   GroupFailed(String),
+  /// A reader that may not write (the browser's service worker over the store on OPFS) was asked
+  /// to.
+  #[error("this copy of the local data is read-only")]
+  ReadOnly,
 }
 
 impl StoreError {

@@ -1907,6 +1907,12 @@ of `crates/teamcraft-core/tests/web_opfs.rs`:
   pays that for what it shows; the decoded messages stay in the message cache as before.
 - **The move** reads IndexedDB once, as today's open does, and writes it as the log's first group;
   the app will show it like a catalog build.
+- **The service worker** (push previews without an open tab) can't use the index this way: it has
+  no sync access handles, so it copies the slot holding the log and the index file into memory
+  through `getFile()` (`ServiceWorkerStore`, e2ee.md §9.1) and reads from the copy. That is the
+  bytes of the log, about what the IndexedDB open reads today, so a push costs the same before and
+  after the move; asking the owning tab's worker instead, while a tab is open, is the rest of #2266.
+  The app's own start is unchanged by this step: nothing opens the OPFS store yet.
 
 To measure the same:
 
