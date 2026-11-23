@@ -1851,6 +1851,46 @@ worker. The first start with empty caches is left out of the medians: it took 98
 simulator before and 0.68 s after. Before, 93 s of that were the texts waiting behind the 866 other
 requests of this local test server, so read it as the shape of the problem, not its size.
 
+#### Web store on OPFS (issue #2266)
+
+The IndexedDB store reads every record's ciphertext into memory when it opens (`store-read` above):
+open time and memory grow with the history. The store on OPFS (`OpfsStore`, e2ee.md §9.1) reads
+an index of where each record is and the log written after it, and a record when it is asked for.
+It runs only in a dedicated worker; the app doesn't use it yet (the core's move into a worker is
+the rest of #2266), so these are the store's own numbers, not the app's start.
+
+Release build, headless Chromium 156 in `dev/wasm-test` (4 CPUs of a Linux desktop), a dedicated
+worker, the store of "Web start on phones": 30 channels with 705 messages each, 21,631 records with
+the catalog. Three runs, the median and the range, by `bench_open_indexeddb` and `bench_open_opfs`
+of `crates/teamcraft-core/tests/web_opfs.rs`:
+
+| What                                        | IndexedDB            | OPFS            |
+|---------------------------------------------|----------------------|-----------------|
+| Open (records, catalog root, ready to read) | 272 ms (261–288)     | 79 ms (48–93)   |
+| Held in memory by the store after the open  | 19.7 MiB, ciphertext | 0.9 MiB, index  |
+| One channel's 705 messages, read and opened | 7 ms (7–10)          | 24 ms (15–25)   |
+| Moving the store from IndexedDB, once       | –                    | 1.6 s (1.1–3.0) |
+
+- **The open** no longer reads ciphertext: what grows with the store is the index file, 44 bytes
+  per record (0.9 MiB here against 19.7 MiB of records), and the log after the last checkpoint,
+  at most a few MiB, and nothing once the app writes a checkpoint when the page is hidden. The
+  OPFS open also opens the IndexedDB database once, which the core does anyway for the key.
+- **Memory** is the index instead of every record: 20 times less here, and the same factor for
+  any store whose records are about a kilobyte.
+- **Reading** a whole channel costs a file read per record on top of the decryption, about
+  twice the time here. A page of a channel (the feed reads 50 rows and their relations, not 705)
+  pays that for what it shows; the decoded messages stay in the message cache as before.
+- **The move** reads IndexedDB once, as today's open does, and writes it as the log's first group;
+  the app will show it like a catalog build.
+
+To measure the same:
+
+```sh
+docker run --rm -v "$PWD":/src:ro -v teamcraft-wasm-target:/target -e CARGO_TARGET_DIR=/target -w /src \
+  teamcraft-wasm-test:local cargo test --release --target wasm32-unknown-unknown -p teamcraft-core \
+  --features service-worker,test-support --test web_opfs -- --include-ignored --nocapture bench_open
+```
+
 #### Own changes show at once (issue #778)
 
 A sent message reached the UI's mirror only after the core had answered, and then after two more

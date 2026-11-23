@@ -7385,6 +7385,44 @@ The design leaves room for a stricter mode: `IndexedDbStore::open` takes any 256
 deployment can derive it from the passkey PRF (§6.2) instead, at the cost of push previews. Choosing
 that per workspace is a policy setting for later (PLAN.md).
 
+**Records on OPFS (issue #2266, the store's part implemented; the app still uses IndexedDB):**
+IndexedDB can't be read synchronously and `LocalStore` is synchronous, so the IndexedDB store reads
+every record's ciphertext into memory when it opens. A dedicated worker can read the origin private
+file system (OPFS) synchronously, so `OpfsStore` keeps the same sealed records in files there and
+reads one when it is asked for. Only the backend under the sealed store changes
+(`store/record_log.rs`, `store/browser/opfs.rs`); the database key, its wrapping in IndexedDB
+(point 5), the lookup IDs, the sealing and the catalog are exactly as above.
+
+- **Files:** per store a directory `teamcraft-stores/<database name>` with two log slots and an
+  index file. A slot is a header (format, generation) and groups of frames: a record put (lookup
+  ID, length, the sealed bytes), a record deleted (lookup ID), and a commit frame closing each group
+  of writes with its frame count and CRC-32. The index file is a checkpoint of where each record is
+  (lookup ID, offset, length) and how much of the log it covers.
+- **What the files show** without the key is what IndexedDB showed: lookup IDs, record sizes, which
+  records were written together and in what order. The log adds the old versions of rewritten
+  records until a compaction drops them (the IndexedDB files keep freed pages for a while too), and
+  the group boundaries, which IndexedDB's transactions also had. The CRC finds torn writes only; a
+  record moved, swapped or altered fails its seal, whose associated data is its lookup ID, and the
+  index file is only a hint: an entry pointing elsewhere gives bytes that don't open.
+- **Opening** reads the index file and the log after it (at most a few MiB; a checkpoint is written
+  when the tail outgrows the index, and when the owner asks, as the app will when the page is
+  hidden), never the records themselves. A
+  damaged index costs one scan of the log. A group whose commit frame is missing or doesn't match
+  is cut off: what survives a crash is a prefix of the groups in their order (#840), as with
+  IndexedDB. Rewrites and deletes leave old frames behind; once the log is twice what it holds it
+  is copied into the other slot, whose header (with the next generation) is written last.
+- **One owner:** the file handles lock the files for the worker that opened them; a second open is
+  refused (`InUse`). The Web Lock of §9.4 decides first which tab's worker that is.
+- **Failed writes** (quota) stay in memory, are read from there and written again with the next
+  group after a backoff, and the flush reports them: §9.4's semantics, unchanged.
+- **From IndexedDB, once:** a store with no log takes IndexedDB's records (same IDs, same sealed
+  bytes) as its first group, writes the slot's header after them, and only then empties IndexedDB's
+  record store; an interruption before the header repeats the move, one after it only the emptying.
+- **What is left** for the app to use it (#2266): the core moves into a dedicated worker and the UI
+  reaches it by messages; the service worker, which can't use sync handles, reads push previews
+  through the worker while a tab is open and from the files otherwise. Until then nothing opens
+  `OpfsStore`, so no store is moved.
+
 **Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
 in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a
 non-extractable Web Crypto key in the same way as the database key; nothing token-like is written

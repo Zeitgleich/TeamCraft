@@ -352,7 +352,7 @@ jobs:
       - name: Browser tests
         run: >
           cargo test --target wasm32-unknown-unknown -p teamcraft-core --features service-worker,test-support
-          --test web --test web_service_worker
+          --test web --test web_service_worker --test web_opfs
       # The browser's call recorder (#2114): WebCodecs and the origin private file system.
       - name: Browser tests (call recording)
         run: >

@@ -117,6 +117,8 @@ rusqlite = { version = "0.39", optional = true, features = ["bundled-sqlcipher-v
 wasm-bindgen = "0.2.106"
 wasm-bindgen-futures = "0.4.56"
 js-sys = "0.3.83"
+# Torn-write checks of the OPFS record log (src/store/record_log.rs); already in the tree through flate2.
+crc32fast = "1.5.0"
 web-sys = { version = "0.3.83", features = [
   "AesGcmParams",
   "AesKeyGenParams",
@@ -139,6 +141,16 @@ web-sys = { version = "0.3.83", features = [
   "Event",
   "ExtendableEvent",
   "File",
+  # The store on OPFS in a dedicated worker: src/store/browser/opfs.rs (#2266).
+  "FileSystemDirectoryHandle",
+  "FileSystemFileHandle",
+  "FileSystemGetDirectoryOptions",
+  "FileSystemGetFileOptions",
+  "FileSystemReadWriteOptions",
+  "FileSystemRemoveOptions",
+  "FileSystemSyncAccessHandle",
+  "StorageManager",
+  "WorkerNavigator",
   "HtmlAnchorElement",
   "HtmlElement",
   "IdbDatabase",
@@ -188,6 +200,8 @@ web-sys = { version = "0.3.83", features = [
 ] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# The OPFS record log's format, tested natively (src/store/record_log.rs).
+crc32fast = "1.5.0"
 # Strict channels (e2ee.md §4.6.2, tests/suite/strict_channels.rs): the tests' leaves announce the
 # capability, which the apps don't yet (issue #1896); `test-hooks` plays apps from before (#1924).
 teamcraft-crypto = { path = "../teamcraft-crypto", features = ["strict-channels", "test-hooks"] }

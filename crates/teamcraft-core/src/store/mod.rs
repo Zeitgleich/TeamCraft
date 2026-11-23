@@ -26,6 +26,8 @@ mod lru;
 mod memory;
 mod message_cache;
 mod overlay;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod record_log;
 pub mod sealed;
 mod sealed_catalog;
 mod sealed_index;
@@ -57,9 +59,10 @@ mod write_queue;
 
 #[cfg(target_arch = "wasm32")]
 pub use browser::{
-  IdbFailureHook, IndexedDbRecords, IndexedDbStore, browser_database_key,
-  browser_database_key_without_upgrade, browser_dpop_prover, browser_dpop_prover_or_new, own_sound_delete,
-  own_sound_get, own_sound_put, set_idb_failure_hook, vault_delete, vault_get, vault_put,
+  IdbFailureHook, IndexedDbRecords, IndexedDbStore, OpfsOpening, OpfsRecords, OpfsStore,
+  browser_database_key, browser_database_key_without_upgrade, browser_dpop_prover,
+  browser_dpop_prover_or_new, own_sound_delete, own_sound_get, own_sound_put, set_idb_failure_hook,
+  vault_delete, vault_get, vault_put,
 };
 pub use commit_journal::{CommitJournal, CommitStamp};
 pub use key_source::{DatabaseKeySource, KeySourceError, StaticKeySource};

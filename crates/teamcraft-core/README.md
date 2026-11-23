@@ -233,15 +233,20 @@ TEAMCRAFT_TEST_SERVER_URL=http://127.0.0.1:8081 cargo test -p teamcraft-core --f
 
 ### Browser tests
 
-`tests/web.rs` and `tests/web_service_worker.rs` run in headless Chromium (wasm-bindgen-test). The
+`tests/web.rs`, `tests/web_service_worker.rs` and `tests/web_opfs.rs` (the store on OPFS, in a
+dedicated worker) run in headless Chromium (wasm-bindgen-test). The
 image in `dev/wasm-test` has Chromium, chromedriver and the matching `wasm-bindgen-cli`:
 
 ```sh
 docker build -t teamcraft-wasm-test:local dev/wasm-test
 docker run --rm -v "$PWD":/src:ro -v teamcraft-wasm-target:/target -e CARGO_TARGET_DIR=/target -w /src \
   teamcraft-wasm-test:local cargo test --target wasm32-unknown-unknown -p teamcraft-core \
-  --features service-worker --test web --test web_service_worker
+  --features service-worker --test web --test web_service_worker --test web_opfs
 ```
 
-`webdriver.json` passes `--no-sandbox` to Chromium for the container. CI runs both files in the
+The open of a large store on IndexedDB and on OPFS (docs/performance.md, "Web store on OPFS") is
+measured by the ignored `bench_open_indexeddb` and `bench_open_opfs` of `tests/web_opfs.rs`, each
+run alone (`--test web_opfs -- --include-ignored bench_open_opfs`).
+
+`webdriver.json` passes `--no-sandbox` to Chromium for the container. CI runs these files in the
 `browser-tests` job of `.github/workflows/ci.yml` (nextest skips them: they only compile for wasm32).
