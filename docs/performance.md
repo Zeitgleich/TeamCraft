@@ -1940,7 +1940,12 @@ A message with a 12 MP photo (#2269, same test, 10 sends, `PENDING_ECHO_FILE_RUN
 On the web the core in the page answers in the same task, and the photo went up with the draft
 already, so "before" was quick there; the gain is the picture itself. The desktop app's core answers
 through the shell, two round trips more (see above): there the row no longer waits for them. The
-desktop app was not measured.
+desktop app is measured by `desktop_echo.rs` (`DESKTOP_ECHO_RUNS`, feature `desktop`, same page probe as the web
+test); it needs the app's debug build and a display, so its numbers are filled in where one is available.
+
+Reactions and edits (#2269) read no conversation: the target is one keyed read (`find_stored`,
+`message_by_server_id`; a pending one is looked for among the outbox's rows only) and a reaction's
+current state comes from the store's reactions index (`LocalStore::reactions_to`, #1757).
 
 "Before" is `main` 4167ebd6 with the same test (three more runs: medians 35.6, 36.7, 36.9 ms, p95 43 to
 52 ms, one 213 ms). The p95 of "after" is its first send, with the page's code still being compiled;

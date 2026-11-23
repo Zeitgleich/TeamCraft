@@ -32,6 +32,8 @@ mod deployed;
 #[cfg(feature = "desktop")]
 mod desktop_call_mini;
 #[cfg(feature = "desktop")]
+mod desktop_echo;
+#[cfg(feature = "desktop")]
 mod desktop_perf;
 mod devices;
 mod display_names;
