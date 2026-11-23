@@ -73,9 +73,11 @@ const MAX_PENDING_EXTRAS: usize = 32;
 /// a bound every conversation opened stayed in the page's memory, which a wasm heap never gives
 /// back (#1708).
 const MAX_HELD_FEEDS: usize = 10;
-/// Answers the mirror keeps. Message rows ask one each (their reactions, files, quote), so without
-/// a bound every row ever shown stayed (#1708). The ones read longest ago go first.
-const MAX_HELD_ANSWERS: usize = 1_000;
+/// Answers of message rows the mirror keeps. Each row asks for its own (reactions, files, quote),
+/// so without a bound every row ever shown stayed (#1708). The ones read longest ago go first.
+/// Answers about a conversation or the account are bounded by the workspace and stay: dropped,
+/// a row of the sidebar would ask again whenever its space is shown.
+const MAX_HELD_ROW_ANSWERS: usize = 1_000;
 /// A feed or answer read this recently stays whatever the bounds: what the UI shows is read on
 /// every change, and one loaded a moment ago is about to be read.
 const MIN_HOLD: Duration = Duration::from_secs(60);
@@ -1126,6 +1128,11 @@ impl Slot {
     true
   }
 
+  /// Whether it answers for message rows ([`MAX_HELD_ROW_ANSWERS`]).
+  fn is_row_answer(&self) -> bool {
+    matches!(self.maybe_query, Some(ChatQuery::MessageExtras { .. }))
+  }
+
   /// Whether dropping it loses nothing in use: not on its way, not read lately and not due to be
   /// asked again.
   fn is_idle(&self, now_ms: f64) -> bool {
@@ -1155,19 +1162,20 @@ impl ReadStamp {
   }
 }
 
-/// Drops the idle answers read longest ago while more than [`MAX_HELD_ANSWERS`] are held: down to
+/// Drops the idle answers read longest ago while more than [`MAX_HELD_ROW_ANSWERS`] are held: down to
 /// three quarters of it, so the sort runs once per few hundred new answers, not on every one.
 fn evict_idle_answers(answers: &mut HashMap<String, Slot>, now_ms: f64) {
-  if answers.len() <= MAX_HELD_ANSWERS {
+  let rows = answers.values().filter(|slot| slot.is_row_answer()).count();
+  if rows <= MAX_HELD_ROW_ANSWERS {
     return;
   }
   let mut idle: Vec<(u64, String)> = answers
     .iter()
-    .filter(|(_, slot)| slot.is_idle(now_ms))
+    .filter(|(_, slot)| slot.is_row_answer() && slot.is_idle(now_ms))
     .map(|(key, slot)| (slot.last_read.tick, key.clone()))
     .collect();
   idle.sort_unstable();
-  let excess = answers.len() - MAX_HELD_ANSWERS * 3 / 4;
+  let excess = rows - MAX_HELD_ROW_ANSWERS * 3 / 4;
   for (_, key) in idle.into_iter().take(excess) {
     answers.remove(&key);
   }
@@ -1386,7 +1394,7 @@ impl RemoteChat {
   }
 
   /// Drops what the UI hasn't read for a while beyond the bounds ([`MAX_HELD_FEEDS`],
-  /// [`MAX_HELD_ANSWERS`]). Before a change resets what counts as used, so nothing read since the
+  /// [`MAX_HELD_ROW_ANSWERS`]). Before a change resets what counts as used, so nothing read since the
   /// last one goes.
   fn evict_idle(&self, now_ms: f64) {
     evict_idle_answers(&mut self.answers.borrow_mut(), now_ms);
@@ -5566,7 +5574,7 @@ mod tests {
       for raw in 1..=(MAX_HELD_FEEDS as u64 + 3) {
         hold_feed(&backend, raw);
       }
-      let mut answers: HashMap<String, Slot> = (0..=MAX_HELD_ANSWERS)
+      let mut answers: HashMap<String, Slot> = (0..=MAX_HELD_ROW_ANSWERS)
         .map(|index| (format!("{index:05}"), idle_slot()))
         .collect();
 
@@ -5574,7 +5582,7 @@ mod tests {
       evict_idle_answers(&mut answers, LATER_MS - 1.0);
 
       assert_eq!(backend.mirror.borrow().feeds.len(), MAX_HELD_FEEDS + 3);
-      assert_eq!(answers.len(), MAX_HELD_ANSWERS + 1);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS + 1);
     }
 
     #[test]
@@ -5640,15 +5648,15 @@ mod tests {
     #[test]
     fn the_answers_read_longest_ago_go_down_to_three_quarters_of_the_bound() {
       let mut answers = HashMap::new();
-      for index in 0..=MAX_HELD_ANSWERS {
+      for index in 0..=MAX_HELD_ROW_ANSWERS {
         answers.insert(format!("{index:05}"), idle_slot());
       }
 
       evict_idle_answers(&mut answers, LATER_MS);
 
-      assert_eq!(answers.len(), MAX_HELD_ANSWERS * 3 / 4);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4);
       // Inserted in the order they were read: the first ones went.
-      let first_kept = format!("{:05}", MAX_HELD_ANSWERS + 1 - MAX_HELD_ANSWERS * 3 / 4);
+      let first_kept = format!("{:05}", MAX_HELD_ROW_ANSWERS + 1 - MAX_HELD_ROW_ANSWERS * 3 / 4);
       assert_eq!(answers.keys().min(), Some(&first_kept));
     }
 
@@ -5683,7 +5691,7 @@ mod tests {
           ..idle_slot()
         },
       );
-      for index in 0..MAX_HELD_ANSWERS {
+      for index in 0..MAX_HELD_ROW_ANSWERS {
         answers.insert(format!("{index:05}"), idle_slot());
       }
 
@@ -5692,16 +5700,16 @@ mod tests {
       for key in ["used", "loading", "due", "outdated"] {
         assert!(answers.contains_key(key), "{key} stays");
       }
-      assert_eq!(answers.len(), MAX_HELD_ANSWERS * 3 / 4);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4);
     }
 
     #[test]
     fn under_the_bound_nothing_goes() {
-      let mut answers: HashMap<String, Slot> = (0..MAX_HELD_ANSWERS)
+      let mut answers: HashMap<String, Slot> = (0..MAX_HELD_ROW_ANSWERS)
         .map(|index| (format!("{index:05}"), idle_slot()))
         .collect();
       evict_idle_answers(&mut answers, LATER_MS);
-      assert_eq!(answers.len(), MAX_HELD_ANSWERS);
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS);
     }
 
     /// A feed of two rows the UI read and moved on from (a change came since).
@@ -5713,9 +5721,31 @@ mod tests {
       feed.is_used = false;
     }
 
+    #[test]
+    fn answers_about_a_conversation_stay() {
+      let mut answers: HashMap<String, Slot> = (0..=MAX_HELD_ROW_ANSWERS)
+        .map(|index| (format!("{index:05}"), idle_slot()))
+        .collect();
+      answers.insert(
+        "activity".to_owned(),
+        Slot {
+          maybe_query: Some(ChatQuery::Activity),
+          ..idle_slot()
+        },
+      );
+
+      evict_idle_answers(&mut answers, LATER_MS);
+
+      assert!(answers.contains_key("activity"));
+      assert_eq!(answers.len(), MAX_HELD_ROW_ANSWERS * 3 / 4 + 1);
+    }
+
     fn idle_slot() -> Slot {
       Slot {
-        maybe_query: Some(ChatQuery::Activity),
+        maybe_query: Some(ChatQuery::MessageExtras {
+          conversation: id_from_raw(7),
+          messages: vec![id_from_raw(1)],
+        }),
         maybe_answer: Some(draft("x")),
         last_read: ReadStamp::now(),
         ..Slot::default()
