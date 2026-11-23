@@ -164,6 +164,17 @@ impl Heights {
     Self::Wrapped(starts)
   }
 
+  /// Rows of the given sizes, in any unit (a table's rows in pixels when their cells wrap).
+  pub fn from_sizes(sizes: impl IntoIterator<Item = u32>) -> Self {
+    let mut starts = vec![0];
+    let mut total = 0u32;
+    for size in sizes {
+      total = total.saturating_add(size.max(1));
+      starts.push(total);
+    }
+    Self::Wrapped(starts)
+  }
+
   /// The number of rows.
   pub fn len(&self) -> usize {
     match self {
@@ -417,6 +428,14 @@ mod tests {
       assert_eq!(heights.row_at(3), 2);
       assert_eq!(heights.row_at(6), 3);
       assert_eq!(heights.row_at(70), 3);
+    }
+
+    #[test]
+    fn rows_of_given_sizes() {
+      let heights = Heights::from_sizes([30, 0, 45]);
+      assert_eq!(heights, Heights::Wrapped(vec![0, 30, 31, 76]));
+      assert_eq!(heights.row_at(40), 2);
+      assert!(Heights::from_sizes([]).is_empty());
     }
 
     #[test]

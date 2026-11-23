@@ -37,9 +37,12 @@ pub enum PreviewKind {
 /// What a text file is, for what the viewer offers beyond plain text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TextFormat {
-  /// Plain text, and the text formats without a feature of their own: CSV, YAML, TOML, XML, INI,
-  /// configuration files. A plain text file that reads like a log is shown as one.
+  /// Plain text, and the text formats without a feature of their own: YAML, TOML, XML, INI,
+  /// configuration files. A plain text file that reads like a log is shown as one, and one whose
+  /// lines read like a table can be shown as a table.
   Plain,
+  /// Delimited data (CSV, TSV, semicolon- and pipe-separated): shown as a table (#2341).
+  Table,
   /// A log: levels and times highlighted, a filter by level.
   Log,
   /// JSON: formatted on demand.
@@ -94,6 +97,7 @@ impl TextFormat {
     match essence {
       "text/x-log" => Some(Self::Log),
       "application/json" | "text/json" => Some(Self::Json),
+      "text/csv" | "application/csv" | "text/x-csv" | "text/tab-separated-values" => Some(Self::Table),
       _ if is_structured("+json") => Some(Self::Json),
       "application/xml"
       | "application/yaml"
@@ -110,8 +114,9 @@ impl TextFormat {
     match extension {
       "log" | "out" | "err" => Some(Self::Log),
       "json" => Some(Self::Json),
-      "txt" | "text" | "csv" | "tsv" | "yaml" | "yml" | "toml" | "xml" | "ini" | "conf" | "cfg"
-      | "properties" | "jsonl" | "ndjson" => Some(Self::Plain),
+      "csv" | "tsv" | "tab" | "psv" => Some(Self::Table),
+      "txt" | "text" | "yaml" | "yml" | "toml" | "xml" | "ini" | "conf" | "cfg" | "properties" | "jsonl"
+      | "ndjson" => Some(Self::Plain),
       _ => None,
     }
   }
@@ -200,8 +205,14 @@ mod tests {
         PreviewKind::of("application/vnd.api+json", "x"),
         Some(text(TextFormat::Json))
       );
+      for table in ["text/csv", "text/tab-separated-values", "application/csv"] {
+        assert_eq!(
+          PreviewKind::of(table, "x"),
+          Some(text(TextFormat::Table)),
+          "{table}"
+        );
+      }
       for plain in [
-        "text/csv",
         "application/yaml",
         "application/toml",
         "application/xml",
@@ -227,12 +238,21 @@ mod tests {
         PreviewKind::of("application/octet-stream", "data.json"),
         Some(text(TextFormat::Json))
       );
-      for name in [
-        "a.txt", "a.csv", "a.yaml", "a.yml", "a.toml", "a.xml", "a.ini", "a.conf",
-      ] {
+      for name in ["a.txt", "a.yaml", "a.yml", "a.toml", "a.xml", "a.ini", "a.conf"] {
         assert_eq!(
           PreviewKind::of("application/octet-stream", name),
           Some(text(TextFormat::Plain)),
+          "{name}"
+        );
+      }
+    }
+
+    #[test]
+    fn delimited_data_by_extension_when_the_type_is_unspecific() {
+      for name in ["a.csv", "a.TSV", "a.tab", "a.psv"] {
+        assert_eq!(
+          PreviewKind::of("text/plain", name),
+          Some(text(TextFormat::Table)),
           "{name}"
         );
       }

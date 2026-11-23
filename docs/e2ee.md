@@ -1347,6 +1347,7 @@ kind is shown in a way that can't run its code or reach the app:
 | HTML     | a sandboxed frame, see below; "show source"                                                    |
 | PDF      | the vendored PDF.js, see below                                                                 |
 | Text     | plain text in the text viewer, see below                                                       |
+| Table    | delimited text (CSV, TSV, …) as a table of text cells, see below                               |
 
 **Text.** Text nodes only (`crates/teamcraft-ui/src/text_preview`): nothing in the file is read as HTML or
 Markdown, and addresses in it stay text (no link is made, nothing is fetched). The bytes are read as UTF-8,
@@ -1358,6 +1359,15 @@ request, after `serde_json` accepted it, by re-indenting its tokens, with nestin
 formatted size (64 MiB) bounded so a small hostile file can't blow up. Only the rows in view
 are in the page, at most a million lines are indexed, and finding is capped (10,000 matches), so a large
 file can't exhaust the page.
+
+**Table.** Delimited text (`.csv`, `.tsv`, `.tab`, `.psv`, `text/csv`, `text/tab-separated-values`, and a
+text file whose lines clearly are one) can be shown as a table (#2341, `text_preview/table.rs`). The separator
+(`,` `;` tab `|` `:`) and quote character are sniffed from the first 100 records, or picked or typed by the
+user; fields follow RFC 4180 leniently. Cells are byte ranges of the decoded text and drawn as text nodes
+only, like the text view. The table is parsed in steps, capped at a million rows, two million cells and 256
+columns (the view says what it left out), and only the rows in view are in the page. A file that turns out
+to be no table (rows of different lengths, a quote never closed) is shown as text with a note. The view's
+choices are kept per file extension in local storage; nothing about the file's content is stored.
 
 **HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
 `allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,

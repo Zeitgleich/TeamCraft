@@ -9,6 +9,9 @@
 //! - PDF: the vendored PDF.js (`pdf-viewer.mjs`), loaded when the first PDF opens (`pdf_pane.rs`).
 //! - Text, logs and data files: plain text in the text viewer (`text_viewer.rs`).
 //!
+//! The preview is a floating window: moved by its header, resized at its edges, its place kept
+//! (`preview_resize.rs`).
+//!
 //! A file above the preview limit (a setting, `PreviewLimit`) is not loaded: the preview says how
 //! large it is and offers the download.
 
@@ -26,6 +29,7 @@ use wasm_bindgen::JsCast;
 use crate::components::icons::{Icon, IconName};
 use crate::components::modal::Modal;
 use crate::components::pdf_pane::pdf_pane;
+use crate::components::preview_resize::PreviewFrame;
 use crate::components::rich_text::RichText;
 use crate::components::text_viewer::text_viewer;
 use crate::i18n::{I18n, use_i18n};
@@ -149,9 +153,19 @@ pub fn FilePreview(conversation: ConversationId, key: MediaKey) -> impl IntoView
     "file-preview"
   };
 
+  let frame = PreviewFrame::new(state);
+
   view! {
     <Modal labelled_by="file-preview-title" class=class>
-      <header class="modal-head preview-head">
+      {frame.handles()}
+      <header
+        class="modal-head preview-head"
+        on:pointerdown=move |ev| frame.on_head_down(ev)
+        on:pointermove=move |ev| frame.on_head_move(ev)
+        on:pointerup=move |ev| frame.on_head_up(ev)
+        on:pointercancel=move |ev| frame.on_head_up(ev)
+        on:dblclick=move |ev| frame.on_head_double_click(ev)
+      >
         <h2 id="file-preview-title" class="preview-name" translate="no" title=name.clone()>{name.clone()}</h2>
         <span class="preview-size">{size}</span>
         <div class="preview-tools">
