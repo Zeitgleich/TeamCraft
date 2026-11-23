@@ -14,7 +14,12 @@ use crate::history::{Travel, travel};
 use crate::i18n::use_i18n;
 use crate::keys::{QUICK_SWITCHER, ShortcutKeys};
 use crate::model::{Conversation, ConversationId, ConversationKind, UserId};
+use crate::settings;
 use crate::state::{AppState, Overlay, use_app_state};
+
+/// Set once the downloads button's module is there; until then the top bar keeps its place.
+#[derive(Clone, Copy)]
+pub struct DownloadsSlot(pub RwSignal<bool>);
 
 /// Global header: search, help and the account/status menu. In the desktop app it is also the
 /// window's title bar: a press on its empty parts moves the window, and so does dragging the brand, which a click
@@ -31,6 +36,11 @@ pub fn TopBar() -> impl IntoView {
   let press = ClickOrDrag::new();
   // The browser has its own buttons; the desktop webview has none (#874).
   let has_history_buttons = tauri::is_available();
+  let has_downloads_slot = tauri::is_available();
+  let downloads_slot = DownloadsSlot(RwSignal::new(false));
+  provide_context(downloads_slot);
+  let was_downloads_shown = has_downloads_slot
+    && settings::load_string(&settings::downloads_shown_key(me.get_untracked().id)).as_deref() == Some("1");
 
   view! {
     <header class="top-bar" data-window-drag="" on:mousedown=on_drag on:contextmenu=on_menu>
@@ -63,8 +73,14 @@ pub fn TopBar() -> impl IntoView {
         <SearchField />
       </div>
       <div class="top-actions">
-        // The browser has its own downloads list and never loads this one.
-        {tauri::is_available().then(|| lazy_area(Place::Inline, || areas::downloads(())))}
+        // The browser has its own downloads list and never loads this one. While its module loads
+        // from the disk, the place of a button the last start showed stays free: the search beside
+        // it doesn't move (#2338).
+        {has_downloads_slot.then(|| view! {
+          <div class="downloads-slot" class:is-reserved=move || was_downloads_shown && !downloads_slot.0.get()>
+            {areas::desktop_only(|| areas::downloads(()))}
+          </div>
+        })}
         <button
           class="icon-btn on-dark"
           aria-label=move || i18n.t("shortcuts-title")

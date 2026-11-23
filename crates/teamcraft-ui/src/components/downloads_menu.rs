@@ -15,8 +15,10 @@ use wasm_bindgen::JsCast;
 use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
+use crate::components::top_bar::DownloadsSlot;
 use crate::download_speed::{SpeedMeter, seconds_left};
 use crate::i18n::{I18n, use_i18n};
+use crate::settings;
 use crate::state::{AppState, Overlay, use_app_state};
 
 /// The button in the top bar; nothing until the first file was saved.
@@ -24,12 +26,27 @@ use crate::state::{AppState, Overlay, use_app_state};
 pub fn DownloadsButton() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  // A read that is still on its way keeps the last list instead of hiding the button.
-  let entries = Memo::new(move |previous: Option<&Vec<DownloadEntry>>| {
-    state
-      .read(|backend| backend.downloads())
-      .or_else(|| previous.cloned())
-      .unwrap_or_default()
+  let user = state.me().id;
+  // The top bar's placeholder gives way to the button (or to nothing, once the core says so).
+  if let Some(slot) = use_context::<DownloadsSlot>() {
+    slot.0.set(true);
+  }
+  // Until the core first answers, the button is where the last start left it: the search beside it
+  // doesn't move when the answer comes.
+  let was_shown = settings::load_string(&settings::downloads_shown_key(user)).as_deref() == Some("1");
+  let listed = Memo::new(move |previous: Option<&Listed>| {
+    Listed::next(previous, state.read(|backend| backend.downloads()))
+  });
+  let entries = Memo::new(move |_| listed.with(|listed| listed.entries.clone()));
+  let is_shown = Memo::new(move |_| listed.with(|listed| listed.is_shown(was_shown)));
+  let is_answered = Memo::new(move |_| listed.with(|listed| listed.is_answered));
+  Effect::new(move |_| {
+    if is_answered.get() {
+      settings::store_string(
+        &settings::downloads_shown_key(user),
+        if is_shown.get() { "1" } else { "0" },
+      );
+    }
   });
   let is_open = move || matches!(state.overlay.get(), Overlay::Downloads);
   let seen_failures = RwSignal::new(HashSet::<String>::new());
@@ -69,7 +86,7 @@ pub fn DownloadsButton() -> impl IntoView {
   };
 
   view! {
-    <Show when=move || !entries.with(Vec::is_empty) fallback=|| ()>
+    <Show when=move || is_shown.get() fallback=|| ()>
       <div class="downloads">
         <button
           class="icon-btn on-dark downloads-btn"
@@ -99,6 +116,37 @@ pub fn DownloadsButton() -> impl IntoView {
         </Show>
       </div>
     </Show>
+  }
+}
+
+/// The list as the core last told it. Visibility follows only the core's answers: a read still on
+/// its way (`None`) keeps what was there, so the button never blinks while the app catches up.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Listed {
+  entries: Vec<DownloadEntry>,
+  /// The core answered at least once since the app started.
+  is_answered: bool,
+}
+
+impl Listed {
+  fn next(maybe_previous: Option<&Self>, maybe_read: Option<Vec<DownloadEntry>>) -> Self {
+    match maybe_read {
+      Some(entries) => Self {
+        entries,
+        is_answered: true,
+      },
+      None => maybe_previous.cloned().unwrap_or_default(),
+    }
+  }
+
+  /// Whether the button shows: once answered, whether there is anything to list; before that, what
+  /// the last start ended with.
+  fn is_shown(&self, was_shown: bool) -> bool {
+    if self.is_answered {
+      !self.entries.is_empty()
+    } else {
+      was_shown
+    }
   }
 }
 
@@ -490,5 +538,64 @@ fn focus_downloads_button() {
     .and_then(|element| element.dyn_into::<web_sys::HtmlElement>().ok());
   if let Some(button) = button {
     drop(button.focus());
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use teamcraft_proto::{Id, Snowflake};
+
+  use super::*;
+  use crate::model::ConversationId;
+
+  mod visibility {
+    use super::*;
+
+    #[test]
+    fn reads_still_on_their_way_keep_the_button() {
+      let shown = Listed::next(None, Some(vec![saved("1")]));
+      // The core is busy catching up: one read after another comes back without an answer.
+      let mut listed = shown.clone();
+      for _ in 0..50 {
+        listed = Listed::next(Some(&listed), None);
+        assert!(listed.is_shown(false));
+      }
+      assert_eq!(listed, shown);
+    }
+
+    #[test]
+    fn the_same_answer_again_is_no_change() {
+      let first = Listed::next(None, Some(vec![saved("1"), saved("2")]));
+      let again = Listed::next(Some(&first), Some(vec![saved("1"), saved("2")]));
+      assert_eq!(first, again, "the memo doesn't notify, nothing re-renders");
+    }
+
+    #[test]
+    fn before_the_first_answer_the_last_start_decides() {
+      let waiting = Listed::next(None, None);
+      assert!(waiting.is_shown(true));
+      assert!(!waiting.is_shown(false));
+    }
+
+    #[test]
+    fn an_answer_decides_over_the_last_start() {
+      let cleared = Listed::next(None, Some(Vec::new()));
+      assert!(!cleared.is_shown(true), "the user cleared the list meanwhile");
+      let saved_since = Listed::next(None, Some(vec![saved("1")]));
+      assert!(saved_since.is_shown(false));
+    }
+  }
+
+  fn saved(file_id: &str) -> DownloadEntry {
+    DownloadEntry {
+      file_id: file_id.to_owned(),
+      conversation: ConversationId::from_snowflake(Snowflake::new(7).unwrap()),
+      file_name: format!("{file_id}.txt"),
+      total_bytes: 10,
+      done_bytes: 10,
+      started_at_ms: 1,
+      state: DownloadState::Saved,
+      is_open_when_done: false,
+    }
   }
 }

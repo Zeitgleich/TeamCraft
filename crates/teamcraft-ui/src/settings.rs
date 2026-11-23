@@ -82,10 +82,20 @@ pub(crate) fn accounts_seen_on_device() -> Vec<String> {
 /// the place the desktop app reopens. For an account removed from this computer (#214).
 pub fn forget_account_on_device(user: UserId) {
   if let Some(storage) = local_storage() {
-    for key in [last_open_key(user), crate::last_place::key(user)] {
+    for key in [
+      last_open_key(user),
+      crate::last_place::key(user),
+      downloads_shown_key(user),
+    ] {
       drop(storage.remove_item(&key));
     }
   }
+}
+
+/// Whether `user`'s downloads button showed when the desktop app last knew (not secret: a flag),
+/// so the next start puts it there before the core answers.
+pub fn downloads_shown_key(user: UserId) -> String {
+  format!("teamcraft.downloads.shown.{user}")
 }
 
 fn last_open_key(user: UserId) -> String {
