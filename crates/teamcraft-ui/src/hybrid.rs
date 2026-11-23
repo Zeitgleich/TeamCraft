@@ -284,6 +284,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.message_count(conversation)
   }
 
+  fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
+    self.chat.last_activity(conversation)
+  }
+
   fn rows_prepended(&self, conversation: ConversationId) -> usize {
     self.chat.rows_prepended(conversation)
   }
@@ -2675,6 +2679,23 @@ mod tests {
     );
   }
 
+  /// The newest message's time orders Home's direct messages and tells the notifier which
+  /// conversations to look at (#1708); the default of the trait knew none.
+  #[test]
+  fn the_newest_message_time_comes_from_the_chat() {
+    let hybrid = Hybrid {
+      chat: Rc::new(Recorder::default()),
+      role: Role::Member,
+      maybe_live: None,
+      maybe_admin: None,
+      maybe_calls: None,
+      calls_unavailable: CallsUnavailableReason::NotInThisApp,
+    };
+
+    assert_eq!(hybrid.last_activity(id_from_raw(7)), Some(1_234));
+    assert_eq!(hybrid.last_activity(id_from_raw(8)), None);
+  }
+
   /// A chat that notes the history requests and answers the rest from the mock.
   struct Recorder {
     inner: MockBackend,
@@ -2707,6 +2728,10 @@ mod tests {
 
     fn is_history_loaded(&self, _conversation: ConversationId, at: i64) -> bool {
       at == 1_000
+    }
+
+    fn last_activity(&self, conversation: ConversationId) -> Option<TimestampMs> {
+      (conversation == id_from_raw(7)).then_some(1_234)
     }
 
     fn history_gaps(&self, _conversation: ConversationId) -> Vec<HistoryGap> {
