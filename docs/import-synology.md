@@ -72,7 +72,11 @@ on; `ssh -L <port>:127.0.0.1:<port> <host>` and open the printed address in your
   ```
 
   It prints an address to open in the browser (the identity provider's page); over SSH, forward the
-  port it names first. The state directory now holds the device's encrypted store and keys.
+  port it names first. The state directory now holds the device's encrypted store and keys. Where the
+  identity provider and the server check DPoP (operations.md, "Binding tokens to devices"), the sign-in
+  is bound to a key in the state directory (`dpop.key`), so the import also works under the policy
+  `required`; the tool says "bound" after signing in. A sign-in from before the provider took proofs
+  stays unbound: run `login` again before switching to `required`.
 - **Workspace roster**, as an owner in the app: confirm the import account as an admin (admin.md
   §2.3), so members' apps accept what it signs.
 - **Administration → Import**, as an owner: pick the import account and the date until which it may
@@ -191,8 +195,9 @@ History imported before version 1.0.16
 is shared with guests by `serve` only under keys no member wrote under (e2ee.md §4.10, "Earlier
 versions").
 
-The state directory holds the tool's device keys (encrypted, the key in `store.key`): keep it, back it
-up, and never run two imports with the same state at once.
+The state directory holds the tool's device keys (encrypted, the key in `store.key`) and its DPoP key
+(`dpop.key`): keep it, back it up, and never run two imports with the same state at once. Without
+`dpop.key` a bound sign-in can't be renewed: the tool says so, and `login` makes a new one.
 
 ## 9. Waiting for everybody
 

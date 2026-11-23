@@ -592,7 +592,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       record.maybe_refresh_at_ms = maybe_refresh_at_ms;
       self.put_ready_record(conversation, &record)?;
     }
-    Ok(())
+    // An answer came in or the tree changed: the asker's list of waiting devices moves.
+    self.note_strict_view(conversation)
   }
 
   /// Refreshes this device's leaf when due; whether a refresh is still to come.

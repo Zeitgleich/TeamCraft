@@ -49,11 +49,16 @@ pub(crate) struct RequestLog {
   members: HashMap<ConversationId, i64>,
   /// Channels whose anchor was verified again for the marks, bounded like the searches.
   anchors: HashMap<ConversationId, i64>,
+  /// Channels whose strict view was made afresh, bounded like the searches.
+  stricts: HashMap<ConversationId, i64>,
 }
 
 /// How long a channel's anchor, verified again for the marks, isn't verified again: it fetches
 /// the device lists of the anchor's signers.
 const ANCHOR_REFRESH_MS: i64 = 5 * 60_000;
+/// How long a channel's strict view, made afresh for the UI, isn't made afresh again: it reads the
+/// group's tree, which is local.
+const STRICT_REFRESH_MS: i64 = 10_000;
 
 impl<S: LocalStore> CoreChatBackend<S> {
   /// The channel or its settings opened: verify its anchor again for the marks (e2ee.md §4.6.5),
@@ -69,6 +74,26 @@ impl<S: LocalStore> CoreChatBackend<S> {
       remember_search(&mut log.anchors, conversation, now);
       drop(log);
       self.command(CoreCommand::RefreshChannelAnchor { conversation });
+    }
+  }
+
+  /// The channel or its settings opened: make its strict view afresh (e2ee.md §4.6.2), unless that
+  /// was asked for within [`STRICT_REFRESH_MS`]. The core makes it afresh on its own after every
+  /// change it sees; this catches what only the workspace roster moved.
+  pub(crate) fn ui_refresh_strict_channel(&self, conversation: ConversationId) {
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .stricts
+      .get(&conversation)
+      .is_none_or(|requested| now - requested > STRICT_REFRESH_MS);
+    if is_due {
+      remember_search(&mut log.stricts, conversation, now);
+      drop(log);
+      self.command(CoreCommand::Strict {
+        conversation,
+        step: crate::client::StrictStep::Refresh,
+      });
     }
   }
 

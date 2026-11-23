@@ -41,12 +41,14 @@ use crate::store::{SealedStoreLimits, StoreError};
 
 /// The directory in the origin's private file system holding one directory per store.
 const STORES_DIRECTORY: &str = "teamcraft-stores";
-const SLOT_FILES: [&str; 2] = ["records-0.log", "records-1.log"];
-const INDEX_FILE: &str = "records.idx";
+pub(super) const SLOT_FILES: [&str; 2] = ["records-0.log", "records-1.log"];
+pub(super) const INDEX_FILE: &str = "records.idx";
 /// `DOMException.name` of a write refused for lack of space.
 const QUOTA_EXCEEDED: &str = "QuotaExceededError";
 /// `DOMException.name` of a sync access handle another worker holds.
 const LOCKED: &str = "NoModificationAllowedError";
+/// `DOMException.name` of a file or directory that doesn't exist.
+const NOT_FOUND: &str = "NotFoundError";
 
 /// The encrypted browser store on OPFS.
 pub type OpfsStore = SealedStore<OpfsRecords>;
@@ -103,15 +105,17 @@ impl SealedStore<OpfsRecords> {
   }
 
   /// Deletes the store `name`: its log and what IndexedDB holds of it (records and key wrapping).
-  /// The store must be closed first.
+  /// The store must be closed first. Works in the page too (sign-out, a reset): a browser without
+  /// OPFS there holds no log to delete.
   pub async fn delete(name: &str) -> Result<(), StoreError> {
-    let stores = stores_directory().await?;
-    let options = FileSystemRemoveOptions::new();
-    options.set_recursive(true);
-    match JsFuture::from(stores.remove_entry_with_options(name, &options)).await {
-      Ok(_) => {},
-      Err(error) if dom_name(&error).as_deref() == Some("NotFoundError") => {},
-      Err(error) => return Err(opfs_error("delete", &error)),
+    if let Some(stores) = existing_stores_directory().await? {
+      let options = FileSystemRemoveOptions::new();
+      options.set_recursive(true);
+      match JsFuture::from(stores.remove_entry_with_options(name, &options)).await {
+        Ok(_) => {},
+        Err(error) if dom_name(&error).as_deref() == Some(NOT_FOUND) => {},
+        Err(error) => return Err(opfs_error("delete", &error)),
+      }
     }
     idb::delete_database(name).await
   }
@@ -340,14 +344,65 @@ async fn store_directory(name: &str) -> Result<FileSystemDirectoryHandle, StoreE
 }
 
 async fn stores_directory() -> Result<FileSystemDirectoryHandle, StoreError> {
-  let scope: WorkerGlobalScope = js_sys::global()
-    .dyn_into()
-    .map_err(|_| StoreError::Database("the OPFS store opens only in a worker".into()))?;
-  let root: FileSystemDirectoryHandle = JsFuture::from(scope.navigator().storage().get_directory())
-    .await
-    .map_err(|error| opfs_error("root", &error))?
-    .unchecked_into();
-  directory(&root, STORES_DIRECTORY).await
+  if js_sys::global().dyn_into::<WorkerGlobalScope>().is_err() {
+    return Err(StoreError::Database(
+      "the OPFS store opens only in a worker".into(),
+    ));
+  }
+  directory(&storage_root().await?, STORES_DIRECTORY).await
+}
+
+/// The directory of the store `name` if it exists; creates nothing (the service worker reads
+/// only, e2ee.md §9.3).
+pub(super) async fn existing_store_directory(
+  name: &str,
+) -> Result<Option<FileSystemDirectoryHandle>, StoreError> {
+  let Some(stores) = existing_stores_directory().await? else {
+    return Ok(None);
+  };
+  existing_directory(&stores, name).await
+}
+
+/// The directory holding the stores if it exists. `None` also where the browser offers no OPFS
+/// (a private window of some browsers): no store can be there.
+async fn existing_stores_directory() -> Result<Option<FileSystemDirectoryHandle>, StoreError> {
+  let root = match storage_root().await {
+    Ok(root) => root,
+    Err(error) => {
+      tracing::debug!(%error, "no origin private file system");
+      return Ok(None);
+    },
+  };
+  existing_directory(&root, STORES_DIRECTORY).await
+}
+
+async fn existing_directory(
+  parent: &FileSystemDirectoryHandle,
+  name: &str,
+) -> Result<Option<FileSystemDirectoryHandle>, StoreError> {
+  match JsFuture::from(parent.get_directory_handle(name)).await {
+    Ok(handle) => Ok(Some(handle.unchecked_into())),
+    Err(error) if dom_name(&error).as_deref() == Some(NOT_FOUND) => Ok(None),
+    Err(error) => Err(opfs_error("directory", &error)),
+  }
+}
+
+/// The origin's private file system: from a worker of any kind or the page.
+async fn storage_root() -> Result<FileSystemDirectoryHandle, StoreError> {
+  let global = js_sys::global();
+  let storage = if let Some(scope) = global.dyn_ref::<WorkerGlobalScope>() {
+    scope.navigator().storage()
+  } else if let Some(window) = global.dyn_ref::<web_sys::Window>() {
+    window.navigator().storage()
+  } else {
+    return Err(StoreError::Database("no storage in this scope".into()));
+  };
+  Ok(
+    JsFuture::from(storage.get_directory())
+      .await
+      .map_err(|error| opfs_error("root", &error))?
+      .unchecked_into(),
+  )
 }
 
 async fn directory(
@@ -364,7 +419,7 @@ async fn directory(
   )
 }
 
-fn store_error(error: LogFileError) -> StoreError {
+pub(super) fn store_error(error: LogFileError) -> StoreError {
   match error {
     LogFileError::QuotaExceeded => StoreError::QuotaExceeded,
     LogFileError::Closed => StoreError::Closed,
@@ -380,14 +435,14 @@ fn file_error(error: JsValue) -> LogFileError {
   }
 }
 
-fn opfs_error(context: &'static str, error: &JsValue) -> StoreError {
+pub(super) fn opfs_error(context: &'static str, error: &JsValue) -> StoreError {
   StoreError::Database(format!(
     "OPFS {context}: {}",
     crate::platform::describe_js_error(error)
   ))
 }
 
-fn dom_name(error: &JsValue) -> Option<String> {
+pub(super) fn dom_name(error: &JsValue) -> Option<String> {
   error
     .dyn_ref::<web_sys::DomException>()
     .map(web_sys::DomException::name)

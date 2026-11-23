@@ -13,6 +13,7 @@ use crate::components::admin_fields::{
   CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
   parse_list, parse_scaled,
 };
+use crate::components::admin_id_picker::{IdPicker, PickKind};
 use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
@@ -69,8 +70,8 @@ enum Kind {
   },
   Text,
   Area,
-  /// Space or channel IDs.
-  IdList,
+  /// Space or channel IDs, chosen by name (see [`PickKind`]).
+  IdList(PickKind),
   /// Other identifiers, checked by the server.
   TextList,
   /// The sign-in methods in order, one of [`METHOD_CHOICES`].
@@ -205,11 +206,11 @@ const SERVER_RULES: &[FieldDef] = &[
   flag("invites_require_verified_email"),
   FieldDef {
     id: "default_spaces",
-    kind: Kind::IdList,
+    kind: Kind::IdList(PickKind::Spaces),
   },
   FieldDef {
     id: "default_channels",
-    kind: Kind::IdList,
+    kind: Kind::IdList(PickKind::PublicChannels),
   },
   optional_amount("remove_deactivated_after_days", 1, 3_650, DAYS),
   amount("admin_join_request_days", 1, 90, DAYS),
@@ -225,6 +226,7 @@ const TOKEN_BINDING: &[FieldDef] = &[
   amount("nonce_rotation_secs", 1, 86_400, SECONDS),
   amount("replay_cache_max_entries", 1, 10_000_000, ENTRIES),
   amount("replay_cache_max_entries_per_user", 1, 10_000_000, ENTRIES),
+  amount("replay_cache_reserved_per_user", 16, 100_000, ENTRIES),
 ];
 const APP_LINKS: &[FieldDef] = &[
   flag("is_enabled"),
@@ -900,7 +902,11 @@ fn FieldRow(
       }
       .into_any()
     },
-    Kind::IdList | Kind::TextList => view! {
+    Kind::IdList(pick) => view! {
+      <IdPicker id=leak_key(dom_id) label=label kind=pick value=value on_input=on_input error=error />
+    }
+    .into_any(),
+    Kind::TextList => view! {
       <TextAreaField
         id=leak_key(dom_id)
         label=label
@@ -1115,7 +1121,7 @@ fn value_text(kind: Kind, maybe_value: Option<&Value>) -> String {
           .join(",")
       })
       .unwrap_or_default(),
-    Kind::IdList | Kind::TextList => {
+    Kind::IdList(_) | Kind::TextList => {
       let items: Vec<String> = value
         .as_array()
         .map(|items| {
@@ -1247,7 +1253,7 @@ fn field_json(kind: Kind, typed: &str) -> Result<Value, &'static str> {
         .map_or(Value::Null, |code| json!(code)),
     ),
     Kind::TextList => Ok(json!(parse_list(typed))),
-    Kind::IdList => {
+    Kind::IdList(_) => {
       let items = parse_list(typed);
       if items.iter().all(|item| item.parse::<Snowflake>().is_ok()) {
         Ok(json!(items))

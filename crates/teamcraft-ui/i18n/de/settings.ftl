@@ -510,8 +510,8 @@ settings-group-mail_texts-hint = Texte der eigenen Mails des Servers. Platzhalte
 settings-group-meeting_mail = Besprechungsmails
 settings-group-meeting_mail-hint = Besprechungseinladungen. Platzhalter: title, organizer, start, end, description, join_url.
 settings-f-invites_require_verified_email = Einladungen brauchen eine bestätigte E-Mail-Adresse
-settings-f-default_spaces = Spaces, denen jedes neue Mitglied beitritt (IDs)
-settings-f-default_channels = Öffentliche Kanäle, denen sie mit beitreten (IDs)
+settings-f-default_spaces = Spaces, denen jedes neue Mitglied beitritt
+settings-f-default_channels = Öffentliche Kanäle, denen sie mit beitreten
 settings-f-remove_deactivated_after_days = Deaktivierte Nutzer aus allen Chats entfernen nach (leer: nie)
 settings-f-admin_join_request_days = Beitrittsanfragen von Admins zu privaten Kanälen laufen ab nach
 settings-f-one_to_one_call_ends_for_both = 1:1-Anrufe enden für beide, wenn eine Seite auflegt
@@ -797,8 +797,9 @@ settings-dpop-off = Aus: Es wird nichts geprüft
 settings-f-proof_max_age_secs = Nachweise gelten für
 settings-f-proof_leeway_secs = Erlaubter Uhrenunterschied
 settings-f-nonce_rotation_secs = Die Nonce des Servers wechselt alle
-settings-f-replay_cache_max_entries = Gemerkte Nachweise, um Wiederholungen abzulehnen
-settings-f-replay_cache_max_entries_per_user = Davon für ein Konto
+settings-f-replay_cache_max_entries = Gemerkte Nachweise im gemeinsamen Vorrat aller Konten, um Wiederholungen abzulehnen
+settings-f-replay_cache_max_entries_per_user = Höchstens für ein Konto
+settings-f-replay_cache_reserved_per_user = Für jedes Konto freigehalten, egal was andere senden
 settings-unit-entries = Einträge
 
 settings-group-app_links = Links öffnen sich in den Apps
@@ -969,3 +970,14 @@ crash-reports-notice-publisher-required = TeamCraft sendet bei Abstürzen Fehler
 crash-reports-notice-organization-optional = TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Du kannst das in den Einstellungen abschalten.
 crash-reports-notice-organization-required = TeamCraft sendet bei Abstürzen Fehlerberichte an deine Organisation. Sie enthalten keine persönlichen Informationen und nie Chat-Inhalte.
 crash-reports-notice-settings = Einstellungen
+
+## Spaces und Kanäle nach Namen wählen (Grenzen und Regeln)
+settings-picker-spaces-search = Space hinzufügen …
+settings-picker-channels-search = Öffentlichen Kanal hinzufügen …
+settings-picker-spaces-none = Keine gewählt: Neue Mitglieder starten ohne Space.
+settings-picker-channels-none = Keine gewählt: Neue Mitglieder treten keinem Kanal von selbst bei.
+settings-picker-spaces-no-match = Kein Space mit diesem Namen.
+settings-picker-channels-no-match = Kein öffentlicher Kanal mit diesem Namen.
+settings-picker-space-unknown = Unbekannter Space
+settings-picker-channel-unknown = Unbekannter Kanal
+settings-picker-remove = { $name } entfernen

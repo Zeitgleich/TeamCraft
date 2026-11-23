@@ -564,6 +564,11 @@ pub enum CoreCommand {
   RefreshChannelAnchor {
     conversation: ConversationId,
   },
+  /// A step of a private channel's strict mode (e2ee.md §4.6.2), or its view read afresh.
+  Strict {
+    conversation: ConversationId,
+    step: crate::client::StrictStep,
+  },
   RemoveSpaceMember {
     space: SpaceId,
     user: UserId,
@@ -668,6 +673,7 @@ impl CoreCommand {
       | Self::SetChannelRole { .. }
       | Self::SignReviewedChannelRoles { .. }
       | Self::RefreshChannelRoles { .. }
+      | Self::Strict { .. }
       | Self::RemoveSpaceMember { .. }
       | Self::RevokeSpaceInvite { .. }
       | Self::ResendSpaceInvite { .. }
@@ -4460,6 +4466,50 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn refresh_channel_anchor(&self, conversation: ConversationId) {
     self.ui_refresh_channel_anchor(conversation);
+  }
+
+  fn strict_channel(
+    &self,
+    conversation: ConversationId,
+  ) -> Option<teamcraft_client_api::strict_channel::StrictChannel> {
+    let view = self.read(crate::client::stored_strict_view(self.store_ref(), conversation))?;
+    Some(crate::ui_strict::strict_channel_of(view))
+  }
+
+  fn refresh_strict_channel(&self, conversation: ConversationId) {
+    self.ui_refresh_strict_channel(conversation);
+  }
+
+  fn ask_strict_ready(&self, conversation: ConversationId) {
+    self.strict_step(conversation, crate::client::StrictStep::AskReady);
+  }
+
+  fn turn_strict_on(&self, conversation: ConversationId) {
+    self.strict_step(conversation, crate::client::StrictStep::TurnOn);
+  }
+
+  fn turn_strict_off(&self, conversation: ConversationId) {
+    self.strict_step(conversation, crate::client::StrictStep::TurnOff);
+  }
+
+  fn remove_strict_blocker(
+    &self,
+    conversation: ConversationId,
+    user: UserId,
+    device: teamcraft_proto::DeviceId,
+  ) {
+    self.strict_step(
+      conversation,
+      crate::client::StrictStep::RemoveBlocker { user, device },
+    );
+  }
+
+  fn continue_strict_channel(&self, conversation: ConversationId, maybe_remove: Option<UserId>) {
+    self.strict_step(conversation, crate::client::StrictStep::Continue { maybe_remove });
+  }
+
+  fn accept_strict_rejoin(&self, conversation: ConversationId) {
+    self.strict_step(conversation, crate::client::StrictStep::AcceptRejoin);
   }
 
   fn sign_reviewed_channel_roles(

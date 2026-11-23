@@ -571,13 +571,29 @@ old nonce gets a `dpop_nonce` frame and `use_dpop_nonce`, then the connection en
 connects again.
 
 **Replay and restart.** Seen proofs of bound tokens are kept in memory for `max_age + 2 × leeway`,
-the longest time one can be fresh, as hashes of key and `jti`, up to `replay_cache_max_entries`. One
-account may hold `replay_cache_max_entries_per_user` of them and gets 429 past that, whichever keys it
-uses. A full cache refuses further proofs of bound tokens with 503 rather than forget one that could
-still be replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well
-leave the proof out, and anybody with a token could otherwise fill the cache with keys of their own
-making. What is left is several accounts working together, which takes 20 of them at the defaults and
-the per-address limits on top. A restart loses the
+the longest time one can be fresh, as hashes of key and `jti`, **per account**: a proof names the
+token it goes with (`ath`) and a bound token its account, so a proof can only be replayed with its own
+account's token and is compared with that account's proofs only. Room comes in two tiers, so that no
+group of accounts can fill the cache for everybody else:
+
+- **A reserve per account** (`replay_cache_reserved_per_user`, default 256: a burst of 256 requests,
+  or more than one a second for the whole window), which another account's flood never takes.
+- **A pool shared by all** above their reserves (`replay_cache_max_entries`, default 200 000), up to
+  `replay_cache_max_entries_per_user` (default 10 000) for one account. When the pool is full, the
+  accounts above their reserve get 429 until their entries expire; everybody within their reserve goes
+  on as before.
+
+The reserves together hold at most as many entries as the pool, so the cache stays bounded (some
+60 MiB at the defaults). Only when they are full too, which at the defaults takes some 780 accounts
+with bound tokens all sending more than a request a second at once, on top of the per-address
+limits, does the cache refuse further proofs of bound tokens with 503 rather than forget one that
+could still be replayed. Nothing live is ever evicted: that would let exactly those proofs be
+replayed. Proofs with unbound tokens are checked but not remembered: a replay could as well leave the
+proof out, and anybody with a token could otherwise fill the cache with keys of their own making.
+Earlier the cache had a single shared limit, which 20 cooperating accounts at their own limit could
+fill for everybody (#120). A nonce-based freshness window wouldn't have helped: a nonce stays good
+for two rotations (10 minutes by default), longer than a proof's `iat` window, so `iat` decides how
+long an entry lives; an operator who wants it shorter lowers `proof_max_age_secs`. A restart loses the
 cache, and that is safe only because it loses the nonces too: every proof needs a nonce, nonces are
 random and kept only in memory, so a proof made before the restart gets a challenge, and a new proof
 takes the private key. Clients see one extra round trip.
@@ -602,7 +618,8 @@ bearer tokens.
 
 **Clients** (`teamcraft_core::api::dpop`; web: `store/browser/dpop_key.rs`, `auth/browser.rs`;
 desktop: `apps/desktop/src/auth`; iOS: `apps/ios/Shared/DeviceProofKey.swift`, `SessionProofs.swift`;
-Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`).
+Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`; the import tool:
+`crates/teamcraft-import/src/proof_key.rs`).
 
 - **Key.** Behind `DpopSigner`: a public key and "sign these bytes", so that a hardware-backed key
   fits. One per device and server. In the browser a non-extractable Web Crypto ES256 key pair in
@@ -721,12 +738,19 @@ Android: `security/DeviceProofKeys.kt`, `auth/DeviceProofs.kt`).
   is a plain new sign-in. Android has a single process for the app and push, so there is no
   extension's view to reconcile.
 
+- **The import tool** (`teamcraft-import`, `proof_key.rs`, `auth.rs`). A software P-256 key in its
+  state directory (`dpop.key`, readable by its user only, like the refresh token and the store's key
+  next to it: a server has no hardware key store, and whoever reads the directory has the rest
+  anyway). `login` binds the sign-in under the apps' rule (discovery names ES256 and a fresh
+  `server-info` has `DPoP-Nonce`), with a new key each time; the stored sign-in names the key it is
+  bound to, and a refresh sends that key's proof and never goes without it. A missing or different
+  key stops the tool with "run `login` again"; nothing goes to the provider. API requests and the
+  gateway's first frame carry proofs through the core as in the apps. A sign-in made before this
+  version stays unbound until the next `login`.
+
 **Not done yet** (the next steps of issue #120):
 
 - Secure Enclave for the macOS desktop: the key is software in the sealed file for now.
-- The identity provider: documented vendor-neutrally with the reference setup as example, and refresh
-  tokens bound for public clients.
-- Then the rollout in operations.md, "Binding tokens to devices".
 
 ### 3.2 Enrollment order and interruptions
 
@@ -3442,7 +3466,14 @@ decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and 
 - `teamcraft-server`: the rewind in one transaction, with its audit row and permission; stock replacement
   of key packages if it isn't there.
 - Clients: the setting, the list of who blocks it, the notice, the admin's decision, permission gates,
-  and the console's signed assignment, on desktop, web, Android and iOS.
+  and the console's signed assignment, on desktop, web, Android and iOS. Done in #1897 except the
+  console: the core keeps a view of each private channel's strict mode in the store (made from the
+  group after every commit, stop, held welcome and strict step), and
+  `teamcraft_client_api::strict_channel` decides what is offered (`StrictGates`: the context's roles
+  or the fresh roster *and* the server's permission) and who loses what (D1, D2). No view is made
+  while the build's leaves don't announce the capability, so no app shows the setting or claims the
+  protection before `strict-channels` is on. The "has to update" of an older app is the anchor's
+  (`MustUpdate`): the group's `required_capabilities` names both extensions.
 - Tests: every role and action combination against the pure verdict; malicious commits refused alike on
   all members; a fresh-group commit; older and capable clients in one group; race and rewind convergence.
 
@@ -7519,10 +7550,25 @@ reads one when it is asked for. Only the backend under the sealed store changes
 - **From IndexedDB, once:** a store with no log takes IndexedDB's records (same IDs, same sealed
   bytes) as its first group, writes the slot's header after them, and only then empties IndexedDB's
   record store; an interruption before the header repeats the move, one after it only the emptying.
+- **The service worker** has no sync access handles, so it reads a copy (`ServiceWorkerStore`,
+  `store/browser/service_worker.rs`): through `getFile()`, which takes no lock, it reads the header
+  of both slots, then the whole slot that holds the log and the index file, and opens the log over
+  those copies in memory. That costs what the IndexedDB store's open costs (every record's
+  ciphertext read once per push), not more. The copy never writes: every write is refused
+  (`StoreError::ReadOnly`), and a group cut off as incomplete is cut off the copy, never the file. A
+  copy taken while the owner writes is the log up to its last complete group, a prefix like after
+  a crash; a compaction between the headers and the copy is noticed (the log is no longer in the
+  slot copied whole) and the copy is taken again. Where OPFS holds no log of the store (not moved,
+  or a move interrupted before the header), the service worker reads IndexedDB as before; once a
+  log exists, IndexedDB's records are stale or gone and are never read. Looking for the log creates
+  nothing on OPFS. The key comes from IndexedDB either way (point 5).
+- **Deleting** a store (a reset of an unreadable store, a guest device's cleanup) removes its OPFS
+  directory and its IndexedDB database, from the page as from a worker; a browser without OPFS in
+  that context has no log to remove.
 - **What is left** for the app to use it (#2266): the core moves into a dedicated worker and the UI
-  reaches it by messages; the service worker, which can't use sync handles, reads push previews
-  through the worker while a tab is open and from the files otherwise. Until then nothing opens
-  `OpfsStore`, so no store is moved.
+  reaches it by messages; while a tab's worker holds the store, the service worker asks that worker
+  instead of copying the files. Until then nothing opens `OpfsStore`, so no store is moved, and the
+  service worker finds no log and reads IndexedDB.
 
 **Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
 in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a
@@ -7770,7 +7816,8 @@ So exactly one core owns a device's store at a time:
   jitter; after five passes in a row it keeps it. A reload of the active tab finds its own account
   in the tab's session storage, claims the lock like "Use here" and waits up to 3 s for it instead
   of asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
-  the store (push previews, §7) and opens it without upgrading it (§9.5).
+  the store (push previews, §7) and opens it without upgrading it (§9.5); on OPFS it reads a copy
+  of the files and can't write at all (§9.1).
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
   and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off

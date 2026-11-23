@@ -1166,6 +1166,30 @@ pub trait ChatBackend {
   /// Verifies the channel's anchor again (the channel or its settings opened), at most every few
   /// minutes per channel.
   fn refresh_channel_anchor(&self, _conversation: ConversationId) {}
+  /// What this device knows of a private channel's strict mode (e2ee.md §4.6.2). `None` while this
+  /// app doesn't implement strict channels, for anything but a private channel, and before the
+  /// core looked ([`Self::refresh_strict_channel`]): then nothing about strict channels is shown.
+  fn strict_channel(&self, _conversation: ConversationId) -> Option<crate::strict_channel::StrictChannel> {
+    None
+  }
+  /// Reads the channel's strict mode afresh from its group (the channel or its settings opened),
+  /// at most every few seconds per channel.
+  fn refresh_strict_channel(&self, _conversation: ConversationId) {}
+  /// Asks the channel's devices whether they are ready for strict (step 2): a workspace owner or
+  /// admin in the group (D3). Nothing changes yet.
+  fn ask_strict_ready(&self, _conversation: ConversationId) {}
+  /// Turns the channel strict with the roles [`crate::strict_channel::StrictChannel::roles`]
+  /// shows, once every device is ready (step 4).
+  fn turn_strict_on(&self, _conversation: ConversationId) {}
+  /// Turns strict off: a signed change with no roles.
+  fn turn_strict_off(&self, _conversation: ConversationId) {}
+  /// Removes a device that blocks turning strict on (D6); the person's other devices stay.
+  fn remove_strict_blocker(&self, _conversation: ConversationId, _user: UserId, _device: DeviceId) {}
+  /// Continues the channel from where this device stopped (D4): "Remove {name} and continue" with
+  /// `maybe_remove`, otherwise "Continue".
+  fn continue_strict_channel(&self, _conversation: ConversationId, _maybe_remove: Option<UserId>) {}
+  /// Takes a member's welcome back into the strict channel, after the user saw who is in it.
+  fn accept_strict_rejoin(&self, _conversation: ConversationId) {}
   /// Signs exactly `roles`, as the workspace admin looked at them with the log at `at_cursor`
   /// ([`crate::model::ChannelRolesReview::log_cursor`]); nothing changes on the server. Refused if
   /// the log moved since.

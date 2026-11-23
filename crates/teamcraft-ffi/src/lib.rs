@@ -56,6 +56,7 @@ mod stall_watch;
 mod status_presets;
 mod stickers;
 mod store_threads;
+mod strict_channel;
 mod types;
 mod video;
 mod voice;

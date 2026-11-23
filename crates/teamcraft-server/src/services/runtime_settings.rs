@@ -78,6 +78,11 @@ const MAX_FEED_MAX_AGE_SECS: u64 = 90 * 86_400;
 const MIN_REPLAY_CACHE_ENTRIES: u64 = 1000;
 /// Most proofs remembered: some 1 GiB, far above what the rate limits let through.
 const MAX_REPLAY_CACHE_ENTRIES: u64 = 10_000_000;
+/// Fewest proofs kept for every account: fewer would refuse an app's burst at the start while
+/// others flood the cache.
+const MIN_REPLAY_CACHE_RESERVE: u64 = 16;
+/// Most proofs kept for every account; never more than the account may have at all.
+const MAX_REPLAY_CACHE_RESERVE: u64 = 100_000;
 
 /// Puts the stored groups on top of the configuration; at startup and after every change.
 pub async fn load(state: &AppState) -> Result<(), ApiError> {
@@ -583,6 +588,12 @@ fn validate(section: &RuntimeSettingsSection) -> Result<(), ApiError> {
         u64::from(values.replay_cache_max_entries_per_user),
         MIN_REPLAY_CACHE_ENTRIES,
         MAX_REPLAY_CACHE_ENTRIES,
+      )?;
+      check_range(
+        "replay_cache_reserved_per_user",
+        u64::from(values.replay_cache_reserved_per_user),
+        MIN_REPLAY_CACHE_RESERVE,
+        u64::from(values.replay_cache_max_entries_per_user).min(MAX_REPLAY_CACHE_RESERVE),
       )
     },
     RuntimeSettingsSection::ServerRules(rules) => {

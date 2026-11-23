@@ -104,15 +104,30 @@ pub enum DpopRefusal {
   TokenNotBound,
 }
 
-/// The proofs seen lately. A set for the lookup, a queue for expiry: every entry lives equally long,
-/// so the oldest is at the front, and a request pays for the ones that just expired, not for all.
-/// Each entry counts for the user whose token it came with, so that one account can't fill the cache
-/// for everybody, however many keys the identity provider binds its tokens to.
+/// The proofs of bound tokens seen lately, kept per account (e2ee.md §3.1.2, "Replay and restart").
+/// A proof names the token it goes with (`ath`), and a bound token names its account, so a proof can
+/// only ever be replayed with that account's token: each account's proofs are compared with its own
+/// only, and one account's entries say nothing about another's.
+///
+/// Room comes in two tiers, so that no group of accounts can fill the cache for everybody else:
+///
+/// - Every account has a reserve of its own (`reserved_per_owner`), enough for one person's apps.
+///   Another account's flood never takes it.
+/// - Above its reserve an account uses a pool shared by all (`max_shared`), up to
+///   `max_entries_per_owner`. When the pool is full, the accounts above their reserve wait (429),
+///   and those within it go on.
+///
+/// The reserves together are bounded as well (`max_reserved`): only that many accounts, all sending
+/// at the rate of their reserve at the same moment, fill them, and then the cache fails closed (503).
+///
+/// A queue for expiry: every entry lives equally long, so the oldest is at the front, and a request
+/// pays for the ones that just expired, not for all.
 #[derive(Debug, Default)]
 struct ReplayCache {
-  seen: HashSet<[u8; 32]>,
+  seen_per_owner: HashMap<Arc<str>, HashSet<[u8; 32]>>,
   by_expiry: VecDeque<ReplayEntry>,
-  entries_per_owner: HashMap<Arc<str>, u32>,
+  reserved_in_use: usize,
+  shared_in_use: usize,
 }
 
 #[derive(Debug)]
@@ -121,21 +136,36 @@ struct ReplayEntry {
   /// The last moment the proof can be fresh; the entry goes after it.
   last_fresh_unix: i64,
   owner: Arc<str>,
+  /// Which room the entry took, given back when it expires. Kept with the entry because the limits
+  /// can change while it lives.
+  tier: ReplayTier,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayTier {
+  Reserved,
+  Shared,
 }
 
 #[derive(Debug, Clone, Copy)]
 struct ReplayLimits {
   retention_secs: u64,
-  max_entries: usize,
-  max_entries_per_owner: u32,
+  /// Entries all accounts share above their reserves.
+  max_shared: usize,
+  /// Entries in all accounts' reserves together.
+  max_reserved: usize,
+  reserved_per_owner: usize,
+  max_entries_per_owner: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayOutcome {
   New,
   Seen,
-  /// This user has as many proofs in the cache as one may.
+  /// This account is past its reserve, and has as many proofs in the cache as one may or the
+  /// shared pool is full: it waits, nobody else does.
   OwnerFull,
+  /// The reserves of all accounts together are full.
   Full,
 }
 
@@ -268,14 +298,7 @@ impl DpopGuard {
     subject: &str,
     now: i64,
   ) -> Result<(), AuthError> {
-    let limits = ReplayLimits {
-      retention_secs: replay_retention_secs(
-        u64::from(rules.proof_max_age_secs),
-        u64::from(rules.proof_leeway_secs),
-      ),
-      max_entries: rules.replay_cache_max_entries as usize,
-      max_entries_per_owner: rules.replay_cache_max_entries_per_user,
-    };
+    let limits = ReplayLimits::from_rules(rules);
     let outcome = self
       .replays
       .lock()
@@ -284,9 +307,10 @@ impl DpopGuard {
     match outcome {
       ReplayOutcome::New => Ok(()),
       ReplayOutcome::Seen => Err(DpopRefusal::Replayed.into()),
-      // The one account that sends this much waits, and nobody else notices.
+      // The accounts that send this much wait, and nobody else notices.
       ReplayOutcome::OwnerFull => Err(AuthError::DpopUserLimit),
-      // Fail closed: taking the request could let a replay through. Clients retry on 503.
+      // Fail closed: taking the request could let a replay through. Clients retry on 503. Only
+      // reachable when the reserves of very many accounts are full at once.
       ReplayOutcome::Full => {
         self.log_full_cache(now);
         Err(AuthError::DpopReplayCacheFull)
@@ -387,37 +411,72 @@ impl DpopRefusal {
   }
 }
 
+impl ReplayLimits {
+  fn from_rules(rules: &TokenBindingSettings) -> Self {
+    let max_shared = rules.replay_cache_max_entries as usize;
+    Self {
+      retention_secs: replay_retention_secs(
+        u64::from(rules.proof_max_age_secs),
+        u64::from(rules.proof_leeway_secs),
+      ),
+      max_shared,
+      // As much again as the pool: the cache holds at most twice `replay_cache_max_entries`.
+      max_reserved: max_shared,
+      reserved_per_owner: rules.replay_cache_reserved_per_user as usize,
+      max_entries_per_owner: rules.replay_cache_max_entries_per_user as usize,
+    }
+  }
+}
+
 impl ReplayCache {
   /// Remembers a proof, unless it was seen or there is no room. No eviction of live entries: that
   /// would let exactly those proofs be replayed.
   fn record(&mut self, id: [u8; 32], owner: &str, now: i64, limits: ReplayLimits) -> ReplayOutcome {
     self.forget_expired(now);
-    if self.seen.contains(&id) {
+    let maybe_seen = self.seen_per_owner.get(owner);
+    if maybe_seen.is_some_and(|seen| seen.contains(&id)) {
       return ReplayOutcome::Seen;
     }
-    // Before the shared limit: whoever fills the cache is told so, not everybody else's error.
-    let owner_entries = self.entries_per_owner.get(owner).copied().unwrap_or(0);
-    if owner_entries >= limits.max_entries_per_owner {
-      return ReplayOutcome::OwnerFull;
-    }
-    if self.seen.len() >= limits.max_entries {
-      return ReplayOutcome::Full;
+    let owner_entries = maybe_seen.map_or(0, HashSet::len);
+    let Some(tier) = self.room_for(owner_entries, limits) else {
+      return if owner_entries < limits.reserved_per_owner {
+        ReplayOutcome::Full
+      } else {
+        ReplayOutcome::OwnerFull
+      };
+    };
+    match tier {
+      ReplayTier::Reserved => self.reserved_in_use += 1,
+      ReplayTier::Shared => self.shared_in_use += 1,
     }
     let owner = self
-      .entries_per_owner
+      .seen_per_owner
       .get_key_value(owner)
       .map_or_else(|| Arc::from(owner), |(known, _)| Arc::clone(known));
-    let retention = i64::try_from(limits.retention_secs).unwrap_or(i64::MAX);
-    self.seen.insert(id);
     self
-      .entries_per_owner
-      .insert(Arc::clone(&owner), owner_entries + 1);
+      .seen_per_owner
+      .entry(Arc::clone(&owner))
+      .or_default()
+      .insert(id);
+    let retention = i64::try_from(limits.retention_secs).unwrap_or(i64::MAX);
     self.by_expiry.push_back(ReplayEntry {
       id,
       last_fresh_unix: now.saturating_add(retention),
       owner,
+      tier,
     });
     ReplayOutcome::New
+  }
+
+  /// Where a new entry of an account with `owner_entries` goes, or `None` if there is no room.
+  fn room_for(&self, owner_entries: usize, limits: ReplayLimits) -> Option<ReplayTier> {
+    if owner_entries >= limits.max_entries_per_owner {
+      return None;
+    }
+    if owner_entries < limits.reserved_per_owner {
+      return (self.reserved_in_use < limits.max_reserved).then_some(ReplayTier::Reserved);
+    }
+    (self.shared_in_use < limits.max_shared).then_some(ReplayTier::Shared)
   }
 
   fn forget_expired(&mut self, now: i64) {
@@ -429,14 +488,22 @@ impl ReplayCache {
       let Some(entry) = self.by_expiry.pop_front() else {
         return;
       };
-      self.seen.remove(&entry.id);
-      if let Some(count) = self.entries_per_owner.get_mut(&entry.owner) {
-        *count = count.saturating_sub(1);
-        if *count == 0 {
-          self.entries_per_owner.remove(&entry.owner);
+      match entry.tier {
+        ReplayTier::Reserved => self.reserved_in_use = self.reserved_in_use.saturating_sub(1),
+        ReplayTier::Shared => self.shared_in_use = self.shared_in_use.saturating_sub(1),
+      }
+      if let Some(seen) = self.seen_per_owner.get_mut(&entry.owner) {
+        seen.remove(&entry.id);
+        if seen.is_empty() {
+          self.seen_per_owner.remove(&entry.owner);
         }
       }
     }
+  }
+
+  #[cfg(test)]
+  fn len(&self) -> usize {
+    self.by_expiry.len()
   }
 }
 
@@ -893,7 +960,7 @@ mod tests {
           Some(DpopRefusal::UseNonce)
         );
       }
-      assert!(guard.replays.lock().unwrap().seen.is_empty());
+      assert_eq!(guard.replays.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -988,41 +1055,41 @@ mod tests {
     }
 
     #[test]
-    fn a_full_cache_fails_closed_until_entries_expire() {
+    fn full_reserves_fail_closed_until_entries_expire() {
       let limits = ReplayLimits {
         retention_secs: 10,
-        max_entries: 2,
+        max_shared: 0,
+        max_reserved: 2,
+        reserved_per_owner: 5,
         max_entries_per_owner: 100,
       };
       let mut cache = ReplayCache::default();
       assert_eq!(cache.record([1; 32], "a", NOW, limits), ReplayOutcome::New);
       assert_eq!(cache.record([2; 32], "b", NOW, limits), ReplayOutcome::New);
       assert_eq!(cache.record([1; 32], "a", NOW + 1, limits), ReplayOutcome::Seen);
-      assert_eq!(cache.record([3; 32], "a", NOW + 1, limits), ReplayOutcome::Full);
-      assert_eq!(cache.seen.len(), 2);
+      assert_eq!(cache.record([3; 32], "c", NOW + 1, limits), ReplayOutcome::Full);
+      assert_eq!(cache.len(), 2);
       // Still there at the last moment, gone right after it.
       assert_eq!(cache.record([1; 32], "a", NOW + 10, limits), ReplayOutcome::Seen);
-      assert_eq!(cache.record([3; 32], "a", NOW + 11, limits), ReplayOutcome::New);
-      assert_eq!(cache.seen.len(), 1);
-      assert_eq!(cache.by_expiry.len(), 1);
+      assert_eq!(cache.record([3; 32], "c", NOW + 11, limits), ReplayOutcome::New);
+      assert_eq!(cache.len(), 1);
+      assert_eq!(cache.reserved_in_use, 1);
+      assert!(!cache.seen_per_owner.contains_key("a"));
     }
 
     #[test]
-    fn a_full_cache_answers_unavailable_not_success() {
+    fn full_reserves_answer_unavailable_not_success() {
       let guard = guard();
       let key = DpopSigningKey::generate();
       let mut settings = rules(DpopPolicy::Optional);
       settings.replay_cache_max_entries = 1;
-      guard.replays.lock().unwrap().record(
-        [9; 32],
-        "somebody-else",
-        NOW,
-        ReplayLimits {
-          retention_secs: 600,
-          max_entries: 1,
-          max_entries_per_owner: 1,
-        },
-      );
+      let mut limits = ReplayLimits::from_rules(&settings);
+      limits.reserved_per_owner = 1;
+      guard
+        .replays
+        .lock()
+        .unwrap()
+        .record([9; 32], "somebody-else", NOW, limits);
       let proof = proof_with_nonce(&guard, &key, "GET", ORIGIN, NOW);
       let mut binding = TokenBinding::Bound(key.thumbprint());
       let result = guard.check(
@@ -1055,7 +1122,9 @@ mod tests {
     fn a_clock_that_steps_back_keeps_entries_longer_not_shorter() {
       let limits = ReplayLimits {
         retention_secs: 10,
-        max_entries: 10,
+        max_shared: 10,
+        max_reserved: 10,
+        reserved_per_owner: 1,
         max_entries_per_owner: 10,
       };
       let mut cache = ReplayCache::default();
@@ -1084,7 +1153,7 @@ mod tests {
           ));
         }
       }
-      assert!(guard.replays.lock().unwrap().seen.is_empty());
+      assert_eq!(guard.replays.lock().unwrap().len(), 0);
     }
 
     #[test]
@@ -1092,6 +1161,7 @@ mod tests {
       let guard = guard();
       let mut settings = rules(DpopPolicy::Optional);
       settings.replay_cache_max_entries_per_user = 1;
+      settings.replay_cache_reserved_per_user = 1;
       let check = |key: &DpopSigningKey, subject: &str, now: i64| {
         let proof = proof_with_nonce(&guard, key, "GET", ORIGIN, now);
         let mut binding = TokenBinding::Bound(key.thumbprint());
@@ -1127,9 +1197,192 @@ mod tests {
           .replays
           .lock()
           .unwrap()
-          .entries_per_owner
+          .seen_per_owner
           .contains_key("patient")
       );
+    }
+  }
+
+  /// Several accounts with bound tokens working together try to fill the cache, so that everybody
+  /// else's requests are refused (#120, review of #1184).
+  mod flood {
+    use super::*;
+
+    /// At the defaults, 20 accounts at their own limit used to fill the whole cache and get 503 for
+    /// everybody bound. Now 25 fill the shared pool and only get 429 themselves.
+    #[test]
+    fn accounts_at_their_limit_leave_everybody_else_untouched() {
+      let limits = ReplayLimits::from_rules(&TokenBindingSettings::default());
+      let mut cache = ReplayCache::default();
+      let mut next_id = 0_u64;
+      let mut flood_until_refused = |cache: &mut ReplayCache, owner: &str| loop {
+        next_id += 1;
+        match cache.record(id(next_id), owner, NOW, limits) {
+          ReplayOutcome::New => {},
+          outcome => return outcome,
+        }
+      };
+      for flooder in 0..25 {
+        assert_eq!(
+          flood_until_refused(&mut cache, &format!("flooder-{flooder}")),
+          ReplayOutcome::OwnerFull
+        );
+      }
+      assert_eq!(cache.shared_in_use, limits.max_shared);
+
+      // Everybody else still has a reserve of their own, and the flooders don't get more.
+      for honest in 0..100 {
+        for request in 0..limits.reserved_per_owner {
+          let unique = u64::try_from(honest * 1_000_000 + request).unwrap() + u64::MAX / 2;
+          assert_eq!(
+            cache.record(id(unique), &format!("member-{honest}"), NOW + 1, limits),
+            ReplayOutcome::New
+          );
+        }
+      }
+      assert_eq!(
+        flood_until_refused(&mut cache, "flooder-0"),
+        ReplayOutcome::OwnerFull
+      );
+    }
+
+    /// More accounts than the default ever let fill the cache: each takes only its reserve and the
+    /// pool, and an account that has sent little gets in.
+    #[test]
+    fn many_flooding_accounts_still_leave_room_for_a_quiet_one() {
+      let limits = ReplayLimits {
+        retention_secs: 180,
+        max_shared: 1000,
+        max_reserved: 1000,
+        reserved_per_owner: 10,
+        max_entries_per_owner: 500,
+      };
+      let mut cache = ReplayCache::default();
+      let mut next_id = 0_u64;
+      for flooder in 0..90 {
+        for _ in 0..1000 {
+          next_id += 1;
+          cache.record(id(next_id), &format!("flooder-{flooder}"), NOW, limits);
+        }
+      }
+      assert_eq!(cache.shared_in_use, 1000);
+      assert_eq!(cache.reserved_in_use, 900);
+      assert_eq!(cache.len(), 1900);
+      next_id += 1;
+      assert_eq!(
+        cache.record(id(next_id), "quiet", NOW, limits),
+        ReplayOutcome::New
+      );
+    }
+
+    /// Only when the reserves of all accounts together are full does the cache fail closed. At the
+    /// defaults that takes some 780 accounts, each sending more than one request a second for
+    /// three minutes.
+    #[test]
+    fn only_full_reserves_of_very_many_accounts_fail_closed() {
+      let limits = ReplayLimits::from_rules(&TokenBindingSettings::default());
+      assert_eq!(limits.max_reserved / limits.reserved_per_owner, 781);
+      let small = ReplayLimits {
+        max_reserved: 30,
+        reserved_per_owner: 10,
+        ..limits
+      };
+      let mut cache = ReplayCache::default();
+      let mut next_id = 0_u64;
+      for account in 0..3 {
+        for _ in 0..10 {
+          next_id += 1;
+          assert_eq!(
+            cache.record(id(next_id), &format!("a-{account}"), NOW, small),
+            ReplayOutcome::New
+          );
+        }
+      }
+      next_id += 1;
+      assert_eq!(cache.record(id(next_id), "a-3", NOW, small), ReplayOutcome::Full);
+    }
+
+    /// Through the guard, with real proofs: the flooding account gets 429, another gets in.
+    #[test]
+    fn the_flooding_account_waits_and_another_goes_on() {
+      let guard = guard();
+      let mut settings = rules(DpopPolicy::Required);
+      settings.replay_cache_max_entries = 1000;
+      settings.replay_cache_max_entries_per_user = 2000;
+      settings.replay_cache_reserved_per_user = 2;
+      let limits = ReplayLimits::from_rules(&settings);
+      {
+        let mut cache = guard.replays.lock().unwrap();
+        for n in 0..1100 {
+          cache.record(id(n), "flooder", NOW, limits);
+        }
+        // Reserve and the whole pool: 2 + 1000 entries, one more is refused.
+        assert_eq!(cache.len(), 1002);
+      }
+      let check = |subject: &str| {
+        let key = DpopSigningKey::generate();
+        let proof = proof_with_nonce(&guard, &key, "GET", ORIGIN, NOW);
+        let mut binding = TokenBinding::Bound(key.thumbprint());
+        guard.check(
+          &settings,
+          &ORIGINS,
+          &presented(TokenScheme::Dpop, PresentedProof::One(&proof)),
+          subject,
+          &mut binding,
+          NOW,
+        )
+      };
+      assert!(matches!(check("flooder"), Err(AuthError::DpopUserLimit)));
+      assert!(matches!(check("member"), Ok(Some(DpopOutcome::Bound))));
+      assert!(matches!(check("member"), Ok(Some(DpopOutcome::Bound))));
+      // Past its reserve, while the pool is full, the member waits too: the pool is for bursts.
+      assert!(matches!(check("member"), Err(AuthError::DpopUserLimit)));
+      assert_eq!(guard.full_cache_logged_at_unix.load(Ordering::Relaxed), i64::MIN);
+    }
+
+    /// A proof is only compared with the proofs of the same account; a proof of one account counts
+    /// as a replay for that account only.
+    #[test]
+    fn a_replay_is_found_in_the_account_it_belongs_to() {
+      let limits = ReplayLimits::from_rules(&TokenBindingSettings::default());
+      let mut cache = ReplayCache::default();
+      assert_eq!(cache.record(id(1), "a", NOW, limits), ReplayOutcome::New);
+      assert_eq!(cache.record(id(1), "a", NOW, limits), ReplayOutcome::Seen);
+    }
+
+    /// The limits are settings and can change while entries live: each entry gives back the room it
+    /// took, so the counts never drift.
+    #[test]
+    fn changed_limits_give_back_the_room_each_entry_took() {
+      let first = ReplayLimits {
+        retention_secs: 10,
+        max_shared: 100,
+        max_reserved: 100,
+        reserved_per_owner: 1,
+        max_entries_per_owner: 100,
+      };
+      let second = ReplayLimits {
+        reserved_per_owner: 50,
+        ..first
+      };
+      let mut cache = ReplayCache::default();
+      for n in 0..5 {
+        cache.record(id(n), "a", NOW, first);
+      }
+      for n in 5..10 {
+        cache.record(id(n), "a", NOW + 1, second);
+      }
+      // One in the first reserve, four in the pool, then five in the raised reserve.
+      assert_eq!((cache.reserved_in_use, cache.shared_in_use), (6, 4));
+      cache.forget_expired(NOW + 100);
+      assert_eq!((cache.reserved_in_use, cache.shared_in_use), (0, 0));
+      assert!(cache.seen_per_owner.is_empty());
+    }
+
+    fn id(n: u64) -> [u8; 32] {
+      let mut id = [0; 32];
+      id[..8].copy_from_slice(&n.to_be_bytes());
+      id
     }
   }
 

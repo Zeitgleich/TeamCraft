@@ -153,8 +153,6 @@ admin-no-devices = No devices registered.
 admin-deactivate = Deactivate user
 admin-deactivate-confirm = Deactivate and revoke sessions
 admin-reactivate = Reactivate user
-admin-deactivate-hint = They are signed out everywhere and can't sign in. They stay in their chats with their devices, so reactivating restores everything.
-admin-deactivated-hint = Deactivated, but still in their chats with their devices. Remove them from all chats if they left the organization.
 admin-remove-from-chats = Remove from all chats
 admin-delete-user = Delete account
 admin-delete-user-title = Delete this account?
@@ -165,7 +163,6 @@ admin-delete-user-confirm = Delete account
 admin-delete-user-needs-keys = Deleting an account is signed by an admin's app with its encryption keys: use the desktop app or a browser where you set up this account.
 admin-user-deleted = This account was deleted. Its messages in channels stay as "Deleted user".
 admin-remove-from-chats-confirm = Remove and rotate keys
-admin-remove-from-chats-hint = Your app signs their removal from every channel; the members' apps then remove their devices and rotate the keys. Their devices are revoked and they leave their direct messages and spaces too. A reactivation does not undo this; they would have to be added again.
 admin-remove-from-chats-needs-keys = Deactivated, but still in their chats. Removing them from all chats is signed by an admin's app with its encryption keys: use the desktop app or a browser where you set up this account.
 admin-recovery-start = Start recovery
 admin-recovery-needs-second = A second admin has to approve before the key bag can be unwrapped.
@@ -1446,3 +1443,28 @@ legal-hold-scope-direct-hint = Also once the person or the other side is deleted
 legal-hold-person-release-label = Release the legal hold on { $person }
 legal-hold-error-person = Choose the person to hold.
 legal-hold-error-person-held = This person is already held.
+
+## Users: access and the actions that can't be taken back (issue #958)
+admin-user-access = Access
+admin-user-danger = Restrict or remove
+admin-deactivate-what = { $name } is signed out on every device and can't sign in. Their chats, devices and messages stay, so reactivating restores everything.
+admin-deactivate-question = Deactivate { $name }?
+admin-deactivated-done = Deactivated and no longer in any chat.
+admin-remove-from-chats-what = Your app signs the removal of { $name } from every channel; the members' apps then remove their devices and rotate the keys. They leave their direct messages and spaces too. Reactivating does not undo this.
+admin-remove-from-chats-question = Remove { $name } from all chats?
+admin-delete-user-what = Final: the devices, keys and memberships of { $name } are removed and direct messages with them are deleted. Their channel messages stay as "Deleted user".
+
+## What needs attention, at the top of System health (issue #958)
+admin-attention-title = Needs your attention
+admin-attention-open = Open { $page }
+admin-attention-open-activity = Open Activity
+admin-attention-unverifiable-owners = { $count ->
+    [one] One owner's key can't be checked on this device, so they can't sign and don't count as an owner.
+   *[other] { $count } owners' keys can't be checked on this device, so they can't sign and don't count as owners.
+}
+admin-attention-roles-owner = Admin roles can't follow the identity provider by themselves right now: an owner has to look at who is affected.
+admin-attention-roles-operator = Admin roles can't follow the identity provider by themselves: the provider needs a setting, which the operator of the instance makes.
+admin-attention-join-requests = { $count ->
+    [one] An admin asks to join one of your private channels.
+   *[other] { $count } admins ask to join your private channels.
+}

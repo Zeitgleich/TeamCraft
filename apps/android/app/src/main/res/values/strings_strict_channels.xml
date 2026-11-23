@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strict channels (e2ee.md §4.6.2, issue #1897); the same texts as crates/teamcraft-ui/i18n/en/channels.ftl. -->
+<resources>
+  <string name="channel_strict_title">Member changes</string>
+  <string name="channel_strict_on">Only the channel\'s admins and workspace admins change members</string>
+  <string name="channel_strict_off">Every member\'s app accepts member changes from any member</string>
+  <string name="channel_strict_hint">When this is on, every member\'s app checks each change to the members itself: only the channel\'s admins add and remove people, moderators only remove members, and workspace owners and admins keep both. Nobody else, and not the server, can add someone. It doesn\'t stop members from passing on what they can read.</string>
+  <string name="channel_strict_role_admin">Admin</string>
+  <string name="channel_strict_role_moderator">Moderator</string>
+  <string name="channel_strict_turn_on">Turn on</string>
+  <string name="channel_strict_turn_on_confirm">Turn on admin-only member changes? The people listed above lose what is named next to them. Only the channel\'s admins or a workspace owner or admin can turn it off again.</string>
+  <string name="channel_strict_turn_off">Turn off</string>
+  <string name="channel_strict_turn_off_confirm">Turn off admin-only member changes? Any member\'s app can then add and remove people again.</string>
+  <string name="channel_strict_ask_workspace_admin">Only workspace owners and admins can turn this on. Ask one of them.</string>
+  <string name="channel_strict_nobody_loses">Nobody who changes members today loses that.</string>
+  <string name="channel_strict_losses">Who loses what when it is on:</string>
+  <string name="channel_strict_loses_changing">can no longer add or remove people</string>
+  <string name="channel_strict_loses_adding">can only remove members, not add anyone</string>
+  <string name="channel_strict_needs_admin">Give at least one person in the channel the admin role first.</string>
+  <string name="channel_strict_ask_hint">First every device in the channel has to be ready. Nothing changes for anyone yet.</string>
+  <string name="channel_strict_ask">Check devices</string>
+  <string name="channel_strict_blocker_device">a device on an older version or not online</string>
+  <string name="channel_strict_remove_device">Remove device</string>
+  <string name="channel_strict_remove_device_confirm">Remove this device of %1$s from the channel? Their other devices stay. They can add it back once it is updated.</string>
+  <string name="channel_strict_stopped">A change to this channel\'s members was refused. Messages still reach the people who were in it. An admin has to decide.</string>
+  <string name="channel_strict_continue">Continue</string>
+  <string name="channel_strict_remove_and_continue">Remove %1$s and continue</string>
+  <string name="channel_strict_remove_and_continue_confirm">Remove %1$s from the channel and continue? Their change is dropped.</string>
+  <string name="channel_strict_rejoin_waiting">This device left the channel and waits for an admin to add it back.</string>
+  <string name="channel_strict_rejoin_due">%1$s wants to add this device back. No admin of the channel did. Check who is in it before you join.</string>
+  <string name="channel_strict_rejoin_joined">New since this device left: %1$s</string>
+  <string name="channel_strict_rejoin_gone">Gone since this device left: %1$s</string>
+  <string name="channel_strict_rejoin">Join</string>
+  <string name="channel_strict_rejoin_accepted">This device joins with the next invitation back.</string>
+  <string name="channel_strict_someone">Someone</string>
+  <plurals name="channel_strict_waiting">
+    <item quantity="one">%1$d device is on an older version or hasn\'t been online.</item>
+    <item quantity="other">%1$d devices are on an older version or haven\'t been online.</item>
+  </plurals>
+  <plurals name="channel_strict_refreshing">
+    <item quantity="one">%1$d device is getting ready.</item>
+    <item quantity="other">%1$d devices are getting ready.</item>
+  </plurals>
+</resources>

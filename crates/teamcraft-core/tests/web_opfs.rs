@@ -8,13 +8,18 @@
 
 use rand_core::{OsRng, RngCore};
 use teamcraft_core::store::{
-  IndexedDbStore, LocalStore, MessageContent, MessageFilter, OpfsOpening, OpfsStore, StoreError,
-  StoredMessage, Table,
+  IndexedDbStore, LocalStore, MessageContent, MessageFilter, OpfsOpening, OpfsStore, ServiceWorkerStore,
+  StoreError, StoredMessage, Table,
 };
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{ClientMessageId, Id, Snowflake, UserId};
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use wasm_bindgen_test::{console_log, wasm_bindgen_test, wasm_bindgen_test_configure};
+use web_sys::{
+  FileSystemDirectoryHandle, FileSystemFileHandle, FileSystemGetDirectoryOptions, FileSystemGetFileOptions,
+  FileSystemSyncAccessHandle, WorkerGlobalScope,
+};
 
 wasm_bindgen_test_configure!(run_in_dedicated_worker);
 
@@ -161,6 +166,146 @@ mod from_indexed_db {
   }
 }
 
+/// The service worker's view of the store (e2ee.md §9.3): a copy of the log read through
+/// `getFile()`, which works in any worker; the tests run it in this dedicated worker, where the
+/// store can be written first. `web_service_worker.rs` opens it in a real service worker.
+mod in_the_service_worker {
+  use super::*;
+
+  #[wasm_bindgen_test]
+  async fn reads_the_log_and_refuses_writes() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let (store, _) = OpfsStore::open(&name, &key).await.unwrap();
+    store.put(Table::Users, "1", b"one").unwrap();
+    for client in 0..30 {
+      store
+        .upsert_message(&message(7, client, &format!("message {client}")))
+        .unwrap();
+    }
+    store.flush().unwrap();
+    drop(store);
+
+    let copy = ServiceWorkerStore::open_for_service_worker(&name, &key)
+      .await
+      .unwrap();
+    assert!(copy.is_on_opfs());
+    assert_eq!(copy.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    assert_eq!(bodies(&copy, 7)[29], "message 29");
+    assert!(matches!(
+      copy.put(Table::Users, "2", b"two"),
+      Err(StoreError::ReadOnly)
+    ));
+    drop(copy);
+
+    let (store, _) = OpfsStore::open(&name, &key).await.unwrap();
+    assert_eq!(store.get(Table::Users, "2").unwrap(), None);
+    drop(store);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  /// The owner's worker holds the files' sync access handles while the service worker copies them.
+  #[wasm_bindgen_test]
+  async fn reads_while_the_owner_holds_the_store() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let (store, _) = OpfsStore::open(&name, &key).await.unwrap();
+    store.put(Table::Users, "1", b"one").unwrap();
+    store.flush().unwrap();
+    store.checkpoint().unwrap();
+    store.put(Table::Users, "2", b"two").unwrap();
+    store.flush().unwrap();
+
+    let copy = ServiceWorkerStore::open_for_service_worker(&name, &key)
+      .await
+      .unwrap();
+    assert_eq!(copy.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    assert_eq!(copy.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
+    drop(copy);
+    drop(store);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  /// Before the move the records are in IndexedDB, as before; reading creates nothing on OPFS.
+  #[wasm_bindgen_test]
+  async fn reads_indexed_db_before_the_move() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let old = IndexedDbStore::open(&name, &key).await.unwrap();
+    old.put(Table::Users, "1", b"one").unwrap();
+    old.flush().await.unwrap();
+    drop(old);
+
+    let store = ServiceWorkerStore::open_for_service_worker(&name, &key)
+      .await
+      .unwrap();
+    assert!(!store.is_on_opfs());
+    assert_eq!(store.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    drop(store);
+    assert!(!has_opfs_directory(&name).await);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  /// Once the log exists, IndexedDB's records are stale (a move interrupted before it emptied
+  /// them): the copy of the log wins.
+  #[wasm_bindgen_test]
+  async fn ignores_a_stale_indexed_db_copy() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let (store, _) = OpfsStore::open(&name, &key).await.unwrap();
+    store.put(Table::Users, "1", b"new").unwrap();
+    store.flush().unwrap();
+    drop(store);
+    let stale = IndexedDbStore::open(&name, &key).await.unwrap();
+    stale.put(Table::Users, "1", b"stale").unwrap();
+    stale.flush().await.unwrap();
+    drop(stale);
+
+    let copy = ServiceWorkerStore::open_for_service_worker(&name, &key)
+      .await
+      .unwrap();
+    assert!(copy.is_on_opfs());
+    assert_eq!(copy.get(Table::Users, "1").unwrap(), Some(b"new".to_vec()));
+    drop(copy);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  /// A move interrupted before the log's header was written left files but no log: the records
+  /// are still in IndexedDB.
+  #[wasm_bindgen_test]
+  async fn files_without_a_log_mean_indexed_db() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let old = IndexedDbStore::open(&name, &key).await.unwrap();
+    old.put(Table::Users, "1", b"one").unwrap();
+    old.flush().await.unwrap();
+    drop(old);
+    for file in ["records-0.log", "records-1.log"] {
+      write_opfs_file(&name, file, &[0x42; 64]).await;
+    }
+
+    let store = ServiceWorkerStore::open_for_service_worker(&name, &key)
+      .await
+      .unwrap();
+    assert!(!store.is_on_opfs());
+    assert_eq!(store.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    drop(store);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  #[wasm_bindgen_test]
+  async fn deleting_removes_the_log() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let (store, _) = OpfsStore::open(&name, &key).await.unwrap();
+    store.put(Table::Users, "1", b"one").unwrap();
+    drop(store);
+    assert!(has_opfs_directory(&name).await);
+    OpfsStore::delete(&name).await.unwrap();
+    assert!(!has_opfs_directory(&name).await);
+  }
+}
+
 /// docs/performance.md, "Web store on OPFS": the open of the IndexedDB store at the size the docs
 /// use, what it holds in memory (every record's ciphertext), and one channel's messages read.
 #[wasm_bindgen_test]
@@ -270,7 +415,7 @@ fn now_ms() -> f64 {
   js_sys::Date::now()
 }
 
-fn bodies(store: &OpfsStore, conversation: i64) -> Vec<String> {
+fn bodies(store: &impl LocalStore, conversation: i64) -> Vec<String> {
   store
     .messages(id(conversation), MessageFilter::TopLevel)
     .unwrap()
@@ -311,4 +456,55 @@ fn id<T: Id>(raw: i64) -> T {
 
 fn database_name() -> String {
   format!("teamcraft-test-{}", OsRng.next_u64())
+}
+
+/// Whether OPFS holds a directory for the store `name`.
+async fn has_opfs_directory(name: &str) -> bool {
+  let Some(stores) = opfs_child(&opfs_root().await, "teamcraft-stores", false).await else {
+    return false;
+  };
+  opfs_child(&stores, name, false).await.is_some()
+}
+
+/// Writes `bytes` as the file `file` of the store `name` on OPFS, as a crashed move might leave it.
+async fn write_opfs_file(name: &str, file: &str, bytes: &[u8]) {
+  let stores = opfs_child(&opfs_root().await, "teamcraft-stores", true)
+    .await
+    .unwrap();
+  let directory = opfs_child(&stores, name, true).await.unwrap();
+  let options = FileSystemGetFileOptions::new();
+  options.set_create(true);
+  let handle: FileSystemFileHandle = JsFuture::from(directory.get_file_handle_with_options(file, &options))
+    .await
+    .unwrap()
+    .unchecked_into();
+  let access: FileSystemSyncAccessHandle = JsFuture::from(handle.create_sync_access_handle())
+    .await
+    .unwrap()
+    .unchecked_into();
+  access.truncate_with_u32(0).unwrap();
+  access.write_with_u8_array(bytes).unwrap();
+  access.flush().unwrap();
+  access.close();
+}
+
+async fn opfs_root() -> FileSystemDirectoryHandle {
+  let scope: WorkerGlobalScope = js_sys::global().unchecked_into();
+  JsFuture::from(scope.navigator().storage().get_directory())
+    .await
+    .unwrap()
+    .unchecked_into()
+}
+
+async fn opfs_child(
+  parent: &FileSystemDirectoryHandle,
+  name: &str,
+  is_created: bool,
+) -> Option<FileSystemDirectoryHandle> {
+  let options = FileSystemGetDirectoryOptions::new();
+  options.set_create(is_created);
+  JsFuture::from(parent.get_directory_handle_with_options(name, &options))
+    .await
+    .ok()
+    .map(JsCast::unchecked_into)
 }

@@ -40,6 +40,8 @@ import uniffi.teamcraft_ffi.NewSpaceInput
 import uniffi.teamcraft_ffi.ReviewedRolesOutcome
 import uniffi.teamcraft_ffi.SpaceDeletionPreview
 import uniffi.teamcraft_ffi.SpaceMenuItem
+import uniffi.teamcraft_ffi.StrictChannelItem
+import uniffi.teamcraft_ffi.StrictStepItem
 import uniffi.teamcraft_ffi.TeamCraft
 
 /**
@@ -277,6 +279,15 @@ class ChatClient(
 
   /** The channel can't be read on this device: the server offered a group the user's devices didn't pin. */
   suspend fun isChannelUnreachable(conversation: String): Boolean = core().isChannelUnreachable(conversation)
+
+  /** A private channel's strict mode (e2ee.md §4.6.2); `null` while this app doesn't implement it. */
+  suspend fun strictChannel(conversation: String): StrictChannelItem? = core().strictChannel(conversation)
+
+  /** The channel's settings opened: its strict mode is read afresh, as on desktop and web. */
+  suspend fun refreshStrictChannel(conversation: String) = core().refreshStrictChannel(conversation)
+
+  /** A strict channel step; waits for it, so the button shows a failure where it was pressed. */
+  suspend fun strictStep(conversation: String, step: StrictStepItem) = core().strictStep(conversation, step)
 
   /** Confirms exactly the roles of [review] as the admin opened it; nothing is signed if the log moved. */
   suspend fun signReviewedChannelRoles(conversation: String, review: ChannelRolesReviewItem): ReviewedRolesOutcome =

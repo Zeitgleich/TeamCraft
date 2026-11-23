@@ -444,7 +444,7 @@ mod opting_in {
 
   /// Three peers whose apps didn't announce strict channels when the channel was made, all
   /// updated now; Alice owns the workspace.
-  async fn channel_on_old_apps(server: &FakeServer) -> (Peer, Peer, Peer, ConversationId) {
+  pub(super) async fn channel_on_old_apps(server: &FakeServer) -> (Peer, Peer, Peer, ConversationId) {
     test_hooks::set_legacy_leaves(true);
     let (mut alice, mut bob, mut carol) = three_with_owner_settings(server, quick()).await;
     let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
@@ -462,6 +462,116 @@ mod opting_in {
       .iter()
       .filter(|entry| entry.payload.as_slice().starts_with(b"TCSY"))
       .count()
+  }
+}
+
+/// What the UI shows (issue #1897): the core's stored view of a channel's strict mode.
+mod view {
+  use super::*;
+  use teamcraft_core::client::StrictStep;
+
+  #[tokio::test]
+  async fn the_ui_walks_a_channel_from_asking_to_strict() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, channel) = super::opting_in::channel_on_old_apps(&server).await;
+    let alice_id = alice.client.user_id();
+
+    alice
+      .client
+      .run_strict_step(channel, StrictStep::Refresh)
+      .await
+      .unwrap();
+    let view = alice.client.strict_view(channel).unwrap().unwrap();
+    assert!(view.has_group && !view.is_strict);
+    assert_eq!(view.workspace_signers, vec![alice_id]);
+    let readiness = view.maybe_readiness.unwrap();
+    assert_eq!(readiness.waiting.len(), 3);
+    assert!(!readiness.is_ready && readiness.maybe_asked_by.is_none());
+
+    alice
+      .client
+      .run_strict_step(channel, StrictStep::AskReady)
+      .await
+      .unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let readiness = alice
+      .client
+      .strict_view(channel)
+      .unwrap()
+      .unwrap()
+      .maybe_readiness
+      .unwrap();
+    assert!(readiness.is_ready, "{readiness:?}");
+    assert_eq!(readiness.maybe_asked_by, Some(alice_id));
+
+    alice
+      .client
+      .run_strict_step(channel, StrictStep::TurnOn)
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let view = alice.client.strict_view(channel).unwrap().unwrap();
+    assert!(view.is_strict && view.maybe_readiness.is_none());
+    assert!(
+      view
+        .roles
+        .iter()
+        .any(|role| role.user == alice_id && role.is_admin),
+      "{view:?}"
+    );
+    // Bob never opened the settings: his app shows the channel strict all the same.
+    assert!(bob.client.strict_view(channel).unwrap().unwrap().is_strict);
+  }
+
+  #[tokio::test]
+  async fn a_stop_shows_on_every_member_and_ends_with_the_admins_continue() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    let good_epoch = epoch(&mut alice, channel);
+    post_garbage_commit(&bob, channel, good_epoch).await;
+    settle(&mut [&mut alice, &mut carol]).await;
+
+    for peer in [&mut alice, &mut carol] {
+      let view = peer.client.strict_view(channel).unwrap().unwrap();
+      assert!(view.maybe_stop.is_some(), "{}: {view:?}", peer.name);
+    }
+
+    alice
+      .client
+      .run_strict_step(channel, StrictStep::Continue { maybe_remove: None })
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut carol]).await;
+    for peer in [&mut alice, &mut carol] {
+      let view = peer.client.strict_view(channel).unwrap().unwrap();
+      assert_eq!(view.maybe_stop, None, "{}", peer.name);
+    }
+  }
+
+  #[tokio::test]
+  async fn a_plain_members_step_fails_and_the_view_stays() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+
+    let result = bob.client.run_strict_step(channel, StrictStep::AskReady).await;
+
+    assert!(result.is_err(), "only a workspace owner or admin asks (D3)");
+    let view = bob.client.strict_view(channel).unwrap().unwrap();
+    assert!(!view.is_strict);
+    assert!(view.maybe_readiness.unwrap().maybe_asked_by.is_none());
+  }
+
+  #[tokio::test]
+  async fn a_channel_that_was_never_strict_gets_no_view_unasked() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    carol.client.send_text(channel, None, "hello").await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    assert_eq!(bob.client.strict_view(channel).unwrap(), None);
   }
 }
 

@@ -40,6 +40,7 @@ use crate::components::roster_banner::{current_standing, unsigned_reason};
 use crate::components::section_tabs::{Section, SectionTabs};
 use crate::components::space_deletion_list::SpaceDeletionList;
 use crate::components::space_tile::SpaceTile;
+use crate::components::strict_channel::ChannelStrictSection;
 use crate::feedback::{PendingAction, failure_message};
 use crate::form_errors::{FieldError, FieldErrors, FormErrors};
 use crate::i18n::{I18n, use_i18n};
@@ -1232,7 +1233,13 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
   let state = use_app_state();
   let i18n = use_i18n();
   let access = ChannelAccess::new(state, conversation);
-  let can_convert = Memo::new(move |_| access.can(&Permission::ConvertChannelPrivacy));
+  // A strict channel turns strict off before it is made public (e2ee.md §4.6.2): not offered.
+  let is_strict = Memo::new(move |_| {
+    state
+      .read(|backend| backend.strict_channel(conversation))
+      .is_some_and(|strict| strict.is_strict)
+  });
+  let can_convert = Memo::new(move |_| access.can(&Permission::ConvertChannelPrivacy) && !is_strict.get());
   let is_confirming_privacy = RwSignal::new(false);
   let pending = PendingAction::new();
   // Closes once the core confirmed the conversion; a refusal stays in the dialog.
@@ -1265,6 +1272,12 @@ fn ChannelPrivacy(conversation: ConversationId, is_private: bool) -> impl IntoVi
         <button type="button" class="btn" on:click=move |_| is_confirming_privacy.set(false)>{move || i18n.t("cancel")}</button>
       </div>
       <FailureNote pending=pending />
+    </Show>
+    <Show when=move || is_private && is_strict.get() fallback=|| ()>
+      <p class="hint">{move || i18n.t("channel-strict-public-hint")}</p>
+    </Show>
+    <Show when=move || is_private fallback=|| ()>
+      <ChannelStrictSection conversation=conversation />
     </Show>
     <ChannelRetention conversation=conversation can_edit=Signal::derive(move || access.can(&Permission::ManageChannelProperties)) />
   }

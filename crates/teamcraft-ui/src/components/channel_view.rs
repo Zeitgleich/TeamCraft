@@ -19,6 +19,7 @@ use crate::components::log_view::ChannelFeed;
 use crate::components::security_ui::KeyChangeBanner;
 use crate::components::sheet::MenuSurface;
 use crate::components::sliding_indicator::SlidingIndicator;
+use crate::components::strict_channel::StrictChannelNotice;
 use crate::components::tab_list::{on_tab_keys, roving_tabindex};
 use crate::components::typing_indicator::{TypingDots, TypingIndicator, typing_text};
 use crate::delivery::ReadIndicator;
@@ -127,6 +128,7 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
         <CatchingUpNote info=info />
         <ChannelInactivityNotice conversation=conversation />
         <LegalHoldNotice conversation=conversation />
+        <StrictChannelNotice conversation=conversation />
         <KeyCatchUpNote conversation=conversation />
         <MembershipIssueBanners conversation=conversation info=info />
         <HuddleBar conversation=conversation />
