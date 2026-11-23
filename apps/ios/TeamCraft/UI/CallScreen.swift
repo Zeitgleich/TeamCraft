@@ -48,6 +48,8 @@ struct CallScreen: View {
   @State private var maybeEndFailure: LocalizedStringKey?
   /// The floating window when the app goes to the background during a video call (#2067).
   @State private var pictureInPicture = CallPictureInPicture()
+  /// What is unread in the call's conversation: the Chat button's badge (#1488).
+  @State private var chatBadge = CallChatBadge.none
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -174,6 +176,9 @@ struct CallScreen: View {
     }
     .task(id: LobbyKey(conversationId: call.conversationId, participants: call.participantUserIds, knocks: model.calls.lobbyKnocks)) {
       await readLobby()
+    }
+    .task(id: ChatBadgeKey(conversationId: call.conversationId, changes: model.changeCount)) {
+      await readChatBadge()
     }
     .task(id: AutoHideKey(isShown: areControlsShown, hasVideo: hasRemoteVideo, phase: call.phase, interactions: interactions)) {
       // The chrome steps aside when there is video to look at; without video it stays.
@@ -674,10 +679,13 @@ struct CallScreen: View {
       }
       Spacer(minLength: 0)
       AudioRouteButton().frame(width: Self.controlSize, height: Self.controlSize)
-      if extraControls > 1 {
-        // Together in one menu, so the bar keeps its room on small phones.
+      if extraControls > 0 {
+        // Together in one menu with Chat, so the bar keeps its room on small phones.
         Spacer(minLength: 0)
         Menu {
+          Button(action: openChat) {
+            Label(chatLabel, systemImage: "bubble.left.and.bubble.right")
+          }
           if isAddingPeopleOffered {
             Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
           }
@@ -691,35 +699,21 @@ struct CallScreen: View {
             Button("call_lobby_title", systemImage: "person.badge.clock") { interact { isLobbyShown = true } }
           }
         } label: {
-          Image(systemName: "plus")
+          Image(systemName: "ellipsis")
             .font(.app(.title2))
             .foregroundStyle(.white)
             .frame(width: Self.controlSize, height: Self.controlSize)
             .background(Color.white.opacity(0.16), in: Circle())
             .contentShape(Circle())
+            // With Chat in the menu, a dot says something there is unread.
+            .overlay(alignment: .topTrailing) { ChatBadgeView(badge: chatBadge, isDot: true) }
         }
         .accessibilityLabel(Text("more"))
-      } else if isAddingPeopleOffered {
+        .accessibilityValue(chatBadge.count > 0 ? Text("chat_unread \(chatBadge.count)") : Text(verbatim: ""))
+      } else {
         Spacer(minLength: 0)
-        RoundControl(system: "person.badge.plus", isActive: false, label: "call_add_people") {
-          interact { isAddingPeople = true }
-        }
-      } else if isNotetakerControlShown {
-        Spacer(minLength: 0)
-        RoundControl(system: "note.text.badge.plus", isActive: false, label: "call_notetaker_add") {
-          interact { pressNotetaker() }
-        }
-        .opacity(notetakerRefusalKey == nil ? 1 : 0.45)
-      } else if isHostsOffered {
-        Spacer(minLength: 0)
-        RoundControl(system: "person.2.badge.gearshape", isActive: false, label: "call_hosts_title") {
-          interact { isHostsShown = true }
-        }
-      } else if isLobbyOffered {
-        Spacer(minLength: 0)
-        RoundControl(system: "person.badge.clock", isActive: false, label: "call_lobby_title") {
-          interact { isLobbyShown = true }
-        }
+        RoundControl(system: "bubble.left.and.bubble.right.fill", isActive: false, label: chatLabel, action: openChat)
+          .overlay(alignment: .topTrailing) { ChatBadgeView(badge: chatBadge, isDot: false) }
       }
       Spacer(minLength: 0)
       hangUpControl
@@ -731,6 +725,31 @@ struct CallScreen: View {
       LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea()
     }
+  }
+
+  /// "Chat", or "Chat, 3 unread messages" for VoiceOver.
+  private var chatLabel: LocalizedStringKey {
+    chatBadge.count > 0 ? "call_chat_unread \(chatBadge.count)" : "call_chat"
+  }
+
+  /// The call's chat (#1488): its conversation in the app, the call going on behind the app's bar
+  /// as after "Minimise". The conversation's own feed and composer are the chat, as on desktop
+  /// (#936), so reading it there marks it read.
+  private func openChat() {
+    model.openConversationId = call.conversationId
+    model.calls.minimise()
+  }
+
+  /// The badge from the conversation list's read: unread messages, loud for a mention or a DM, as
+  /// on desktop. Nothing while the store can't be read.
+  private func readChatBadge() async {
+    guard let item = await model.conversations().first(where: { $0.id == call.conversationId }) else {
+      chatBadge = .none
+      return
+    }
+    let isDirectLike = item.kind == .direct || item.kind == .group
+    chatBadge = CallChatBadge(
+      count: Int(max(item.unreadCount, item.mentionCount)), isLoud: item.mentionCount > 0 || isDirectLike)
   }
 
   /// How many of "Add people", "Add notetaker", "Hosts" and "Lobby" the bar offers.
@@ -1032,6 +1051,48 @@ private struct StagePerson: Identifiable {
 private struct NotetakerKey: Hashable {
   let conversationId: String
   let participants: [String]
+}
+
+/// Reads the Chat button's badge again for another call or after a change in the store.
+private struct ChatBadgeKey: Hashable {
+  let conversationId: String
+  let changes: Int
+}
+
+/// The Chat button's badge (#1488): what is unread in the call's conversation, and whether it asks
+/// for the user (a mention, a DM), which colours it red, as desktop's.
+private struct CallChatBadge: Equatable {
+  var count = 0
+  var isLoud = false
+
+  static let none = CallChatBadge()
+}
+
+/// The unread count on the Chat button, or a dot on "More"; nothing while all is read. The
+/// buttons' labels say the count, so the badge itself is hidden from VoiceOver.
+private struct ChatBadgeView: View {
+  let badge: CallChatBadge
+  let isDot: Bool
+
+  var body: some View {
+    if badge.count > 0 {
+      let fill = badge.isLoud ? Color.red : Color.white
+      Group {
+        if isDot {
+          Circle().fill(fill).frame(width: 10, height: 10)
+        } else {
+          Text(verbatim: badge.count > 99 ? "99+" : String(badge.count))
+            .font(.app(.caption2).weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(badge.isLoud ? Color.white : Color.black)
+            .padding(.horizontal, 5)
+            .frame(minWidth: 20, minHeight: 20)
+            .background(fill, in: Capsule())
+        }
+      }
+      .accessibilityHidden(true)
+    }
+  }
 }
 
 /// Reads the lobby again when the call, its people or a knock change.

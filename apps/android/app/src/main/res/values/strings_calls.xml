@@ -161,4 +161,8 @@
     <item quantity="one">%d person left the call</item>
     <item quantity="other">%d people left the call</item>
   </plurals>
+  <!-- The call's chat button (#1488): opens the call's conversation in the app while the call goes on. -->
+  <string name="call_chat">Chat</string>
+  <!-- The chat button with unread messages, for screen readers, e.g. "Chat, 3 unread messages". -->
+  <string name="call_chat_unread">Chat, %1$s</string>
 </resources>

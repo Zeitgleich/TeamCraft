@@ -100,6 +100,13 @@ internal object CallIcons {
       "M7,15.02c0.31,-1.48 0.92,-2.95 2.07,-4.06l1.59,1.59c-1.54,0.38 -2.7,1.18 -3.66,2.47z",
   )
 
+  /** The call's chat (#1488): Material's "chat" symbol. */
+  val Chat = icon(
+    "Chat",
+    "M20,2H4c-1.1,0 -1.99,0.9 -1.99,2L2,22l4,-4h14c1.1,0 2,-0.9 2,-2V4c0,-1.1 -0.9,-2 -2,-2z" +
+      "M6,9h12v2H6V9zM14,14H6v-2h8v2zM18,8H6V6h12v2z",
+  )
+
   private fun icon(name: String, pathData: String): ImageVector =
     ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
       .addPath(addPathNodes(pathData), fill = SolidColor(Color.Black))
