@@ -216,6 +216,12 @@ Release builds allow plain HTTP only to the device itself (`127.0.0.1`, `localho
   Keystore (StrongBox where present). The store is plain SQLite with every record sealed by the core
   (e2ee.md §9.2), because SQLCipher needs a libcrypto the NDK doesn't ship.
 - **OIDC session:** AppAuth's state (refresh token included) is sealed the same way.
+- **Device key (DPoP, docs/e2ee.md §3.1.2):** where the identity provider advertises ES256 and the server
+  offers a nonce, the session is bound to a non-exportable P-256 key in the Keystore (StrongBox where
+  present; a sealed software key only where the Keystore makes no EC key), one per server, gone at
+  sign-out. AppAuth's token requests carry a proof (`auth/DeviceProofs.kt`), the core signs its own
+  requests with the same key (`security/DeviceProofKeys.kt`, `TeamCraft.withDeviceKey`). A lost key
+  shows "sign in again", which makes a new one.
 - **Backups:** off, and every domain excluded from cloud backup and device transfer. A new phone is
   set up by linking it from another device or with the recovery passphrase.
 - **TLS:** every request the app sends itself goes through the core, sign-in and token refresh included

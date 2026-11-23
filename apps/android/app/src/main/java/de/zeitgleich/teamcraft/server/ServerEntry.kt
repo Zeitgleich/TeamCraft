@@ -123,6 +123,12 @@ object StoragePaths {
   /** The sealed session of a local account (e-mail and password) on a server. */
   fun localSessionFile(storageKey: String): String = "auth/${segment(storageKey)}/local-session.bin"
 
+  /** The sealed software device key of a server, where the Keystore made none (DPoP, e2ee.md §3.1.2). */
+  fun deviceKeyFile(storageKey: String): String = "auth/${segment(storageKey)}/device-key.bin"
+
+  /** The Keystore alias of a server's device key for DPoP proofs. */
+  fun deviceKeyAlias(storageKey: String): String = "teamcraft_dpop.${segment(storageKey)}"
+
   /** The cached icon of a server's identity provider ("Sign in with …"). */
   fun ssoIconFile(storageKey: String): String = "${brandDir(storageKey)}/sso_icon"
 
