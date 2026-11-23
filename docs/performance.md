@@ -2568,6 +2568,82 @@ here, where a GPU that paints keeps its tiles in VRAM; and the debug binary's ma
 34 MiB more than a release binary's). The release build on a GPU remains the number the budget is
 about.
 
+### Desktop on Linux: what grows with use (issue #1708)
+
+Same harness and workspace as above (`desktop_perf.rs`, large workspace, debug shell with the
+release web client), measured 2026-11-23 on main after #2319. This machine has no Xvfb any more: the
+runs use a virtual KWin with Xwayland (`kwin_wayland --virtual --xwayland`, its own display, never
+the real screen); WebKit still paints on the CPU there, and the page held 232 MiB anonymous after
+the 40 switches, as under Xvfb. The measurement that found the growth goes on where the harness
+stops: after its 40 switches, 105 more (seven spaces, a channel a second, scripted over the
+inspector), then the harness's own idle windows. The wasm heap is the largest `ArrayBuffer` of a
+heap snapshot, the calls to the shell are the page's `ipc://` requests by command.
+
+The composited message list from the section above isn't one: making its scroller a plain box
+(`overflow: hidden`) in the held page changed the page's anonymous memory by nothing. WebKit's
+layer estimate is the content's size, not the tiles it keeps.
+
+What grew instead, with every channel opened:
+
+- **The notifier read every conversation.** On each change it read the newest rows of all 300
+  conversations, so the page's mirror of the core (`remote_backend.rs`) loaded a page of 100
+  messages of each and kept it: a dump of the wasm heap held about 5,400 copies of each seeded
+  text. The notifier now reads a conversation again only when its newest message moved since a
+  look that left nothing pending (`notifier.rs`). It couldn't tell before: the desktop's and the
+  browser's backend (`Hybrid`) never passed the newest message's time on, so every
+  `last_activity` read got `None`. That also left Home's DMs and favorites (#1884) and the share
+  sheet without their order by recency.
+- **The mirror kept everything.** The rows of every conversation opened and one answer per message
+  row ever shown stayed for the session. It now keeps the rows of the 10 conversations read last
+  and 1,000 rows' answers; what was read in the last minute stays whatever the bound, and the
+  rest goes when a change comes in (`MAX_HELD_FEEDS`, `MAX_HELD_ROW_ANSWERS`, `MIN_HOLD`).
+  Switching back to an older conversation reads its page from the core again (a local call).
+- **One call to the shell per message row.** Each row asked for its own extras (reactions, files,
+  quote), and every change asked each row shown again: 25,084 calls in the 105 switches, about
+  240 a switch. Each answer is parsed in the page twice (Tauri's `invoke`, then `call_shell`)
+  and once more in the shell; the page's JavaScript heap kept their text (a 20 MiB region of the
+  web process was `core_query` requests and answers) and the shell's heap grew with them. The asks
+  of one turn now go to the core as one query per conversation, and each row gets its part
+  (`ExtrasBatch`).
+
+Both builds side by side on their own displays and stacks, so the PSS splits the shared libraries
+between the two runs; the anonymous memory compares:
+
+| Large workspace                             | Before          | After           |
+|---------------------------------------------|-----------------|-----------------|
+| After 40 switches: whole app, anonymous     | 336.8 MiB       | 321.4 MiB       |
+| Of it the page                              | 237.8 MiB       | 231.1 MiB       |
+| Of it the shell and core                    | 86.5 MiB        | 77.1 MiB        |
+| Wasm heap                                   | 22.2 MiB        | 21.8 MiB        |
+| After 105 more: whole app, anonymous        | 506.8 MiB       | 335.7 MiB       |
+| Of it the page                              | 333.9 MiB       | 243.9 MiB       |
+| Of it the shell and core                    | 160.0 MiB       | 78.5 MiB        |
+| Wasm heap                                   | 37.5 MiB        | 28.3 MiB        |
+| `message_extras` calls in the 105 switches  | 25,084          | 2,009           |
+| `has_external_people` calls (see below)     | 1,228           | 4,815           |
+| Each other per-conversation query           | 788–793         | 771             |
+| Then shown, idle: whole app PSS             | 565.1 MiB       | 485.1 MiB       |
+| Then hidden in the tray: whole app PSS      | 548.3 MiB       | 479.6 MiB       |
+| Idle CPU, shown / hidden                    | 0.34 / 0.33 %   | 0.19 / 0.30 %   |
+| Channel switch p50 / p95 (the 40)           | 109 / 173 ms    | 125 / 165 ms    |
+
+Before, the page gave part of its growth back once WebKit's memory pressure handler ran (334 to
+266 MiB anonymous by the idle windows) and the shell once it was hidden (`malloc_trim`, 160 to 78);
+after, there is little to give back. The wasm heap doesn't shrink, and its 22 MiB after the
+40 switches are the same in both builds: they are reached during the start and catch-up (not
+taken apart here; the notifier's first look still reads every conversation once).
+Switches stayed within the spread between runs (four pairs: p95 152 to 185 ms either way).
+
+One count went up: the sidebar's question whether a channel has guests
+(`has_external_people`), from about 1,200 to 4,800 small calls in the 105 switches. The other
+per-conversation queries stayed the same, so more rows ask it on a change than before, which
+started with the newest message's time reaching the lists ordered by it. It is far below what the
+batching saved.
+
+Still above the budget in this measurement after 40 switches; what is left is what the section
+above names (compiled WebAssembly, the JavaScript heap, the debug binary). The use doesn't add to
+it any more as it did.
+
 ### Coming back and bad networks, end to end (issue #972)
 
 `tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the
