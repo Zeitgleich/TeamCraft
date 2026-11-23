@@ -19,6 +19,8 @@ use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{DeviceActivity, GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, ServerApi};
+#[cfg(feature = "ui")]
+use crate::canvas_presence::CanvasPresenceAnnouncer;
 use crate::client::files::BlobUpload;
 use crate::client::notify_sync_progress_during;
 use crate::client::{Client, SyncStopRequest};
@@ -52,6 +54,9 @@ pub struct SyncRunner<A: ServerApi, S> {
   /// The user's own typing, sent at most once per [`crate::typing::TYPING_INTERVAL_MS`].
   #[cfg(feature = "ui")]
   typing: TypingAnnouncer,
+  /// Numbers this device's words about the notes page it shows (e2ee.md §4.11).
+  #[cfg(feature = "ui")]
+  canvas_presence: CanvasPresenceAnnouncer,
   /// The file going up beside the loop.
   maybe_upload: Option<BlobUpload>,
   /// A file may be waiting for its upload: one was queued, a retry came due, or one finished.
@@ -200,6 +205,8 @@ impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
       upkeep,
       #[cfg(feature = "ui")]
       typing: TypingAnnouncer::default(),
+      #[cfg(feature = "ui")]
+      canvas_presence: CanvasPresenceAnnouncer::default(),
       maybe_upload: None,
       is_upload_due: true,
       downloads: Downloads::default(),
@@ -395,6 +402,16 @@ impl<A: ServerApi + 'static, S: LocalStore + 'static> SyncRunner<A, S> {
       }) => {
         self.announce_typing(conversation, maybe_thread).await;
         // Nothing to flush: typing changes no stored state.
+        return;
+      },
+      #[cfg(feature = "ui")]
+      RunnerCommand::Ui(CoreCommand::AnnounceCanvas { conversation, note }) => {
+        let now = self.client.now_ms();
+        self
+          .canvas_presence
+          .announce(&self.client, &mut self.connection, conversation, note, now)
+          .await;
+        // Nothing to flush: a word about the notes changes no stored state.
         return;
       },
       // Uploads and saves run beside the loop.

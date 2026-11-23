@@ -44,6 +44,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.liveRegion
@@ -62,20 +63,32 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleStartEffect
 import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.ServerHistory
 import de.zeitgleich.teamcraft.ui.theme.Spacing
+import kotlinx.coroutines.delay
 import uniffi.teamcraft_ffi.CanvasBlockItem
 import uniffi.teamcraft_ffi.CanvasBlockKind
 import uniffi.teamcraft_ffi.CanvasPageItem
+import uniffi.teamcraft_ffi.CanvasPresenceItem
 import uniffi.teamcraft_ffi.CanvasRunItem
 
 /** Pages of older history read per opening, as on desktop and web (e2ee.md §4.11, "A device catching up"). */
 private const val MAX_HISTORY_PAGES = 20
+
+/** How often the shown page asks who else has it open: an entry runs out without an event, and the core says "open" on its refresh. */
+private const val PRESENCE_CHECK_MS = 10_000L
+
+/** Avatars in the presence line at most; the text names everyone. */
+private const val MAX_PRESENCE_AVATARS = 5
+
+private val PRESENCE_AVATAR_SIZE = 24.dp
 
 /** How light the code block's background is over the sheet's surface. */
 private const val CODE_BACKGROUND_ALPHA = 0.06f
@@ -104,6 +117,7 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
       viewModel.act(ChatActions.loadOlderHistory(conversationId))
     }
   }
+  val presence = rememberPagePresence(viewModel, conversationId, maybePageId, changes)
   val hasFiles = maybePage?.blocks?.any { it.maybeFile != null } == true
   val files = rememberRead(viewModel, key = conversationId, enabled = hasFiles) { query(ChatQueries.files(conversationId)).files }
   val context = LocalContext.current
@@ -120,6 +134,9 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
           style = MaterialTheme.typography.titleMedium,
           modifier = Modifier.semantics { heading() },
         )
+      }
+      presence?.takeIf { it.openBy.isNotEmpty() || it.editing.isNotEmpty() }?.let { shown ->
+        item(key = "presence") { PresenceLine(shown) }
       }
       if (page == null) {
         item { PageLoadingIndicator(Modifier.padding(Spacing.l)) }
@@ -139,6 +156,67 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
         NotesBlock(block, files.maybeValue.orEmpty(), onOpenFile = { file -> openOrDownload(viewModel, file, context) })
       }
     }
+  }
+}
+
+/**
+ * Who else has the shown page open and who edited it lately (#1456, e2ee.md §4.11, "Who has the page
+ * open"), and this device's own word that it has: asked when the page opens, every
+ * [PRESENCE_CHECK_MS] and on every change while the app is in the foreground. Going to the
+ * background, switching pages or closing the sheet says "closed", so the others drop the phone at
+ * once; the core paces the rest. "Show when I'm typing" off: the phone says nothing, but still shows
+ * the others.
+ */
+@Composable
+private fun rememberPagePresence(viewModel: MainViewModel, conversationId: String, maybePageId: String?, changes: Long): CanvasPresenceItem? {
+  val context = LocalContext.current
+  val isShared = remember { ComposerPrefs.prefs(context).isSharingTyping }
+  var presence by remember(conversationId, maybePageId) { mutableStateOf<CanvasPresenceItem?>(null) }
+  var isStarted by remember { mutableStateOf(false) }
+  LifecycleStartEffect(conversationId, maybePageId) {
+    isStarted = true
+    onStopOrDispose {
+      isStarted = false
+      // The page of this effect's keys, not the one shown by the time the word goes out.
+      viewModel.leaveCanvasPage(conversationId, maybePageId, isShared)
+    }
+  }
+  LaunchedEffect(conversationId, maybePageId, isStarted, changes) {
+    while (isStarted) {
+      presence = viewModel.canvasPresence(conversationId, maybePageId, isShared) ?: presence
+      delay(PRESENCE_CHECK_MS)
+    }
+  }
+  return presence
+}
+
+/** The avatars and names of the others on the page: "Anna has this page open · Ben is editing". */
+@Composable
+private fun PresenceLine(presence: CanvasPresenceItem) {
+  val resources = LocalContext.current.resources
+  val text = listOfNotNull(
+    presence.openBy.takeIf { it.isNotEmpty() }?.let { people ->
+      resources.getQuantityString(R.plurals.channel_notes_open_by, people.size, people.joinToString { it.displayName })
+    },
+    presence.editing.takeIf { it.isNotEmpty() }?.let { people ->
+      resources.getQuantityString(R.plurals.channel_notes_editing, people.size, people.joinToString { it.displayName })
+    },
+  ).joinToString(" · ")
+  Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
+    if (presence.openBy.isNotEmpty()) {
+      // Decorative: the text names them.
+      Row(Modifier.clearAndSetSemantics {}, horizontalArrangement = Arrangement.spacedBy((-6).dp)) {
+        for (person in presence.openBy.take(MAX_PRESENCE_AVATARS)) {
+          AccountAvatar(person.userId, person.displayName, PRESENCE_AVATAR_SIZE)
+        }
+      }
+    }
+    Text(
+      text,
+      style = MaterialTheme.typography.bodySmall,
+      color = MaterialTheme.colorScheme.onSurfaceVariant,
+      modifier = Modifier.weight(1f).semantics { liveRegion = LiveRegionMode.Polite },
+    )
   }
 }
 

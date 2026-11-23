@@ -7,6 +7,8 @@ import SwiftUI
 struct ChannelNotesView: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.scenePhase) private var scenePhase
+  @AppStorage("share_typing") private var isSharingTyping = true
   let conversationId: String
 
   @State private var maybePageId: String?
@@ -14,6 +16,7 @@ struct ChannelNotesView: View {
   @State private var history = OlderHistory.complete
   @State private var historyPages = 0
   @State private var files: [FileInfo] = []
+  @State private var maybePresence: CanvasPresenceItem?
 
   var body: some View {
     NavigationStack {
@@ -34,11 +37,25 @@ struct ChannelNotesView: View {
       .toolbar { ToolbarItem(placement: .confirmationAction) { Button("done") { dismiss() } } }
     }
     .task(id: ReadKey(changes: model.changeCount, pageId: maybePageId)) { await read() }
+    .task(id: PresenceKey(changes: model.changeCount, pageId: maybePageId, isActive: scenePhase == .active)) {
+      await followPresence()
+    }
+    .onChange(of: maybePageId) { left, _ in
+      maybePresence = nil
+      leave(left)
+    }
+    .onChange(of: scenePhase) { _, phase in
+      if phase != .active { leave(maybePageId) }
+    }
+    .onDisappear { leave(maybePageId) }
   }
 
   @ViewBuilder
   private func content(_ page: CanvasPageItem) -> some View {
     if !page.pages.isEmpty { pagePicker(page) }
+    if let presence = maybePresence, !presence.openBy.isEmpty || !presence.editing.isEmpty {
+      presenceLine(presence)
+    }
     note("channel_notes_read_only_phone")
     if let key = ChannelNotes.statusKey(page, history: history) { note(key, isStatus: true) }
     if !page.isUnreadable {
@@ -117,9 +134,53 @@ struct ChannelNotesView: View {
     }
   }
 
+  /// The avatars and names of the others on the page. The avatars are decorative: the text names them.
+  private func presenceLine(_ presence: CanvasPresenceItem) -> some View {
+    HStack(spacing: 8) {
+      if !presence.openBy.isEmpty {
+        HStack(spacing: -6) {
+          ForEach(presence.openBy.prefix(ChannelNotes.maxPresenceAvatars), id: \.userId) { person in
+            SenderAvatar(name: person.displayName, userId: person.userId, size: 24)
+          }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+      }
+      Text(verbatim: ChannelNotes.presenceText(presence))
+        .font(.app(.footnote))
+        .foregroundStyle(Theme.textMuted)
+        .accessibilityAddTraits(.updatesFrequently)
+    }
+  }
+
+  /// Who else has the page open, asked now, every `ChannelNotes.presenceCheck` and on every change
+  /// while the app is active; the core says "open" when due. Leaving the page, the sheet or the
+  /// foreground says "closed" (`leave`).
+  private func followPresence() async {
+    guard scenePhase == .active else { return }
+    while !Task.isCancelled {
+      if let presence = await model.canvasPresence(conversationId, pageId: maybePageId, isShared: isSharingTyping) {
+        maybePresence = presence
+      }
+      try? await Task.sleep(for: ChannelNotes.presenceCheck)
+    }
+  }
+
+  private func leave(_ pageId: String?) {
+    let conversationId = conversationId
+    let isShared = isSharingTyping
+    Task { await model.leaveCanvasPage(conversationId, pageId: pageId, isShared: isShared) }
+  }
+
   private struct ReadKey: Equatable {
     let changes: Int
     let pageId: String?
+  }
+
+  private struct PresenceKey: Equatable {
+    let changes: Int
+    let pageId: String?
+    let isActive: Bool
   }
 }
 

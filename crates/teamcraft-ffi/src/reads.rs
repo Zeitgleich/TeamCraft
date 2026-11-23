@@ -43,7 +43,6 @@ use teamcraft_client_api::model::{
 };
 use teamcraft_client_api::remote::{ChatPreviews, NamedSearchResults};
 use teamcraft_client_api::search::parse_query;
-use teamcraft_core::TypingState;
 use teamcraft_core::chat_list_pass::{ListPass, SliceLimit};
 use teamcraft_core::client::{CatchUpFocus, LinkRequestList};
 use teamcraft_core::clock::{Clock as _, SystemClock};
@@ -58,6 +57,7 @@ use teamcraft_core::store::{Table, read_together, write_group};
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::ui_backend::{CoreChatBackend, CountedTallies, EntryNeed};
 use teamcraft_core::ui_snapshot::SnapshotCache;
+use teamcraft_core::{CanvasPresenceState, TypingState};
 use teamcraft_proto::{ConversationId, SpaceId, ThreadId, UserId};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
@@ -208,6 +208,9 @@ pub(crate) struct Reads {
   /// Where a read thread's caches go to be written; `None` on the actions' thread, which writes
   /// them itself (issue #1962).
   maybe_cache_writes: Option<Arc<CacheWrites>>,
+  /// When the page of notes the app shows says it is open (`crate::canvas`): asked on the main
+  /// read thread only.
+  pub(crate) canvas_pacers: crate::canvas::PagePacers,
 }
 
 /// The enrolled account as the read thread has it.
@@ -439,15 +442,21 @@ impl ReadQueue {
     });
   }
 
-  /// Typing and transfers come from the client once it is open, and from its successor when it is
-  /// reopened; what the backend keeps stays.
-  pub(crate) fn follow_client(&self, typing: TypingState, transfers: Transfers) {
+  /// Typing, who has a page of notes open, and transfers come from the client once it is open,
+  /// and from its successor when it is reopened; what the backend keeps stays.
+  pub(crate) fn follow_client(
+    &self,
+    typing: TypingState,
+    canvas_presence: CanvasPresenceState,
+    transfers: Transfers,
+  ) {
     self.post_all(move |reads| {
       if let Some(account) = reads.maybe_account.take() {
         reads.maybe_account = Some(ReadAccount {
           backend: account
             .backend
             .with_typing(typing.clone())
+            .with_canvas_presence(canvas_presence.clone())
             .with_transfers(transfers.clone()),
           ..account
         });
@@ -659,6 +668,7 @@ fn spawn_lane(
         link_requests: LinkRequestList::default(),
         maybe_closing: None,
         maybe_cache_writes,
+        canvas_pacers: crate::canvas::PagePacers::default(),
       };
       loop {
         let job = match jobs.try_recv() {

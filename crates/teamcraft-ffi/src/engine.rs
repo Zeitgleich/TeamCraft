@@ -1858,9 +1858,11 @@ impl Engine {
       client.device_id(),
       client.identity_fingerprint(),
     );
-    self
-      .reads
-      .follow_client(client.typing_state(), client.transfers());
+    self.reads.follow_client(
+      client.typing_state(),
+      client.canvas_presence_state(),
+      client.transfers(),
+    );
     self.client = ClientSlot::Idle(Box::new(client));
   }
 

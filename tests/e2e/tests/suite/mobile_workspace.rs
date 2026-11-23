@@ -28,16 +28,20 @@
 //! learns of only through the push or a sync), `rekey` (Alice takes Bob out of the first channel and
 //! back in: two commits the device hasn't seen) and `newdevice` (Bob links another device, which the
 //! apps add to every group).
+//!
+//! `notes <seconds>` (issue #1456): Alice keeps the first channel's notes page open for that long,
+//! saying so every 15 s as the editor does, and logs whether she sees the device having it open.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use teamcraft_client_api::canvas::{BlockKind, CanvasDoc, InlineMark};
+use teamcraft_core::api::GatewayConnection as _;
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_e2e::call::{hold_call, join_call};
 use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
-use teamcraft_proto::{ConversationId, SpaceId, UserId};
+use teamcraft_proto::{CanvasPageState, CanvasPresence, ConversationId, SpaceId, UserId};
 
 const PORT: u16 = 8091;
 /// The web client's policy: the dev realm's sign-in page on :8080 and the dev storage on :3900
@@ -165,6 +169,7 @@ async fn serve_a_large_workspace_to_a_device() {
         sent += 1;
         eprintln!("WORKSPACE: rekeyed {channel} and sent a message");
       },
+      Some(Command::Notes(duration)) => hold_notes(&mut alice, channels[0], device_user, duration).await,
       Some(Command::NewDevice) => {
         let index = bob_devices.len();
         bob_devices.push(Peer::enroll_device(&stack, "bob", &format!("bob-{index}")).await);
@@ -498,6 +503,55 @@ fn burst_file() -> PathBuf {
   std::env::temp_dir().join(format!("teamcraft-mobile-workspace-{}.burst", port()))
 }
 
+/// Alice has the first page of `channel`'s notes open for `duration`, then leaves it; logs when the
+/// device's own word that it has the page open arrives and when it goes.
+async fn hold_notes(alice: &mut Peer, channel: ConversationId, device_user: UserId, duration: Duration) {
+  eprintln!("WORKSPACE: Alice has the notes of {channel} open for {duration:?}");
+  let until = Instant::now() + duration;
+  let mut maybe_said = None::<Instant>;
+  let mut was_seen = false;
+  while Instant::now() < until {
+    if maybe_said.is_none_or(|said| said.elapsed() >= Duration::from_secs(15)) {
+      say_notes(alice, channel, CanvasPageState::Open).await;
+      maybe_said = Some(Instant::now());
+    }
+    alice.pump_reconnecting().await;
+    alice.heartbeat().await;
+    let now_ms = now_ms();
+    let is_seen = alice
+      .client
+      .canvas_presence_state()
+      .peers(channel, None, alice.user_id(), now_ms)
+      .iter()
+      .any(|peer| peer.user == device_user);
+    if is_seen != was_seen {
+      eprintln!("WORKSPACE: the device has the notes open: {is_seen}");
+      was_seen = is_seen;
+    }
+    tokio::time::sleep(Duration::from_millis(500)).await;
+  }
+  say_notes(alice, channel, CanvasPageState::Closed).await;
+  eprintln!("WORKSPACE: Alice left the notes");
+}
+
+async fn say_notes(alice: &mut Peer, channel: ConversationId, state: CanvasPageState) {
+  let word = CanvasPresence {
+    seq: u64::try_from(now_ms()).unwrap_or(0),
+    maybe_page: None,
+    state,
+    maybe_caret: None,
+  };
+  let frame = alice.client.canvas_presence_frame(channel, &word).unwrap();
+  alice.gateway.send(&frame).await.unwrap();
+}
+
+fn now_ms() -> i64 {
+  let since_epoch = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default();
+  i64::try_from(since_epoch.as_millis()).unwrap_or(i64::MAX)
+}
+
 /// `MOBILE_WORKSPACE_PORT`, or 8091.
 fn port() -> u16 {
   std::env::var("MOBILE_WORKSPACE_PORT")
@@ -513,6 +567,7 @@ enum Command {
   NewChannel,
   Rekey,
   NewDevice,
+  Notes(Duration),
 }
 
 /// The command written to the control file, which is then removed.
@@ -524,6 +579,7 @@ fn take_command(path: &PathBuf) -> Option<Command> {
     ["newchannel"] => Some(Command::NewChannel),
     ["rekey"] => Some(Command::Rekey),
     ["newdevice"] => Some(Command::NewDevice),
+    ["notes", seconds] => Some(Command::Notes(Duration::from_secs(seconds.parse().ok()?))),
     [count] => count.parse().ok().map(Command::Send),
     ["call", kind, seconds] => Some(Command::Call {
       is_direct: *kind == "dm",

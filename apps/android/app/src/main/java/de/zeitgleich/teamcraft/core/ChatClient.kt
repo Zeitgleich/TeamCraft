@@ -13,6 +13,7 @@ import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.PollLimitsItem
 import uniffi.teamcraft_ffi.CanvasPageItem
+import uniffi.teamcraft_ffi.CanvasPresenceItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -267,6 +268,17 @@ class ChatClient(
 
   /** A page of the channel's shared notes, read-only (#1456): the first page (`null`) or a further one. */
   suspend fun canvasPage(conversation: String, maybePage: String?): CanvasPageItem = core().canvasPage(conversation, maybePage)
+
+  /**
+   * Who else has the page open and who edited it lately; says this device has it open when due (#1456,
+   * e2ee.md §4.11). Asked while the page is shown; [isShared] is "Show when I'm typing".
+   */
+  suspend fun canvasPresence(conversation: String, maybePage: String?, isShared: Boolean): CanvasPresenceItem =
+    core().canvasPresence(conversation, maybePage, isShared)
+
+  /** The page is no longer shown: the others drop this device at once. */
+  suspend fun leaveCanvasPage(conversation: String, maybePage: String?, isShared: Boolean) =
+    core().leaveCanvasPage(conversation, maybePage, isShared)
 
   /** Reads the channel's members and signed roles afresh; the change arrives as a store update. */
   suspend fun refreshChannelMembers(conversation: String) = core().refreshChannelMembers(conversation)

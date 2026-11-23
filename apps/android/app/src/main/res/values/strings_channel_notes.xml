@@ -17,4 +17,13 @@
   <string name="channel_notes_file_downloading">Downloading…</string>
   <string name="channel_notes_checked">Done</string>
   <string name="channel_notes_unchecked">Not done</string>
+  <!-- Who else has the page open now, and who edited it lately without having it open; names joined by commas. -->
+  <plurals name="channel_notes_open_by">
+    <item quantity="one">%1$s has this page open</item>
+    <item quantity="other">%1$s have this page open</item>
+  </plurals>
+  <plurals name="channel_notes_editing">
+    <item quantity="one">%1$s is editing</item>
+    <item quantity="other">%1$s are editing</item>
+  </plurals>
 </resources>
