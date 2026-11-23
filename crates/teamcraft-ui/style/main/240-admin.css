@@ -611,7 +611,7 @@
 /* A person's actions that can't be taken back, apart from the rest (issue #958): each names what it
    does before the click, and asks in place before it acts. */
 .danger-zone {
-  margin-top: 20px;
+  margin-top: 8px;
   padding-top: 4px;
   border-top: 1px solid var(--border);
 }
