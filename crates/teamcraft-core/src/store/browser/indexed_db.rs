@@ -547,7 +547,7 @@ fn classify(name: &str) -> WriteFailure {
   }
 }
 
-async fn read_all(database: &IdbDatabase) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
+pub(super) async fn read_all(database: &IdbDatabase) -> Result<Vec<(LookupId, Vec<u8>)>, StoreError> {
   let transaction = database
     .transaction_with_str(RECORDS)
     .map_err(|error| idb::js_error("load", &error))?;
