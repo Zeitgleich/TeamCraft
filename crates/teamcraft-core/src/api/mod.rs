@@ -1029,6 +1029,15 @@ impl std::fmt::Display for Interception {
   }
 }
 
+/// Whether an HTTP status without the server's own error body means the server is out of reach
+/// rather than refusing the request: a proxy or load balancer in front of it answers 502 (bad
+/// gateway), 503 (unavailable) or 504 (gateway timeout) while the server restarts or is down. The
+/// same request succeeds once it is back. A 503 with the server's error body is the server itself
+/// (a storage outage, with `Retry-After`): it is up, and that stays a refusal.
+pub fn is_unreachable_status(status: u16) -> bool {
+  matches!(status, 502..=504)
+}
+
 /// Longest `Retry-After` a client honours; a longer one (or a hostile server) waits this long.
 pub const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(10 * 60);
 
@@ -1108,9 +1117,19 @@ impl ApiError {
     matches!(self, Self::Status { status: 409, .. })
   }
 
-  /// The request never reached the server: offline, or intercepted on the way.
+  /// The server can't be reached right now: offline, intercepted on the way, or a proxy in front of
+  /// the server answered that the server is down (a restart, an update; [`is_unreachable_status`]). The shells show it as the
+  /// connection state, not as a failed action; the request is retried.
   pub fn is_unreachable(&self) -> bool {
-    matches!(self, Self::Network(_) | Self::Intercepted { .. })
+    match self {
+      Self::Network(_) | Self::Intercepted { .. } => true,
+      Self::Status {
+        status,
+        maybe_body: None,
+        ..
+      } => is_unreachable_status(*status),
+      _ => false,
+    }
   }
 
   /// What intercepted the connection, if something did.
@@ -1204,6 +1223,77 @@ mod tests {
   use std::time::Duration;
 
   use super::*;
+
+  mod unreachable {
+    use super::*;
+
+    fn proxy_answer(status: u16) -> ApiError {
+      ApiError::Status {
+        status,
+        maybe_body: None,
+        maybe_retry_after: None,
+      }
+    }
+
+    #[test]
+    fn a_proxy_answering_for_a_server_that_is_down_is_unreachable() {
+      for status in [502, 503, 504] {
+        let error = proxy_answer(status);
+        assert!(is_unreachable_status(status));
+        assert!(error.is_unreachable(), "{status}");
+        assert!(error.is_transient() && error.is_retry_later(), "{status}");
+      }
+    }
+
+    #[test]
+    fn other_statuses_are_answers_of_the_server() {
+      for status in [400, 401, 403, 404, 409, 413, 429, 500, 501, 505, 511] {
+        assert!(!is_unreachable_status(status), "{status}");
+        assert!(!proxy_answer(status).is_unreachable(), "{status}");
+      }
+    }
+
+    #[test]
+    fn the_servers_own_unavailable_answer_is_a_refusal_not_unreachable() {
+      // The server is up; its storage isn't (it says how long to wait).
+      let error = ApiError::Status {
+        status: 503,
+        maybe_body: Some(ErrorBody::new(ErrorCode::Unavailable, "storage is down")),
+        maybe_retry_after: Some(Duration::from_secs(30)),
+      };
+      assert!(!error.is_unreachable());
+      assert!(error.is_transient());
+    }
+
+    #[test]
+    fn no_connection_timeouts_and_interceptions_are_unreachable() {
+      for error in [
+        ApiError::Network("connection refused".into()),
+        ApiError::Network("dns error: failed to lookup address".into()),
+        ApiError::Network("connection reset by peer".into()),
+        ApiError::Network("no answer within 30 s".into()),
+        ApiError::Intercepted {
+          kind: Interception::CaptivePortal,
+          detail: "HTML".into(),
+        },
+      ] {
+        assert!(error.is_unreachable(), "{error}");
+      }
+    }
+
+    #[test]
+    fn local_and_refusal_errors_are_not_unreachable() {
+      for error in [
+        ApiError::Decode("bad json".into()),
+        ApiError::Token("none".into()),
+        ApiError::SignInExpired,
+        ApiError::BoundKeyLost,
+        ApiError::status(403, ErrorCode::Forbidden, "no"),
+      ] {
+        assert!(!error.is_unreachable(), "{error}");
+      }
+    }
+  }
 
   #[test]
   fn retry_after_is_read_in_seconds_capped_and_dates_are_ignored() {

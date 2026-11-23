@@ -1,7 +1,5 @@
-/* A failed action (issue #322): stays until closed, with the details behind a toggle. */
-.toast-error { border-color: var(--danger); border-inline-start-width: 4px; }
-.toast-details summary { cursor: pointer; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); color: var(--text-muted); }
-.toast-detail-text { display: block; margin-top: .25rem; font-size: var(--text-xs); letter-spacing: var(--tracking-xs); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+/* A failed action (issue #322) looks like every other toast (460-composer-extras.css): one quiet
+   style for the app. Its words say what to do; "Copy details" carries the technical part. */
 
 /* A button whose work runs (PendingAction): disabled, with a spinner in front of its label. */
 .btn[aria-busy="true"] { cursor: progress; }

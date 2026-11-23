@@ -6985,22 +6985,6 @@
         }
       }
     },
-    "connection_unreachable %lld": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "The server can't be reached. Messages wait until it is back. Next attempt in %lld s."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in %lld s."
-          }
-        }
-      }
-    },
     "connection_captive_portal %lld": {
       "localizations": {
         "en": {
@@ -7045,6 +7029,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "Jetzt versuchen"
+          }
+        }
+      }
+    },
+    "connection_server_unreachable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server can't be reached right now"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server gerade nicht erreichbar"
           }
         }
       }
@@ -7141,22 +7141,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Neue Nachrichten werden geladen"
-          }
-        }
-      }
-    },
-    "connection_slow": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Slow connection. Messages still go out, but may take longer."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Langsame Verbindung. Nachrichten gehen weiter raus, brauchen aber länger."
           }
         }
       }

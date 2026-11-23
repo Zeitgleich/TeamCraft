@@ -94,15 +94,12 @@ weekday-sat = Sat
 weekday-sun = Sun
 
 ## Daily-use improvements (docs/ux-backlog.md)
-offline-banner = You are offline. The app reconnects on its own when the network is back.
-connection-banner-connecting = Connecting to the server…
-connection-banner-unreachable = The server can't be reached. Messages wait until it is back. Next attempt in { $seconds } s.
 connection-banner-captive-portal = This network wants you to sign in first (a login page answered instead of the server). Open a web page to sign in; messages wait. Next attempt in { $seconds } s.
 connection-banner-untrusted-certificate = The server's certificate isn't trusted. On a network that inspects encrypted traffic, use another network or ask your IT to install the company certificate on this device; if it happens everywhere, the server's certificate may be broken: tell your administrator. Next attempt in { $seconds } s.
 connection-banner-proof-refused = The server keeps refusing this device's proof of who it is. A proxy on the way may change requests, or the server may not know this address: tell your administrator. Messages wait. Next attempt in { $seconds } s.
-connection-hint-offline = Offline
+connection-note-unreachable = Server can't be reached right now
+connection-note-offline = You're offline
 connection-hint-connecting = Connecting…
-connection-hint-reconnecting = Reconnecting…
 connection-hint-slow = Slow connection
 connection-banner-retry = Try now
 connection-banner-sign-in = Your session has expired. Messages wait until you sign in again.
@@ -205,7 +202,7 @@ window-restore = Restore
 window-close = Close
 
 ## Failed actions (an error toast) and the panic overlay
-error-details = Details
+error-copy-details = Copy details
 error-generic = That didn't work. Try again; if it keeps failing, copy the details for your admin.
 area-load-failed = This part of the app could not be loaded. Check your connection, then try again. If it still fails, reload the app: a new version may have come out.
 area-reload = Reload app

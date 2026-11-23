@@ -8,10 +8,12 @@
 //! connection at once instead of after its backoff, and gives the reconnect a grace period before
 //! the banner shows: coming back from the camera or another app is silent when it reconnects quickly.
 //!
-//! Reconnecting is the app's job, not the user's (#718): while it works on it the state is a small,
-//! muted line along the top bar's lower edge, without moving anything. Only when the user has to act
-//! (sign in again, sign in to the network, a certificate to sort out) or the connection stays down
-//! long does it become a notice, with an action where there is one.
+//! Reconnecting is the app's job, not the user's (#718): while it works on it the state is one quiet
+//! line of text above the composer ([`ConnectionNote`], connection_note.rs), never a toast. A
+//! request that finds the server down (a proxy answering 502 while it restarts) shows the same line
+//! at once and makes the core check its connection. The line goes away by itself once the server
+//! answers. Only when the user has to act (sign in again, sign in to the network, a certificate to
+//! sort out) does it become a notice in the banner row, with the action.
 
 use leptos::ev;
 use leptos::prelude::*;
@@ -22,19 +24,25 @@ use teamcraft_proto::SignInReason;
 use crate::auth::tauri;
 use crate::clock::now_ms;
 use crate::components::app::{on_document, on_window};
+use crate::components::connection_note::{ConnectionNote, ConnectionNoteSlot};
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::use_i18n;
 use crate::reactive::{SetIfAlive, use_interval_while};
 use crate::remote_backend;
 use crate::session::{SessionControl, use_session};
 
-/// "Connecting" and "unreachable" only show when the connection stays down longer than this, counted
-/// from the page's return when it was hidden or frozen: a quick reconnect needs no banner.
-const CONNECTING_GRACE_MS: i64 = 10_000;
+/// "Connecting" and "unreachable" only show when the connection stays down longer than this: a
+/// short blip stays invisible.
+const CONNECTING_GRACE_MS: i64 = 2_000;
+/// The grace period after the page came back (from the camera, another app, a frozen tab): the
+/// reconnect it starts gets this long before anything shows.
+const RETURN_GRACE_MS: i64 = 10_000;
+/// How long a request that found the server unreachable keeps the note up while the connection
+/// itself looks fine; another such failure renews it, the connection coming back ends it.
+const REQUEST_HOLD_MS: i64 = 15_000;
 /// How often the countdown to the next attempt updates.
 const COUNTDOWN_MS: u64 = 1_000;
-/// A connection that stays down this long (counted like the grace period) becomes a notice; an
-/// unreachable server's has "Try now".
+/// A connection that stays down this long (counted like the grace period) offers "Try now".
 const ESCALATE_AFTER_MS: i64 = 60_000;
 /// While the app runs from the cached account and the server hasn't answered yet (issue #778) the
 /// grace period is this short: the chats are on screen, and the user should soon see that they may
@@ -59,21 +67,26 @@ enum Notice {
   Slow,
 }
 
-/// How much room a notice takes (#718).
+/// Where a notice shows (#718).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Prominence {
-  /// The app is on it: a quiet line, nothing to do.
-  Hint,
-  /// The user can or must do something: a card with the full text and an action.
+  /// The app is on it: the quiet line above the composer, nothing to do.
+  Note(ConnectionNote),
+  /// The user must do something: a card in the banner row with the full text and the action.
   Notice,
 }
 
-/// Since when the connection is down, for the grace period. A page that comes back (from the
-/// camera, another app, a frozen tab) starts it again: the time it was away doesn't count, and the
-/// reconnect it starts gets the whole grace period.
+/// Since when the connection is down, for the grace period, and whether an attempt failed since
+/// (then "connecting" again is still "unreachable", not a new state every few seconds). A page that
+/// comes back (from the camera, another app, a frozen tab) starts the grace period again, the longer
+/// [`RETURN_GRACE_MS`]: the time it was away doesn't count.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct Unsettled {
   maybe_since_ms: Option<i64>,
+  has_failed: bool,
+  is_after_return: bool,
+  /// When a request last found the server unreachable while the connection looked fine.
+  maybe_request_failed_ms: Option<i64>,
 }
 
 /// Shown while the app can't reach the server: a hint along the top bar, or a notice to act on.
@@ -119,19 +132,30 @@ pub fn OfflineBanner() -> impl IntoView {
   };
   refresh();
   tauri::listen(CORE_CHANGED_EVENT, refresh);
-  // The clock only matters while a countdown or the connecting grace period can show; a connected
-  // app must not wake up every second for it.
+  // The clock only matters while a countdown, the connecting grace period or a failed request's
+  // note can show; a connected app must not wake up every second for it.
   use_interval_while(
     COUNTDOWN_MS,
     move || {
       matches!(
         connection.get(),
         Some(CoreConnection::Connecting | CoreConnection::Offline { .. })
-      )
+      ) || unsettled.with(|current| current.maybe_request_failed_ms.is_some())
     },
-    move || now.set(now_ms()),
+    move || {
+      let tick = now_ms();
+      now.set(tick);
+      if let Some(current) = unsettled.try_get_untracked() {
+        let expired = current.expire_request_failure(tick);
+        if expired != current {
+          unsettled.set_if_alive(expired);
+        }
+      }
+    },
   );
   report_network_changes(is_online, unsettled, maybe_session);
+
+  follow_request_failures(unsettled);
 
   let notice = Memo::new(move |_| {
     let grace_ms = match maybe_session.is_some_and(|control| control.is_account_unconfirmed.get()) {
@@ -151,39 +175,39 @@ pub fn OfflineBanner() -> impl IntoView {
       .get()
       .map(|notice| prominence_of(notice, unsettled.get(), now.get()))
   });
+  // The quiet line lives above the composer (connection_note.rs); this only feeds it.
+  if let Some(slot) = use_context::<ConnectionNoteSlot>() {
+    Effect::new(move |_| {
+      let maybe_note = match prominence.get() {
+        Some(Prominence::Note(note)) => Some(note),
+        Some(Prominence::Notice) | None => None,
+      };
+      slot.set_note(maybe_note);
+    });
+    on_cleanup(move || slot.set_note(None));
+  }
   move || {
     let notice = notice.get()?;
-    Some(match prominence.get()? {
-      Prominence::Hint => view! { <ConnectionHint notice=notice /> }.into_any(),
-      Prominence::Notice => {
-        view! { <ConnectionNotice notice=notice maybe_session=maybe_session /> }.into_any()
-      },
-    })
+    (prominence.get()? == Prominence::Notice)
+      .then(|| view! { <ConnectionNotice notice=notice maybe_session=maybe_session /> })
   }
 }
 
-/// The quiet hint while the app reconnects by itself: a slim line along the top bar's lower edge,
-/// moving while the app works on it and resting while the device is offline. Screen readers hear
-/// the short state; there is no countdown and nothing to do.
-#[component]
-fn ConnectionHint(notice: Notice) -> impl IntoView {
-  let i18n = use_i18n();
-  let key = match notice {
-    Notice::DeviceOffline => "connection-hint-offline",
-    Notice::Connecting => "connection-hint-connecting",
-    Notice::Unreachable { .. } | Notice::SignInRequired(_) => "connection-hint-reconnecting",
-    Notice::Slow => "connection-hint-slow",
-  };
-  view! {
-    <div
-      class="connection-hint"
-      class:is-offline=notice == Notice::DeviceOffline
-      class:is-slow=notice == Notice::Slow
-      role="status"
-    >
-      <span class="visually-hidden">{move || i18n.t(key)}</span>
-    </div>
-  }
+/// Requests that find the server unreachable (feedback.rs) show the note at once, also while the
+/// gateway still looks connected, and make the core check its connection now instead of after its
+/// heartbeat.
+fn follow_request_failures(unsettled: RwSignal<Unsettled>) {
+  crate::components::connection_note::set_request_failure_sink(move || {
+    let now = now_ms();
+    let Some(current) = unsettled.try_get_untracked() else {
+      return;
+    };
+    let must_probe = current.is_probe_due(now);
+    unsettled.set_if_alive(current.request_unreachable(now));
+    if must_probe {
+      network_changed();
+    }
+  });
 }
 
 /// The card when the user can do something about it: what happened, and the action.
@@ -191,18 +215,14 @@ fn ConnectionHint(notice: Notice) -> impl IntoView {
 fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> impl IntoView {
   let i18n = use_i18n();
   let text = move || match notice {
-    Notice::DeviceOffline => i18n.t("offline-banner"),
-    Notice::Connecting => i18n.t("connection-banner-connecting"),
-    Notice::Slow => i18n.t("connection-hint-slow"),
     Notice::Unreachable {
       retry_in_secs,
-      maybe_interception,
+      maybe_interception: Some(interception),
     } => i18n.t_with(
-      match maybe_interception {
-        None => "connection-banner-unreachable",
-        Some(NetworkInterception::CaptivePortal) => "connection-banner-captive-portal",
-        Some(NetworkInterception::UntrustedCertificate) => "connection-banner-untrusted-certificate",
-        Some(NetworkInterception::ProofRefused) => "connection-banner-proof-refused",
+      match interception {
+        NetworkInterception::CaptivePortal => "connection-banner-captive-portal",
+        NetworkInterception::UntrustedCertificate => "connection-banner-untrusted-certificate",
+        NetworkInterception::ProofRefused => "connection-banner-proof-refused",
       },
       &[("seconds", &retry_in_secs.to_string())],
     ),
@@ -214,6 +234,8 @@ fn ConnectionNotice(notice: Notice, maybe_session: Option<SessionControl>) -> im
       SignInReason::NoTeamcraftRole => "connection-banner-no-role-left",
       SignInReason::SignInExpired | SignInReason::Unknown => "connection-banner-sign-in",
     }),
+    // Notes, never a card (prominence_of).
+    Notice::DeviceOffline | Notice::Connecting | Notice::Slow | Notice::Unreachable { .. } => String::new(),
   };
   let action = match notice {
     Notice::Unreachable { .. } => Some(
@@ -287,7 +309,7 @@ fn report_network_changes(
   });
 }
 
-fn network_changed() {
+pub(crate) fn network_changed() {
   spawn_local(async {
     if let Err(error) = remote_backend::network_changed().await {
       tracing::debug!(%error, "could not report the network change");
@@ -297,26 +319,80 @@ fn network_changed() {
 
 impl Unsettled {
   /// Follows the connection: the grace period starts when it goes down and ends when it is up (or
-  /// waits for the user to sign in).
+  /// waits for the user to sign in). Being connected again also ends a failed request's note: the
+  /// server answers.
   fn observe(self, connection: CoreConnection, now_ms: i64) -> Self {
-    let maybe_since_ms = match connection {
-      CoreConnection::Connecting | CoreConnection::Offline { .. } => {
-        Some(self.maybe_since_ms.unwrap_or(now_ms))
+    match connection {
+      CoreConnection::Connecting => Self {
+        maybe_since_ms: Some(self.maybe_since_ms.unwrap_or(now_ms)),
+        ..self
       },
-      CoreConnection::Connected | CoreConnection::Slow | CoreConnection::SignInRequired { .. } => None,
-    };
-    Self { maybe_since_ms }
+      CoreConnection::Offline { .. } => Self {
+        maybe_since_ms: Some(self.maybe_since_ms.unwrap_or(now_ms)),
+        has_failed: true,
+        ..self
+      },
+      // Back from being down: the server answers again. Still up: a failed request's note stays
+      // until its hold is over (this runs on every change of the core, not only on reconnects).
+      CoreConnection::Connected | CoreConnection::Slow if self.maybe_since_ms.is_some() => Self::default(),
+      CoreConnection::Connected | CoreConnection::Slow | CoreConnection::SignInRequired { .. } => Self {
+        maybe_request_failed_ms: self.maybe_request_failed_ms,
+        ..Self::default()
+      },
+    }
   }
 
-  /// The page is back: a connection that is down gets the grace period from now on.
+  /// The page is back: a connection that is down gets the longer grace period from now on.
   fn page_returned(self, now_ms: i64) -> Self {
-    Self {
-      maybe_since_ms: self.maybe_since_ms.map(|_| now_ms),
+    match self.maybe_since_ms {
+      Some(_) => Self {
+        maybe_since_ms: Some(now_ms),
+        is_after_return: true,
+        ..self
+      },
+      None => self,
     }
+  }
+
+  /// A request found the server unreachable.
+  fn request_unreachable(self, now_ms: i64) -> Self {
+    Self {
+      maybe_request_failed_ms: Some(now_ms),
+      ..self
+    }
+  }
+
+  /// Whether a request failure should make the core check its connection: the first one, not every
+  /// one of a burst (a scroll through history while the server is down).
+  fn is_probe_due(self, now_ms: i64) -> bool {
+    !self.is_request_failure_live(now_ms)
+  }
+
+  /// Forgets a failed request's note once its hold is over.
+  fn expire_request_failure(self, now_ms: i64) -> Self {
+    match self.is_request_failure_live(now_ms) {
+      true => self,
+      false => Self {
+        maybe_request_failed_ms: None,
+        ..self
+      },
+    }
+  }
+
+  /// A request found the server unreachable within [`REQUEST_HOLD_MS`]. A clock that went back
+  /// counts as just now.
+  fn is_request_failure_live(self, now_ms: i64) -> bool {
+    self
+      .maybe_request_failed_ms
+      .is_some_and(|at| now_ms.saturating_sub(at) < REQUEST_HOLD_MS)
   }
 
   /// Down for longer than the grace period. A clock that went back counts as just now.
   fn is_past_grace(self, now_ms: i64, grace_ms: i64) -> bool {
+    let grace_ms = match self.is_after_return {
+      true => grace_ms.max(RETURN_GRACE_MS),
+      false => grace_ms,
+    };
     self
       .maybe_since_ms
       .is_some_and(|since| now_ms.saturating_sub(since) >= grace_ms)
@@ -334,35 +410,42 @@ fn notice_for(
   if !is_online {
     return Some(Notice::DeviceOffline);
   }
-  match maybe_connection? {
-    CoreConnection::Connected => None,
-    // Still connected: a quiet hint, no grace period needed (the core doesn't flip it back and forth).
-    CoreConnection::Slow => Some(Notice::Slow),
-    CoreConnection::Connecting | CoreConnection::Offline { .. }
+  // A request found the server down although the connection looks fine (or is still in its grace
+  // period): the user's action waits, so this shows at once.
+  let request_failed = unsettled
+    .is_request_failure_live(now)
+    .then_some(Notice::Unreachable {
+      retry_in_secs: 0,
+      maybe_interception: None,
+    });
+  match maybe_connection {
+    None | Some(CoreConnection::Connected) => request_failed,
+    // Still connected: a quiet note, no grace period needed (the core doesn't flip it back and forth).
+    Some(CoreConnection::Slow) => request_failed.or(Some(Notice::Slow)),
+    Some(CoreConnection::Connecting | CoreConnection::Offline { .. })
       if !unsettled.is_past_grace(now, grace_ms) =>
     {
-      None
+      request_failed
     },
-    CoreConnection::Connecting => Some(Notice::Connecting),
-    // The attempt is due but hasn't started (the loop finishes other work first): "next attempt in
-    // 0 s" would read as stuck.
-    CoreConnection::Offline {
-      retry_at_ms,
+    // Reconnecting after a failed attempt is still "unreachable", not a new state every few seconds.
+    Some(CoreConnection::Connecting) if unsettled.has_failed => Some(Notice::Unreachable {
+      retry_in_secs: 0,
       maybe_interception: None,
-    } if retry_at_ms <= now => Some(Notice::Connecting),
-    CoreConnection::Offline {
+    }),
+    Some(CoreConnection::Connecting) => Some(Notice::Connecting),
+    Some(CoreConnection::Offline {
       retry_at_ms,
       maybe_interception,
-    } => Some(Notice::Unreachable {
+    }) => Some(Notice::Unreachable {
       retry_in_secs: retry_at_ms.saturating_sub(now).max(0).saturating_add(999) / 1000,
       maybe_interception,
     }),
-    CoreConnection::SignInRequired { reason } => Some(Notice::SignInRequired(reason)),
+    Some(CoreConnection::SignInRequired { reason }) => Some(Notice::SignInRequired(reason)),
   }
 }
 
-/// A notice where the user has to act (sign in again, sign in to the network, a certificate) or the
-/// connection stayed down long; a hint while the app reconnects by itself.
+/// A notice where the user has to act (sign in again, sign in to the network, a certificate); the
+/// quiet note while the app reconnects by itself, with "Try now" once the server stayed away long.
 fn prominence_of(notice: Notice, unsettled: Unsettled, now_ms: i64) -> Prominence {
   let is_down_long = unsettled
     .maybe_since_ms
@@ -373,11 +456,12 @@ fn prominence_of(notice: Notice, unsettled: Unsettled, now_ms: i64) -> Prominenc
       maybe_interception: Some(_),
       ..
     } => Prominence::Notice,
-    Notice::DeviceOffline | Notice::Connecting | Notice::Unreachable { .. } if is_down_long => {
-      Prominence::Notice
-    },
-    Notice::DeviceOffline | Notice::Connecting | Notice::Unreachable { .. } => Prominence::Hint,
-    Notice::Slow => Prominence::Hint,
+    Notice::DeviceOffline => Prominence::Note(ConnectionNote::DeviceOffline),
+    Notice::Connecting => Prominence::Note(ConnectionNote::Connecting),
+    Notice::Unreachable { .. } => Prominence::Note(ConnectionNote::ServerUnreachable {
+      can_retry: is_down_long,
+    }),
+    Notice::Slow => Prominence::Note(ConnectionNote::Slow),
   }
 }
 
@@ -393,6 +477,10 @@ mod tests {
     retry_at_ms: 17_500,
     maybe_interception: None,
   };
+  const UNREACHABLE: Notice = Notice::Unreachable {
+    retry_in_secs: 0,
+    maybe_interception: None,
+  };
 
   /// The usual grace period; see [`a_start_from_the_cached_account_says_so_sooner`].
   fn notice_for(
@@ -404,8 +492,24 @@ mod tests {
     super::notice_for(is_online, maybe_connection, unsettled, now, CONNECTING_GRACE_MS)
   }
 
+  /// What the quiet line above the composer says at `now`, if anything.
+  fn note_at(
+    maybe_connection: Option<CoreConnection>,
+    unsettled: Unsettled,
+    now: i64,
+  ) -> Option<ConnectionNote> {
+    match prominence_of(
+      notice_for(true, maybe_connection, unsettled, now)?,
+      unsettled,
+      now,
+    ) {
+      Prominence::Note(note) => Some(note),
+      Prominence::Notice => None,
+    }
+  }
+
   /// The chats are on screen before the server answered (issue #778): the user soon sees that they
-  /// may be out of date, but a normal start doesn't flash the hint.
+  /// may be out of date, but a normal start doesn't flash the note.
   #[test]
   fn a_start_from_the_cached_account_says_so_sooner() {
     let unsettled = Unsettled::default().observe(CoreConnection::Connecting, 1_000);
@@ -423,7 +527,7 @@ mod tests {
     assert_eq!(shown, Some(Notice::Connecting));
     assert_eq!(
       shown.map(|shown| prominence_of(shown, unsettled, 1_000 + UNCONFIRMED_GRACE_MS)),
-      Some(Prominence::Hint)
+      Some(Prominence::Note(ConnectionNote::Connecting))
     );
   }
 
@@ -432,6 +536,10 @@ mod tests {
     assert_eq!(
       notice_for(false, Some(CoreConnection::Connected), Unsettled::default(), 0),
       Some(Notice::DeviceOffline)
+    );
+    assert_eq!(
+      prominence_of(Notice::DeviceOffline, Unsettled::default(), 0),
+      Prominence::Note(ConnectionNote::DeviceOffline)
     );
   }
 
@@ -445,27 +553,27 @@ mod tests {
   }
 
   #[test]
-  fn a_slow_link_is_a_hint_not_unreachable() {
-    let notice = notice_for(true, Some(CoreConnection::Slow), Unsettled::default(), 0);
-    assert_eq!(notice, Some(Notice::Slow));
+  fn a_slow_link_is_a_note_not_unreachable() {
     assert_eq!(
-      notice.map(|notice| prominence_of(notice, Unsettled::default(), 0)),
-      Some(Prominence::Hint)
+      note_at(Some(CoreConnection::Slow), Unsettled::default(), 0),
+      Some(ConnectionNote::Slow)
     );
   }
 
   #[test]
-  fn a_refused_token_asks_to_sign_in() {
+  fn a_refused_token_asks_to_sign_in_on_a_card() {
+    let notice = notice_for(
+      true,
+      Some(CoreConnection::SignInRequired {
+        reason: SignInReason::SessionEnded,
+      }),
+      Unsettled::default(),
+      0,
+    );
+    assert_eq!(notice, Some(Notice::SignInRequired(SignInReason::SessionEnded)));
     assert_eq!(
-      notice_for(
-        true,
-        Some(CoreConnection::SignInRequired {
-          reason: SignInReason::SessionEnded
-        }),
-        Unsettled::default(),
-        0
-      ),
-      Some(Notice::SignInRequired(SignInReason::SessionEnded))
+      notice.map(|notice| prominence_of(notice, Unsettled::default(), 0)),
+      Some(Prominence::Notice)
     );
   }
 
@@ -483,14 +591,37 @@ mod tests {
       notice,
       Some(Notice::SignInRequired(SignInReason::NoTeamcraftRole))
     );
-    assert_eq!(
-      notice.map(|notice| prominence_of(notice, Unsettled::default(), 0)),
-      Some(Prominence::Notice)
-    );
   }
 
   mod grace {
     use super::*;
+
+    #[test]
+    fn a_short_blip_stays_invisible() {
+      let unsettled = Unsettled::default().observe(OFFLINE, 1_000);
+      assert_eq!(note_at(Some(OFFLINE), unsettled, 1_000), None);
+      assert_eq!(
+        note_at(Some(OFFLINE), unsettled, 1_000 + CONNECTING_GRACE_MS - 1),
+        None
+      );
+      // Back within the grace period: nothing ever showed.
+      let back = unsettled.observe(CoreConnection::Connected, 2_500);
+      assert_eq!(
+        note_at(Some(CoreConnection::Connected), back, 1_000 + CONNECTING_GRACE_MS),
+        None
+      );
+    }
+
+    #[test]
+    fn the_server_down_longer_shows_the_note_until_it_answers() {
+      let unsettled = Unsettled::default().observe(OFFLINE, 1_000);
+      assert_eq!(
+        note_at(Some(OFFLINE), unsettled, 1_000 + CONNECTING_GRACE_MS),
+        Some(ConnectionNote::ServerUnreachable { can_retry: false })
+      );
+      let back = unsettled.observe(CoreConnection::Connected, 30_000);
+      assert_eq!(note_at(Some(CoreConnection::Connected), back, 30_000), None);
+    }
 
     #[test]
     fn connecting_shows_only_after_the_grace_period() {
@@ -504,24 +635,17 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_connection_is_not_unreachable_before_the_grace_period() {
-      let unsettled = Unsettled::default().observe(OFFLINE, 1_000);
-      assert_eq!(notice_for(true, Some(OFFLINE), unsettled, 2_500), None);
-    }
-
-    #[test]
-    fn the_grace_period_runs_on_from_lost_to_connecting() {
+    fn reconnecting_after_a_failed_attempt_stays_unreachable() {
       let unsettled = Unsettled::default()
         .observe(OFFLINE, 1_000)
         .observe(CoreConnection::Connecting, 2_000);
       assert_eq!(
-        notice_for(
-          true,
+        note_at(
           Some(CoreConnection::Connecting),
           unsettled,
           1_000 + CONNECTING_GRACE_MS
         ),
-        Some(Notice::Connecting)
+        Some(ConnectionNote::ServerUnreachable { can_retry: false })
       );
     }
 
@@ -542,9 +666,9 @@ mod tests {
         ),
         None
       );
-      // Still down after the grace period: now it says so.
+      // Still down after the longer grace period: now it says so.
       assert_eq!(
-        notice_for(true, Some(connecting), back, 60_000 + CONNECTING_GRACE_MS),
+        notice_for(true, Some(connecting), back, 60_000 + RETURN_GRACE_MS),
         Some(Notice::Connecting)
       );
     }
@@ -577,35 +701,114 @@ mod tests {
     }
   }
 
+  mod failed_requests {
+    use super::*;
+
+    #[test]
+    fn a_request_that_finds_the_server_down_shows_the_note_at_once() {
+      let unsettled = Unsettled::default().request_unreachable(5_000);
+      assert_eq!(
+        notice_for(true, Some(CoreConnection::Connected), unsettled, 5_000),
+        Some(UNREACHABLE)
+      );
+      // Also while the connection is down but still within its grace period.
+      let down = Unsettled::default()
+        .observe(OFFLINE, 5_000)
+        .request_unreachable(5_500);
+      assert_eq!(
+        note_at(Some(OFFLINE), down, 5_500),
+        Some(ConnectionNote::ServerUnreachable { can_retry: false })
+      );
+    }
+
+    #[test]
+    fn the_note_goes_once_requests_stop_failing() {
+      let unsettled = Unsettled::default().request_unreachable(5_000);
+      let later = 5_000 + REQUEST_HOLD_MS;
+      assert_eq!(
+        notice_for(true, Some(CoreConnection::Connected), unsettled, later - 1),
+        Some(UNREACHABLE)
+      );
+      assert_eq!(
+        notice_for(true, Some(CoreConnection::Connected), unsettled, later),
+        None
+      );
+      assert_eq!(unsettled.expire_request_failure(later), Unsettled::default());
+      assert_eq!(unsettled.expire_request_failure(later - 1), unsettled);
+    }
+
+    #[test]
+    fn another_failure_renews_the_note() {
+      let unsettled = Unsettled::default()
+        .request_unreachable(5_000)
+        .request_unreachable(15_000);
+      assert_eq!(
+        notice_for(
+          true,
+          Some(CoreConnection::Connected),
+          unsettled,
+          5_000 + REQUEST_HOLD_MS
+        ),
+        Some(UNREACHABLE)
+      );
+    }
+
+    #[test]
+    fn the_connection_coming_back_ends_it() {
+      let unsettled = Unsettled::default()
+        .observe(OFFLINE, 1_000)
+        .request_unreachable(2_000)
+        .observe(CoreConnection::Connected, 3_000);
+      assert_eq!(
+        notice_for(true, Some(CoreConnection::Connected), unsettled, 3_000),
+        None
+      );
+    }
+
+    #[test]
+    fn other_changes_while_connected_keep_it() {
+      let unsettled = Unsettled::default()
+        .request_unreachable(2_000)
+        .observe(CoreConnection::Connected, 2_500);
+      assert_eq!(
+        notice_for(true, Some(CoreConnection::Connected), unsettled, 2_500),
+        Some(UNREACHABLE)
+      );
+    }
+
+    #[test]
+    fn only_the_first_failure_of_a_burst_probes_the_connection() {
+      let unsettled = Unsettled::default();
+      assert!(unsettled.is_probe_due(1_000));
+      let failed = unsettled.request_unreachable(1_000);
+      assert!(!failed.is_probe_due(1_500));
+      assert!(failed.is_probe_due(1_000 + REQUEST_HOLD_MS));
+    }
+  }
+
   mod prominence {
     use super::*;
 
     #[test]
-    fn reconnecting_by_itself_is_only_a_hint() {
+    fn reconnecting_by_itself_is_only_a_note() {
       let unsettled = Unsettled::default().observe(OFFLINE, 0);
-      for notice in [
-        Notice::DeviceOffline,
-        Notice::Connecting,
-        Notice::Unreachable {
-          retry_in_secs: 5,
-          maybe_interception: None,
-        },
-      ] {
-        assert_eq!(prominence_of(notice, unsettled, 30_000), Prominence::Hint);
-      }
+      assert_eq!(
+        prominence_of(Notice::DeviceOffline, unsettled, 30_000),
+        Prominence::Note(ConnectionNote::DeviceOffline)
+      );
+      assert_eq!(
+        prominence_of(Notice::Connecting, unsettled, 30_000),
+        Prominence::Note(ConnectionNote::Connecting)
+      );
+      assert_eq!(
+        prominence_of(UNREACHABLE, unsettled, 30_000),
+        Prominence::Note(ConnectionNote::ServerUnreachable { can_retry: false })
+      );
     }
 
     #[test]
     fn what_the_user_must_act_on_is_a_notice() {
       let unsettled = Unsettled::default().observe(OFFLINE, 0);
-      assert_eq!(
-        prominence_of(
-          Notice::SignInRequired(SignInReason::SessionEnded),
-          Unsettled::default(),
-          0
-        ),
-        Prominence::Notice
-      );
       assert_eq!(
         prominence_of(
           Notice::Unreachable {
@@ -620,22 +823,16 @@ mod tests {
     }
 
     #[test]
-    fn a_connection_down_long_becomes_a_notice() {
+    fn a_server_away_long_offers_to_try_now_but_stays_quiet() {
       let unsettled = Unsettled::default().observe(OFFLINE, 1_000);
-      let unreachable = Notice::Unreachable {
-        retry_in_secs: 5,
-        maybe_interception: None,
-      };
       assert_eq!(
-        prominence_of(unreachable, unsettled, ESCALATE_AFTER_MS),
-        Prominence::Hint
+        prominence_of(UNREACHABLE, unsettled, ESCALATE_AFTER_MS),
+        Prominence::Note(ConnectionNote::ServerUnreachable { can_retry: false })
       );
-      for notice in [unreachable, Notice::Connecting, Notice::DeviceOffline] {
-        assert_eq!(
-          prominence_of(notice, unsettled, 1_000 + ESCALATE_AFTER_MS),
-          Prominence::Notice
-        );
-      }
+      assert_eq!(
+        prominence_of(UNREACHABLE, unsettled, 1_000 + ESCALATE_AFTER_MS),
+        Prominence::Note(ConnectionNote::ServerUnreachable { can_retry: true })
+      );
     }
   }
 
@@ -646,16 +843,11 @@ mod tests {
     fn online_but_unreachable_counts_down_to_the_next_attempt() {
       let unsettled = Unsettled::default().observe(OFFLINE, 0);
       assert_eq!(
-        notice_for(true, Some(OFFLINE), unsettled, CONNECTING_GRACE_MS),
+        notice_for(true, Some(OFFLINE), unsettled, 9_500),
         Some(Notice::Unreachable {
           retry_in_secs: 8,
           maybe_interception: None
         })
-      );
-      // Due but not started yet: connecting, not "next attempt in 0 s" (issue #1064).
-      assert_eq!(
-        notice_for(true, Some(OFFLINE), unsettled, 20_000),
-        Some(Notice::Connecting)
       );
     }
 
@@ -667,7 +859,7 @@ mod tests {
       };
       let unsettled = Unsettled::default().observe(portal, 0);
       assert_eq!(
-        notice_for(true, Some(portal), unsettled, CONNECTING_GRACE_MS),
+        notice_for(true, Some(portal), unsettled, 10_000),
         Some(Notice::Unreachable {
           retry_in_secs: 2,
           maybe_interception: Some(NetworkInterception::CaptivePortal)

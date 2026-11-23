@@ -292,7 +292,7 @@ async fn offline_start_shows_the_chats_and_connects_later(
   assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
   assert!(took < START_LIMIT, "{took:?}");
   wait_for_text(page, MESSAGE).await;
-  wait_for_element(page, ".connection-hint").await;
+  wait_for_element(page, ".connection-note").await;
   tokio::time::sleep(Duration::from_secs(5)).await;
   let text = body_text(page).await;
   assert!(text.contains(CHANNEL) && !text.contains("Sign in"), "{text}");
@@ -309,7 +309,7 @@ async fn offline_start_shows_the_chats_and_connects_later(
   alice.client.send_text(channel, None, newer).await.unwrap();
   unblock_the_network(page).await;
   wait_for_text(page, newer).await;
-  wait_until_gone(page, ".connection-hint").await;
+  wait_until_gone(page, ".connection-note").await;
 }
 
 /// The identity provider answers a refresh with something other than `invalid_grant`, with and without
@@ -338,7 +338,7 @@ async fn provider_hiccup_keeps_the_session(page: &Page, channel: String) {
   // The same tokens work once the provider does.
   let (end, took) = start_until_list(page, &url).await;
   assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
-  wait_until_gone(page, ".connection-hint").await;
+  wait_until_gone(page, ".connection-note").await;
   tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
@@ -368,7 +368,7 @@ async fn proxy_401_keeps_the_session(page: &Page, channel: String) {
   let (end, took) = start_until_list(page, &url).await;
   assert_eq!(end, StartEnd::ChannelList, "after {took:?}");
   unblock_the_network(page).await;
-  wait_until_gone(page, ".connection-hint").await;
+  wait_until_gone(page, ".connection-note").await;
   tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
@@ -437,7 +437,7 @@ async fn nothing_goes_out_before_the_answer(page: &Page, channel: String) {
     "a socket before the answer; the page's log:\n{log}"
   );
   hold.stop(page).await;
-  wait_until_gone(page, ".connection-hint").await;
+  wait_until_gone(page, ".connection-note").await;
   tokio::time::sleep(Duration::from_secs(2)).await;
 }
 
@@ -503,7 +503,7 @@ async fn hung_answer_is_given_up(page: &Page, channel: String) {
     assert!(Instant::now() < deadline, "the check never asked again");
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
-  wait_until_gone(page, ".connection-hint").await;
+  wait_until_gone(page, ".connection-note").await;
   hang.stop(page).await;
   tokio::time::sleep(Duration::from_secs(2)).await;
 }

@@ -184,6 +184,8 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
   change_source.set_change_notifier(Rc::new(move || state.backend_changed()));
   // A failed action is never silent (issue #322).
   crate::feedback::set_failure_sink(move |failure| state.show_failure(i18n, &failure));
+  // The server being away is one quiet line above the composer, not a toast per request.
+  provide_context(crate::components::connection_note::ConnectionNoteSlot::new());
   Effect::new(move |_| state.tell_suspect_deletions(i18n));
   follow_crash_reports(state, settings, i18n);
   // Preferences the server enforces (push, do not disturb, mutes) follow the account on the server.
@@ -436,6 +438,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
           .then(|| lazy_area(Place::Inline, || areas::call_recording_take(())))
       }}
       <LinkRequestPrompt />
+      <crate::components::connection_note::WindowConnectionNote />
       // Always in the page: screen readers only announce changes in a live region that already
       // existed when the toast arrived.
       <div
@@ -459,6 +462,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
             let swipe = Swipe::new();
             let is_error = matches!(toast.tone, ToastTone::Error { .. });
             view! {
+              // One look for every toast; `toast-error` only names it (tests).
               <div
                 class=if is_error { "toast toast-error" } else { "toast" }
                 role=is_error.then_some("alert")
@@ -475,15 +479,6 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
                       {move || i18n.t_with("undo-shortcut-hint", &[("shortcut", &crate::keys::shortcut_text(&crate::keys::UNDO, i18n.locale()))])}
                     </span>
                   })}
-                  {match toast.tone {
-                    ToastTone::Info => None,
-                    ToastTone::Error { detail } => Some(view! {
-                      <details class="toast-details">
-                        <summary>{move || i18n.t("error-details")}</summary>
-                        <code class="toast-detail-text">{detail}</code>
-                      </details>
-                    }),
-                  }}
                 </div>
                 {toast.maybe_undo.map(|undo| view! {
                   <button class="btn btn-small" on:click=move |_| state.undo(id, undo)>

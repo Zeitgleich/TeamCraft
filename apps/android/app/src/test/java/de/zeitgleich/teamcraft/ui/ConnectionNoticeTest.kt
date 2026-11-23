@@ -31,15 +31,16 @@ class ConnectionNoticeTest {
   }
 
   @Test
-  fun theGracePeriodIsTenSecondsLikeDesktopAndWeb() {
-    assertEquals(10_000L, CONNECTION_GRACE_MS)
+  fun theGracePeriodsMatchDesktopAndWeb() {
+    assertEquals(2_000L, CONNECTION_GRACE_MS)
+    assertEquals(10_000L, RETURN_GRACE_MS)
   }
 
   @Test
   fun aShortNetworkGapShowsNothing() {
     // Android drops "validated" for a moment on a hand-over; no "No connection" flash.
     val unsettled = Unsettled().observe(isDown = true, nowMs = 0)
-    assertNull(connectionNotice(false, ConnectionState.Connected, unsettled, 2_000))
+    assertNull(connectionNotice(false, ConnectionState.Connected, unsettled, 1_000))
     assertEquals(ConnectionNotice.DeviceOffline, connectionNotice(false, ConnectionState.Connected, unsettled, CONNECTION_GRACE_MS))
   }
 
@@ -61,7 +62,7 @@ class ConnectionNoticeTest {
       .observe(isDown = true, nowMs = 1_000)
       .observe(isDown = false, nowMs = 2_000)
       .observe(isDown = true, nowMs = 20_000)
-    assertNull(connectionNotice(true, ConnectionState.Connecting, unsettled, 25_000))
+    assertNull(connectionNotice(true, ConnectionState.Connecting, unsettled, 21_000))
   }
 
   @Test
@@ -70,7 +71,7 @@ class ConnectionNoticeTest {
     val back = Unsettled().observe(isDown = true, nowMs = 1_000).appReturned(nowMs = 600_000)
     assertNull(connectionNotice(true, ConnectionState.Connecting, back, 600_000))
     assertNull(connectionNotice(true, ConnectionState.Connecting, back, 605_000))
-    assertEquals(ConnectionNotice.Connecting, connectionNotice(true, ConnectionState.Connecting, back, 600_000 + CONNECTION_GRACE_MS))
+    assertEquals(ConnectionNotice.Connecting, connectionNotice(true, ConnectionState.Connecting, back, 600_000 + RETURN_GRACE_MS))
   }
 
   @Test
@@ -89,7 +90,7 @@ class ConnectionNoticeTest {
     val unsettled = Unsettled().observe(isDown = true, nowMs = 0)
     assertEquals(
       ConnectionNotice.Unreachable(retryInSeconds = 8, maybeInterception = null),
-      connectionNotice(true, offline(retryAtMs = 17_500), unsettled, CONNECTION_GRACE_MS),
+      connectionNotice(true, offline(retryAtMs = 17_500), unsettled, 9_500),
     )
     // Due but not started yet: connecting, not "next attempt in 0 s".
     assertEquals(ConnectionNotice.Connecting, connectionNotice(true, offline(retryAtMs = 17_500), unsettled, 30_000))
@@ -108,7 +109,7 @@ class ConnectionNoticeTest {
     val portal = ConnectionState.Offline(retryAtMs = 12_000, maybeInterception = NetworkInterception.CAPTIVE_PORTAL)
     assertEquals(
       ConnectionNotice.Unreachable(retryInSeconds = 2, maybeInterception = NetworkInterception.CAPTIVE_PORTAL),
-      connectionNotice(true, portal, unsettled, CONNECTION_GRACE_MS),
+      connectionNotice(true, portal, unsettled, 10_000),
     )
   }
 
@@ -140,6 +141,7 @@ class ConnectionNoticeTest {
     now = 50_000
     grace.appReturned()
     assertEquals(50_000L, grace.unsettled.value.maybeSinceMs)
+    assertEquals(true, grace.unsettled.value.isAfterReturn)
     connection.value = ConnectionState.Connected
     assertNull(grace.unsettled.value.maybeSinceMs)
     scope.cancel()
@@ -157,6 +159,46 @@ class ConnectionNoticeTest {
       ConnectionNotice.DeviceOffline,
       connectionNotice(false, ConnectionState.Connecting, unsettled, CONNECTION_GRACE_MS, isSyncStartFailing = true),
     )
+  }
+
+  @Test
+  fun theStripIsRedWhileDownAndYellowWhileConnecting() {
+    assertEquals(ConnectionStrip.DOWN, connectionStrip(ConnectionNotice.DeviceOffline))
+    assertEquals(ConnectionStrip.DOWN, connectionStrip(ConnectionNotice.SyncNotStarted))
+    assertEquals(ConnectionStrip.DOWN, connectionStrip(ConnectionNotice.Unreachable(3, null)))
+    assertEquals(ConnectionStrip.CONNECTING, connectionStrip(ConnectionNotice.Connecting))
+  }
+
+  @Test
+  fun theStripIsGoneWhenConnectedOrWhenTheUserMustAct() {
+    assertNull(connectionStrip(null))
+    assertNull(connectionStrip(ConnectionNotice.Slow))
+    assertNull(connectionStrip(ConnectionNotice.SignInRequired))
+    assertNull(connectionStrip(ConnectionNotice.NoRoleLeft))
+    assertNull(connectionStrip(ConnectionNotice.Unreachable(3, NetworkInterception.CAPTIVE_PORTAL)))
+  }
+
+  @Test
+  fun onlyWhatTheUserMustActOnIsABanner() {
+    assertEquals(true, needsBanner(ConnectionNotice.SignInRequired))
+    assertEquals(true, needsBanner(ConnectionNotice.NoRoleLeft))
+    assertEquals(true, needsBanner(ConnectionNotice.Unreachable(3, NetworkInterception.UNTRUSTED_CERTIFICATE)))
+    assertEquals(false, needsBanner(ConnectionNotice.Unreachable(3, null)))
+    assertEquals(false, needsBanner(ConnectionNotice.DeviceOffline))
+    assertEquals(false, needsBanner(ConnectionNotice.Connecting))
+    assertEquals(false, needsBanner(ConnectionNotice.Slow))
+  }
+
+  @Test
+  fun aServerDownLongerThanABlipTurnsTheStripRed() {
+    val unsettled = Unsettled().observe(isDown = true, nowMs = 1_000)
+    assertNull(connectionStrip(connectionNotice(true, offline(retryAtMs = 9_000), unsettled, 1_000 + CONNECTION_GRACE_MS - 1)))
+    assertEquals(
+      ConnectionStrip.DOWN,
+      connectionStrip(connectionNotice(true, offline(retryAtMs = 9_000), unsettled, 1_000 + CONNECTION_GRACE_MS)),
+    )
+    // Connected again: gone.
+    assertNull(connectionStrip(connectionNotice(true, ConnectionState.Connected, unsettled.observe(false, 5_000), 5_000)))
   }
 
   private fun offline(retryAtMs: Long) = ConnectionState.Offline(retryAtMs = retryAtMs, maybeInterception = null)

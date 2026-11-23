@@ -48,8 +48,15 @@ thread_local! {
 }
 
 /// Shows a failed user action. Before the shell is up (or after it is gone) the failure is only
-/// logged.
+/// logged. A server that can't be reached is no failed action: it shows as the connection note
+/// above the composer (connection_note.rs), which goes by itself once the server answers; queued
+/// work (outbox, uploads, read positions) goes out then, and a button that waited for the answer
+/// gets the failure through its ticket, so a dialog stays open with the input.
 pub fn report_failure(failure: ActionFailure) {
+  if failure.is_unreachable() && crate::components::connection_note::request_unreachable() {
+    tracing::debug!(detail = %failure.detail, "action waits for the server");
+    return;
+  }
   tracing::warn!(detail = %failure.detail, "action failed");
   // Cloned out of the cell: the sink may start work that reports again.
   let maybe_sink = SINK.with(|sink| sink.borrow().as_ref().map(|(_, sink)| sink.clone()));
@@ -59,12 +66,14 @@ pub fn report_failure(failure: ActionFailure) {
 }
 
 /// Shows a failure of work the core does in the background for a read (loading history, a search
-/// segment), which no button waits for. Network failures stay quiet: the offline banner already
-/// says so, and scrolling while offline must not stack up toasts. The same failure again within
+/// segment), which no button waits for. Network failures stay quiet: they show as the connection
+/// note, and scrolling while offline must not stack up toasts. The same failure again within
 /// [`BACKGROUND_COOLDOWN_MS`] stays quiet too (#344).
 pub fn report_background_failure(failure: ActionFailure) {
   if failure.is_unreachable() {
     tracing::debug!(detail = %failure.detail, "background command failed offline");
+    // Without a note on the page (a meeting guest's) its own view says so.
+    let _ = crate::components::connection_note::request_unreachable();
     return;
   }
   let now = crate::clock::now_ms();
@@ -115,6 +124,12 @@ pub fn failure_action(failure: &ActionFailure) -> Option<ToastAction> {
     FailureKind::Call(CallFailure::ScreenDenied) => Some(ToastAction::OpenScreenSettings),
     _ => None,
   }
+}
+
+/// A failure only the generic message words, with a technical detail to pass on: its toast offers
+/// to copy the detail for the admin.
+pub fn is_unworded(failure: &ActionFailure) -> bool {
+  failure_message_key(failure) == "error-generic" && !failure.detail.trim().is_empty()
 }
 
 /// The i18n key of a failure's message; unknown causes get the generic one (with the details).

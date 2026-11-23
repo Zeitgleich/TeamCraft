@@ -42,15 +42,35 @@ enum ConnectionNotice: Equatable {
     }
   }
 
-  /// Whether the thin "loading new messages" line shows: the device has a network and either the
-  /// connection is being set up or the scope still has messages to come (`isCatchingUp`: this
-  /// conversation's mark in a conversation, any conversation's in the list; issue #1457, as on
-  /// Android). Offline the banner speaks instead.
+  /// The thin bar along the top edge: red while the app can't reach the server, yellow while it
+  /// connects, none once connected. Reconnecting is the app's job, so this is all it says.
+  var strip: ConnectionStrip? {
+    switch self {
+    case .deviceOffline: return .down
+    case .unreachable(_, nil): return .down
+    case .connecting: return .connecting
+    // Connected, only slow: nothing is wrong. What the user must act on is the banner.
+    case .unreachable, .slow, .signInRequired, .noRoleLeft: return nil
+    }
+  }
+
+  /// Whether the user must do something: sign in again, sign in to the network, a certificate.
+  var needsBanner: Bool {
+    switch self {
+    case .signInRequired, .noRoleLeft: return true
+    case .unreachable(_, let maybeInterception): return maybeInterception != nil
+    case .deviceOffline, .connecting, .slow: return false
+    }
+  }
+
+  /// Whether the thin "loading new messages" line shows: the device has a network, the connection
+  /// is up and the scope still has messages to come (`isCatchingUp`: this conversation's mark in a
+  /// conversation, any conversation's in the list; issue #1457, as on Android). Connecting is the
+  /// strip's along the top (`ConnectionStripBar`); offline it speaks too.
   static func isSyncing(isOnline: Bool, isCatchingUp: Bool, connection maybeConnection: ConnectionState?) -> Bool {
-    guard isOnline else { return false }
-    if isCatchingUp { return true }
-    if case .connecting = maybeConnection { return true }
-    return false
+    guard isOnline, isCatchingUp else { return false }
+    if case .connecting = maybeConnection { return false }
+    return true
   }
 
   /// Whether the app counts as not connected: no network, or the core is (re)connecting. Only then
@@ -75,33 +95,47 @@ extension ConnectionState {
   }
 }
 
-/// Since when the connection is down, for the banner's grace period. The device being offline gets
-/// the grace period too: a network hand-over (Wi-Fi to cellular, leaving a lift) drops the path for
-/// a moment, which must not flash a banner.
+/// The connection strip's colour (`ConnectionNotice.strip`).
+enum ConnectionStrip: Equatable {
+  case down
+  case connecting
+}
+
+/// Since when the connection is down, for the grace period. The device being offline gets the grace
+/// period too: a network hand-over (Wi-Fi to cellular, leaving a lift) drops the path for a moment,
+/// which must not flash the strip. The same rule as web, desktop and Android.
 struct ConnectionGrace: Equatable {
-  static let period: TimeInterval = 10
+  /// A blip shorter than this stays invisible.
+  static let period: TimeInterval = 2
+  /// After the app's return the reconnect it starts gets this long (issue #713).
+  static let returnPeriod: TimeInterval = 10
 
   private(set) var maybeDownSince: Date?
+  private(set) var isAfterReturn = false
 
   /// Follows the connection: the period starts when it goes down and ends when it is up.
   mutating func observe(isDown: Bool, now: Date) {
     if !isDown {
       maybeDownSince = nil
+      isAfterReturn = false
     } else if maybeDownSince == nil {
       maybeDownSince = now
     }
   }
 
-  /// The app is back in the foreground: a connection that is down gets the grace period from now,
+  /// The app is back in the foreground: a connection that is down gets the longer period from now,
   /// the time in the background doesn't count.
   mutating func appReturned(now: Date) {
-    if maybeDownSince != nil { maybeDownSince = now }
+    if maybeDownSince != nil {
+      maybeDownSince = now
+      isAfterReturn = true
+    }
   }
 
   /// Down for at least the grace period. A clock that went back counts as just now.
   func isPastGrace(now: Date) -> Bool {
     guard let since = maybeDownSince else { return false }
-    return now.timeIntervalSince(since) >= Self.period
+    return now.timeIntervalSince(since) >= (isAfterReturn ? Self.returnPeriod : Self.period)
   }
 }
 

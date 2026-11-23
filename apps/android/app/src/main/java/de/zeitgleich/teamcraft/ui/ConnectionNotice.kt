@@ -10,12 +10,17 @@ import uniffi.teamcraft_ffi.ConnectionState
 import uniffi.teamcraft_ffi.NetworkInterception
 
 /**
- * The connection banner stays away while the app reconnects on its own: it shows only when the
- * connection is still down this long after it went down or after the app came back to the
- * foreground (issue #700; the same rule as desktop and web, #685). The cached conversations are on
- * screen meanwhile.
+ * A connection that comes back within this long after it went down shows nothing: a short blip
+ * (Android drops a network's "validated" flag for a moment on every hand-over) stays invisible. The
+ * same rule as desktop and web.
  */
-const val CONNECTION_GRACE_MS = 10_000L
+const val CONNECTION_GRACE_MS = 2_000L
+
+/**
+ * After the app came back to the foreground the reconnect it starts gets this long before anything
+ * shows (issue #700): the cached conversations are on screen meanwhile.
+ */
+const val RETURN_GRACE_MS = 10_000L
 
 /** What the connection banner says. */
 sealed interface ConnectionNotice {
@@ -48,15 +53,45 @@ sealed interface ConnectionNotice {
  * gets the grace period too: Android drops a network's "validated" flag for a moment on every
  * hand-over (Wi-Fi to mobile, leaving Doze), which must not flash a banner.
  */
-data class Unsettled(val maybeSinceMs: Long? = null) {
+data class Unsettled(val maybeSinceMs: Long? = null, val isAfterReturn: Boolean = false) {
   /** Follows the connection: the grace period starts when it goes down and ends when it is up. */
-  fun observe(isDown: Boolean, nowMs: Long): Unsettled = Unsettled(if (isDown) maybeSinceMs ?: nowMs else null)
+  fun observe(isDown: Boolean, nowMs: Long): Unsettled =
+    if (isDown) Unsettled(maybeSinceMs ?: nowMs, isAfterReturn) else Unsettled()
 
-  /** The app is back in the foreground: a connection that is down gets the grace period from now. */
-  fun appReturned(nowMs: Long): Unsettled = Unsettled(maybeSinceMs?.let { nowMs })
+  /** The app is back in the foreground: a connection that is down gets the longer grace period from now. */
+  fun appReturned(nowMs: Long): Unsettled = if (maybeSinceMs == null) this else Unsettled(nowMs, isAfterReturn = true)
 
   /** Down for longer than the grace period. A clock that went back counts as just now. */
-  fun isPastGrace(nowMs: Long): Boolean = maybeSinceMs?.let { nowMs - it >= CONNECTION_GRACE_MS } == true
+  fun isPastGrace(nowMs: Long): Boolean {
+    val graceMs = if (isAfterReturn) RETURN_GRACE_MS else CONNECTION_GRACE_MS
+    return maybeSinceMs?.let { nowMs - it >= graceMs } == true
+  }
+}
+
+/**
+ * The thin bar along the top of the screen: red while the app can't reach the server, yellow while
+ * it connects, gone once connected. Reconnecting is the app's job, so this is all it says; only what
+ * the user must act on is a banner with text ([needsBanner]).
+ */
+enum class ConnectionStrip {
+  DOWN,
+  CONNECTING,
+}
+
+/** The bar for a notice, if it shows one. */
+fun connectionStrip(maybeNotice: ConnectionNotice?): ConnectionStrip? = when (maybeNotice) {
+  ConnectionNotice.DeviceOffline, ConnectionNotice.SyncNotStarted -> ConnectionStrip.DOWN
+  is ConnectionNotice.Unreachable -> if (maybeNotice.maybeInterception == null) ConnectionStrip.DOWN else null
+  ConnectionNotice.Connecting -> ConnectionStrip.CONNECTING
+  // Connected, only slow: nothing is wrong.
+  ConnectionNotice.Slow, ConnectionNotice.SignInRequired, ConnectionNotice.NoRoleLeft, null -> null
+}
+
+/** Whether the user must do something: sign in again, sign in to the network, a certificate. */
+fun needsBanner(notice: ConnectionNotice): Boolean = when (notice) {
+  ConnectionNotice.SignInRequired, ConnectionNotice.NoRoleLeft -> true
+  is ConnectionNotice.Unreachable -> notice.maybeInterception != null
+  ConnectionNotice.DeviceOffline, ConnectionNotice.Connecting, ConnectionNotice.SyncNotStarted, ConnectionNotice.Slow -> false
 }
 
 /** Whether the app counts as not connected: no network, or the core is (re)connecting. */

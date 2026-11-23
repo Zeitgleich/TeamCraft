@@ -103,6 +103,8 @@ struct RootView: View {
         .animation(callBarAnimation, value: model.calls.isMinimised && model.calls.activeCall != nil)
         // A new device asks to be linked: a card on every signed-in device (docs/e2ee.md §5).
         .overlay(alignment: .top) { LinkPromptOverlay() }
+        // The connection state, over every signed-in screen: one strip along the top edge.
+        .overlay(alignment: .top) { ConnectionStripBar() }
     case .failed(let failure):
       FailureView(failure: failure)
     case .storeUnreadable(let problem, let failure):

@@ -46,6 +46,9 @@ const MAX_TOASTS: usize = 4;
 const UNDO_WINDOW: Duration = Duration::from_secs(6);
 /// How long a confirmation toast ("Link copied") stays.
 const BRIEF_TOAST: Duration = Duration::from_secs(4);
+/// How long a failure's toast stays when it has nothing the user must do: long enough to read it,
+/// paused while the pointer or the focus is on it. A failure with a next step stays until handled.
+const ERROR_TOAST: Duration = Duration::from_secs(8);
 
 /// A short message over the app, optionally with an Undo button.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -76,6 +79,8 @@ pub enum ToastAction {
   OpenCrashReportSettings,
   /// Joins the call again whose join waited for this device's encryption in vain (#1990).
   RetryJoin(CallRequest),
+  /// Copies the technical detail of a failure nobody could word, for the admin.
+  CopyDetails,
 }
 
 impl ToastAction {
@@ -88,6 +93,7 @@ impl ToastAction {
       Self::RemoveFromMeeting { .. } => "meetings-remove-joined",
       Self::OpenCrashReportSettings => "crash-reports-notice-settings",
       Self::RetryJoin(_) => "call-retry-join",
+      Self::CopyDetails => "error-copy-details",
     }
   }
 
@@ -95,13 +101,20 @@ impl ToastAction {
   pub fn keeps_toast(self) -> bool {
     matches!(self, Self::OpenScreenSettings)
   }
+
+  /// Whether a failure's toast with this button waits for the user: a next step to take does, a
+  /// copy of the details doesn't.
+  pub fn holds_failure(self) -> bool {
+    !matches!(self, Self::CopyDetails)
+  }
 }
 
-/// How a toast looks and is announced.
+/// How a toast is announced. Every toast looks the same: one quiet style for the whole app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ToastTone {
   Info,
-  /// A failed action (issue #322), with the technical detail behind a "Details" toggle.
+  /// A failed action (issue #322), announced at once; the technical detail goes to the clipboard
+  /// with "Copy details" where the message can't say more ([`ToastAction::CopyDetails`]).
   Error {
     detail: String,
   },
@@ -1410,8 +1423,9 @@ impl AppState {
     });
   }
 
-  /// Shows a failed action until the user closes it. Called from outside the reactive tree (the
-  /// core answered), so it does nothing once the shell is gone. A repeat of any error still shown
+  /// Shows a failed action for a few seconds ([`ERROR_TOAST`]), or until handled when it offers a
+  /// next step. Called from outside the reactive tree (the core answered), so it does nothing once
+  /// the shell is gone. A repeat of any error still shown
   /// adds no second toast; background failures are rate-limited before they get here (#344).
   pub fn show_error(&self, text: String, detail: String) {
     self.show_error_with(text, detail, None);
@@ -1441,13 +1455,25 @@ impl AppState {
         .flatten()
         .map(ToastAction::RetryJoin)
     } else {
-      crate::feedback::failure_action(failure).filter(|_| is_in_call)
+      crate::feedback::failure_action(failure)
+        .filter(|_| is_in_call)
+        .or_else(|| crate::feedback::is_unworded(failure).then_some(ToastAction::CopyDetails))
     };
     self.show_error_with(text, failure.detail.clone(), maybe_action);
   }
 
   /// Carries out a toast's action and closes the toast, unless its steps stay needed.
   pub fn run_toast_action(&self, toast: u64, action: ToastAction) {
+    // Read before the toast closes.
+    let maybe_detail = self.toasts.with_untracked(|list| {
+      list
+        .iter()
+        .find(|shown| shown.id == toast)
+        .and_then(|shown| match &shown.tone {
+          ToastTone::Error { detail } => Some(detail.clone()),
+          ToastTone::Info => None,
+        })
+    });
     if !action.keeps_toast() {
       self.dismiss_toast(toast);
     }
@@ -1456,6 +1482,11 @@ impl AppState {
       ToastAction::OpenScreenSettings => crate::external_links::open_screen_recording_settings(),
       ToastAction::OpenCrashReportSettings => self.open_settings_at(SettingsTab::Security),
       ToastAction::RetryJoin(request) => self.call.join(request),
+      ToastAction::CopyDetails => {
+        if let Some(detail) = maybe_detail {
+          crate::components::message_actions::copy_to_clipboard(&detail);
+        }
+      },
       ToastAction::RemoveFromMeeting { conversation, user } => {
         self.write(|backend| backend.remove_member(conversation, user));
       },
@@ -1481,7 +1512,7 @@ impl AppState {
     let Some(id) = self.next_toast.try_get_value() else {
       return;
     };
-    let _ = self.toasts.try_update(|list| {
+    let is_added = self.toasts.try_update(|list| {
       let is_shown = list.iter().any(|shown| {
         shown.text == text && matches!(&shown.tone, ToastTone::Error { detail: shown } if *shown == detail)
       });
@@ -1498,7 +1529,11 @@ impl AppState {
           },
         );
       }
+      !is_shown
     });
+    if is_added == Some(true) && maybe_action.is_none_or(|action| !action.holds_failure()) {
+      self.close_toast_after(id, ERROR_TOAST, || {});
+    }
   }
 
   /// Shows a confirmation that goes away by itself ("Link copied").
@@ -3405,6 +3440,53 @@ mod tests {
       );
       state.show_error("refused".into(), "other detail".into());
       assert_eq!(state.toasts.get_untracked().len(), 2);
+    }
+
+    #[test]
+    fn an_error_goes_by_itself_but_waits_under_the_pointer() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      state.show_error("refused".into(), "detail".into());
+      state.hold_toasts(Hold::Pointer, true);
+      state.wake_toasts_at(now + 60_000);
+      assert_eq!(state.toasts.get_untracked().len(), 1, "held under the pointer");
+      state.hold_toasts(Hold::Pointer, false);
+      state.wake_toasts_at(now + ERROR_TOAST.as_millis() as i64 - 1);
+      assert_eq!(state.toasts.get_untracked().len(), 1);
+      state.wake_toasts_at(now + ERROR_TOAST.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+    }
+
+    #[test]
+    fn an_error_with_a_next_step_stays_until_handled() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      state.show_error_with(
+        "no camera".into(),
+        "detail".into(),
+        Some(ToastAction::ChooseCamera),
+      );
+      state.wake_toasts_at(now + 10 * ERROR_TOAST.as_millis() as i64);
+      assert_eq!(state.toasts.get_untracked().len(), 1);
+    }
+
+    #[test]
+    fn an_unworded_error_offers_its_details_and_still_goes_by_itself() {
+      let state = test_state();
+      let now = crate::clock::now_ms();
+      let failure = crate::feedback::ActionFailure::other("store: disk full");
+      state.show_failure_worded("That didn't work".into(), &failure);
+      let toasts = state.toasts.get_untracked();
+      assert_eq!(toasts[0].maybe_action, Some(ToastAction::CopyDetails));
+      state.wake_toasts_at(now + ERROR_TOAST.as_millis() as i64);
+      assert!(state.toasts.get_untracked().is_empty());
+      // A worded refusal has nothing to copy.
+      let refused = crate::feedback::ActionFailure::new(
+        FailureKind::Server(teamcraft_proto::ErrorCode::Forbidden),
+        "forbidden",
+      );
+      state.show_failure_worded("Not allowed".into(), &refused);
+      assert_eq!(state.toasts.get_untracked()[0].maybe_action, None);
     }
 
     #[test]
