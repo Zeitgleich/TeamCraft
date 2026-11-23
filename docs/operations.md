@@ -979,9 +979,10 @@ carried over. Work through it in this order:
 DPoP (RFC 9449) ties access tokens to a key on the device, so a stolen token, or one relayed by a
 look-alike server, doesn't work without that key (e2ee.md §3.1.2). The setting is in the admin console:
 Instance settings, "Binding sign-ins to devices". The default `optional` changes nothing for clients
-that don't support it. **The desktop, web, iOS and Android apps send proofs**; an app version from
-before it did keeps an unbound session until its next sign-in or refresh in an updated app, so move to
-`required` only once everybody updated.
+that don't support it. **The desktop, web, iOS and Android apps and `teamcraft-import` send proofs**;
+an app version from before it did keeps an unbound session until its next sign-in or refresh in an
+updated app, so move to `required` only once everybody updated. The import tool binds at `login` only:
+run `teamcraft-import login` again once the provider takes proofs (docs/import-synology.md).
 
 An identity provider that advertises DPoP (`dpop_signing_alg_values_supported`, on by default with
 current Keycloak) gets proofs from the desktop, web, iOS and Android apps as soon as this server knows its origin,
@@ -1004,6 +1005,33 @@ Behind a reverse proxy nothing else changes. It must pass the `DPoP` request hea
 the path: the path of the request is compared with the path in the proof. Without a known origin
 proofs with unbound tokens are ignored, bound tokens are refused, the server warns once in its log,
 and the console refuses `required`.
+
+**The identity provider.** What it has to do, whatever the product:
+
+- Advertise DPoP in its discovery document: `dpop_signing_alg_values_supported` lists `ES256`. The apps
+  only send proofs to a provider that says so.
+- Bind **access and refresh tokens** of the apps' public client to the proof's key at the token
+  endpoint: the access token names it in `cnf.jkt` (RFC 9449 §6), and a bound refresh token is only
+  taken with a proof of the same key. Binding the refresh token alone isn't enough: the server only
+  sees the access token, and an unbound one counts as unbound.
+- Take proofs on refresh and on revocation; a nonce of its own (`use_dpop_nonce`) is fine, the apps
+  answer it once.
+- For the web app, its CORS rule allows the `DPoP` request header and exposes `DPoP-Nonce` and `Date`.
+
+Keycloak (26.4 or newer, where DPoP is fully supported and on by default), the reference setup:
+
+- **Check** that the realm's `/.well-known/openid-configuration` lists `ES256` under
+  `dpop_signing_alg_values_supported`.
+- **Binding when an app sends a proof** needs nothing: Keycloak binds access and refresh tokens to a
+  proof sent at the token endpoint.
+- **Forcing it** (rollout step 6): Clients → the apps' client → Settings → Capability config, "Require
+  DPoP bound tokens" on. Not the variant that binds only refresh tokens, and leave "require
+  `dpop_jkt`" off: the apps don't send it with the authorization request.
+- **Web origins** of the same client: the web app's origin, so that the CORS answers carry the headers
+  above.
+
+A provider without DPoP keeps working under `optional`: the apps stay unbound, and `required` can't be
+used with it.
 
 **Rollout**
 
@@ -1047,11 +1075,14 @@ an address with 429. Guessed tokens still do, and every request stays under the 
 - 401 `invalid_dpop_proof` for one person, "too old or from the future": their device's clock is off
   by more than the proof's window, and the app doesn't correct for it. Raise `proof_leeway_secs` for
   the time being.
+- 429 for one account: it sent more than its reserve (`replay_cache_reserved_per_user`) within the
+  window while the shared pool (`replay_cache_max_entries`) was full, or more than
+  `replay_cache_max_entries_per_user` at all. Others aren't affected. If it is an import or a busy
+  integration, raise the per-account value, and the pool if many such accounts run at once (some 150
+  bytes per entry); entries expire on their own after the window (default 3 minutes).
 - 503 for requests with bound tokens and "replay cache is full" in the log (at most every five
-  minutes): more requests than `replay_cache_max_entries` within the window. Raise it (some 150 bytes
-  per entry); entries expire on their own after the window (default 3 minutes).
-- 429 for one account: it sent more than `replay_cache_max_entries_per_user` requests within the
-  window. If it is an import or a busy integration, raise that value.
+  minutes): the reserves of very many accounts are full at once (as many entries as the pool, about
+  780 busy accounts at the defaults). Raise `replay_cache_max_entries`, which raises both.
 - "the stored DPoP policy" or "the stored DPoP settings" in the log at error level: the row can't
   be used by this version (usually after going back a version), so `optional` applies. Set the policy
   again in the console.

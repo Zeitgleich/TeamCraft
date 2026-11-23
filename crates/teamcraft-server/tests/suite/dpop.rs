@@ -538,6 +538,8 @@ mod policy {
       ("nonce_rotation_secs", json!(0)),
       ("replay_cache_max_entries", json!(10)),
       ("replay_cache_max_entries_per_user", json!(10)),
+      ("replay_cache_reserved_per_user", json!(8)),
+      ("replay_cache_reserved_per_user", json!(20_000)),
     ] {
       let mut values = binding_values(&app, &user, "optional").await;
       values[name] = value;

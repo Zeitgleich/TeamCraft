@@ -797,8 +797,9 @@ settings-dpop-off = Aus: Es wird nichts geprüft
 settings-f-proof_max_age_secs = Nachweise gelten für
 settings-f-proof_leeway_secs = Erlaubter Uhrenunterschied
 settings-f-nonce_rotation_secs = Die Nonce des Servers wechselt alle
-settings-f-replay_cache_max_entries = Gemerkte Nachweise, um Wiederholungen abzulehnen
-settings-f-replay_cache_max_entries_per_user = Davon für ein Konto
+settings-f-replay_cache_max_entries = Gemerkte Nachweise im gemeinsamen Vorrat aller Konten, um Wiederholungen abzulehnen
+settings-f-replay_cache_max_entries_per_user = Höchstens für ein Konto
+settings-f-replay_cache_reserved_per_user = Für jedes Konto freigehalten, egal was andere senden
 settings-unit-entries = Einträge
 
 settings-group-app_links = Links öffnen sich in den Apps
