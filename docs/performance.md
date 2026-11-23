@@ -2620,7 +2620,7 @@ between the two runs; the anonymous memory compares:
 | Of it the shell and core                    | 160.0 MiB       | 78.5 MiB        |
 | Wasm heap                                   | 37.5 MiB        | 28.3 MiB        |
 | `message_extras` calls in the 105 switches  | 25,084          | 2,009           |
-| `has_external_people` calls (see below)     | 1,228           | 4,815           |
+| `has_external_people` calls                 | 1,228           | 405             |
 | Each other per-conversation query           | 788–793         | 771             |
 | Then shown, idle: whole app PSS             | 565.1 MiB       | 485.1 MiB       |
 | Then hidden in the tray: whole app PSS      | 548.3 MiB       | 479.6 MiB       |
@@ -2634,11 +2634,11 @@ after, there is little to give back. The wasm heap doesn't shrink, and its 22 Mi
 taken apart here; the notifier's first look still reads every conversation once).
 Switches stayed within the spread between runs (four pairs: p95 152 to 185 ms either way).
 
-One count went up: the sidebar's question whether a channel has guests
-(`has_external_people`), from about 1,200 to 4,800 small calls in the 105 switches. The other
-per-conversation queries stayed the same, so more rows ask it on a change than before, which
-started with the newest message's time reaching the lists ordered by it. It is far below what the
-batching saved.
+The sidebar asks for each row whether its conversation has guests (`has_external_people`). Every
+change, and every action of the user's own (a read marker on each switch), asked all shown rows
+again; once the lists had times, that came to 4,815 calls in the 105 switches. The answer depends
+only on its conversation, whose members are part of its entry, so it is now asked again only when
+that conversation changed (405 calls).
 
 Still above the budget in this measurement after 40 switches; what is left is what the section
 above names (compiled WebAssembly, the JavaScript heap, the debug binary). The use doesn't add to
