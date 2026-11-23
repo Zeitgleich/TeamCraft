@@ -303,7 +303,7 @@ impl RecordBackend for IndexedDbRecords {
 
 impl IndexedDbRecords {
   /// Opens the database `name` as `mode` says and reads every record's ciphertext.
-  async fn read(name: &str, mode: OpenMode) -> Result<Self, StoreError> {
+  pub(super) async fn read(name: &str, mode: OpenMode) -> Result<Self, StoreError> {
     let database = idb::open_database_with(name, mode).await?;
     let started_ms = js_sys::Date::now();
     match read_all(&database).await {

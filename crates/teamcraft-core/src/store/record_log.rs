@@ -40,6 +40,7 @@
 // Natively only its tests use it; the browser's store is its user.
 #![cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
 use std::time::Duration;
@@ -52,6 +53,9 @@ const LOG_MAGIC: [u8; 8] = *b"TCLOG\0\0\x01";
 const INDEX_MAGIC: [u8; 8] = *b"TCIDX\0\0\x01";
 /// Magic, generation, CRC of both.
 const HEADER_LEN: u64 = 8 + 8 + 4;
+/// The bytes at the start of a slot that say whether it holds the log: a reader that copies the
+/// files ([`CopiedFile`]) reads these of both slots, then copies only the one holding the log.
+pub(crate) const SLOT_HEADER_BYTES: u64 = HEADER_LEN;
 const TAG_PUT: u8 = 1;
 const TAG_DELETE: u8 = 2;
 const TAG_COMMIT: u8 = 3;
@@ -137,6 +141,15 @@ pub(crate) enum LogFileError {
   Io(String),
 }
 
+/// A file's bytes copied into memory, for a reader that can't hold the files (the browser's
+/// service worker has no sync access handles, e2ee.md §9.3). Opening a log over copies reads the
+/// copies; a group cut off as incomplete is cut off the copy only, never the file; writes are
+/// refused. The owner may write the files meanwhile: the copy is the log as it was when copied,
+/// which is a prefix of its groups like any log.
+pub(crate) struct CopiedFile {
+  bytes: RefCell<Vec<u8>>,
+}
+
 /// Where a record's sealed bytes are in the active slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Place {
@@ -187,16 +200,18 @@ impl Default for LogLimits {
   }
 }
 
+/// The slot holding the log in `slots`; `None` when neither does.
+pub(crate) fn newest_slot<F: LogFile>(slots: &[F; 2]) -> Result<Option<usize>, LogFileError> {
+  Ok(newest(&[read_header(&slots[0])?, read_header(&slots[1])?]))
+}
+
 impl<F: LogFile> RecordLog<F> {
   /// Opens the log in `slots` with `index_file`. [`Opened::Empty`]: neither slot holds a log (a new
   /// store, or one whose first write was interrupted); [`Self::create`] makes one in its files.
   pub(crate) fn open(slots: [F; 2], index_file: F, limits: LogLimits) -> Result<Opened<F>, LogFileError> {
     let headers = [read_header(&slots[0])?, read_header(&slots[1])?];
-    let active = match (&headers[0], &headers[1]) {
-      (None, None) => return Ok(Opened::Empty { slots, index_file }),
-      (Some(_), None) => 0,
-      (None, Some(_)) => 1,
-      (Some(first), Some(second)) => usize::from(second.generation > first.generation),
+    let Some(active) = newest(&headers) else {
+      return Ok(Opened::Empty { slots, index_file });
     };
     let Some(header) = &headers[active] else {
       return Ok(Opened::Empty { slots, index_file });
@@ -389,6 +404,11 @@ impl<F: LogFile> RecordLog<F> {
   /// what it can fetch again later.
   pub(crate) fn is_backlogged(&self) -> bool {
     self.unsaved.len() > self.limits.max_unsaved
+  }
+
+  /// The slot holding the log.
+  pub(crate) fn active_slot(&self) -> usize {
+    self.active
   }
 
   /// Records held, and bytes of the log on disk.
@@ -774,6 +794,54 @@ impl<'f, F: LogFile> ChunkReader<'f, F> {
   }
 }
 
+impl CopiedFile {
+  pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    Self {
+      bytes: RefCell::new(bytes),
+    }
+  }
+}
+
+impl LogFile for CopiedFile {
+  fn size(&self) -> Result<u64, LogFileError> {
+    Ok(self.bytes.borrow().len() as u64)
+  }
+
+  fn read_at(&self, offset: u64, buffer: &mut [u8]) -> Result<usize, LogFileError> {
+    let bytes = self.bytes.borrow();
+    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(bytes.len());
+    let len = buffer.len().min(bytes.len() - start);
+    buffer[..len].copy_from_slice(&bytes[start..start + len]);
+    Ok(len)
+  }
+
+  fn write_at(&self, _offset: u64, _data: &[u8]) -> Result<(), LogFileError> {
+    Err(LogFileError::Io("a copy of the log is read-only".into()))
+  }
+
+  /// Cuts the copy: what opening does to a log whose last group is incomplete.
+  fn truncate(&self, size: u64) -> Result<(), LogFileError> {
+    let mut bytes = self.bytes.borrow_mut();
+    let size = usize::try_from(size).unwrap_or(usize::MAX).min(bytes.len());
+    bytes.truncate(size);
+    Ok(())
+  }
+
+  fn flush(&self) -> Result<(), LogFileError> {
+    Ok(())
+  }
+}
+
+/// The slot whose header is valid, the newer generation if both are.
+fn newest(headers: &[Option<SlotHeader>; 2]) -> Option<usize> {
+  match (&headers[0], &headers[1]) {
+    (None, None) => None,
+    (Some(_), None) => Some(0),
+    (None, Some(_)) => Some(1),
+    (Some(first), Some(second)) => Some(usize::from(second.generation > first.generation)),
+  }
+}
+
 fn read_header<F: LogFile>(file: &F) -> Result<Option<SlotHeader>, LogFileError> {
   let mut header = [0u8; HEADER_LEN as usize];
   if file.read_at(0, &mut header)? < header.len() {
@@ -872,7 +940,6 @@ fn array<const N: usize>(bytes: &[u8]) -> [u8; N] {
 
 #[cfg(test)]
 mod tests {
-  use std::cell::RefCell;
   use std::rc::Rc;
 
   use super::*;
@@ -1175,6 +1242,77 @@ mod tests {
     assert_eq!(log.sizes().0, 0);
     files.slots[0].borrow_mut().extend_from_slice(&[0xff; 100]);
     assert_eq!(files.open().unwrap().sizes().0, 0);
+  }
+
+  mod copies {
+    use super::*;
+
+    /// The service worker reads a copy of the files while the owner may be writing: a copy taken
+    /// in the middle of a group reads the groups before it, and cutting the incomplete group off
+    /// changes the copy only.
+    #[test]
+    fn a_copy_taken_mid_group_reads_the_complete_groups() {
+      let files = Files::default();
+      let mut log = files.create(vec![(id(1), vec![1; 10])]);
+      log.put(&id(2), &[2; 20], NOW);
+      let complete = files.slot(0).len();
+      log.put(&id(3), &[3; 30], NOW);
+      let mid_group = files.slot(0)[..complete + 7].to_vec();
+      drop(log);
+
+      let log = open_copies(mid_group, files.slot(1), files.index.borrow().clone());
+      assert_eq!(log.get(&id(2)).unwrap(), Some(vec![2; 20]));
+      assert_eq!(log.get(&id(3)).unwrap(), None);
+      assert_eq!(files.open().unwrap().get(&id(3)).unwrap(), Some(vec![3; 30]));
+    }
+
+    #[test]
+    fn a_copy_refuses_writes() {
+      let files = Files::default();
+      let mut log = files.create(vec![(id(1), vec![1; 10])]);
+      log.flush(NOW).unwrap();
+      drop(log);
+      let mut copy = open_copies(files.slot(0), files.slot(1), files.index.borrow().clone());
+      copy.put(&id(2), &[2; 20], NOW);
+      assert!(copy.flush(NOW).is_err());
+      assert_eq!(files.open().unwrap().get(&id(2)).unwrap(), None);
+    }
+
+    /// The reader copies the whole of the slot the headers name, and only the header of the other.
+    #[test]
+    fn the_headers_name_the_slot_to_copy() {
+      let files = Files::default();
+      let mut log = files.create_with(Vec::new(), limits(u64::MAX, 64));
+      for round in 0..20u8 {
+        log.put(&id(1), &[round; 100], NOW);
+      }
+      drop(log);
+      let headers = |slot: usize| {
+        let bytes = files.slot(slot);
+        CopiedFile::new(bytes[..bytes.len().min(SLOT_HEADER_BYTES as usize)].to_vec())
+      };
+      let active = newest_slot(&[headers(0), headers(1)]).unwrap().unwrap();
+      assert!(files.slot(1 - active).len() < files.slot(active).len());
+      let log = match active {
+        0 => open_copies(files.slot(0), Vec::new(), files.index.borrow().clone()),
+        _ => open_copies(Vec::new(), files.slot(1), files.index.borrow().clone()),
+      };
+      assert_eq!(log.get(&id(1)).unwrap(), Some(vec![19; 100]));
+    }
+
+    #[test]
+    fn no_header_names_no_slot() {
+      let empty = || CopiedFile::new(Vec::new());
+      assert_eq!(newest_slot(&[empty(), empty()]).unwrap(), None);
+    }
+
+    fn open_copies(first: Vec<u8>, second: Vec<u8>, index: Vec<u8>) -> RecordLog<CopiedFile> {
+      let slots = [CopiedFile::new(first), CopiedFile::new(second)];
+      match RecordLog::open(slots, CopiedFile::new(index), LogLimits::default()).unwrap() {
+        Opened::Log(log) => log,
+        Opened::Empty { .. } => panic!("the copy holds no log"),
+      }
+    }
   }
 
   fn id(n: u8) -> LookupId {

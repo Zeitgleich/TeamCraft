@@ -7474,10 +7474,25 @@ reads one when it is asked for. Only the backend under the sealed store changes
 - **From IndexedDB, once:** a store with no log takes IndexedDB's records (same IDs, same sealed
   bytes) as its first group, writes the slot's header after them, and only then empties IndexedDB's
   record store; an interruption before the header repeats the move, one after it only the emptying.
+- **The service worker** has no sync access handles, so it reads a copy (`ServiceWorkerStore`,
+  `store/browser/service_worker.rs`): through `getFile()`, which takes no lock, it reads the header
+  of both slots, then the whole slot that holds the log and the index file, and opens the log over
+  those copies in memory. That costs what the IndexedDB store's open costs (every record's
+  ciphertext read once per push), not more. The copy never writes: every write is refused
+  (`StoreError::ReadOnly`), and a group cut off as incomplete is cut off the copy, never the file. A
+  copy taken while the owner writes is the log up to its last complete group, a prefix like after
+  a crash; a compaction between the headers and the copy is noticed (the log is no longer in the
+  slot copied whole) and the copy is taken again. Where OPFS holds no log of the store (not moved,
+  or a move interrupted before the header), the service worker reads IndexedDB as before; once a
+  log exists, IndexedDB's records are stale or gone and are never read. Looking for the log creates
+  nothing on OPFS. The key comes from IndexedDB either way (point 5).
+- **Deleting** a store (a reset of an unreadable store, a guest device's cleanup) removes its OPFS
+  directory and its IndexedDB database, from the page as from a worker; a browser without OPFS in
+  that context has no log to remove.
 - **What is left** for the app to use it (#2266): the core moves into a dedicated worker and the UI
-  reaches it by messages; the service worker, which can't use sync handles, reads push previews
-  through the worker while a tab is open and from the files otherwise. Until then nothing opens
-  `OpfsStore`, so no store is moved.
+  reaches it by messages; while a tab's worker holds the store, the service worker asks that worker
+  instead of copying the files. Until then nothing opens `OpfsStore`, so no store is moved, and the
+  service worker finds no log and reads IndexedDB.
 
 **Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
 in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a
@@ -7725,7 +7740,8 @@ So exactly one core owns a device's store at a time:
   jitter; after five passes in a row it keeps it. A reload of the active tab finds its own account
   in the tab's session storage, claims the lock like "Use here" and waits up to 3 s for it instead
   of asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
-  the store (push previews, §7) and opens it without upgrading it (§9.5).
+  the store (push previews, §7) and opens it without upgrading it (§9.5); on OPFS it reads a copy
+  of the files and can't write at all (§9.1).
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
   and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off

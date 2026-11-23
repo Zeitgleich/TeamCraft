@@ -57,7 +57,7 @@ use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{MINUTES_PLACEHOLDER, NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, StoreError, TrackedStore, browser_database_key,
+  DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, OpfsStore, StoreError, TrackedStore, browser_database_key,
 };
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::typing::TypingAnnouncer;
@@ -504,7 +504,7 @@ pub async fn delete_stale_guest_store() {
   let Some(user) = load_string(GUEST_STORE_KEY) else {
     return;
   };
-  match IndexedDbStore::delete(&format!("teamcraft-{user}")).await {
+  match OpfsStore::delete(&format!("teamcraft-{user}")).await {
     Ok(()) => store_string(GUEST_STORE_KEY, ""),
     Err(error) => tracing::debug!(%error, "could not delete an earlier guest device's database"),
   }
@@ -2054,7 +2054,7 @@ impl Core {
     // Dropping the last handle closes the database, so it can be deleted.
     self.store = None;
     let name = format!("teamcraft-{}", self.user);
-    IndexedDbStore::delete(&name)
+    OpfsStore::delete(&name)
       .await
       .map_err(|error| error.to_string())?;
     tracing::warn!("deleted the unreadable local database");
@@ -2514,7 +2514,7 @@ impl Core {
     self.backend = None;
     // Dropping the last handle closes the database, so it can be deleted.
     self.store = None;
-    IndexedDbStore::delete(&format!("teamcraft-{}", self.user))
+    OpfsStore::delete(&format!("teamcraft-{}", self.user))
       .await
       .map_err(|error| error.to_string())?;
     store_string(GUEST_STORE_KEY, "");

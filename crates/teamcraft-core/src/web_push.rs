@@ -143,7 +143,7 @@ mod service_worker {
   use crate::push_preview::{PushPreview, PushSession, push_preview, push_session};
   use crate::push_subscription::{subscription_change, subscription_change_from};
   use crate::push_text::{NotificationLabels, notification_text};
-  use crate::store::{IndexedDbStore, browser_database_key_without_upgrade, browser_dpop_prover};
+  use crate::store::{ServiceWorkerStore, browser_database_key_without_upgrade, browser_dpop_prover};
 
   /// Key of the conversation ID in a notification's `data`.
   const CONVERSATION_FIELD: &str = "conversation_id";
@@ -334,7 +334,7 @@ mod service_worker {
       starts_at: UnixMillis(starts_at),
     };
     let key = browser_database_key_without_upgrade(database_name).await?;
-    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
+    let store = ServiceWorkerStore::open_for_service_worker(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
     session_api(session)
@@ -351,7 +351,7 @@ mod service_worker {
     let message_id: MessageId = message.parse().map_err(|_| unreadable())?;
     // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
     let key = browser_database_key_without_upgrade(database_name).await?;
-    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
+    let store = ServiceWorkerStore::open_for_service_worker(database_name, &key).await?;
     let session = push_session(&store, SystemClock.now_ms())?
       .ok_or_else(|| CoreError::Browser("no valid push session".into()))?;
     let api = session_api(session).await;
@@ -396,7 +396,7 @@ mod service_worker {
   ) -> Result<bool, CoreError> {
     // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
     let key = browser_database_key_without_upgrade(database_name).await?;
-    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
+    let store = ServiceWorkerStore::open_for_service_worker(database_name, &key).await?;
     let Some(change) = subscription_change(&store, token)? else {
       return Ok(false);
     };
@@ -458,7 +458,7 @@ mod service_worker {
   async fn preview(database_name: &str, payload: &[u8]) -> Result<OpenedPush, CoreError> {
     // Never upgrades the database: only the page that owns the store does (e2ee.md §9.4).
     let key = browser_database_key_without_upgrade(database_name).await?;
-    let store = IndexedDbStore::open_without_upgrade(database_name, &key).await?;
+    let store = ServiceWorkerStore::open_for_service_worker(database_name, &key).await?;
     let maybe_api = match push_session(&store, SystemClock.now_ms())? {
       Some(session) => Some(session_api(session).await),
       None => None,

@@ -1,6 +1,6 @@
 //! The push path inside a real service worker (wasm-bindgen-test, headless Chromium): IndexedDB,
-//! Web Crypto and timers in worker scope, and a preview from a store reopened the way the service
-//! worker opens it. Showing the notification itself needs a permission headless tests don't have.
+//! OPFS lookups, Web Crypto and timers in worker scope, and a preview from a store reopened the way
+//! the service worker opens it. Showing the notification itself needs a permission headless tests don't have.
 #![cfg(target_arch = "wasm32")]
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
@@ -17,7 +17,7 @@ use teamcraft_core::api::fake::{FakeServer, FakeServerApi};
 use teamcraft_core::push_preview::{PreviewContent, PreviewGap, push_preview};
 use teamcraft_core::store::{
   ConversationEvent, IndexedDbStore, LocalStore, MemoryStore, MessageContent, MessageFilter,
-  browser_database_key,
+  ServiceWorkerStore, browser_database_key,
 };
 use teamcraft_crypto::push::seal_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
@@ -123,7 +123,11 @@ async fn service_worker_previews_a_push_from_the_encrypted_store() {
     .unwrap()
   };
   let key = browser_database_key(&name).await.unwrap();
-  let reopened = IndexedDbStore::open_without_upgrade(&name, &key).await.unwrap();
+  // Not moved to OPFS: the service worker finds no log there and reads IndexedDB.
+  let reopened = ServiceWorkerStore::open_for_service_worker(&name, &key)
+    .await
+    .unwrap();
+  assert!(!reopened.is_on_opfs());
   let preview = push_preview::<FakeServerApi>(&reopened, None, &sealed(message_id))
     .await
     .unwrap();
