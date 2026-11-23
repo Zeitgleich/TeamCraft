@@ -168,7 +168,7 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
  * the others.
  */
 @Composable
-private fun rememberPagePresence(viewModel: MainViewModel, conversationId: String, maybePageId: String?, changes: Int): CanvasPresenceItem? {
+private fun rememberPagePresence(viewModel: MainViewModel, conversationId: String, maybePageId: String?, changes: Long): CanvasPresenceItem? {
   val context = LocalContext.current
   val isShared = remember { ComposerPrefs.prefs(context).isSharingTyping }
   var presence by remember(conversationId, maybePageId) { mutableStateOf<CanvasPresenceItem?>(null) }
