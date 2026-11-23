@@ -199,6 +199,8 @@ targets:
         link: true
       - sdk: Security.framework
       - sdk: SystemConfiguration.framework
+      # The FFI library's port mapping (#127) finds the default gateway with nw_path (`netdev`).
+      - sdk: Network.framework
       - sdk: CoreAudio.framework
       - sdk: AudioToolbox.framework
       - sdk: AVFAudio.framework
