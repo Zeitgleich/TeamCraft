@@ -4,6 +4,18 @@
   position: relative;
 }
 
+/* The button's place in the top bar: no box of its own, except while its module loads and the last
+   start showed the button. Then it holds the button's size, so the search beside it stays put. */
+.downloads-slot {
+  display: contents;
+}
+
+.downloads-slot.is-reserved {
+  display: block;
+  width: 30px;
+  height: 30px;
+}
+
 /* The arrow drops onto a bar, like a browser's: the bar is the tray it lands in and the progress. */
 .downloads-btn {
   position: relative;

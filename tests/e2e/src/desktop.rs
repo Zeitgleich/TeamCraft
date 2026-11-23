@@ -165,6 +165,11 @@ impl DesktopSession {
 
   /// Starts the app against `server_url`.
   pub async fn launch(&self, server_url: &str) -> anyhow::Result<DesktopApp> {
+    self.launch_binary(&self.binary, server_url).await
+  }
+
+  /// Starts another build of the app (an earlier version, for an update) in this session.
+  pub async fn launch_binary(&self, binary: &Path, server_url: &str) -> anyhow::Result<DesktopApp> {
     let inspector_port = free_tcp_port();
     let mut envs: Vec<(String, String)> = session_env(&self.dir, &self.bus_address);
     envs.extend(
@@ -195,7 +200,7 @@ impl DesktopSession {
       "PATH".to_owned(),
       format!("{}:{path}", self.dir.join("bin").display()),
     ));
-    let service = Service::spawn("teamcraft-desktop", &self.binary, &[], &envs, &self.dir)?;
+    let service = Service::spawn("teamcraft-desktop", binary, &[], &envs, &self.dir)?;
     Ok(DesktopApp {
       service,
       inspector_port,
