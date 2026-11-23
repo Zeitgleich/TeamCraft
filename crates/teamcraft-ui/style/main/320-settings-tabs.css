@@ -32,22 +32,10 @@
 }
 
 /* "Pause notifications": a title row, then its choices indented under it. */
-.menu-group-title {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 34px;
-  padding: 4px 14px;
-  color: var(--text);
-}
-
+/* A group of choices inside a menu (presence, accounts): denser rows, but the same left edge as
+   every other item, so all icons line up in one column. */
 .menu-sub .menu-item {
-  padding-left: 36px;
   min-height: 30px;
-}
-
-.menu-sub .menu-user-sub {
-  padding: 2px 36px;
 }
 
 .menu-custom-until {
