@@ -235,11 +235,6 @@ jobs:
       SQLX_OFFLINE: "true"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
-      # Three compiler processes, not one per core: at the end of a cold build the big test crates
-      # are compiled side by side at 3 to 5 GB each, and four of them took the 16 GB runner into
-      # swap until it was killed (exit 137 or a lost runner, #2344). The tests themselves need
-      # little memory.
-      CARGO_BUILD_JOBS: "3"
       DATABASE_URL: postgres://teamcraft:ci-only@postgres:5432/teamcraft
       TEST_DATABASE_REQUIRED: "true"
       TEST_SERVICES_REQUIRED: "true"
@@ -300,6 +295,20 @@ jobs:
           cache-bin: "false"
       - name: Placeholder UI bundle (the desktop build embeds crates/teamcraft-ui/dist)
         run: mkdir -p crates/teamcraft-ui/dist
+      - name: More swap for the build's memory peak
+        # At the end of a cold build the big test crates are compiled side by side at 4 to 6 GB each;
+        # the 16 GB runner went 2.9 GB into its 4 GB of swap with under 2 GB left, and runs were
+        # killed there (exit 137 or a lost runner, #2344). Fewer compiler processes didn't lower the
+        # peak (each grows larger) and cost minutes. The peak lasts a few minutes; swap carries it.
+        # Swap is the host's (privileged container). A runner without room for it builds as before.
+        run: |
+          swapfile="$RUNNER_TEMP/swapfile"
+          if fallocate -l 8G "$swapfile" && chmod 600 "$swapfile" && mkswap "$swapfile" > /dev/null && swapon "$swapfile"; then
+            grep -E '^Swap(Total|Free):' /proc/meminfo
+          else
+            echo "::warning::Could not add swap; building with the runner's own (#2344)"
+            rm -f "$swapfile"
+          fi
       - name: Test
         env:
           # The test thread polls the whole test body, and in a debug build the futures of the bridge's

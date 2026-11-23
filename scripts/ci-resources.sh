@@ -27,8 +27,8 @@ while true; do
     done | sort -rn | head -5 | awk '{printf "%s:%d ", $2, $1 / 1024}'
   )
   elapsed=$((SECONDS - started))
-  printf '[resources] +%dm%02ds mem_available=%dMiB swap_used=%dMiB mem_pressure_avg10=%s disk_free=%dMiB top=%s\n' \
-    $((elapsed / 60)) $((elapsed % 60)) $((available / 1024)) $(((swap_total - swap_free) / 1024)) \
+  printf '[resources] +%dm%02ds mem_available=%dMiB swap_used=%d/%dMiB mem_pressure_avg10=%s disk_free=%dMiB top=%s\n' \
+    $((elapsed / 60)) $((elapsed % 60)) $((available / 1024)) $(((swap_total - swap_free) / 1024)) $((swap_total / 1024)) \
     "$pressure" "$disk_free" "$top"
   sleep "$interval"
 done
