@@ -588,6 +588,10 @@
   .save-actions {
     flex: 1 1 100%;
   }
+
+  .save-actions .btn {
+    flex: 1 1 auto;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
