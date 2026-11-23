@@ -2480,7 +2480,8 @@ impl Reads {
       AdminSection::Brands => Self::BRANDS,
       AdminSection::Mail => Self::MAIL,
       AdminSection::Calendar => Self::CALENDAR,
-      AdminSection::Settings => Self::RUNTIME,
+      // The spaces and public channels by name, for the pickers of the default memberships.
+      AdminSection::Settings => Self::RUNTIME | Self::SPACES | Self::CONVERSATIONS,
       AdminSection::Instance => Self::INSTANCE,
       AdminSection::Health => Self::HEALTH,
       // The owners and admins to propose for the roster are read by role, not out of the user list.

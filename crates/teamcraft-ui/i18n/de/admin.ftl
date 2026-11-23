@@ -153,8 +153,6 @@ admin-no-devices = Keine Geräte registriert.
 admin-deactivate = Nutzer deaktivieren
 admin-deactivate-confirm = Deaktivieren und Sitzungen beenden
 admin-reactivate = Nutzer reaktivieren
-admin-deactivate-hint = Die Person wird überall abgemeldet und kann sich nicht mehr anmelden. Sie bleibt mit ihren Geräten in ihren Chats, eine Reaktivierung stellt also alles wieder her.
-admin-deactivated-hint = Deaktiviert, aber noch mit Geräten in den Chats. Entferne die Person aus allen Chats, wenn sie die Organisation verlassen hat.
 admin-remove-from-chats = Aus allen Chats entfernen
 admin-delete-user = Konto löschen
 admin-delete-user-title = Dieses Konto löschen?
@@ -165,7 +163,6 @@ admin-delete-user-confirm = Konto löschen
 admin-delete-user-needs-keys = Das Löschen eines Kontos signiert die App eines Admins mit ihren Schlüsseln: Nutze die Desktop-App oder einen Browser, in dem dieses Konto eingerichtet ist.
 admin-user-deleted = Dieses Konto wurde gelöscht. Seine Nachrichten in Kanälen bleiben als „Gelöschter Nutzer“ stehen.
 admin-remove-from-chats-confirm = Entfernen und Schlüssel erneuern
-admin-remove-from-chats-hint = Deine App signiert ihre Entfernung aus jedem Kanal; die Apps der Mitglieder entfernen dann ihre Geräte und erneuern die Schlüssel. Ihre Geräte werden widerrufen, und sie verlässt auch ihre Direktnachrichten und Spaces. Eine Reaktivierung macht das nicht rückgängig; die Person müsste neu hinzugefügt werden.
 admin-remove-from-chats-needs-keys = Deaktiviert, aber noch in den Chats. Das Entfernen aus allen Chats signiert die App eines Admins mit ihren Schlüsseln: Nutze die Desktop-App oder einen Browser, in dem dieses Konto eingerichtet ist.
 admin-recovery-start = Wiederherstellung starten
 admin-recovery-needs-second = Ein zweiter Admin muss zustimmen, bevor der Schlüsselbund entschlüsselt wird.
@@ -1446,3 +1443,28 @@ legal-hold-scope-direct-hint = Auch wenn die Person oder ihr Gegenüber später 
 legal-hold-person-release-label = Aufbewahrungsanordnung für { $person } aufheben
 legal-hold-error-person = Wähle die Person, die gehalten werden soll.
 legal-hold-error-person-held = Für diese Person gilt schon eine Anordnung.
+
+## Benutzer: Zugang und Aktionen, die sich nicht zurücknehmen lassen (Issue #958)
+admin-user-access = Zugang
+admin-user-danger = Einschränken oder entfernen
+admin-deactivate-what = { $name } wird auf allen Geräten abgemeldet und kann sich nicht anmelden. Chats, Geräte und Nachrichten bleiben, eine Reaktivierung stellt alles wieder her.
+admin-deactivate-question = { $name } deaktivieren?
+admin-deactivated-done = Deaktiviert und in keinem Chat mehr.
+admin-remove-from-chats-what = Deine App signiert die Entfernung von { $name } aus jedem Kanal; die Apps der Mitglieder entfernen dann die Geräte und rotieren die Schlüssel. Auch Direktnachrichten und Spaces werden verlassen. Eine Reaktivierung macht das nicht rückgängig.
+admin-remove-from-chats-question = { $name } aus allen Chats entfernen?
+admin-delete-user-what = Endgültig: Geräte, Schlüssel und Mitgliedschaften von { $name } werden entfernt, Direktnachrichten mit der Person gelöscht. Ihre Nachrichten in Kanälen bleiben als „Gelöschter Benutzer“.
+
+## Was Aufmerksamkeit braucht, oben im Systemzustand (Issue #958)
+admin-attention-title = Braucht deine Aufmerksamkeit
+admin-attention-open = { $page } öffnen
+admin-attention-open-activity = Aktivität öffnen
+admin-attention-unverifiable-owners = { $count ->
+    [one] Der Schlüssel eines Eigentümers lässt sich auf diesem Gerät nicht prüfen: Er kann nicht signieren und zählt nicht als Eigentümer.
+   *[other] Die Schlüssel von { $count } Eigentümern lassen sich auf diesem Gerät nicht prüfen: Sie können nicht signieren und zählen nicht als Eigentümer.
+}
+admin-attention-roles-owner = Admin-Rollen können dem Identitätsanbieter gerade nicht von selbst folgen: Ein Eigentümer muss sich die Betroffenen ansehen.
+admin-attention-roles-operator = Admin-Rollen können dem Identitätsanbieter nicht von selbst folgen: Der Anbieter braucht eine Einstellung, die der Betreiber der Instanz vornimmt.
+admin-attention-join-requests = { $count ->
+    [one] Ein Admin bittet, einem deiner privaten Kanäle beizutreten.
+   *[other] { $count } Admins bitten, deinen privaten Kanälen beizutreten.
+}

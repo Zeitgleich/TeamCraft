@@ -766,7 +766,7 @@ fn change_text(i18n: I18n, change: RosterChange, name_of: &impl Fn(UserId) -> St
   i18n.t_with(key, &[("name", &name_of(user))])
 }
 
-fn warning_text(i18n: I18n, warning: OwnerWarning) -> String {
+pub(crate) fn warning_text(i18n: I18n, warning: OwnerWarning) -> String {
   match warning {
     OwnerWarning::Expired => i18n.t("policy-owners-expired"),
     OwnerWarning::ExpiresSoon { at } => i18n.t_with(

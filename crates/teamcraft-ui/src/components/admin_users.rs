@@ -206,8 +206,6 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
   let device_count = entry.device_count;
   let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
-  let confirm_deactivate = RwSignal::new(false);
-  let confirm_removal = RwSignal::new(false);
   let recovery_started = RwSignal::new(false);
   let (_, policy) = state.read(|backend| backend.workspace_policy());
   let is_recovery_allowed = if entry.maybe_guest.is_some() {
@@ -295,64 +293,17 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
         <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
       </Show>
     </ul>
+    <h4 class="detail-heading">{move || i18n.t("admin-user-access")}</h4>
     <div class="detail-actions">
-      <Show
-        when=move || confirm_deactivate.get()
-        fallback=move || {
-          view! {
-            <button class="btn" on:click=move |_| {
-              if is_active {
-                confirm_deactivate.set(true);
-              } else {
-                state.write(|backend| backend.set_user_active(user_id, true));
-              }
-            }>
-              {move || if is_active { i18n.t("admin-deactivate") } else { i18n.t("admin-reactivate") }}
-            </button>
-          }
-        }
-      >
-        <button
-          class="btn btn-danger"
-          on:click=move |_| {
-            state.write(|backend| backend.set_user_active(user_id, false));
-            confirm_deactivate.set(false);
-          }
-        >
-          {move || i18n.t("admin-deactivate-confirm")}
+      {(!is_active).then(|| view! {
+        <button class="btn" on:click=move |_| state.write(|backend| backend.set_user_active(user_id, true))>
+          {move || i18n.t("admin-reactivate")}
         </button>
-        <button class="btn" on:click=move |_| confirm_deactivate.set(false)>{move || i18n.t("cancel")}</button>
-      </Show>
-      {(can_remove_from_chats && can_sign_removals)
-        .then(|| {
-          view! {
-            <Show
-              when=move || confirm_removal.get()
-              fallback=move || {
-                view! {
-                  <button class="btn" on:click=move |_| confirm_removal.set(true)>
-                    {move || i18n.t("admin-remove-from-chats")}
-                  </button>
-                }
-              }
-            >
-              <button
-                class="btn btn-danger"
-                on:click=move |_| {
-                  state.write(|backend| backend.remove_user_from_chats(user_id));
-                  confirm_removal.set(false);
-                }
-              >
-                {move || i18n.t("admin-remove-from-chats-confirm")}
-              </button>
-              <button class="btn" on:click=move |_| confirm_removal.set(false)>{move || i18n.t("cancel")}</button>
-            </Show>
-          }
-        })}
+      })}
       <button
         class="btn"
         disabled=!can_recover
-        title=move || i18n.t(recovery_hint)
+        aria-describedby="admin-recovery-hint"
         on:click=move |_| {
           state.write(|backend| backend.start_org_recovery(user_id));
           recovery_started.set(true);
@@ -360,41 +311,77 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
       >
         {move || i18n.t("admin-recovery-start")}
       </button>
-      {may_delete
-        .then(|| {
-          view! {
-            <button
-              class="btn btn-danger"
-              disabled=!can_sign_removals
-              title=move || (!can_sign_removals).then(|| i18n.t("admin-delete-user-needs-keys"))
-              on:click=move |_| state.overlay.set(Overlay::DeleteUser(user_id))
-            >
-              {move || i18n.t("admin-delete-user")}
-            </button>
-          }
-        })}
     </div>
-    <Show when=is_deleting fallback=|| ()>
-      <DeleteUserDialog user=user_id name=display_name.clone() />
-    </Show>
-    <p class="muted-text small">
-      {move || {
-        if confirm_deactivate.get() {
-          Some(i18n.t("admin-deactivate-hint"))
-        } else if confirm_removal.get() {
-          Some(i18n.t("admin-remove-from-chats-hint"))
-        } else if can_remove_from_chats && !can_sign_removals {
-          Some(i18n.t("admin-remove-from-chats-needs-keys"))
-        } else if can_remove_from_chats {
-          Some(i18n.t("admin-deactivated-hint"))
-        } else {
-          None
-        }
-      }}
-    </p>
+    <p id="admin-recovery-hint" class="muted-text small">{move || i18n.t(recovery_hint)}</p>
     <p class="status-line" role="status">
       {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
     </p>
+    // Issue #958: what can't be taken back sits apart, and says what it does to this person before
+    // the click, not after.
+    <section class="danger-zone" aria-labelledby="admin-user-danger">
+      <h4 id="admin-user-danger" class="detail-heading">{move || i18n.t("admin-user-danger")}</h4>
+      {is_active.then(|| {
+        let name = display_name.clone();
+        view! {
+          <DangerRow
+            title_key="admin-deactivate"
+            consequence=Signal::derive({
+              let name = name.clone();
+              move || i18n.t_with("admin-deactivate-what", &[("name", &name)])
+            })
+            maybe_question=Signal::derive(move || i18n.t_with("admin-deactivate-question", &[("name", &name)]))
+            confirm_key="admin-deactivate-confirm"
+            on_confirm=Callback::new(move |()| state.write(|backend| backend.set_user_active(user_id, false)))
+          />
+        }
+      })}
+      {(!is_active && !can_remove_from_chats).then(|| view! {
+        <p class="muted-text small">{move || i18n.t("admin-deactivated-done")}</p>
+      })}
+      {can_remove_from_chats.then(|| {
+        let name = display_name.clone();
+        view! {
+          <DangerRow
+            title_key="admin-remove-from-chats"
+            consequence=Signal::derive({
+              let name = name.clone();
+              move || {
+                if can_sign_removals {
+                  i18n.t_with("admin-remove-from-chats-what", &[("name", &name)])
+                } else {
+                  i18n.t("admin-remove-from-chats-needs-keys")
+                }
+              }
+            })
+            maybe_question=Signal::derive(move || i18n.t_with("admin-remove-from-chats-question", &[("name", &name)]))
+            confirm_key="admin-remove-from-chats-confirm"
+            is_disabled=!can_sign_removals
+            on_confirm=Callback::new(move |()| state.write(|backend| backend.remove_user_from_chats(user_id)))
+          />
+        }
+      })}
+      {may_delete.then(|| {
+        let name = display_name.clone();
+        view! {
+          <DangerRow
+            title_key="admin-delete-user"
+            consequence=Signal::derive(move || {
+              if can_sign_removals {
+                i18n.t_with("admin-delete-user-what", &[("name", &name)])
+              } else {
+                i18n.t("admin-delete-user-needs-keys")
+              }
+            })
+            confirm_key="admin-delete-user"
+            is_disabled=!can_sign_removals
+            on_confirm=Callback::new(move |()| state.overlay.set(Overlay::DeleteUser(user_id)))
+          />
+        }
+      })}
+    </section>
+    <Show when=is_deleting fallback=|| ()>
+      <DeleteUserDialog user=user_id name=display_name.clone() />
+    </Show>
   }
   .into_any()
 }
@@ -406,6 +393,70 @@ fn DeletedUserDetail() -> impl IntoView {
   view! {
     <h3>{move || i18n.t("user-deleted-name")}</h3>
     <p class="muted-text">{move || i18n.t("admin-user-deleted")}</p>
+  }
+}
+
+/// One action that is hard or impossible to take back: its name, what it does to this person, and
+/// a button. With `maybe_question` the button first asks in place ("Deactivate Alex?") and acts on
+/// the second, red button; without, it acts at once (a dialog of its own asks).
+#[component]
+fn DangerRow(
+  title_key: &'static str,
+  #[prop(into)] consequence: Signal<String>,
+  #[prop(optional)] maybe_question: Option<Signal<String>>,
+  confirm_key: &'static str,
+  #[prop(optional)] is_disabled: bool,
+  on_confirm: Callback<()>,
+) -> impl IntoView {
+  let i18n = use_i18n();
+  let is_asking = RwSignal::new(false);
+  let confirm_button = NodeRef::<leptos::html::Button>::new();
+  // The button that asked is gone: the focus moves to the one that acts, not to the page.
+  Effect::new(move |_| {
+    if is_asking.get()
+      && let Some(button) = confirm_button.get()
+    {
+      drop(button.focus());
+    }
+  });
+  let consequence_id = format!("{title_key}-what");
+  let start = move |_| match maybe_question {
+    Some(_) => is_asking.set(true),
+    None => on_confirm.run(()),
+  };
+  view! {
+    <div class="danger-row">
+      <div class="danger-row-text">
+        <strong>{move || i18n.t(title_key)}</strong>
+        <p id=consequence_id.clone() class="muted-text small">{move || consequence.get()}</p>
+      </div>
+      <Show
+        when=move || is_asking.get()
+        fallback=move || {
+          let consequence_id = consequence_id.clone();
+          view! {
+            <button class="btn danger-row-start" disabled=is_disabled aria-describedby=consequence_id on:click=start>
+              {move || i18n.t(title_key)}
+            </button>
+          }
+        }
+      >
+        <div class="danger-row-confirm" role="group" aria-label=move || maybe_question.map(|question| question.get())>
+          <span>{move || maybe_question.map(|question| question.get())}</span>
+          <button
+            class="btn btn-danger"
+            node_ref=confirm_button
+            on:click=move |_| {
+              on_confirm.run(());
+              is_asking.set(false);
+            }
+          >
+            {move || i18n.t(confirm_key)}
+          </button>
+          <button class="btn" on:click=move |_| is_asking.set(false)>{move || i18n.t("cancel")}</button>
+        </div>
+      </Show>
+    </div>
   }
 }
 
