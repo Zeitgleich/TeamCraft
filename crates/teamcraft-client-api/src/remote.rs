@@ -132,6 +132,14 @@ pub enum CallAction {
   },
   /// Takes the call over from the account's other devices, which leave it (#505).
   MoveHere,
+  /// Shows a reaction to everybody else in the call (#2324), end-to-end encrypted.
+  SendReaction {
+    reaction: teamcraft_proto::CallReaction,
+  },
+  /// Raises or lowers this device's hand for everybody else in the call (#2324).
+  SetHandRaised {
+    is_raised: bool,
+  },
   /// `None` follows the system default.
   SelectMicrophone {
     #[serde(default)]

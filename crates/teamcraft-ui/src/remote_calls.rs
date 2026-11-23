@@ -513,6 +513,8 @@ impl RemoteCalls {
       | CallEvent::Muted(_)
       | CallEvent::Deafened(_)
       | CallEvent::MoveHere
+      | CallEvent::Reaction(_)
+      | CallEvent::Hand(_)
       | CallEvent::StartScreenShare { .. }
       | CallEvent::StopScreenShare
       | CallEvent::StatusSounds(_)
@@ -830,6 +832,8 @@ mod tests {
         maybe_encryption_failure: None,
         recorders: Vec::new(),
         maybe_own_recording: None,
+        reactions: Vec::new(),
+        is_hand_raised: false,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {

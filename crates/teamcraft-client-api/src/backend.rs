@@ -1385,6 +1385,10 @@ pub trait CallBackend {
   fn set_call_deafened(&self, _is_deafened: bool) {}
   /// Takes the active call over from the account's other devices, which leave it (#505).
   fn move_call_here(&self) {}
+  /// Shows a reaction to everybody else in the active call (#2324), end-to-end encrypted.
+  fn send_call_reaction(&self, _reaction: teamcraft_proto::CallReaction) {}
+  /// Raises or lowers this device's hand in the active call (#2324).
+  fn set_call_hand_raised(&self, _is_raised: bool) {}
   /// Takes all of the user's devices out of the conversation's call ("Leave on all devices"),
   /// also one only the server still lists (#684).
   fn leave_call_everywhere(&self, _conversation: ConversationId) {}

@@ -39,7 +39,7 @@ use socket2::{Domain, Protocol, Socket, Type};
 use teamcraft_net::traffic::TrafficClass;
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
-  Base64Bytes, CallClientMessage, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
+  Base64Bytes, CallClientMessage, CallReaction, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
   SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, VideoCodec, VideoLayerInfo,
   VideoPublicationId, VideoTrackKind, fallback_protocols,
 };
@@ -255,6 +255,10 @@ enum Command {
   Mute(bool),
   Deafen(bool),
   MoveHere,
+  /// A reaction to show the others (#2324).
+  Reaction(CallReaction),
+  /// The hand raised or lowered (#2324).
+  Hand(bool),
   SwitchAudio {
     source: AudioSource,
     sink: AudioSink,
@@ -546,6 +550,17 @@ impl NativeCall {
   /// Takes the call over from the account's other devices.
   pub fn move_here(&self) {
     let _ = self.commands.send(Command::MoveHere);
+  }
+
+  /// Shows a reaction to everybody else in the call (#2324).
+  pub fn send_reaction(&self, reaction: CallReaction) {
+    // A closed channel means the call already ended; nobody to show it to.
+    let _ = self.commands.send(Command::Reaction(reaction));
+  }
+
+  /// Raises or lowers the hand for everybody else in the call (#2324).
+  pub fn set_hand_raised(&self, is_raised: bool) {
+    let _ = self.commands.send(Command::Hand(is_raised));
   }
 
   /// Publishes a video track whose frames the app encodes itself; [`CallEngineEvent::VideoPublished`]
@@ -1062,6 +1077,8 @@ async fn run_call(
             capture.set_muted(is_muted);
           },
           Some(Command::MoveHere) => engine.move_here(),
+          Some(Command::Reaction(reaction)) => engine.send_reaction(reaction, Instant::now()),
+          Some(Command::Hand(is_raised)) => engine.set_hand_raised(is_raised),
           Some(Command::Deafen(is_deafened)) => {
             engine.set_deafened(is_deafened);
             sinks.mixer.set_deafened(is_deafened);

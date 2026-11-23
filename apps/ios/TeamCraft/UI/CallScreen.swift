@@ -50,6 +50,11 @@ struct CallScreen: View {
   @State private var pictureInPicture = CallPictureInPicture()
   /// What is unread in the call's conversation: the Chat button's badge (#1488).
   @State private var chatBadge = CallChatBadge.none
+  /// Reactions rising over the stage (#2324): the others' and the user's own.
+  @State private var floating: [FloatingReaction] = []
+  @State private var nextFloatingKey = 0
+  /// The id of the newest reaction of the others already shown; the first look is the baseline.
+  @State private var maybeLastReactionId: UInt64?
 
   private static let controlSize: CGFloat = 60
   private static let autoHideDelay: Duration = .seconds(5)
@@ -68,6 +73,10 @@ struct CallScreen: View {
         // An action, not a label and a button trait on the container: those could replace the
         // tiles' own labels for VoiceOver (#2281).
         .accessibilityAction(named: Text("call_toggle_controls")) { setControlsShown(!areControlsShown) }
+      // Reactions rise over the stage, clear of the header and the controls (#2324).
+      FloatingReactionsLayer(reactions: floating, reduceMotion: reduceMotion)
+        .padding(.top, Self.gridTopRoom)
+        .padding(.bottom, Self.gridBottomRoom)
       chrome
       if model.calls.isCameraOn {
         SelfViewCorner(size: CGSize(width: 108, height: 144), spring: spring) {
@@ -200,6 +209,12 @@ struct CallScreen: View {
     .onChange(of: call.participantUserIds) { old, new in
       rosterAnnouncer.note(RosterChange(before: old, now: new), names: model.calls.names, say: { announce($0) })
     }
+    .onAppear { maybeLastReactionId = call.reactions.last?.id ?? 0 }
+    .onChange(of: call.reactions.last?.id) { showNewReactions() }
+    .onChange(of: call.raisedHandUserIds) { old, new in
+      let raised = new.filter { !old.contains($0) }
+      if !raised.isEmpty { announce(String(localized: "call_announce_hand_raised \(names(of: raised))")) }
+    }
     .onChange(of: call.phase) { _, phase in
       if phase == .reconnecting { announce(String(localized: "call_reconnecting")) }
     }
@@ -220,6 +235,48 @@ struct CallScreen: View {
     var announcement = AttributedString(text)
     if isUrgent { announcement.accessibilitySpeechAnnouncementPriority = .high }
     AccessibilityNotification.Announcement(announcement).post()
+  }
+
+  /// Floats the others' reactions above the last one shown, and says them to VoiceOver (#2324).
+  private func showNewReactions() {
+    let seen = maybeLastReactionId ?? 0
+    let fresh = call.reactions.filter { $0.id > seen }
+    maybeLastReactionId = max(seen, call.reactions.last?.id ?? 0)
+    guard !fresh.isEmpty else { return }
+    for reaction in fresh {
+      float(reaction.emoji, name: model.calls.names[reaction.userId] ?? "")
+    }
+    if fresh.count > 3 {
+      announce(String(localized: "call_announce_reacted_many \(fresh.count)"))
+    } else {
+      let worded = fresh
+        .map { "\(names(of: [$0.userId])) (\(FloatingReactions.name(of: $0.reaction)))" }
+        .joined(separator: ", ")
+      announce(String(localized: "call_announce_reacted \(worded)"))
+    }
+  }
+
+  /// Sends a reaction and floats it for the user at once.
+  private func react(_ choice: CallReactionChoice) {
+    model.calls.sendReaction(choice.reaction)
+    float(choice.emoji, name: "")
+  }
+
+  private func float(_ emoji: String, name: String) {
+    nextFloatingKey += 1
+    let key = nextFloatingKey
+    if floating.count >= FloatingReactions.maxFloating { floating.removeFirst() }
+    floating.append(FloatingReaction(id: key, emoji: emoji, name: name, xFraction: FloatingReactions.spread(key)))
+    Task { @MainActor in
+      try? await Task.sleep(for: .seconds(FloatingReactions.seconds))
+      floating.removeAll { $0.id == key }
+    }
+  }
+
+  /// The names of `ids`, "Someone" for those without one, joined.
+  private func names(of ids: [String]) -> String {
+    let someone = String(localized: "call_recording_someone")
+    return ids.map { id in model.calls.names[id].flatMap { $0.isEmpty ? nil : $0 } ?? someone }.joined(separator: ", ")
   }
 
   // MARK: Stage
@@ -283,7 +340,8 @@ struct CallScreen: View {
         isSpeaking: call.speakingUserIds.contains(id),
         isRejoining: call.reconnectingUserIds.contains(id),
         isMuted: call.mutedUserIds.contains(id),
-        isUnverified: call.unverifiedUserIds.contains(id))
+        isUnverified: call.unverifiedUserIds.contains(id),
+        hasHandRaised: call.raisedHandUserIds.contains(id))
     }
     var tiles = people.map { person -> StageTile in
       if let stream = cameras.first(where: { call.userIdByDevice[$0.deviceId] == person.id }) {
@@ -325,7 +383,10 @@ struct CallScreen: View {
       .animation(Motion.fast, value: person.isSpeaking)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
-        CallTileLabel(name: person.name, isMuted: person.isMuted, isUnverified: person.isUnverified).text
+        CallTileLabel(
+          name: handName(person.name, hasHandRaised: person.hasHandRaised), isMuted: person.isMuted,
+          isUnverified: person.isUnverified
+        ).text
       )
       .accessibilityValue(person.isSpeaking ? Text("call_tile_speaking") : Text(verbatim: ""))
     }
@@ -338,6 +399,7 @@ struct CallScreen: View {
       HStack(spacing: 4) {
         if person.isUnverified { unverifiedMark }
         if person.isSpeaking { speakingMark }
+        if person.hasHandRaised { handMark }
         if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
         hostBadge(of: person.id)
@@ -415,6 +477,20 @@ struct CallScreen: View {
     call.userIdByDevice[stream.deviceId].map { call.mutedUserIds.contains($0) } ?? false
   }
 
+  private func hasHandRaised(_ stream: RemoteVideoStream) -> Bool {
+    call.userIdByDevice[stream.deviceId].map { call.raisedHandUserIds.contains($0) } ?? false
+  }
+
+  /// The raised hand on a tile's name (#2324).
+  private var handMark: some View {
+    Image(systemName: "hand.raised.fill").font(.app(.caption2)).foregroundStyle(.yellow)
+  }
+
+  /// "Ada, hand raised" for VoiceOver while the hand is up (#2324).
+  private func handName(_ name: String, hasHandRaised: Bool) -> String {
+    hasHandRaised ? String(localized: "call_person_hand_raised \(name)") : name
+  }
+
   /// The name of the person whose device sends `stream`, once known.
   private func ownerName(of stream: RemoteVideoStream) -> String? {
     call.userIdByDevice[stream.deviceId].flatMap { model.calls.names[$0] }
@@ -460,6 +536,7 @@ struct CallScreen: View {
       HStack(spacing: 4) {
         if isUnverified(stream) { unverifiedMark }
         if isSpeaking(stream) { speakingMark }
+        if hasHandRaised(stream) { handMark }
         if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
         if let userId = call.userIdByDevice[stream.deviceId] { hostBadge(of: userId) }
@@ -467,7 +544,11 @@ struct CallScreen: View {
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
-      .accessibilityLabel(CallTileLabel(name: name, isMuted: isMuted(stream), isUnverified: isUnverified(stream)).text)
+      .accessibilityLabel(
+        CallTileLabel(
+          name: handName(name, hasHandRaised: hasHandRaised(stream)), isMuted: isMuted(stream),
+          isUnverified: isUnverified(stream)
+        ).text)
       .accessibilityValue(isSpeaking(stream) ? Text("call_tile_speaking") : Text(verbatim: ""))
       .padding(.horizontal, 8)
       .padding(.vertical, 2)
@@ -679,13 +760,20 @@ struct CallScreen: View {
       }
       Spacer(minLength: 0)
       AudioRouteButton().frame(width: Self.controlSize, height: Self.controlSize)
-      if extraControls > 0 {
-        // Together in one menu with Chat, so the bar keeps its room on small phones.
+      if extraControls > 0 || model.calls.isCameraOn {
+        // Together in one menu with Chat and the reactions, so the bar keeps its room on small
+        // phones (six controls at most).
         Spacer(minLength: 0)
         Menu {
           Button(action: openChat) {
             Label(chatLabel, systemImage: "bubble.left.and.bubble.right")
           }
+          Menu {
+            reactionItems
+          } label: {
+            Label("call_reactions", systemImage: "face.smiling")
+          }
+          handItem
           if isAddingPeopleOffered {
             Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
           }
@@ -712,6 +800,8 @@ struct CallScreen: View {
         .accessibilityValue(chatBadge.count > 0 ? Text("chat_unread \(chatBadge.count)") : Text(verbatim: ""))
       } else {
         Spacer(minLength: 0)
+        reactionsControl
+        Spacer(minLength: 0)
         RoundControl(system: "bubble.left.and.bubble.right.fill", isActive: false, label: chatLabel, action: openChat)
           .overlay(alignment: .topTrailing) { ChatBadgeView(badge: chatBadge, isDot: false) }
       }
@@ -724,6 +814,48 @@ struct CallScreen: View {
     .background(alignment: .bottom) {
       LinearGradient(colors: [.clear, .black.opacity(0.55)], startPoint: .top, endPoint: .bottom)
         .ignoresSafeArea()
+    }
+  }
+
+  /// The reactions and the raised hand as a control of their own (#2324), where the bar has room.
+  private var reactionsControl: some View {
+    Menu {
+      reactionItems
+      Divider()
+      handItem
+    } label: {
+      Image(systemName: call.isHandRaised ? "hand.raised.fill" : "face.smiling")
+        .font(.app(.title2))
+        .foregroundStyle(.white)
+        .frame(width: Self.controlSize, height: Self.controlSize)
+        .background(Color.white.opacity(call.isHandRaised ? 0.32 : 0.16), in: Circle())
+        .contentShape(Circle())
+    }
+    .accessibilityLabel(Text("call_reactions"))
+    .accessibilityValue(call.isHandRaised ? Text("call_hand_raised_value") : Text(verbatim: ""))
+  }
+
+  /// One item per reaction the core offers; the emoji is the reaction (user content), the text
+  /// its name.
+  @ViewBuilder
+  private var reactionItems: some View {
+    ForEach(callReactions(), id: \.reaction) { choice in
+      Button {
+        interact { react(choice) }
+      } label: {
+        Label {
+          Text(verbatim: FloatingReactions.name(of: choice.reaction))
+        } icon: {
+          Text(verbatim: choice.emoji)
+        }
+      }
+    }
+  }
+
+  private var handItem: some View {
+    let title: LocalizedStringKey = call.isHandRaised ? "call_hand_lower" : "call_hand_raise"
+    return Button(title, systemImage: call.isHandRaised ? "hand.raised.slash" : "hand.raised") {
+      interact { model.calls.setHandRaised(!call.isHandRaised) }
     }
   }
 
@@ -1045,6 +1177,7 @@ private struct StagePerson: Identifiable {
   let isRejoining: Bool
   let isMuted: Bool
   let isUnverified: Bool
+  var hasHandRaised = false
 }
 
 /// Reads the notetaker again for another call or other people in it.

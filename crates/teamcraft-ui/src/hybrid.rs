@@ -1713,6 +1713,18 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn send_call_reaction(&self, reaction: teamcraft_proto::CallReaction) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SendReaction { reaction });
+    }
+  }
+
+  fn set_call_hand_raised(&self, is_raised: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetHandRaised { is_raised });
+    }
+  }
+
   fn leave_call_everywhere(&self, conversation: ConversationId) {
     if let Some(live) = &self.maybe_live {
       live.leave_call_everywhere(conversation);

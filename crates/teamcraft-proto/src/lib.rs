@@ -9,6 +9,7 @@ mod call_direct;
 mod call_fallback;
 mod call_media;
 mod call_recording;
+mod call_signal;
 mod calls;
 mod canvas_page;
 mod canvas_presence;
@@ -57,6 +58,7 @@ pub use call_recording::{
   CallRecorders, CallRecordingPolicy, DEFAULT_RECORDING_MINUTES, MAX_RECORDING_MINUTES,
   MAX_RECORDING_NOTICE_BYTES, RecorderRole, RecordingFiles,
 };
+pub use call_signal::{CallReaction, InCallSignal, MAX_SEALED_SIGNAL_BYTES, SealedSignalBody};
 pub use calls::{
   AUDIO_SOCKET_SECRET_BYTES, CALL_JOIN_TOKEN_AUDIENCE, CALL_PROBE_TICKET_AUDIENCE, CallClientMessage,
   CallEvent, CallJoinClaims, CallParticipant, CallProbeClaims, CallServerMessage, CallTokenKind,

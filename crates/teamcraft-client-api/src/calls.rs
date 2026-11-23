@@ -2,7 +2,7 @@
 //! `teamcraft-media`; these types only describe what the UI shows and lets the user pick.
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{BackgroundId, CallBackgroundMode, CallRosterEntry, OrgBackgroundId};
+use teamcraft_proto::{BackgroundId, CallBackgroundMode, CallReaction, CallRosterEntry, OrgBackgroundId};
 pub use teamcraft_proto::{ScreenContentMode, ScreenShareResolution};
 
 use crate::model::{ConversationId, TimestampMs, UserId};
@@ -776,6 +776,28 @@ pub struct ActiveCall {
   /// This device records the call (the desktop app). Absent from older shells and the browser.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_own_recording: Option<OwnCallRecording>,
+  /// The others' latest reactions (#2324), oldest first, at most [`MAX_KEPT_REACTIONS`]: the UI
+  /// floats each new one over the stage once. Absent from older shells.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub reactions: Vec<ShownReaction>,
+  /// This device's hand is raised (#2324): a page that opens while the call runs (the desktop
+  /// shell keeps the call over a reload) shows it so. Absent from older shells.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_hand_raised: bool,
+}
+
+/// How many of the others' latest reactions [`ActiveCall::reactions`] keeps.
+pub const MAX_KEPT_REACTIONS: usize = 16;
+
+/// Somebody else's reaction in the call (#2324).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShownReaction {
+  /// Counts up within the call: the UI floats the ones above the last it showed.
+  pub id: u64,
+  pub user: UserId,
+  pub reaction: CallReaction,
+  /// When it arrived (wall clock): a page that opens later (a reload) doesn't float old ones.
+  pub at: TimestampMs,
 }
 
 /// Somebody else recording the call (e2ee.md §8.3).

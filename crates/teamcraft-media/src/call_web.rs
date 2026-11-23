@@ -88,7 +88,7 @@ use futures::channel::{mpsc, oneshot};
 use futures::future::{Either, select};
 use js_sys::{Array, Float32Array, Function, Object, Promise, Reflect, Uint8Array};
 use teamcraft_proto::{
-  CallClientMessage, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
+  CallClientMessage, CallReaction, CallServerMessage, DeviceId, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE,
   SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, VideoCodec, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
@@ -509,6 +509,10 @@ enum Command {
   Mute(bool),
   Deafen(bool),
   MoveHere,
+  /// A reaction to show the others (#2324).
+  Reaction(CallReaction),
+  /// The hand raised or lowered (#2324).
+  Hand(bool),
   SwitchAudio {
     source: AudioSource,
     sink: AudioSink,
@@ -811,6 +815,21 @@ impl WebCall {
   /// Takes the call over from the account's other devices.
   pub fn move_here(&self) {
     let _ = self.inputs.unbounded_send(Input::Command(Command::MoveHere));
+  }
+
+  /// Shows a reaction to everybody else in the call (#2324).
+  pub fn send_reaction(&self, reaction: CallReaction) {
+    // A closed channel means the call already ended; nobody to show it to.
+    let _ = self
+      .inputs
+      .unbounded_send(Input::Command(Command::Reaction(reaction)));
+  }
+
+  /// Raises or lowers the hand for everybody else in the call (#2324).
+  pub fn set_hand_raised(&self, is_raised: bool) {
+    let _ = self
+      .inputs
+      .unbounded_send(Input::Command(Command::Hand(is_raised)));
   }
 
   /// Switches microphone and speakers (or test signals) mid-call. On error the previous ones keep
@@ -2592,6 +2611,8 @@ impl CallState<'_> {
         self.encoder.pending.clear();
       },
       Command::MoveHere => engine.move_here(),
+      Command::Reaction(reaction) => engine.send_reaction(reaction, Instant::now()),
+      Command::Hand(is_raised) => engine.set_hand_raised(is_raised),
       Command::Deafen(is_deafened) => {
         engine.set_deafened(is_deafened);
         self.is_deafened = is_deafened;

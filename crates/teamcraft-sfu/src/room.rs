@@ -34,9 +34,10 @@ use teamcraft_media::{
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
   ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia, ErrorBody, ErrorCode,
-  MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_NOTICE_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents, SfuCallRoster, SfuControlAction,
-  TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
+  MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_NOTICE_BYTES, MAX_SEALED_SIGNAL_BYTES, MAX_SIMULCAST_LAYERS,
+  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents,
+  SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo,
+  VideoPublicationId, VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -107,6 +108,8 @@ pub struct Room {
   recording_notices_per_second: u32,
   direct_offer_burst: u32,
   direct_offers_per_second: u32,
+  sealed_signal_burst: u32,
+  sealed_signals_per_second: u32,
   state: Mutex<RoomState>,
   /// Wakes the lost sessions waiting through the reconnect grace when a device joins: the one whose
   /// device took its slot back stops waiting ([`Room::wait_for_return`]).
@@ -261,6 +264,8 @@ struct Participant {
   recording_notice_limit: TokenBucket,
   /// Limits how often the device may send a direct path offer.
   direct_offer_limit: TokenBucket,
+  /// Limits how often the device may send a sealed in-call signal (#2324).
+  sealed_signal_limit: TokenBucket,
   /// The device's latest signed recording notice (e2ee.md §8.3), as it sent it: the SFU can't
   /// read it, it hands it to devices that join later.
   maybe_recording_notice: Option<Base64Bytes>,
@@ -680,6 +685,8 @@ impl Room {
       recording_notices_per_second: config.recording_notices_per_second,
       direct_offer_burst: config.direct_offer_burst,
       direct_offers_per_second: config.direct_offers_per_second,
+      sealed_signal_burst: config.sealed_signal_burst,
+      sealed_signals_per_second: config.sealed_signals_per_second,
       state: Mutex::new(state),
       joins: Notify::new(),
     })
@@ -800,6 +807,10 @@ impl Room {
       },
       CallClientMessage::DirectOffer { to_device_id, sealed } => {
         self.relay_direct_offer(participant_id, to_device_id, sealed, now);
+        Ok(())
+      },
+      CallClientMessage::SealedSignal { sealed } => {
+        self.relay_sealed_signal(participant_id, sealed, now);
         Ok(())
       },
       CallClientMessage::DirectPath { is_active, media } => {
@@ -1142,6 +1153,11 @@ impl Room {
             ),
             maybe_recording_notice: None,
             direct_offer_limit: TokenBucket::new(self.direct_offer_burst, self.direct_offers_per_second, now),
+            sealed_signal_limit: TokenBucket::new(
+              self.sealed_signal_burst,
+              self.sealed_signals_per_second,
+              now,
+            ),
             audio_stream_id,
             session,
             presence: Presence::Connected(handle),
@@ -1402,6 +1418,32 @@ impl Room {
         from_device_id: device_id,
         sealed,
         maybe_observed_ip,
+      },
+    );
+  }
+
+  /// Passes a sealed reaction or raised hand on to every other device in the call (#2324, e2ee.md
+  /// §8.5). The SFU can't read it (it is sealed under a key of the DAVE epoch); it relays within the
+  /// size and rate limits and drops it otherwise. Ephemeral: nothing is kept for devices that join
+  /// later. Logged by count, never the content.
+  fn relay_sealed_signal(&self, device_id: DeviceId, sealed: Base64Bytes, now: Instant) {
+    if sealed.is_empty() || sealed.len() > MAX_SEALED_SIGNAL_BYTES {
+      debug!(call_id = %self.call_id, device_id = %device_id, bytes = sealed.len(), "sealed signal refused: size");
+      return;
+    }
+    let mut state = lock(&self.state);
+    let Some(participant) = state.participants.get_mut(&device_id) else {
+      return;
+    };
+    if !participant.sealed_signal_limit.allow(now) {
+      debug!(call_id = %self.call_id, device_id = %device_id, "sealed signal over the limit");
+      return;
+    }
+    state.broadcast_except(
+      device_id,
+      CallEvent::SealedSignal {
+        from_device_id: device_id,
+        sealed,
       },
     );
   }
@@ -2810,6 +2852,78 @@ mod tests {
       }
       let burst = SfuConfig::default().direct_offer_burst as usize;
       assert_eq!(offers(&drain(&mut bob_rx)).len(), burst);
+    }
+  }
+
+  mod sealed_signals {
+    use super::*;
+
+    fn signals(events: &[CallEvent]) -> Vec<(DeviceId, Vec<u8>)> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::SealedSignal {
+            from_device_id,
+            sealed,
+          } => Some((*from_device_id, sealed.as_slice().to_vec())),
+          _ => None,
+        })
+        .collect()
+    }
+
+    #[test]
+    fn a_signal_reaches_everybody_else() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      let (mut carol_rx, _) = join(&rooms, 3, 30);
+      drain(&mut alice_rx);
+      drain(&mut bob_rx);
+      drain(&mut carol_rx);
+      room.relay_sealed_signal(id(10), Base64Bytes::new(vec![1; 100]), Instant::now());
+      assert_eq!(signals(&drain(&mut bob_rx)), vec![(id(10), vec![1; 100])]);
+      assert_eq!(signals(&drain(&mut carol_rx)), vec![(id(10), vec![1; 100])]);
+      assert!(
+        signals(&drain(&mut alice_rx)).is_empty(),
+        "nothing back to the sender"
+      );
+    }
+
+    #[test]
+    fn a_device_that_joins_later_gets_no_earlier_signal() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      room.relay_sealed_signal(id(10), Base64Bytes::new(vec![1; 100]), Instant::now());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      assert!(signals(&drain(&mut bob_rx)).is_empty());
+    }
+
+    #[test]
+    fn empty_oversized_and_flooding_signals_are_dropped() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      let now = Instant::now();
+      room.relay_sealed_signal(id(10), Base64Bytes::new(Vec::new()), now);
+      room.relay_sealed_signal(
+        id(10),
+        Base64Bytes::new(vec![1; MAX_SEALED_SIGNAL_BYTES + 1]),
+        now,
+      );
+      assert!(signals(&drain(&mut bob_rx)).is_empty());
+      for _ in 0..50 {
+        room.relay_sealed_signal(id(10), Base64Bytes::new(vec![1; 100]), now);
+      }
+      let burst = SfuConfig::default().sealed_signal_burst as usize;
+      assert_eq!(signals(&drain(&mut bob_rx)).len(), burst);
+      // The rate refills.
+      room.relay_sealed_signal(
+        id(10),
+        Base64Bytes::new(vec![1; 100]),
+        now + Duration::from_secs(1),
+      );
+      assert_eq!(signals(&drain(&mut bob_rx)).len(), 1);
     }
   }
 

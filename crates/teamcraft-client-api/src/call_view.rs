@@ -170,6 +170,8 @@ impl CallView {
       maybe_encryption_failure: None,
       recorders: Vec::new(),
       maybe_own_recording: None,
+      reactions: Vec::new(),
+      is_hand_raised: false,
     });
     self.maybe_end_reason = None;
   }

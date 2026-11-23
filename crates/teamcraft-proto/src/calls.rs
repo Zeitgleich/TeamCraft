@@ -313,6 +313,14 @@ pub enum CallClientMessage {
     #[serde(default, skip_serializing_if = "DirectPathMedia::is_audio")]
     media: DirectPathMedia,
   },
+  /// This device's reaction or raised hand (#2324, e2ee.md §8.5), sealed under a key of the call's
+  /// DAVE epoch (`teamcraft_crypto::call_signal`), so the SFU can neither read nor forge it. The
+  /// SFU relays it to every other device as [`CallEvent::SealedSignal`], up to
+  /// [`crate::MAX_SEALED_SIGNAL_BYTES`] and within a rate limit per sender, and drops it otherwise.
+  /// Ephemeral: never kept, queued or replayed to devices that join later. Older SFUs ignore it.
+  SealedSignal {
+    sealed: Base64Bytes,
+  },
   /// First message of a short QUIC connection from this device's direct path socket (#127): `secret`
   /// is the session's [`CallServerMessage::AudioSocket`] secret. The SFU answers
   /// [`CallServerMessage::Reflected`] with the address the connection came from (the device's
@@ -630,6 +638,12 @@ pub enum CallEvent {
   /// ([`CallClientMessage::MoveHere`]); the SFU closes this connection right after. Not to be
   /// answered with a rejoin.
   ConnectionReplaced,
+  /// Another device's [`CallClientMessage::SealedSignal`], as it sent it (#2324): every member of
+  /// the DAVE epoch it is sealed for can open it. Older clients read `Unknown`.
+  SealedSignal {
+    from_device_id: DeviceId,
+    sealed: Base64Bytes,
+  },
   /// The other device's [`CallClientMessage::DirectOffer`], as it sent it (#127). Only the device
   /// it was sealed for can open it; one that doesn't allow direct media ignores it.
   DirectOffer {
@@ -848,6 +862,10 @@ impl fmt::Debug for CallClientMessage {
         .debug_struct("DirectPath")
         .field("is_active", is_active)
         .field("media", media)
+        .finish(),
+      Self::SealedSignal { sealed } => f
+        .debug_struct("SealedSignal")
+        .field("sealed_bytes", &sealed.len())
         .finish(),
       Self::Reflect { .. } => f.debug_struct("Reflect").field("secret", &"[redacted]").finish(),
       Self::Unknown => f.write_str("Unknown"),
@@ -1526,6 +1544,28 @@ mod tests {
   }
 
   /// #127: the relayed direct path offer keeps its sealed bytes and names the other device.
+  #[test]
+  fn sealed_signal_wire_format() {
+    let sent = CallClientMessage::SealedSignal {
+      sealed: Base64Bytes::new(vec![1, 2]),
+    };
+    assert_eq!(
+      serde_json::to_string(&sent).unwrap(),
+      r#"{"type":"sealed_signal","sealed":"AQI="}"#
+    );
+    assert!(!format!("{sent:?}").contains("AQI="));
+    let relayed = CallEvent::SealedSignal {
+      from_device_id: DeviceId::from_snowflake(Snowflake::new(8).unwrap()),
+      sealed: Base64Bytes::new(vec![3]),
+    };
+    let json = serde_json::to_string(&relayed).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"sealed_signal","from_device_id":"8","sealed":"Aw=="}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), relayed);
+  }
+
   #[test]
   fn direct_offer_wire_format() {
     let offer = CallClientMessage::DirectOffer {

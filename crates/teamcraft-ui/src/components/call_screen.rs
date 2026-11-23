@@ -15,6 +15,7 @@ use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
 use crate::components::call_popover::CallPopover;
 use crate::components::call_prejoin::call_heading;
+use crate::components::call_reactions::{FloatingReactions, ReactionPicker, reaction_name};
 use crate::components::call_recording::{RecordingBanner, RecordingIndicator, use_recording_control};
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
@@ -286,6 +287,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
 
   let effects_open = RwSignal::new(false);
   let share_open = RwSignal::new(false);
+  let reactions_open = RwSignal::new(false);
   // Stats for nerds (#938) over the real video; the overlays find the hub.
   let video_stats = VideoStatsHub::provide(call.shows_video_stats);
   let has_video_stats = is_real && can_show_video();
@@ -418,6 +420,49 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       tiles
         .iter()
         .map(|tile| (tile.user.id, tile.user.display_name.clone()))
+        .collect()
+    })
+  });
+  // Raised hands and the others' reactions, said once each (#2324).
+  let announced_hands = Signal::derive(move || {
+    remote.with(|tiles| {
+      tiles
+        .iter()
+        .filter(|tile| {
+          tile
+            .participant
+            .as_ref()
+            .is_some_and(|participant| participant.has_hand_raised)
+        })
+        .map(|tile| (tile.user.id, tile.user.display_name.clone()))
+        .collect()
+    })
+  });
+  let announced_reactions = Signal::derive(move || {
+    let reactions = state.read(|backend| {
+      backend
+        .active_call()
+        .map(|active| active.reactions)
+        .unwrap_or_default()
+    });
+    remote.with(|tiles| {
+      reactions
+        .into_iter()
+        .map(|shown| {
+          let name = tiles
+            .iter()
+            .find(|tile| tile.user.id == shown.user)
+            .map(|tile| tile.user.display_name.clone())
+            .unwrap_or_else(|| i18n.t("call-recording-someone"));
+          let worded = i18n.t_with(
+            "call-reaction-by",
+            &[
+              ("name", &name),
+              ("reaction", &reaction_name(i18n, &shown.reaction)),
+            ],
+          );
+          (shown.id, worded)
+        })
         .collect()
     })
   });
@@ -696,7 +741,13 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           </span>
         </Show>
         // Joins, leaves, the lobby, the microphone, recording and the phases, said once (#2281).
-        <CallAnnouncer remote=announced_remote lobby=announced_lobby phases=announced_phases />
+        <CallAnnouncer
+          remote=announced_remote
+          lobby=announced_lobby
+          phases=announced_phases
+          hands=announced_hands
+          reactions=announced_reactions
+        />
         // Who records the call (e2ee.md §8.3): always shown while anybody does.
         <RecordingIndicator />
         <Show when=move || is_connecting.get() fallback=|| ()>
@@ -783,7 +834,10 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <RecordingBanner />
       <div class="call-body">
-        <div class="call-stage-wrap" node_ref=stage_wrap>{stage}</div>
+        <div class="call-stage-wrap" node_ref=stage_wrap>
+          {stage}
+          <FloatingReactions names=announced_remote />
+        </div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
           <CallChatPanel chat=chat />
         </Show>
@@ -866,15 +920,27 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           }
         />
         </Show>
-        // Raising a hand has no wire message yet; it stays a demo-only control.
-        <Show when=move || !is_real fallback=|| ()>
-          <ControlButton
-            is_active=Signal::derive(move || call.has_hand_raised.get())
-            icon=IconName::Hand
-            label=Signal::derive(move || if call.has_hand_raised.get() { i18n.t("call-hand-lower") } else { i18n.t("call-hand-raise") })
-            on_press=move || call.has_hand_raised.update(|on| *on = !*on)
-          />
-        </Show>
+        // Reactions and the raised hand reach everybody end-to-end encrypted (#2324, e2ee.md §8.5).
+        <ControlButton
+          is_active=reactions_open
+          popup=Signal::derive(move || Some(reactions_open.get()))
+          icon=IconName::Smile
+          label=Signal::derive(move || i18n.t("call-reactions"))
+          on_press=move || {
+            share_open.set(false);
+            effects_open.set(false);
+            call.is_camera_menu_open.set(false);
+            call.maybe_quality_menu.set(None);
+            call.is_audio_menu_open.set(false);
+            reactions_open.update(|open| *open = !*open);
+          }
+        />
+        <ControlButton
+          is_active=Signal::derive(move || call.has_hand_raised.get())
+          icon=IconName::Hand
+          label=Signal::derive(move || if call.has_hand_raised.get() { i18n.t("call-hand-lower") } else { i18n.t("call-hand-raise") })
+          on_press=move || call.set_hand_raised(!call.has_hand_raised.get_untracked())
+        />
         {has_effects.then(|| view! {
           <ControlButton
             is_active=Signal::derive(move || effects_open.get())
@@ -1031,6 +1097,9 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         </div>
       </footer>
       // After the controls in the DOM, so the keyboard reaches a popover from its trigger.
+      <Show when=move || reactions_open.get() fallback=|| ()>
+        <ReactionPicker on_close=Callback::new(move |()| reactions_open.set(false)) />
+      </Show>
       <Show when=move || share_open.get() fallback=|| ()>
         <CallPopover class="effects-popover share-popover" labelled_by="share-menu-title" on_close=Callback::new(move |()| share_open.set(false))>
           <h2 id="share-menu-title">{move || i18n.t("share-options")}</h2>

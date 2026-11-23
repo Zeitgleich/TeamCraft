@@ -39,6 +39,10 @@ pub enum CallEvent {
   Deafened(bool),
   /// Takes the call over from the account's other devices, which leave it.
   MoveHere,
+  /// Shows a reaction to everybody else in the call (#2324).
+  Reaction(teamcraft_proto::CallReaction),
+  /// Raises or lowers the hand for everybody else in the call (#2324).
+  Hand(bool),
   /// The microphone to use from now on, also mid-call (an empty id: the system default).
   Microphone(String),
   /// The speakers to use from now on, also mid-call (an empty id: the system default).
@@ -307,6 +311,8 @@ pub struct CallState {
   /// How large a screen share may be: up to 1440p, or 4K where the workspace allows it (#565).
   pub screen_resolution: RwSignal<ScreenShareResolution>,
   pub has_hand_raised: RwSignal<bool>,
+  /// The user's latest reaction, with a count of all they sent (#2324): the stage floats each one.
+  pub own_reaction: RwSignal<(u64, Option<teamcraft_proto::CallReaction>)>,
   pub is_deafened: RwSignal<bool>,
   /// The pre-join screen's "Don't use audio" (#1928): the call starts muted and deafened.
   pub uses_no_audio: RwSignal<bool>,
@@ -376,6 +382,7 @@ impl CallState {
       screen_mode: RwSignal::new(ScreenContentMode::default()),
       screen_resolution: RwSignal::new(ScreenShareResolution::default()),
       has_hand_raised: RwSignal::new(false),
+      own_reaction: RwSignal::new((0, None)),
       is_deafened: RwSignal::new(false),
       uses_no_audio: RwSignal::new(false),
       move_offer: RwSignal::new(None),
@@ -423,6 +430,21 @@ impl CallState {
   pub fn set_deafened(&self, is_deafened: bool) {
     self.is_deafened.set(is_deafened);
     self.emit_in_call(CallEvent::Deafened(is_deafened));
+  }
+
+  /// Raises or lowers the hand, in the UI and for everybody else in the call (#2324).
+  pub fn set_hand_raised(&self, is_raised: bool) {
+    self.has_hand_raised.set(is_raised);
+    self.emit_in_call(CallEvent::Hand(is_raised));
+  }
+
+  /// Shows a reaction over the stage and to everybody else in the call (#2324).
+  pub fn send_reaction(&self, reaction: teamcraft_proto::CallReaction) {
+    self.own_reaction.update(|(count, latest)| {
+      *count += 1;
+      *latest = Some(reaction.clone());
+    });
+    self.emit_in_call(CallEvent::Reaction(reaction));
   }
 
   /// Camera on or off, in the UI and in the call (or the choice the call starts with).
@@ -598,6 +620,7 @@ impl CallState {
     self.is_mic_on.set(!active.is_muted);
     self.is_deafened.set(active.is_deafened);
     self.is_camera_on.set(active.is_camera_on);
+    self.has_hand_raised.set(active.is_hand_raised);
     self.is_sharing_screen.set(active.is_sharing_screen);
     self.effect.set(active.background);
     self.has_ended.set(false);
@@ -938,6 +961,8 @@ mod tests {
         maybe_encryption_failure: None,
         recorders: Vec::new(),
         maybe_own_recording: None,
+        reactions: Vec::new(),
+        is_hand_raised: false,
       };
       call.resume(&active);
       assert_eq!(call.phase.get_untracked(), CallPhase::Active);
@@ -1033,6 +1058,8 @@ mod tests {
       maybe_encryption_failure: None,
       recorders: Vec::new(),
       maybe_own_recording: None,
+      reactions: Vec::new(),
+      is_hand_raised: false,
     }
   }
 
