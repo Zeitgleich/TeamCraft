@@ -337,7 +337,9 @@ impl CoreError {
   #[cfg(feature = "ui")]
   pub fn to_failure(&self) -> ActionFailure {
     let kind = match self {
-      Self::Api(ApiError::Network(_)) => FailureKind::Network,
+      Self::Api(error @ (ApiError::Network(_) | ApiError::Status { .. })) if error.is_unreachable() => {
+        FailureKind::Network
+      },
       Self::Api(ApiError::Intercepted { kind, .. }) => match kind {
         Interception::CaptivePortal => FailureKind::CaptivePortal,
         Interception::UntrustedCertificate => FailureKind::UntrustedCertificate,
@@ -413,6 +415,18 @@ mod tests {
     );
     let offline = CoreError::Api(ApiError::Network("offline".into()));
     assert_eq!(offline.to_failure().kind, FailureKind::Network);
+    // A proxy answering for a server that restarts: the connection state, not a failed action.
+    let restarting = CoreError::Api(ApiError::Status {
+      status: 502,
+      maybe_body: None,
+      maybe_retry_after: None,
+    });
+    assert_eq!(restarting.to_failure().kind, FailureKind::Network);
+    let storage_down = CoreError::Api(ApiError::status(503, ErrorCode::Unavailable, "storage"));
+    assert_eq!(
+      storage_down.to_failure().kind,
+      FailureKind::Server(ErrorCode::Unavailable)
+    );
     let portal = CoreError::Api(ApiError::Intercepted {
       kind: crate::api::Interception::CaptivePortal,
       detail: "HTML".into(),

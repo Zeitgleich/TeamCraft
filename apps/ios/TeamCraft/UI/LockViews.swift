@@ -113,10 +113,63 @@ struct DeviceSecuritySection: View {
   }
 }
 
-/// A thin bar while the app can't reach the server: the device is offline, the server is unreachable
-/// although the device is online, or the session expired. The screens show the local store
-/// meanwhile; new messages wait, sent ones stay in the outbox. A connection that comes back within
-/// the grace period never shows the bar (`ConnectionNotice`, issue #713).
+/// The connection state along the top edge of the screen, below the status bar: a thin red bar while
+/// the app can't reach the server (no network, the server down or restarting), yellow while it
+/// connects, nothing once connected. A connection that comes back within the grace period never
+/// shows it (`ConnectionGrace`). Messages wait in the outbox meanwhile.
+struct ConnectionStripBar: View {
+  static let height: CGFloat = 4
+  /// A warm yellow that reads on light and dark backgrounds, as on Android.
+  static let connectingYellow = Color(red: 0xF2 / 255, green: 0xB7 / 255, blue: 0x05 / 255)
+
+  @Environment(AppModel.self) private var model
+  private let network = NetworkMonitor.shared
+
+  var body: some View {
+    // A clock only while the connection is down: a connected app doesn't wake up every second.
+    if ConnectionNotice.isDown(isOnline: network.isOnline, connection: model.connection) {
+      TimelineView(.periodic(from: .now, by: 1)) { timeline in
+        strip(at: timeline.date)
+      }
+    } else {
+      strip(at: .now)
+    }
+  }
+
+  private func strip(at now: Date) -> some View {
+    let maybeNotice = ConnectionNotice.current(
+      isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now)
+    let maybeStrip = maybeNotice?.strip
+    let color: Color =
+      switch maybeStrip {
+      case .down: Theme.danger
+      case .connecting: Self.connectingYellow
+      case nil: .clear
+      }
+    return Rectangle()
+      .fill(color)
+      .frame(maxWidth: .infinity)
+      .frame(height: Self.height)
+      .animation(Motion.fast, value: maybeStrip)
+      .allowsHitTesting(false)
+      .accessibilityElement()
+      .accessibilityLabel(maybeNotice.flatMap { label(of: $0) } ?? Text(""))
+      .accessibilityHidden(maybeStrip == nil)
+  }
+
+  private func label(of notice: ConnectionNotice) -> Text? {
+    switch notice {
+    case .deviceOffline: return Text("offline_banner")
+    case .connecting: return Text("connection_connecting")
+    case .unreachable(_, nil): return Text("connection_server_unreachable")
+    case .unreachable, .slow, .signInRequired, .noRoleLeft: return nil
+    }
+  }
+}
+
+/// A banner with text and an action, only while the user must do something: sign in again, sign in
+/// to the network (a captive portal) or sort out an untrusted certificate. Everything the app
+/// handles by itself is the strip along the top (`ConnectionStripBar`).
 struct OfflineBanner: View {
   @Environment(AppModel.self) private var model
   private let network = NetworkMonitor.shared
@@ -135,14 +188,13 @@ struct OfflineBanner: View {
   @ViewBuilder
   private func bar(at now: Date) -> some View {
     if let notice = ConnectionNotice.current(
-      isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now)
+      isOnline: network.isOnline, connection: model.connection, grace: model.connectionGrace, now: now),
+      notice.needsBanner
     {
-      // Slow is no failure: the neutral colour, not the danger one.
-      let tint = notice == .slow ? Color.secondary : Theme.danger
       HStack {
         text(of: notice)
           .font(.app(.footnote))
-          .foregroundStyle(tint)
+          .foregroundStyle(Theme.danger)
           .frame(maxWidth: .infinity, alignment: .leading)
         switch notice {
         case .unreachable:
@@ -156,29 +208,26 @@ struct OfflineBanner: View {
         }
       }
       .padding(.horizontal).padding(.vertical, 6)
-      .background(tint.opacity(0.12))
+      .background(Theme.danger.opacity(0.12))
       .accessibilityElement(children: .combine)
     }
   }
 
   private func text(of notice: ConnectionNotice) -> Text {
     switch notice {
-    case .deviceOffline:
-      return Text("offline_banner")
-    case .connecting:
-      return Text("connection_connecting")
-    case .slow:
-      return Text("connection_slow")
     case .unreachable(let seconds, let maybeInterception):
       switch maybeInterception {
       case .captivePortal: return Text("connection_captive_portal \(seconds)")
       case .untrustedCertificate: return Text("connection_untrusted_certificate \(seconds)")
-      case nil: return Text("connection_unreachable \(seconds)")
+      case nil: return Text("")
       }
     case .signInRequired:
       return model.isDeviceKeyLost ? Text("connection_device_key_lost") : Text("connection_sign_in")
     case .noRoleLeft:
       return Text("connection_no_role_left")
+    // The strip's (`needsBanner`).
+    case .deviceOffline, .connecting, .slow:
+      return Text("")
     }
   }
 }

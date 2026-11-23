@@ -45,6 +45,15 @@ import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.liveRegion
+import de.zeitgleich.teamcraft.ui.ConnectionStrip
+import de.zeitgleich.teamcraft.ui.connectionStrip
+import de.zeitgleich.teamcraft.ui.needsBanner
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -138,15 +147,9 @@ fun ChromeTopBar(
   }
 }
 
-/**
- * A thin bar while the app can't reach the server: the device is offline, the server is
- * unreachable although the device is online, or the session expired. Follows the core's connection
- * state; new messages wait, sent ones stay in the outbox. A connection that comes back within the
- * grace period ([CONNECTION_GRACE_MS], from going down or from the app's return) shows nothing: the
- * cached state is on screen and syncs quietly (issue #700).
- */
+/** The connection notice for this moment, following the core, the network and the grace period. */
 @Composable
-fun OfflineBanner(onSignInAgain: () -> Unit) {
+private fun rememberConnectionNotice(): ConnectionNotice? {
   val graph = TeamCraftApplication.graph(LocalContext.current)
   val isOnline = rememberIsOnline()
   val maybeConnection by graph.core.connectionState.collectAsState()
@@ -160,17 +163,66 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       value = System.currentTimeMillis()
     }
   }
-  val notice = connectionNotice(isOnline, maybeConnection, unsettled, now, isSyncStartFailing) ?: return
-  val (text, maybeAction) = when (notice) {
-    ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner) to null
-    ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting) to null
-    ConnectionNotice.SyncNotStarted -> stringResource(R.string.connection_sync_not_started) to null
-    ConnectionNotice.Slow -> stringResource(R.string.connection_slow) to null
+  return connectionNotice(isOnline, maybeConnection, unsettled, now, isSyncStartFailing)
+}
+
+/**
+ * The connection state along the top edge of the screen, just below the status bar: a thin red bar
+ * while the app can't reach the server (no network, the server down or restarting), yellow while it
+ * connects, nothing once connected. A connection that comes back within the grace period shows
+ * nothing ([CONNECTION_GRACE_MS]; longer after the app's return). Messages wait in the outbox
+ * meanwhile. Screen readers hear the state once as it changes.
+ */
+@Composable
+fun ConnectionStripBar(modifier: Modifier = Modifier) {
+  val maybeNotice = rememberConnectionNotice()
+  val maybeStrip = connectionStrip(maybeNotice)
+  val color by animateColorAsState(
+    when (maybeStrip) {
+      ConnectionStrip.DOWN -> MaterialTheme.colorScheme.error
+      ConnectionStrip.CONNECTING -> CONNECTING_YELLOW
+      null -> Color.Transparent
+    },
+    LocalMotion.current.fast(),
+    label = "connection strip",
+  )
+  val description = when (maybeNotice) {
+    ConnectionNotice.DeviceOffline -> stringResource(R.string.offline_banner)
+    ConnectionNotice.SyncNotStarted -> stringResource(R.string.connection_sync_not_started)
+    ConnectionNotice.Connecting -> stringResource(R.string.connection_connecting)
+    is ConnectionNotice.Unreachable -> stringResource(R.string.connection_server_unreachable)
+    else -> null
+  }.takeIf { maybeStrip != null }
+  Box(
+    modifier
+      .fillMaxWidth()
+      .windowInsetsPadding(WindowInsets.statusBars)
+      .height(CONNECTION_STRIP_HEIGHT)
+      .background(color)
+      .semantics {
+        description?.let {
+          contentDescription = it
+          liveRegion = LiveRegionMode.Polite
+        }
+      },
+  )
+}
+
+/**
+ * A banner with text and an action, only while the user must do something: sign in again, sign in
+ * to the network (a captive portal), or sort out an untrusted certificate. Everything the app
+ * handles by itself is the strip along the top ([ConnectionStripBar]).
+ */
+@Composable
+fun OfflineBanner(onSignInAgain: () -> Unit) {
+  val graph = TeamCraftApplication.graph(LocalContext.current)
+  val notice = rememberConnectionNotice()?.takeIf(::needsBanner) ?: return
+  val (text, action) = when (notice) {
     is ConnectionNotice.Unreachable -> {
       val text = when (notice.maybeInterception) {
         NetworkInterception.CAPTIVE_PORTAL -> R.string.connection_captive_portal
         NetworkInterception.UNTRUSTED_CERTIFICATE -> R.string.connection_untrusted_certificate
-        null -> R.string.connection_unreachable
+        null -> return
       }
       stringResource(text, notice.retryInSeconds.toInt()) to
         (stringResource(R.string.connection_retry) to { graph.core.networkChanged() })
@@ -179,13 +231,10 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       stringResource(R.string.connection_sign_in) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
     ConnectionNotice.NoRoleLeft ->
       stringResource(R.string.connection_no_role_left) to (stringResource(R.string.connection_sign_in_action) to onSignInAgain)
+    // The strip's (needsBanner).
+    ConnectionNotice.DeviceOffline, ConnectionNotice.Connecting, ConnectionNotice.SyncNotStarted, ConnectionNotice.Slow -> return
   }
-  // Slow is no failure: the neutral colour, not the error one.
-  val isSlow = notice == ConnectionNotice.Slow
-  Surface(
-    color = if (isSlow) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.errorContainer,
-    modifier = Modifier.fillMaxWidth(),
-  ) {
+  Surface(color = MaterialTheme.colorScheme.errorContainer, modifier = Modifier.fillMaxWidth()) {
     Row(
       verticalAlignment = Alignment.CenterVertically,
       modifier = Modifier.padding(start = 16.dp, end = 4.dp),
@@ -193,12 +242,11 @@ fun OfflineBanner(onSignInAgain: () -> Unit) {
       Text(
         text,
         style = MaterialTheme.typography.labelMedium,
-        color = if (isSlow) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onErrorContainer,
+        color = MaterialTheme.colorScheme.onErrorContainer,
         modifier = Modifier.weight(1f).padding(vertical = 6.dp),
       )
-      maybeAction?.let { (label, action) ->
-        TextButton(onClick = action) { Text(label) }
-      }
+      val (label, onClick) = action
+      TextButton(onClick = onClick) { Text(label) }
     }
   }
 }
@@ -215,7 +263,8 @@ fun SyncingLine(isCatchingUp: Boolean) {
   val graph = TeamCraftApplication.graph(LocalContext.current)
   val isOnline = rememberIsOnline()
   val maybeConnection by graph.core.connectionState.collectAsState()
-  val isSyncing = isOnline && (isCatchingUp || maybeConnection is ConnectionState.Connecting)
+  // Connecting is the strip's at the top (ConnectionStripBar): this line is only the catch-up.
+  val isSyncing = isOnline && isCatchingUp && maybeConnection !is ConnectionState.Connecting
   val isShown by produceState(false, isSyncing) {
     if (isSyncing) delay(SYNCING_LINE_DELAY_MILLIS)
     value = isSyncing
@@ -287,6 +336,12 @@ private const val COUNTDOWN_MILLIS = 1_000L
 /** How long syncing goes on before [SyncingLine] shows it. */
 private const val SYNCING_LINE_DELAY_MILLIS = 300L
 private val SYNCING_LINE_HEIGHT = 2.dp
+
+/** The connection strip along the top: thin, but clearly coloured. */
+private val CONNECTION_STRIP_HEIGHT = 4.dp
+
+/** The strip while the app connects: a warm yellow that reads on light and dark backgrounds. */
+private val CONNECTING_YELLOW = Color(0xFFF2B705)
 
 /**
  * Material 3 Expressive's loading indicator (issue #454) for a screen or pane whose content is

@@ -5,18 +5,18 @@ import XCTest
 final class ConnectionNoticeTests: XCTestCase {
   private let start = Date(timeIntervalSince1970: 1_800_000_000)
 
-  func testQuickReconnectShowsNoBanner() {
+  func testQuickReconnectShowsNothing() {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)
-    XCTAssertNil(notice(isOnline: true, .connecting, grace, at: 9))
-    grace.observe(isDown: false, now: start.addingTimeInterval(9))
+    XCTAssertNil(notice(isOnline: true, .connecting, grace, at: 1.5))
+    grace.observe(isDown: false, now: start.addingTimeInterval(1.5))
     XCTAssertNil(notice(isOnline: true, .connected, grace, at: 30))
   }
 
-  func testBannerAfterTheGracePeriod() {
+  func testStripAfterTheGracePeriod() {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)
-    XCTAssertEqual(notice(isOnline: true, .connecting, grace, at: 10), .connecting)
+    XCTAssertEqual(notice(isOnline: true, .connecting, grace, at: 2), .connecting)
     let retryAtMs = Int64((start.timeIntervalSince1970 + 15) * 1000)
     XCTAssertEqual(
       notice(isOnline: true, .offline(retryAtMs: retryAtMs, maybeInterception: nil), grace, at: 12),
@@ -40,7 +40,7 @@ final class ConnectionNoticeTests: XCTestCase {
   func testDeviceOfflineWinsAfterTheGracePeriod() {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)
-    XCTAssertNil(notice(isOnline: false, .connecting, grace, at: 5))
+    XCTAssertNil(notice(isOnline: false, .connecting, grace, at: 1))
     XCTAssertEqual(notice(isOnline: false, .connecting, grace, at: 11), .deviceOffline)
     XCTAssertEqual(notice(isOnline: false, nil, grace, at: 11), .deviceOffline)
   }
@@ -57,6 +57,7 @@ final class ConnectionNoticeTests: XCTestCase {
     var grace = ConnectionGrace()
     grace.observe(isDown: true, now: start)
     grace.appReturned(now: start.addingTimeInterval(600))
+    XCTAssertTrue(grace.isAfterReturn)
     XCTAssertNil(notice(isOnline: true, .connecting, grace, at: 605))
     XCTAssertEqual(notice(isOnline: true, .connecting, grace, at: 610), .connecting)
   }
@@ -90,9 +91,33 @@ final class ConnectionNoticeTests: XCTestCase {
     XCTAssertTrue(PushUpkeepSchedule.mayAttempt(lastAttemptAt: start, now: start.addingTimeInterval(600)))
   }
 
+  func testStripIsRedWhileDownYellowWhileConnectingAndGoneWhenConnected() {
+    XCTAssertEqual(ConnectionNotice.deviceOffline.strip, .down)
+    XCTAssertEqual(ConnectionNotice.unreachable(retryInSeconds: 3, maybeInterception: nil).strip, .down)
+    XCTAssertEqual(ConnectionNotice.connecting.strip, .connecting)
+    XCTAssertNil(ConnectionNotice.slow.strip)
+    XCTAssertNil(ConnectionNotice.signInRequired.strip)
+    XCTAssertNil(ConnectionNotice.unreachable(retryInSeconds: 3, maybeInterception: .captivePortal).strip)
+    var grace = ConnectionGrace()
+    grace.observe(isDown: true, now: start)
+    grace.observe(isDown: false, now: start.addingTimeInterval(20))
+    XCTAssertNil(notice(isOnline: true, .connected, grace, at: 20)?.strip)
+  }
+
+  func testOnlyWhatTheUserMustActOnIsABanner() {
+    XCTAssertTrue(ConnectionNotice.signInRequired.needsBanner)
+    XCTAssertTrue(ConnectionNotice.noRoleLeft.needsBanner)
+    XCTAssertTrue(ConnectionNotice.unreachable(retryInSeconds: 3, maybeInterception: .untrustedCertificate).needsBanner)
+    XCTAssertFalse(ConnectionNotice.unreachable(retryInSeconds: 3, maybeInterception: nil).needsBanner)
+    XCTAssertFalse(ConnectionNotice.deviceOffline.needsBanner)
+    XCTAssertFalse(ConnectionNotice.connecting.needsBanner)
+  }
+
   func testSyncingLineFollowsTheScopesCatchUpAndTheConnection() {
     XCTAssertTrue(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: true, connection: .connected))
-    XCTAssertTrue(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: .connecting))
+    // Connecting is the strip's.
+    XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: .connecting))
+    XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: true, connection: .connecting))
     XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: .connected))
     XCTAssertFalse(ConnectionNotice.isSyncing(isOnline: true, isCatchingUp: false, connection: nil))
     // Offline the banner speaks; a line would promise messages that can't come.

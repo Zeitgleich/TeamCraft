@@ -1362,7 +1362,7 @@ async fn wait_until_done(page: &Page) -> Instant {
     assert!(Instant::now() < deadline, "the client never settled");
     let has_banner = evaluate_value(
       page,
-      "!!document.querySelector('.connection-hint, .connection-notice')".into(),
+      "!!document.querySelector('.connection-note, .connection-notice')".into(),
     )
     .await
     .as_bool()

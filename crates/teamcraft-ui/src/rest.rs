@@ -5,10 +5,14 @@ use std::rc::Rc;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use teamcraft_core::api::is_unreachable_status;
 use teamcraft_proto::{ErrorBody, ErrorCode};
 
 use crate::auth::{ApiMethod, ApiResponse, AuthError, Authenticator, BinaryBody};
 use crate::feedback::{ActionFailure, FailureKind};
+
+/// The `code` of a refusal whose body is not the server's error body (a proxy's page).
+const UNKNOWN_CODE: &str = "unknown";
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RestError {
@@ -31,6 +35,10 @@ impl RestError {
   pub fn to_failure(&self) -> ActionFailure {
     let kind = match self {
       Self::Auth(AuthError::Network(_)) => FailureKind::Network,
+      // A proxy answering for a server that is down (no error code of the server's own).
+      Self::Refused { status, code } if code == UNKNOWN_CODE && is_unreachable_status(*status) => {
+        FailureKind::Network
+      },
       Self::Refused { code, .. } => match ErrorCode::from(code.clone()) {
         ErrorCode::Unknown(_) => FailureKind::Other,
         known => FailureKind::Server(known),
@@ -90,7 +98,7 @@ impl RestClient {
     }
     let code = serde_json::from_slice::<teamcraft_proto::ErrorBody>(&response.body)
       .map(|body| body.error_code.as_str().to_owned())
-      .unwrap_or_else(|_| "unknown".to_owned());
+      .unwrap_or_else(|_| UNKNOWN_CODE.to_owned());
     Err(RestError::Refused {
       status: response.status,
       code,
@@ -119,7 +127,7 @@ pub(crate) fn check(response: ApiResponse) -> Result<ApiResponse, RestError> {
   }
   let code = serde_json::from_str::<ErrorBody>(&response.body)
     .map(|body| body.error_code.as_str().to_owned())
-    .unwrap_or_else(|_| "unknown".to_owned());
+    .unwrap_or_else(|_| UNKNOWN_CODE.to_owned());
   Err(RestError::Refused {
     status: response.status,
     code,
@@ -174,5 +182,31 @@ mod tests {
       RestError::Unreadable("x".into()).to_failure().kind,
       FailureKind::Other
     );
+  }
+
+  #[test]
+  fn a_proxy_answering_for_a_restarting_server_is_unreachable() {
+    for status in [502, 503, 504] {
+      let proxy = check(ApiResponse {
+        status,
+        body: "<html>Bad Gateway</html>".into(),
+      })
+      .unwrap_err();
+      assert_eq!(proxy.to_failure().kind, FailureKind::Network, "{status}");
+      assert!(proxy.to_failure().is_unreachable());
+    }
+    // The server's own answer with its code stays what it says.
+    let own = check(ApiResponse {
+      status: 503,
+      body: r#"{"error_code":"unavailable","message":"storage"}"#.into(),
+    })
+    .unwrap_err();
+    assert_eq!(own.to_failure().kind, FailureKind::Server(ErrorCode::Unavailable));
+    let internal = check(ApiResponse {
+      status: 500,
+      body: String::new(),
+    })
+    .unwrap_err();
+    assert_eq!(internal.to_failure().kind, FailureKind::Other);
   }
 }

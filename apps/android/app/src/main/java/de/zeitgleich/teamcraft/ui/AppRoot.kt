@@ -44,6 +44,7 @@ import de.zeitgleich.teamcraft.ui.theme.rememberScreenTransitions
 import de.zeitgleich.teamcraft.ui.screens.BrowseScreen
 import de.zeitgleich.teamcraft.ui.screens.DirectoryScreen
 import de.zeitgleich.teamcraft.ui.screens.ChatListScreen
+import de.zeitgleich.teamcraft.ui.screens.ConnectionStripBar
 import de.zeitgleich.teamcraft.ui.screens.ConfirmServerScreen
 import de.zeitgleich.teamcraft.ui.screens.ServerEntryScreen
 import de.zeitgleich.teamcraft.ui.screens.ReportProblemScreen
@@ -222,6 +223,8 @@ fun AppRoot(
           onAppLinkHandled,
         )
         LinkRequestPrompts(viewModel, Modifier.align(Alignment.TopCenter))
+        // The connection state, over every signed-in screen: one strip along the top edge.
+        ConnectionStripBar(Modifier.align(Alignment.TopCenter))
       }
     }
     // Before the signed-in screens a share waits: say so, and that it isn't lost.

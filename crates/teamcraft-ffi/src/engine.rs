@@ -1205,8 +1205,9 @@ impl Engine {
     let command_failures = self.signals.command_failures.clone();
     let failed_listener = self.listener.clone();
     runner.report_command_failures(Box::new(move |failure| {
-      command_failures.push(failure.into());
-      failed_listener.on_change();
+      if command_failures.report(failure) {
+        failed_listener.on_change();
+      }
     }));
     runner.share_connection_status(self.signals.connection.clone());
     let notice = LoopDeathNotice(self.maybe_jobs.clone());

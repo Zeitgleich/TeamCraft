@@ -94,15 +94,12 @@ weekday-sat = Sa
 weekday-sun = So
 
 ## Daily-use improvements (docs/ux-backlog.md)
-offline-banner = Du bist offline. Die App verbindet sich von selbst wieder, sobald das Netzwerk zurück ist.
-connection-banner-connecting = Verbindung zum Server wird aufgebaut…
-connection-banner-unreachable = Der Server ist nicht erreichbar. Nachrichten warten, bis er wieder da ist. Nächster Versuch in { $seconds } s.
 connection-banner-captive-portal = Dieses Netzwerk verlangt zuerst eine Anmeldung (statt des Servers hat eine Anmeldeseite geantwortet). Öffne eine Webseite, um dich anzumelden; Nachrichten warten. Nächster Versuch in { $seconds } s.
 connection-banner-untrusted-certificate = Dem Zertifikat des Servers wird nicht vertraut. In einem Netzwerk, das verschlüsselten Verkehr prüft: Nutze ein anderes Netzwerk oder bitte deine IT, das Firmenzertifikat auf diesem Gerät zu installieren. Passiert es überall, ist vielleicht das Zertifikat des Servers fehlerhaft: Sag deiner Administration Bescheid. Nächster Versuch in { $seconds } s.
 connection-banner-proof-refused = Der Server lehnt den Nachweis dieses Geräts immer wieder ab. Vielleicht verändert ein Proxy auf dem Weg die Anfragen, oder der Server kennt diese Adresse nicht: Sag deiner Administration Bescheid. Nachrichten warten. Nächster Versuch in { $seconds } s.
-connection-hint-offline = Offline
+connection-note-unreachable = Server gerade nicht erreichbar
+connection-note-offline = Du bist offline
 connection-hint-connecting = Verbinden…
-connection-hint-reconnecting = Neu verbinden…
 connection-hint-slow = Langsame Verbindung
 connection-banner-retry = Jetzt versuchen
 connection-banner-sign-in = Deine Sitzung ist abgelaufen. Nachrichten warten, bis du dich wieder anmeldest.
@@ -205,7 +202,7 @@ window-restore = Wiederherstellen
 window-close = Schließen
 
 ## Failed actions (an error toast) and the panic overlay
-error-details = Details
+error-copy-details = Details kopieren
 error-generic = Das hat nicht geklappt. Versuche es erneut; wenn es weiter fehlschlägt, kopiere die Details für deinen Admin.
 area-load-failed = Dieser Teil der App konnte nicht geladen werden. Prüfe deine Verbindung und versuche es dann erneut. Klappt es weiterhin nicht, lade die App neu: Vielleicht gibt es eine neue Version.
 area-reload = App neu laden

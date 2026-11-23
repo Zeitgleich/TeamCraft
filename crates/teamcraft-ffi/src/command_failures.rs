@@ -20,7 +20,8 @@ const MAX_WAITING: usize = 8;
 pub enum CommandFailureKind {
   /// The server refused with a stable error code ([`CommandFailure::maybe_error_code`]).
   Refused,
-  /// Nobody answered: the server is out of reach (or a captive portal or proxy answered).
+  /// Nobody answered: the server is out of reach (or a captive portal or proxy answered). Not
+  /// queued any more ([`CommandFailures::report`]): the apps show the connection state instead.
   Unreachable,
   /// Anything else (local store, encryption, a stopped core).
   Other,
@@ -60,6 +61,18 @@ pub(crate) struct CommandFailures {
 }
 
 impl CommandFailures {
+  /// Queues a failure for the app, unless the server was only out of reach (a restart, no network):
+  /// that is the connection state the app shows already, not a failed action to tell about.
+  /// Returns whether it was queued.
+  pub(crate) fn report(&self, failure: ActionFailure) -> bool {
+    if failure.is_unreachable() {
+      tracing::debug!(detail = %failure.detail, "a queued command found the server unreachable");
+      return false;
+    }
+    self.push(failure.into());
+    true
+  }
+
   /// Queues a failure. The same one as the newest waiting is dropped: a retry that fails the same
   /// way is not news.
   pub(crate) fn push(&self, failure: CommandFailure) {
@@ -127,6 +140,24 @@ mod tests {
     assert_eq!(failure.kind, CommandFailureKind::Other);
     assert_eq!(failure.maybe_error_code, None);
     assert_eq!(failure.detail, "store closed");
+  }
+
+  #[test]
+  fn an_unreachable_server_is_not_reported_as_a_failure() {
+    let failures = CommandFailures::default();
+    for kind in [
+      FailureKind::Network,
+      FailureKind::CaptivePortal,
+      FailureKind::UntrustedCertificate,
+    ] {
+      assert!(!failures.report(ActionFailure::new(kind, "server answered 502: ")));
+    }
+    assert!(failures.take().is_empty());
+    assert!(failures.report(ActionFailure::new(
+      FailureKind::Server(ErrorCode::LegalHold),
+      "refused"
+    )));
+    assert_eq!(failures.take().len(), 1);
   }
 
   #[test]

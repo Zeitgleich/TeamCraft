@@ -1767,6 +1767,9 @@ pub fn Composer(
       on:dragover=move |ev: web_sys::DragEvent| ev.prevent_default()
       on:drop=on_drop
     >
+      // The conversation's composer says when the server is away; a thread's beside it doesn't
+      // repeat it.
+      {maybe_thread.is_none().then(|| view! { <crate::components::connection_note::ComposerConnectionNote /> })}
       <Show
         when=move || can_post
         fallback=move || {

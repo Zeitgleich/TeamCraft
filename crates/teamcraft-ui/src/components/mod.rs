@@ -75,6 +75,7 @@ pub mod composer_commands;
 pub mod composer_editor;
 pub mod composer_link_preview;
 pub mod composer_toolbar;
+pub mod connection_note;
 pub mod conversation_notify;
 pub mod conversation_preview;
 pub mod copy_button;
