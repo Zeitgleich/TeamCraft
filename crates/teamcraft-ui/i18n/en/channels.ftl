@@ -485,3 +485,48 @@ inactivity-notice-delete-on = This channel was archived because it was quiet. It
 inactivity-notice-kept-open = This channel is kept open until { $date }.
 inactivity-notice-keep = Keep open
 inactivity-notice-postpone = Postpone deletion
+
+## Strict channels (e2ee.md §4.6.2): only signed admins change a private channel's members.
+channel-strict-title = Member changes
+channel-strict-on = Only the channel's admins and workspace admins change members
+channel-strict-off = Every member's app accepts member changes from any member
+channel-strict-hint = When this is on, every member's app checks each change to the members itself: only the channel's admins add and remove people, moderators only remove members, and workspace owners and admins keep both. Nobody else, and not the server, can add someone. It doesn't stop members from passing on what they can read.
+channel-strict-public-hint = Turn member changes by admins only off before making this channel public.
+channel-strict-role-admin = Admin
+channel-strict-role-moderator = Moderator
+channel-strict-turn-on = Turn on
+channel-strict-turn-on-confirm = Turn on admin-only member changes? The people listed above lose what is named next to them. Only the channel's admins or a workspace owner or admin can turn it off again.
+channel-strict-turn-off = Turn off
+channel-strict-turn-off-confirm = Turn off admin-only member changes? Any member's app can then add and remove people again.
+channel-strict-ask-workspace-admin = Only workspace owners and admins can turn this on. Ask one of them.
+channel-strict-nobody-loses = Nobody who changes members today loses that.
+channel-strict-losses = Who loses what when it is on:
+channel-strict-loses-changing = can no longer add or remove people
+channel-strict-loses-adding = can only remove members, not add anyone
+channel-strict-make-admin = Make admin
+channel-strict-needs-admin = Give at least one person in the channel the admin role first.
+channel-strict-ask-hint = First every device in the channel has to be ready. Nothing changes for anyone yet.
+channel-strict-ask = Check devices
+channel-strict-waiting = { $count ->
+    [0] Waiting for the devices to get ready.
+    [one] { $count } device is on an older version or hasn't been online.
+   *[other] { $count } devices are on an older version or haven't been online.
+  }
+channel-strict-refreshing = { $count ->
+    [one] { $count } device is getting ready.
+   *[other] { $count } devices are getting ready.
+  }
+channel-strict-blocker-device = a device on an older version or not online
+channel-strict-remove-device = Remove device
+channel-strict-remove-device-confirm = Remove this device of { $name } from the channel? Their other devices stay. They can add it back once it is updated.
+channel-strict-stopped = A change to this channel's members was refused. Messages still reach the people who were in it. An admin has to decide.
+channel-strict-continue = Continue
+channel-strict-remove-and-continue = Remove { $name } and continue
+channel-strict-remove-and-continue-confirm = Remove { $name } from the channel and continue? Their change is dropped.
+channel-strict-rejoin-waiting = This device left the channel and waits for an admin to add it back.
+channel-strict-rejoin-due = { $name } wants to add this device back. No admin of the channel did. Check who is in it before you join.
+channel-strict-rejoin-joined = New since this device left: { $names }
+channel-strict-rejoin-gone = Gone since this device left: { $names }
+channel-strict-rejoin = Join
+channel-strict-rejoin-accepted = This device joins with the next invitation back.
+channel-strict-someone = Someone

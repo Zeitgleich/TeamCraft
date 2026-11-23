@@ -383,6 +383,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       } => self.add_space_members(space, &users, is_guest).await,
       CoreCommand::RefreshCustomEmoji => Box::pin(self.refresh_custom_emoji()).await,
       CoreCommand::RefreshStickerPacks => Box::pin(self.refresh_sticker_packs()).await,
+      CoreCommand::Strict { conversation, step } => Box::pin(self.run_strict_step(conversation, step)).await,
       other => Err(runs_elsewhere(&other)),
     }
   }

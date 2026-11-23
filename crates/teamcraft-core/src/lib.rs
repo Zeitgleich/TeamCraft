@@ -109,6 +109,8 @@ mod ui_search;
 #[cfg(feature = "ui")]
 pub mod ui_snapshot;
 #[cfg(feature = "ui")]
+mod ui_strict;
+#[cfg(feature = "ui")]
 mod ui_workspace;
 pub mod unseen_reactions;
 pub mod upkeep;

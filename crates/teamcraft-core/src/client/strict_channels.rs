@@ -312,6 +312,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       ..prompt.hold
     };
     records::put_json(&self.store, Table::AppliedChanges, &hold_key(conversation), &hold)?;
+    self.note_strict_view(conversation)?;
     // Asked again now: the user decided, the backoff of the earlier request doesn't hold it back.
     self
       .store
@@ -358,12 +359,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         &stop,
       )?;
       client.persist_group_at(conversation, message)
-    })
+    })?;
+    self.note_strict_view(conversation)
   }
 
   /// Keeps the roles of the conversation's group in the account data when they changed (e2ee.md
   /// §4.6.2, "Falling out in a strict channel"); a group that was never strict leaves nothing.
   pub(super) fn note_known_strict_roles(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    // The group changed: a stop may have ended, roles or readiness moved (the UI's view).
+    self.note_strict_view(conversation)?;
     if !self.has_group(conversation)? {
       return Ok(());
     }
@@ -485,6 +489,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     records::put_json(&self.store, Table::AppliedChanges, &hold_key(conversation), &hold)?;
     tracing::warn!(conversation_id = %conversation, %error, "held a welcome back into a strict channel");
+    self.note_strict_view(conversation)?;
     Ok(StrictWelcome::Refused(error))
   }
 
@@ -562,6 +567,6 @@ fn stop_key(conversation: ConversationId) -> String {
   format!("strict-stop:{conversation}")
 }
 
-fn hold_key(conversation: ConversationId) -> String {
+pub(super) fn hold_key(conversation: ConversationId) -> String {
   format!("strict-hold:{conversation}")
 }

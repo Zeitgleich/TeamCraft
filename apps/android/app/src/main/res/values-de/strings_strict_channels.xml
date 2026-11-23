@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Strict channels (e2ee.md §4.6.2, issue #1897); the same texts as crates/teamcraft-ui/i18n/de/channels.ftl. -->
+<resources>
+  <string name="channel_strict_title">Mitgliederänderungen</string>
+  <string name="channel_strict_on">Nur die Admins des Kanals und Workspace-Admins ändern die Mitglieder</string>
+  <string name="channel_strict_off">Die App jedes Mitglieds nimmt Mitgliederänderungen von jedem Mitglied an</string>
+  <string name="channel_strict_hint">Wenn das an ist, prüft die App jedes Mitglieds jede Änderung an den Mitgliedern selbst: Nur die Admins des Kanals fügen Personen hinzu und entfernen sie, Moderatoren entfernen nur Mitglieder, und Workspace-Inhaber und -Admins behalten beides. Niemand sonst, auch nicht der Server, kann jemanden hinzufügen. Es hindert Mitglieder nicht daran, weiterzugeben, was sie lesen können.</string>
+  <string name="channel_strict_role_admin">Admin</string>
+  <string name="channel_strict_role_moderator">Moderator</string>
+  <string name="channel_strict_turn_on">Einschalten</string>
+  <string name="channel_strict_turn_on_confirm">Mitgliederänderungen nur durch Admins einschalten? Die oben genannten Personen verlieren, was neben ihnen steht. Nur die Admins des Kanals oder Workspace-Inhaber und -Admins können es wieder ausschalten.</string>
+  <string name="channel_strict_turn_off">Ausschalten</string>
+  <string name="channel_strict_turn_off_confirm">Mitgliederänderungen nur durch Admins ausschalten? Dann kann die App jedes Mitglieds wieder Personen hinzufügen und entfernen.</string>
+  <string name="channel_strict_ask_workspace_admin">Nur Workspace-Inhaber und -Admins können das einschalten. Frag eine dieser Personen.</string>
+  <string name="channel_strict_nobody_loses">Niemand, der heute Mitglieder ändert, verliert das.</string>
+  <string name="channel_strict_losses">Wer was verliert, wenn es an ist:</string>
+  <string name="channel_strict_loses_changing">kann keine Personen mehr hinzufügen oder entfernen</string>
+  <string name="channel_strict_loses_adding">kann nur noch Mitglieder entfernen, niemanden hinzufügen</string>
+  <string name="channel_strict_needs_admin">Gib zuerst mindestens einer Person im Kanal die Admin-Rolle.</string>
+  <string name="channel_strict_ask_hint">Zuerst muss jedes Gerät im Kanal bereit sein. Für niemanden ändert sich schon etwas.</string>
+  <string name="channel_strict_ask">Geräte prüfen</string>
+  <string name="channel_strict_blocker_device">ein Gerät mit älterer Version oder nicht online</string>
+  <string name="channel_strict_remove_device">Gerät entfernen</string>
+  <string name="channel_strict_remove_device_confirm">Dieses Gerät von %1$s aus dem Kanal entfernen? Die anderen Geräte bleiben. Nach einem Update kann es wieder hinzugefügt werden.</string>
+  <string name="channel_strict_stopped">Eine Änderung an den Mitgliedern dieses Kanals wurde abgelehnt. Nachrichten erreichen weiterhin die Personen, die im Kanal waren. Ein Admin muss entscheiden.</string>
+  <string name="channel_strict_continue">Fortfahren</string>
+  <string name="channel_strict_remove_and_continue">%1$s entfernen und fortfahren</string>
+  <string name="channel_strict_remove_and_continue_confirm">%1$s aus dem Kanal entfernen und fortfahren? Die Änderung dieser Person wird verworfen.</string>
+  <string name="channel_strict_rejoin_waiting">Dieses Gerät hat den Kanal verlassen und wartet darauf, dass ein Admin es wieder hinzufügt.</string>
+  <string name="channel_strict_rejoin_due">%1$s möchte dieses Gerät wieder hinzufügen. Kein Admin des Kanals hat es getan. Prüf, wer im Kanal ist, bevor du beitrittst.</string>
+  <string name="channel_strict_rejoin_joined">Neu, seit dieses Gerät weg war: %1$s</string>
+  <string name="channel_strict_rejoin_gone">Nicht mehr dabei, seit dieses Gerät weg war: %1$s</string>
+  <string name="channel_strict_rejoin">Beitreten</string>
+  <string name="channel_strict_rejoin_accepted">Dieses Gerät tritt mit der nächsten Einladung zurück bei.</string>
+  <string name="channel_strict_someone">Jemand</string>
+  <plurals name="channel_strict_waiting">
+    <item quantity="one">%1$d Gerät hat eine ältere Version oder war nicht online.</item>
+    <item quantity="other">%1$d Geräte haben eine ältere Version oder waren nicht online.</item>
+  </plurals>
+  <plurals name="channel_strict_refreshing">
+    <item quantity="one">%1$d Gerät macht sich bereit.</item>
+    <item quantity="other">%1$d Geräte machen sich bereit.</item>
+  </plurals>
+</resources>

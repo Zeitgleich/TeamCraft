@@ -26056,6 +26056,598 @@
           }
         }
       }
+    },
+    "channel_strict_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Member changes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitgliederänderungen"
+          }
+        }
+      }
+    },
+    "channel_strict_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only the channel's admins and workspace admins change members"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur die Admins des Kanals und Workspace-Admins ändern die Mitglieder"
+          }
+        }
+      }
+    },
+    "channel_strict_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Every member's app accepts member changes from any member"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die App jedes Mitglieds nimmt Mitgliederänderungen von jedem Mitglied an"
+          }
+        }
+      }
+    },
+    "channel_strict_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When this is on, every member's app checks each change to the members itself: only the channel's admins add and remove people, moderators only remove members, and workspace owners and admins keep both. Nobody else, and not the server, can add someone. It doesn't stop members from passing on what they can read."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wenn das an ist, prüft die App jedes Mitglieds jede Änderung an den Mitgliedern selbst: Nur die Admins des Kanals fügen Personen hinzu und entfernen sie, Moderatoren entfernen nur Mitglieder, und Workspace-Inhaber und -Admins behalten beides. Niemand sonst, auch nicht der Server, kann jemanden hinzufügen. Es hindert Mitglieder nicht daran, weiterzugeben, was sie lesen können."
+          }
+        }
+      }
+    },
+    "channel_strict_role_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admin"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Admin"
+          }
+        }
+      }
+    },
+    "channel_strict_role_moderator": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderator"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Moderator"
+          }
+        }
+      }
+    },
+    "channel_strict_turn_on": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn on"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Einschalten"
+          }
+        }
+      }
+    },
+    "channel_strict_turn_on_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn on admin-only member changes? The people listed above lose what is named next to them. Only the channel's admins or a workspace owner or admin can turn it off again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitgliederänderungen nur durch Admins einschalten? Die oben genannten Personen verlieren, was neben ihnen steht. Nur die Admins des Kanals oder Workspace-Inhaber und -Admins können es wieder ausschalten."
+          }
+        }
+      }
+    },
+    "channel_strict_turn_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn off"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ausschalten"
+          }
+        }
+      }
+    },
+    "channel_strict_turn_off_confirm": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn off admin-only member changes? Any member's app can then add and remove people again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mitgliederänderungen nur durch Admins ausschalten? Dann kann die App jedes Mitglieds wieder Personen hinzufügen und entfernen."
+          }
+        }
+      }
+    },
+    "channel_strict_ask_workspace_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only workspace owners and admins can turn this on. Ask one of them."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nur Workspace-Inhaber und -Admins können das einschalten. Frag eine dieser Personen."
+          }
+        }
+      }
+    },
+    "channel_strict_nobody_loses": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody who changes members today loses that."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand, der heute Mitglieder ändert, verliert das."
+          }
+        }
+      }
+    },
+    "channel_strict_losses": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Who loses what when it is on:"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wer was verliert, wenn es an ist:"
+          }
+        }
+      }
+    },
+    "channel_strict_loses_changing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "can no longer add or remove people"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "kann keine Personen mehr hinzufügen oder entfernen"
+          }
+        }
+      }
+    },
+    "channel_strict_loses_adding": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "can only remove members, not add anyone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "kann nur noch Mitglieder entfernen, niemanden hinzufügen"
+          }
+        }
+      }
+    },
+    "channel_strict_needs_admin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Give at least one person in the channel the admin role first."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gib zuerst mindestens einer Person im Kanal die Admin-Rolle."
+          }
+        }
+      }
+    },
+    "channel_strict_ask_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "First every device in the channel has to be ready. Nothing changes for anyone yet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zuerst muss jedes Gerät im Kanal bereit sein. Für niemanden ändert sich schon etwas."
+          }
+        }
+      }
+    },
+    "channel_strict_ask": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check devices"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Geräte prüfen"
+          }
+        }
+      }
+    },
+    "channel_strict_blocker_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "a device on an older version or not online"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "ein Gerät mit älterer Version oder nicht online"
+          }
+        }
+      }
+    },
+    "channel_strict_remove_device": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gerät entfernen"
+          }
+        }
+      }
+    },
+    "channel_strict_remove_device_confirm %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove this device of %@ from the channel? Their other devices stay. They can add it back once it is updated."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät von %@ aus dem Kanal entfernen? Die anderen Geräte bleiben. Nach einem Update kann es wieder hinzugefügt werden."
+          }
+        }
+      }
+    },
+    "channel_strict_stopped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A change to this channel's members was refused. Messages still reach the people who were in it. An admin has to decide."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Eine Änderung an den Mitgliedern dieses Kanals wurde abgelehnt. Nachrichten erreichen weiterhin die Personen, die im Kanal waren. Ein Admin muss entscheiden."
+          }
+        }
+      }
+    },
+    "channel_strict_continue": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continue"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fortfahren"
+          }
+        }
+      }
+    },
+    "channel_strict_remove_and_continue %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove %@ and continue"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ entfernen und fortfahren"
+          }
+        }
+      }
+    },
+    "channel_strict_remove_and_continue_confirm %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove %@ from the channel and continue? Their change is dropped."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ aus dem Kanal entfernen und fortfahren? Die Änderung dieser Person wird verworfen."
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin_waiting": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device left the channel and waits for an admin to add it back."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät hat den Kanal verlassen und wartet darauf, dass ein Admin es wieder hinzufügt."
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin_due %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ wants to add this device back. No admin of the channel did. Check who is in it before you join."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte dieses Gerät wieder hinzufügen. Kein Admin des Kanals hat es getan. Prüf, wer im Kanal ist, bevor du beitrittst."
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin_joined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New since this device left: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Neu, seit dieses Gerät weg war: %@"
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin_gone %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Gone since this device left: %@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht mehr dabei, seit dieses Gerät weg war: %@"
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Join"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Beitreten"
+          }
+        }
+      }
+    },
+    "channel_strict_rejoin_accepted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device joins with the next invitation back."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses Gerät tritt mit der nächsten Einladung zurück bei."
+          }
+        }
+      }
+    },
+    "channel_strict_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
+    "channel_strict_waiting %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld device is on an older version or hasn't been online."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld devices are on an older version or haven't been online."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Gerät hat eine ältere Version oder war nicht online."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Geräte haben eine ältere Version oder waren nicht online."
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "channel_strict_refreshing %lld": {
+      "localizations": {
+        "en": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld device is getting ready."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld devices are getting ready."
+                }
+              }
+            }
+          }
+        },
+        "de": {
+          "variations": {
+            "plural": {
+              "one": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Gerät macht sich bereit."
+                }
+              },
+              "other": {
+                "stringUnit": {
+                  "state": "translated",
+                  "value": "%lld Geräte machen sich bereit."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "version": "1.0"

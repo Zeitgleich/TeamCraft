@@ -195,6 +195,7 @@ pub mod space_tile;
 pub mod status_menu;
 pub mod sticker_picker;
 pub mod storage_banner;
+pub mod strict_channel;
 pub mod tab_elsewhere;
 pub mod tab_list;
 pub mod text_viewer;

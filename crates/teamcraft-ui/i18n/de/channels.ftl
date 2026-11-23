@@ -485,3 +485,48 @@ inactivity-notice-delete-on = Dieser Kanal wurde archiviert, weil es still war. 
 inactivity-notice-kept-open = Dieser Kanal bleibt bis zum { $date } offen.
 inactivity-notice-keep = Offen halten
 inactivity-notice-postpone = Löschen aufschieben
+
+## Strenge Kanäle (e2ee.md §4.6.2): nur signierte Admins ändern die Mitglieder eines privaten Kanals.
+channel-strict-title = Mitgliederänderungen
+channel-strict-on = Nur die Admins des Kanals und Workspace-Admins ändern die Mitglieder
+channel-strict-off = Die App jedes Mitglieds nimmt Mitgliederänderungen von jedem Mitglied an
+channel-strict-hint = Wenn das an ist, prüft die App jedes Mitglieds jede Änderung an den Mitgliedern selbst: Nur die Admins des Kanals fügen Personen hinzu und entfernen sie, Moderatoren entfernen nur Mitglieder, und Workspace-Inhaber und -Admins behalten beides. Niemand sonst, auch nicht der Server, kann jemanden hinzufügen. Es hindert Mitglieder nicht daran, weiterzugeben, was sie lesen können.
+channel-strict-public-hint = Schalte Mitgliederänderungen nur durch Admins aus, bevor du diesen Kanal öffentlich machst.
+channel-strict-role-admin = Admin
+channel-strict-role-moderator = Moderator
+channel-strict-turn-on = Einschalten
+channel-strict-turn-on-confirm = Mitgliederänderungen nur durch Admins einschalten? Die oben genannten Personen verlieren, was neben ihnen steht. Nur die Admins des Kanals oder Workspace-Inhaber und -Admins können es wieder ausschalten.
+channel-strict-turn-off = Ausschalten
+channel-strict-turn-off-confirm = Mitgliederänderungen nur durch Admins ausschalten? Dann kann die App jedes Mitglieds wieder Personen hinzufügen und entfernen.
+channel-strict-ask-workspace-admin = Nur Workspace-Inhaber und -Admins können das einschalten. Frag eine dieser Personen.
+channel-strict-nobody-loses = Niemand, der heute Mitglieder ändert, verliert das.
+channel-strict-losses = Wer was verliert, wenn es an ist:
+channel-strict-loses-changing = kann keine Personen mehr hinzufügen oder entfernen
+channel-strict-loses-adding = kann nur noch Mitglieder entfernen, niemanden hinzufügen
+channel-strict-make-admin = Zum Admin machen
+channel-strict-needs-admin = Gib zuerst mindestens einer Person im Kanal die Admin-Rolle.
+channel-strict-ask-hint = Zuerst muss jedes Gerät im Kanal bereit sein. Für niemanden ändert sich schon etwas.
+channel-strict-ask = Geräte prüfen
+channel-strict-waiting = { $count ->
+    [0] Warte darauf, dass die Geräte bereit sind.
+    [one] { $count } Gerät hat eine ältere Version oder war nicht online.
+   *[other] { $count } Geräte haben eine ältere Version oder waren nicht online.
+  }
+channel-strict-refreshing = { $count ->
+    [one] { $count } Gerät macht sich bereit.
+   *[other] { $count } Geräte machen sich bereit.
+  }
+channel-strict-blocker-device = ein Gerät mit älterer Version oder nicht online
+channel-strict-remove-device = Gerät entfernen
+channel-strict-remove-device-confirm = Dieses Gerät von { $name } aus dem Kanal entfernen? Die anderen Geräte bleiben. Nach einem Update kann es wieder hinzugefügt werden.
+channel-strict-stopped = Eine Änderung an den Mitgliedern dieses Kanals wurde abgelehnt. Nachrichten erreichen weiterhin die Personen, die im Kanal waren. Ein Admin muss entscheiden.
+channel-strict-continue = Fortfahren
+channel-strict-remove-and-continue = { $name } entfernen und fortfahren
+channel-strict-remove-and-continue-confirm = { $name } aus dem Kanal entfernen und fortfahren? Die Änderung dieser Person wird verworfen.
+channel-strict-rejoin-waiting = Dieses Gerät hat den Kanal verlassen und wartet darauf, dass ein Admin es wieder hinzufügt.
+channel-strict-rejoin-due = { $name } möchte dieses Gerät wieder hinzufügen. Kein Admin des Kanals hat es getan. Prüf, wer im Kanal ist, bevor du beitrittst.
+channel-strict-rejoin-joined = Neu, seit dieses Gerät weg war: { $names }
+channel-strict-rejoin-gone = Nicht mehr dabei, seit dieses Gerät weg war: { $names }
+channel-strict-rejoin = Beitreten
+channel-strict-rejoin-accepted = Dieses Gerät tritt mit der nächsten Einladung zurück bei.
+channel-strict-someone = Jemand

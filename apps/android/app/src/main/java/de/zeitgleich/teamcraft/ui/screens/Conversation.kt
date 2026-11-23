@@ -474,6 +474,7 @@ fun ConversationScreen(
     }
     LegalHoldBanner(snapshot?.security?.legalHold(conversationId))
     if (isChannel) ChannelUnreachableBanner(viewModel, conversationId)
+    if (isChannel) StrictChannelNotice(viewModel, conversationId)
     RunningCallBanner(viewModel, conversationId, conversation?.name.orEmpty(), runningCallCount)
     if (pinned.isNotEmpty()) PinnedBanner(pinned.last())
     JoinRequestBanner(joinRequests, viewModel.joinRequests)

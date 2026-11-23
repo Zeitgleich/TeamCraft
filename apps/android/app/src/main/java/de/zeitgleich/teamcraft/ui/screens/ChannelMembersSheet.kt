@@ -70,6 +70,9 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
   LaunchedEffect(conversationId, changes) { maybeInfo = viewModel.channelMembers(conversationId) }
   // A forked anchor grants nothing: a workspace admin's look at the roles says so (#1842).
   val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = true)
+  // Who may change the members of a private channel (#1897); nothing while the app doesn't
+  // implement strict channels.
+  val maybeStrict = rememberStrictChannel(viewModel, conversationId, refresh = true)
   // Held here, not in the list's item: scrolling the review away doesn't close it.
   val shownReview = remember(conversationId) { mutableStateOf<ChannelRolesReviewItem?>(null) }
   // "Add people", where the server says the user may (#1534).
@@ -120,6 +123,7 @@ fun ChannelMembersSheet(viewModel: MainViewModel, conversationId: String, onDism
         }
         item { RolesReview(viewModel, conversationId, review, shownReview) }
       }
+      maybeStrict?.let { strict -> item { StrictChannelSection(viewModel, conversationId, strict) } }
       items(info.members, key = { it.userId }) { member -> MemberRow(member) }
     }
   }
