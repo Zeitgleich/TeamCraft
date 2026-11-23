@@ -500,7 +500,7 @@ fn path_row(report: &VideoStatsReport, words: Words<'_>) -> Option<StatsRow> {
       &[("rtt", &or_missing(maybe_rtt_ms.map(|rtt| format!("{rtt} ms"))))],
     ),
   };
-  Some(row("stats-audio-path", value))
+  Some(row("stats-media-path", value))
 }
 
 /// The decoder's queue, and whether this device holds the track back for its own load (#1762):
@@ -811,7 +811,7 @@ mod tests {
       let mut window = StatsWindow::default();
       window.push(report(1_000, sent(), None));
       let rows = english(&window, StatsTarget::OwnCamera);
-      assert!(rows.iter().all(|row| row.label_key != "stats-audio-path"));
+      assert!(rows.iter().all(|row| row.label_key != "stats-media-path"));
 
       let mut direct = report(2_000, sent(), None);
       direct.maybe_media_path = Some(MediaPath::Direct {
@@ -819,13 +819,13 @@ mod tests {
       });
       window.push(direct);
       let rows = english(&window, StatsTarget::OwnCamera);
-      assert_eq!(value(&rows, "stats-audio-path"), "Direct · RTT 12 ms");
+      assert_eq!(value(&rows, "stats-media-path"), "Direct · RTT 12 ms");
 
       let mut relay = report(3_000, sent(), None);
       relay.maybe_media_path = Some(MediaPath::Relay);
       window.push(relay);
       let rows = english(&window, StatsTarget::OwnCamera);
-      assert_eq!(value(&rows, "stats-audio-path"), "Through the server");
+      assert_eq!(value(&rows, "stats-media-path"), "Through the server");
     }
   }
 

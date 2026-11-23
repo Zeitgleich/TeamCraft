@@ -16,6 +16,10 @@
 //! too ([`DrainMeter`], the lower of the two counts): without it, QUIC took in seconds of the
 //! camera at the collapsed rate, which went out after the camera had stopped for the voice and
 //! held it back for 4–5 s (#1889). What QUIC holds can't be taken back; what waits here can.
+//!
+//! The direct path of a 1:1 call (#127) sends its video the same way, on its own QUIC connection
+//! ([`QuicSender::spawn_direct`]): its voice, sent past the queue, waits behind at most
+//! [`MAX_QUIC_WAIT`] of video in QUIC.
 
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
@@ -24,7 +28,7 @@ use tokio::sync::Notify;
 use tracing::debug;
 use web_time::Instant;
 use wtransport::Connection;
-use wtransport::quinn::TransportConfig;
+use wtransport::quinn::{self, TransportConfig};
 
 use crate::send_queue::{QUIC_BACKLOG_BYTES, SendQueue, SendQueueConfig};
 
@@ -57,7 +61,7 @@ pub struct QuicSender {
 }
 
 struct Shared {
-  connection: Connection,
+  connection: Link,
   state: Mutex<State>,
   /// A datagram was queued.
   wake: Notify,
@@ -70,6 +74,14 @@ struct State {
   /// How much QUIC may hold ([`MAX_QUIC_WAIT`] at its rate), and when that was worked out.
   maybe_allowance: Option<(usize, Instant)>,
   drain: DrainMeter,
+}
+
+/// The connection a [`QuicSender`] sends on.
+enum Link {
+  /// A WebTransport session's datagrams (to or from the SFU).
+  Session(Connection),
+  /// A plain QUIC connection's (the direct path, #127).
+  Direct(quinn::Connection),
 }
 
 /// How fast QUIC drains what it holds, while it holds something (see the module docs). Pure: time
@@ -85,6 +97,15 @@ pub struct DrainMeter {
 impl QuicSender {
   /// Starts the task that hands queued datagrams to `connection` (on the current tokio runtime).
   pub fn spawn(connection: Connection, config: SendQueueConfig) -> Self {
+    Self::spawn_on(Link::Session(connection), config)
+  }
+
+  /// The same for the direct path's QUIC connection of a 1:1 call (#127).
+  pub fn spawn_direct(connection: quinn::Connection, config: SendQueueConfig) -> Self {
+    Self::spawn_on(Link::Direct(connection), config)
+  }
+
+  fn spawn_on(connection: Link, config: SendQueueConfig) -> Self {
     let shared = Arc::new(Shared {
       connection,
       state: Mutex::new(State {
@@ -134,7 +155,7 @@ impl Drop for QuicSender {
 impl Shared {
   /// Whether QUIC takes more now: it holds less than its allowance.
   fn is_keeping_up(&self, state: &mut State, now: Instant) -> bool {
-    let quic = self.connection.quic_connection();
+    let quic = self.connection.quic();
     let space = quic.datagram_send_buffer_space();
     let held = QUIC_DATAGRAM_BUFFER_BYTES.saturating_sub(space + QUINN_DATAGRAM_OVERHEAD);
     let allowance = match state.maybe_allowance {
@@ -157,8 +178,25 @@ impl Shared {
 
   fn send(&self, state: &mut State, datagram: &[u8]) {
     state.drain.on_handed(datagram.len());
-    if let Err(error) = self.connection.send_datagram(datagram) {
+    let result = match &self.connection {
+      Link::Session(connection) => connection
+        .send_datagram(datagram)
+        .map_err(|error| error.to_string()),
+      Link::Direct(connection) => connection
+        .send_datagram(datagram.to_vec().into())
+        .map_err(|error| error.to_string()),
+    };
+    if let Err(error) = result {
       debug!(%error, "datagram dropped");
+    }
+  }
+}
+
+impl Link {
+  fn quic(&self) -> &quinn::Connection {
+    match self {
+      Self::Session(connection) => connection.quic_connection(),
+      Self::Direct(connection) => connection,
     }
   }
 }

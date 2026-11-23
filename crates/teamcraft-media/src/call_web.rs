@@ -1991,6 +1991,8 @@ impl CallState<'_> {
             transport.send_datagram(&bytes);
           }
         },
+        // The browser has no direct path (#127): its engine never sets a direct layer.
+        EngineOutput::DirectDatagram(_) => {},
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
           origin,

@@ -33,7 +33,7 @@ use teamcraft_media::{
 };
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
-  ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, ErrorBody, ErrorCode,
+  ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia, ErrorBody, ErrorCode,
   MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_NOTICE_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
   SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents, SfuCallRoster, SfuControlAction,
   TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrackKind,
@@ -802,8 +802,8 @@ impl Room {
         self.relay_direct_offer(participant_id, to_device_id, sealed, now);
         Ok(())
       },
-      CallClientMessage::DirectPath { is_active } => {
-        self.set_direct_path(participant_id, is_active);
+      CallClientMessage::DirectPath { is_active, media } => {
+        self.set_direct_path(participant_id, is_active.then_some(media), now);
         Ok(())
       },
       CallClientMessage::MoveHere => {
@@ -973,10 +973,12 @@ impl Room {
 
   /// The device says its upload's voice is hurt or recovered (#1889): no video to it meanwhile.
   /// A device's report of its direct path (#127): the forwarder skips the pair's voices while both
-  /// say it carries them. Logged by state only.
-  fn set_direct_path(&self, device_id: DeviceId, is_active: bool) {
-    debug!(call_id = %self.call_id, device_id = %device_id, is_active, "direct path reported");
-    lock(&self.state).forwarder.set_direct_path(device_id, is_active);
+  /// say it carries them, and their video while both say it carries that too. Logged by state only.
+  fn set_direct_path(&self, device_id: DeviceId, maybe_media: Option<DirectPathMedia>, now: Instant) {
+    debug!(call_id = %self.call_id, device_id = %device_id, media = ?maybe_media, "direct path reported");
+    let mut state = lock(&self.state);
+    let effects = state.forwarder.set_direct_path(device_id, maybe_media, now);
+    state.apply(effects);
   }
 
   fn set_uplink_hurt(&self, device_id: DeviceId, is_hurt: bool, now: Instant) {

@@ -987,6 +987,8 @@ impl Network {
             connection.room.forward_datagram(device(id), &bytes, now).unwrap();
           }
         },
+        // No direct path in these tests.
+        EngineOutput::DirectDatagram(_) => {},
         EngineOutput::Event(event) => self.client_mut(id).events.push(event),
       }
     }

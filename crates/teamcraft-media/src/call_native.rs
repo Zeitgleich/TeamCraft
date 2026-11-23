@@ -2640,6 +2640,7 @@ impl Sinks {
           }
           self.direct.send(&bytes);
         },
+        EngineOutput::DirectDatagram(bytes) => self.direct.send_video(&bytes),
         EngineOutput::Event(CallEngineEvent::AudioFrame {
           sender,
           origin,

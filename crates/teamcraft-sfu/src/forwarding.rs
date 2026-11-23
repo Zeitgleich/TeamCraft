@@ -59,9 +59,9 @@ use teamcraft_media::{
   voice_guard::{ArrivingVoice, VoiceGuard, VoiceGuardConfig},
 };
 use teamcraft_proto::{
-  AudioFeature, DeviceId, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UplinkFloor, VideoCodec,
-  VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
+  AudioFeature, DeviceId, DirectPathMedia, KNOWN_VIDEO_CODECS, MAX_NACK_SEQUENCE_NUMBERS,
+  MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId, ScreenAudioTrack, TransportFeedback, UplinkFloor,
+  VideoCodec, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, info};
@@ -284,8 +284,9 @@ struct ParticipantRoute {
   /// When its own voice (layer 0) last arrived, and when it came back after a pause.
   maybe_voice_at: Option<Instant>,
   maybe_voice_resumed_at: Option<Instant>,
-  /// It says its direct path to the other device of a 1:1 call carries its media (#127).
-  is_direct_path_active: bool,
+  /// While it says its direct path to the other device of a 1:1 call carries its media (#127):
+  /// what the path carries.
+  maybe_direct: Option<DirectPathMedia>,
 }
 
 #[derive(Debug)]
@@ -399,10 +400,30 @@ impl Forwarder {
 
   /// What a participant says of its direct path to the other device of a 1:1 call (#127,
   /// ARCHITECTURE.md §6.7). The two devices' audio stops going through the SFU to each other only
-  /// while both say it is active ([`Forwarder::is_direct_pair`]); neither can cut the other off.
-  pub fn set_direct_path(&mut self, device_id: DeviceId, is_active: bool) {
-    if let Some(participant) = self.participants.get_mut(&device_id) {
-      participant.is_direct_path_active = is_active;
+  /// while both say it is active ([`Forwarder::is_direct_pair`]), their video only while both say
+  /// it carries the video as well ([`Forwarder::is_direct_video_pair`]); neither can cut the other
+  /// off. When the video starts going directly, neither publisher is asked for layers only the
+  /// other device took; when it stops, the SFU switches the two back to their layers, with
+  /// keyframes asked for.
+  pub fn set_direct_path(
+    &mut self,
+    device_id: DeviceId,
+    maybe_media: Option<DirectPathMedia>,
+    now: Instant,
+  ) -> Vec<Effect> {
+    let maybe_before = self.direct_video_pair();
+    let Some(participant) = self.participants.get_mut(&device_id) else {
+      return Vec::new();
+    };
+    participant.maybe_direct = maybe_media;
+    let maybe_after = self.direct_video_pair();
+    if maybe_before == maybe_after {
+      return Vec::new();
+    }
+    if let Some((first, second)) = maybe_after {
+      self.start_direct_video(first, second, now)
+    } else {
+      self.end_direct_video(maybe_before, now)
     }
   }
 
@@ -413,9 +434,71 @@ impl Forwarder {
       self
         .participants
         .get(&device)
-        .is_some_and(|route| route.is_direct_path_active && !route.is_suspended)
+        .is_some_and(|route| route.maybe_direct.is_some() && !route.is_suspended)
     };
     self.participants.len() == 2 && sender != receiver && is_active(sender) && is_active(receiver)
+  }
+
+  /// Whether `sender` and `receiver` are a direct pair whose direct path carries the video too:
+  /// then the SFU forwards neither one's video to the other.
+  pub fn is_direct_video_pair(&self, sender: DeviceId, receiver: DeviceId) -> bool {
+    let has_video = |device: DeviceId| {
+      self
+        .participants
+        .get(&device)
+        .and_then(|route| route.maybe_direct)
+        .is_some_and(|media| media.has_video())
+    };
+    self.is_direct_pair(sender, receiver) && has_video(sender) && has_video(receiver)
+  }
+
+  /// The two devices whose video goes directly now, if any.
+  fn direct_video_pair(&self) -> Option<(DeviceId, DeviceId)> {
+    let mut devices = self.participants.keys().copied();
+    let (first, second) = (devices.next()?, devices.next()?);
+    self
+      .is_direct_video_pair(first, second)
+      .then_some((first, second))
+  }
+
+  /// The pair's video goes directly from now on: what each received from the SFU stops, and
+  /// neither publisher keeps layers only the other took.
+  fn start_direct_video(&mut self, first: DeviceId, second: DeviceId, now: Instant) -> Vec<Effect> {
+    for route in self.video_tracks.values_mut() {
+      for (receiver, subscription) in &mut route.subscribers {
+        if *receiver == first || *receiver == second {
+          subscription.current = None;
+        }
+      }
+    }
+    self.update_all_layers_needed(now)
+  }
+
+  /// The video of `maybe_pair` came through the SFU again: the two switch to their layers at the
+  /// next keyframes, which are asked for, and the publishers send the layers needed for them.
+  fn end_direct_video(&mut self, maybe_pair: Option<(DeviceId, DeviceId)>, now: Instant) -> Vec<Effect> {
+    let Some((first, second)) = maybe_pair else {
+      return Vec::new();
+    };
+    let mut effects = Vec::new();
+    for receiver in [first, second] {
+      for route in self.video_tracks.values_mut() {
+        if let Some(subscription) = route.subscribers.get_mut(&receiver) {
+          subscription.current = None;
+        }
+      }
+      effects.extend(self.reallocate(receiver, now));
+    }
+    effects.extend(self.update_all_layers_needed(now));
+    effects
+  }
+
+  fn update_all_layers_needed(&mut self, now: Instant) -> Vec<Effect> {
+    let streams: Vec<StreamId> = self.video_tracks.keys().copied().collect();
+    streams
+      .into_iter()
+      .filter_map(|stream_id| self.update_layers_needed(stream_id, now))
+      .collect()
   }
 
   pub fn add_participant(
@@ -429,7 +512,7 @@ impl Forwarder {
     // ends any direct path (#127): everyone gets the voices from the SFU again.
     for route in self.participants.values_mut() {
       route.voice_sequences.remove(&device_id);
-      route.is_direct_path_active = false;
+      route.maybe_direct = None;
     }
     let route = ParticipantRoute {
       audio_stream,
@@ -462,7 +545,7 @@ impl Forwarder {
       maybe_join_probe: self.new_join_probe(now),
       maybe_link_capacity_bps: None,
       maybe_allocation_logged_at: None,
-      is_direct_path_active: false,
+      maybe_direct: None,
     };
     self.participants.insert(device_id, route);
   }
@@ -470,14 +553,15 @@ impl Forwarder {
   /// A participant's connection was lost: it stops receiving and drops out of the speaker
   /// selection; its tracks stay published and its subscriptions stay (paused) for its return.
   pub fn suspend(&mut self, device_id: DeviceId, now: Instant) -> Vec<Effect> {
+    let maybe_direct_video = self.direct_video_pair();
     let Some(participant) = self.participants.get_mut(&device_id) else {
       return Vec::new();
     };
     participant.is_suspended = true;
     // Its direct path counts again only once it says so on its new connection (#127).
-    participant.is_direct_path_active = false;
+    participant.maybe_direct = None;
     participant.maybe_probe_request = None;
-    let mut effects = Vec::new();
+    let mut effects = self.end_direct_video(maybe_direct_video, now);
     if let Some(speakers) = self.speakers.remove(device_id, now) {
       effects.push(Effect::ActiveSpeakers(speakers));
     }
@@ -530,7 +614,7 @@ impl Forwarder {
     participant.maybe_probe_request = None;
     participant.has_feedback = false;
     participant.is_suspended = false;
-    participant.is_direct_path_active = false;
+    participant.maybe_direct = None;
     participant.retransmit_budget = RetransmitBudget::default();
     // Its new connection measures its own, if it does.
     participant.maybe_link_capacity_bps = None;
@@ -615,7 +699,7 @@ impl Forwarder {
     // SFU until it reports a direct path again (#127).
     for route in self.participants.values_mut() {
       route.voice_sequences.remove(&device_id);
-      route.is_direct_path_active = false;
+      route.maybe_direct = None;
     }
     let mut effects: Vec<Effect> = self.follow_thin_voice().into_iter().collect();
     if let Some(speakers) = self.speakers.remove(device_id, now) {
@@ -1040,8 +1124,14 @@ impl Forwarder {
     };
     let is_voice = is_audio || is_screen_audio;
     for receiver in receivers {
-      // The two devices of a 1:1 call that both carry their audio directly (#127).
-      if is_voice && self.is_direct_pair(sender, receiver) {
+      // The two devices of a 1:1 call that both carry their audio, or their video too, directly
+      // (#127).
+      let is_direct = if is_voice {
+        self.is_direct_pair(sender, receiver)
+      } else {
+        self.is_direct_video_pair(sender, receiver)
+      };
+      if is_direct {
         continue;
       }
       if let Some(target) = self.participants.get_mut(&receiver) {
@@ -1537,6 +1627,15 @@ impl Forwarder {
 
   /// Recomputes a receiver's layers; asks publishers for keyframes where a receiver switches.
   fn reallocate(&mut self, receiver: DeviceId, now: Instant) -> Vec<Effect> {
+    // The other device of a direct video pair sends its tracks straight to the receiver (#127):
+    // they take none of its downlink here.
+    let maybe_direct_publisher = self
+      .direct_video_pair()
+      .and_then(|(first, second)| match receiver {
+        device if device == first => Some(second),
+        device if device == second => Some(first),
+        _ => None,
+      });
     let Some(participant) = self
       .participants
       .get_mut(&receiver)
@@ -1554,6 +1653,9 @@ impl Forwarder {
       .video_tracks
       .iter()
       .filter_map(|(&stream_id, route)| {
+        if Some(route.track.device_id) == maybe_direct_publisher {
+          return None;
+        }
         let subscription = route.subscribers.get(&receiver)?;
         let is_screen = route.track.kind == VideoTrackKind::Screen;
         let priority = match route.track.kind {
@@ -1765,6 +1867,15 @@ impl Forwarder {
 
   fn update_layers_needed(&mut self, stream_id: StreamId, now: Instant) -> Option<Effect> {
     let stalled_after = self.config.layer_stalled_after;
+    let publisher = self.video_tracks.get(&stream_id)?.track.device_id;
+    // The other device of a direct video pair gets the track straight from the publisher (#127).
+    let maybe_direct_receiver = self
+      .direct_video_pair()
+      .and_then(|(first, second)| match publisher {
+        device if device == first => Some(second),
+        device if device == second => Some(first),
+        _ => None,
+      });
     let route = self.video_tracks.get_mut(&stream_id)?;
     let arrivals = route.arrivals;
     let is_camera = route.track.kind == VideoTrackKind::Camera;
@@ -1774,8 +1885,9 @@ impl Forwarder {
     // nothing of a camera flows, every layer a receiver may take is needed ([`is_starved`]).
     let mut needed: Vec<u8> = route
       .subscribers
-      .values()
-      .flat_map(|subscription| {
+      .iter()
+      .filter(|(receiver, _)| Some(**receiver) != maybe_direct_receiver)
+      .flat_map(|(_, subscription)| {
         let maybe_live = subscription.target.map(|target| {
           stand_in_layer(
             &arrivals,
@@ -2131,23 +2243,26 @@ mod tests {
   }
 
   /// #127: the SFU stops forwarding the voices of a 1:1 call's two devices to each other only while
-  /// both say their direct path carries them.
+  /// both say their direct path carries them, and their video only while both say it carries that.
   mod direct_path {
     use super::*;
+
+    const AUDIO: Option<DirectPathMedia> = Some(DirectPathMedia::Audio);
+    const WITH_VIDEO: Option<DirectPathMedia> = Some(DirectPathMedia::AudioAndVideo);
 
     #[test]
     fn only_both_saying_so_stops_the_voices_and_either_one_resumes_them() {
       let (mut forwarder, now) = room(2);
-      forwarder.set_direct_path(device(1), true);
+      forwarder.set_direct_path(device(1), AUDIO, now);
       assert_eq!(
         delivered(&mut forwarder, 1, now),
         1,
         "one side alone cuts nothing"
       );
-      forwarder.set_direct_path(device(2), true);
+      forwarder.set_direct_path(device(2), AUDIO, now);
       assert_eq!(delivered(&mut forwarder, 1, now), 0);
       assert_eq!(delivered(&mut forwarder, 2, now), 0);
-      forwarder.set_direct_path(device(2), false);
+      forwarder.set_direct_path(device(2), None, now);
       assert_eq!(delivered(&mut forwarder, 1, now), 1);
       assert_eq!(delivered(&mut forwarder, 2, now), 1);
     }
@@ -2179,23 +2294,108 @@ mod tests {
     }
 
     #[test]
-    fn video_still_goes_through_the_sfu() {
-      let (mut forwarder, _) = room(2);
-      forwarder.set_direct_path(device(1), true);
-      forwarder.set_direct_path(device(2), true);
+    fn only_a_one_to_one_call_is_a_pair() {
+      let (mut forwarder, now) = both_direct();
       assert!(forwarder.is_direct_pair(device(1), device(2)));
       assert!(!forwarder.is_direct_pair(device(1), device(1)));
       let (mut three, _) = room(3);
       for n in 1..=3 {
-        three.set_direct_path(device(n), true);
+        three.set_direct_path(device(n), WITH_VIDEO, now);
       }
       assert!(!three.is_direct_pair(device(1), device(2)), "only a 1:1 call");
+      assert!(!three.is_direct_video_pair(device(1), device(2)));
+      forwarder.set_direct_path(device(1), WITH_VIDEO, now);
+      assert!(
+        !forwarder.is_direct_video_pair(device(1), device(2)),
+        "one side alone"
+      );
+    }
+
+    #[test]
+    fn video_goes_through_the_sfu_unless_both_say_their_path_carries_it() {
+      let (mut forwarder, now) = video_pair();
+      forwarder.set_direct_path(device(1), WITH_VIDEO, now);
+      forwarder.set_direct_path(device(2), AUDIO, now);
+      assert_eq!(send_frame(&mut forwarder, 0, false, now), devices(&[2]));
+      assert_eq!(delivered(&mut forwarder, 1, now), 0, "the voices go directly");
+    }
+
+    /// The publisher stops sending what only the other device took, and starts again with a
+    /// keyframe for it when the video comes through the SFU again.
+    #[test]
+    fn the_pair_s_video_stops_and_resumes_with_keyframes() {
+      let (mut forwarder, now) = video_pair();
+      forwarder.set_direct_path(device(1), WITH_VIDEO, now);
+      let effects = forwarder.set_direct_path(device(2), WITH_VIDEO, now);
+      assert!(
+        effects.contains(&Effect::LayersNeeded {
+          publisher: device(1),
+          stream_id: VIDEO,
+          layers: Vec::new(),
+        }),
+        "{effects:?}"
+      );
+      assert!(send_frame(&mut forwarder, 0, true, now).is_empty());
+
+      let effects = forwarder.set_direct_path(device(2), AUDIO, now);
+      assert!(
+        effects.iter().any(|effect| matches!(
+          effect,
+          Effect::LayersNeeded { stream_id: VIDEO, layers, .. } if layers.contains(&0)
+        )),
+        "{effects:?}"
+      );
+      assert!(
+        effects.iter().any(|effect| matches!(
+          effect,
+          Effect::KeyframeRequest {
+            stream_id: VIDEO,
+            layer: 0,
+            ..
+          }
+        )),
+        "{effects:?}"
+      );
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
+    }
+
+    #[test]
+    fn a_lost_connection_brings_the_video_back_through_the_sfu() {
+      let (mut forwarder, now) = video_pair();
+      forwarder.set_direct_path(device(1), WITH_VIDEO, now);
+      forwarder.set_direct_path(device(2), WITH_VIDEO, now);
+      let effects = forwarder.suspend(device(1), now);
+      assert!(
+        effects.iter().any(|effect| matches!(
+          effect,
+          Effect::LayersNeeded { stream_id: VIDEO, layers, .. } if layers.contains(&0)
+        )),
+        "{effects:?}"
+      );
     }
 
     fn both_direct() -> (Forwarder, Instant) {
       let (mut forwarder, now) = room(2);
-      forwarder.set_direct_path(device(1), true);
-      forwarder.set_direct_path(device(2), true);
+      forwarder.set_direct_path(device(1), AUDIO, now);
+      forwarder.set_direct_path(device(2), AUDIO, now);
+      (forwarder, now)
+    }
+
+    /// Two devices; the second receives layer 0 of the first's camera.
+    fn video_pair() -> (Forwarder, Instant) {
+      let (mut forwarder, now) = room(2);
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Camera,
+          VideoCodec::Av1,
+          three_layers(),
+          None,
+        )
+        .unwrap();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
       (forwarder, now)
     }
 

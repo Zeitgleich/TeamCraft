@@ -5,6 +5,12 @@
 //! The call engine owns the sockets and feeds this module what happened (a connection came up, a
 //! ping was answered or lost, something arrived); it asks [`PathSelector`] where to send. Media on
 //! either path is the same DAVE-encrypted datagram.
+//!
+//! The video (#127 part 4): the receiver tells the sender which of its tracks it takes, up to which
+//! layer ([`DirectControl::Wants`], the same as its subscription at the SFU), and asks the sender
+//! for keyframes ([`DirectControl::Keyframe`]). The sender sends each wanted track on one layer,
+//! the best that fits what the direct connection carries ([`DirectVideoBudget`],
+//! [`direct_video_layers`]).
 
 use std::collections::{HashMap, VecDeque};
 use std::net::{IpAddr, SocketAddr};
@@ -17,7 +23,7 @@ use teamcraft_crypto::ids::DeviceId as BindingDeviceId;
 use teamcraft_proto::{
   Base64Bytes, CallId, CallPeerStanding, DIRECT_PROBE_TOKEN_BYTES, DeviceId, DirectCandidate,
   DirectCandidateKind, DirectMediaPolicy, DirectNatKind, DirectOfferBody, Id, MAX_DIRECT_CANDIDATES,
-  MAX_DIRECT_OFFER_BYTES,
+  MAX_DIRECT_OFFER_BYTES, MediaStreamId, VideoLayerInfo,
 };
 use thiserror::Error;
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
@@ -50,12 +56,51 @@ pub const PING_LOST_AFTER: Duration = Duration::from_millis(400);
 /// While the other device's audio of a stream came on the direct path this recently, the SFU's copy
 /// of it is dropped: the two may be numbered differently (the SFU renumbers voices per receiver).
 pub const DIRECT_PREFERRED_FOR: Duration = Duration::from_millis(100);
+/// The same for video: a track's frames come further apart than a voice's packets (a still screen
+/// share sends a few a second), and its two copies may be different layers, which mustn't mix.
+pub const DIRECT_VIDEO_PREFERRED_FOR: Duration = Duration::from_secs(2);
+/// How often the receiver tells the sender again which tracks it takes (control datagrams may be
+/// lost); a change goes at once.
+pub const WANTS_INTERVAL: Duration = Duration::from_secs(1);
+/// The most tracks a [`DirectControl::Wants`] names: a device sends a camera and a screen share.
+pub const MAX_DIRECT_WANTS: usize = 8;
+/// The shortest time between two keyframes of a track the sender makes for the direct path's
+/// receiver: a receiver can't make the encoder do nothing else.
+pub const DIRECT_KEYFRAME_INTERVAL: Duration = Duration::from_millis(500);
+/// The direct video budget at the start: enough for a camera's middle layer. It grows from there
+/// while the connection keeps up ([`DirectVideoBudget`]).
+pub const START_VIDEO_BUDGET_BPS: u32 = 1_000_000;
+pub const MIN_VIDEO_BUDGET_BPS: u32 = 150_000;
+pub const MAX_VIDEO_BUDGET_BPS: u32 = 10_000_000;
+/// What the budget keeps free for the voices beside the video.
+pub const AUDIO_RESERVE_BPS: u32 = 80_000;
+/// How often the budget looks at the connection: long enough for a loss rate to mean something.
+pub const BUDGET_INTERVAL: Duration = Duration::from_millis(500);
+/// Loss above this share of the packets sent since the last look is congestion.
+const CONGESTION_LOSS: f64 = 0.05;
+/// A round trip this much longer than the shortest one seen is a queue building up.
+const CONGESTION_QUEUE_DELAY: Duration = Duration::from_millis(150);
+/// Fewer packets than this since the last look say nothing about the loss.
+const MIN_PACKETS_FOR_LOSS: u64 = 20;
+/// How much the budget grows per second while the connection keeps up.
+const BUDGET_GROWTH_PER_SECOND: f64 = 0.08;
+/// After congestion the budget doesn't grow for this long; it doubles with each congestion in a
+/// row, up to [`MAX_BUDGET_HOLD`], and starts over after [`BUDGET_CALM_AFTER`] without one.
+const FIRST_BUDGET_HOLD: Duration = Duration::from_secs(2);
+const MAX_BUDGET_HOLD: Duration = Duration::from_secs(30);
+const BUDGET_CALM_AFTER: Duration = Duration::from_secs(20);
+/// A higher layer is taken only when the budget fits it with this much to spare.
+const UPSWITCH_HEADROOM: f64 = 1.15;
 /// The first byte's top bits of a direct path control datagram: datagram version 3, which no media
 /// datagram has (`crate::datagram`, version 0).
 const CONTROL_MARK: u8 = 0b1100_0000;
 const PING_TYPE: u8 = CONTROL_MARK | 1;
 const PONG_TYPE: u8 = CONTROL_MARK | 2;
+const WANTS_TYPE: u8 = CONTROL_MARK | 3;
+const KEYFRAME_TYPE: u8 = CONTROL_MARK | 4;
 const CONTROL_LEN: usize = 5;
+/// A track in a [`DirectControl::Wants`]: its stream ID and the highest layer taken.
+const WANT_LEN: usize = 5;
 
 /// Birthday probing (ARCHITECTURE.md §6.7, "Hard NATs"): the sockets the device behind the hard NAT
 /// opens, each of which its NAT maps to a port of its own toward the other device.
@@ -192,15 +237,23 @@ pub enum DownReason {
   NotAllowed,
 }
 
-/// A control datagram of the direct connection: its liveness, beside the media.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A control datagram of the direct connection, beside the media. It comes from the other device
+/// of the call only (the connection is pinned to its certificate) but is still checked: sizes,
+/// counts, and the tracks it names.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectControl {
+  /// Liveness.
   Ping(u32),
   Pong(u32),
+  /// The receiver's tracks of the sender it takes, each up to a layer; those not named it doesn't
+  /// take. At most [`MAX_DIRECT_WANTS`].
+  Wants(Vec<(MediaStreamId, u8)>),
+  /// The receiver needs a keyframe of the track to decode it again.
+  Keyframe(MediaStreamId),
 }
 
 /// What arrived on the direct connection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectDatagram<'a> {
   Control(DirectControl),
   Media(&'a [u8]),
@@ -250,11 +303,50 @@ pub struct PingDue {
   pub lost: u32,
 }
 
-/// Keeps the SFU's copy of the other device's audio out while the direct path brings it
-/// ([`DIRECT_PREFERRED_FOR`]): the receiver hears each voice from one path at a time.
+/// Keeps the SFU's copy of the other device's audio and video out while the direct path brings it
+/// ([`DIRECT_PREFERRED_FOR`], [`DIRECT_VIDEO_PREFERRED_FOR`]): the receiver takes each stream from
+/// one path at a time.
 #[derive(Debug, Default)]
 pub struct RelayArbiter {
   direct_at: HashMap<u32, Instant>,
+}
+
+/// What the direct connection carries for the own video (#127): a budget that falls at once when
+/// the connection shows congestion (loss, a queue building up, the send queue dropping) and grows
+/// slowly while it keeps up. Growing also when the video sends less than the budget is the probe
+/// upward: the next layer is tried, and taken back if it doesn't fit.
+#[derive(Debug)]
+pub struct DirectVideoBudget {
+  budget_bps: u32,
+  maybe_min_rtt: Option<Duration>,
+  maybe_last: Option<PathReading>,
+  maybe_hold_until: Option<Instant>,
+  maybe_congested_at: Option<Instant>,
+  congestions: u32,
+}
+
+/// The direct connection's counters at a moment (QUIC's path statistics and the send queue's).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PathReading {
+  pub at: Instant,
+  pub sent_packets: u64,
+  pub lost_packets: u64,
+  pub sent_bytes: u64,
+  pub rtt: Duration,
+  /// Datagrams the send queue dropped because they waited too long.
+  pub queue_drops: u64,
+}
+
+/// An own video track as the direct path's layer choice sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectVideoTrack {
+  pub stream_id: MediaStreamId,
+  pub is_screen: bool,
+  pub layers: Vec<VideoLayerInfo>,
+  /// The highest layer the receiver takes; `None`: it doesn't take the track.
+  pub maybe_want: Option<u8>,
+  /// The layer sent now, if any.
+  pub maybe_current: Option<u8>,
 }
 
 /// Decides, from what happens on the direct path, where the media goes (ARCHITECTURE.md §6.7,
@@ -392,8 +484,8 @@ pub fn dial_delay(index: usize) -> Duration {
 
 /// The copy of an own datagram that goes on the direct path, if it goes there: the full voice and
 /// the screen's sound (audio of layer 0; the thin copy is for the SFU's thin receivers), without
-/// the transport sequence number. Video stays on the SFU for now (#127 follow-up: the layer choice
-/// of a direct path).
+/// the transport sequence number. Video isn't copied: the engine makes the direct path's layer as
+/// its own output (`EngineOutput::DirectDatagram`).
 pub fn direct_copy(datagram: &[u8]) -> Option<Vec<u8>> {
   let header = DatagramHeader::parse(datagram).ok()?;
   if header.layer.value() != 0 || !is_audio(datagram) {
@@ -408,13 +500,42 @@ pub fn read_direct(datagram: &[u8]) -> Option<DirectDatagram<'_>> {
   if first & CONTROL_MARK != CONTROL_MARK {
     return Some(DirectDatagram::Media(datagram));
   }
-  let id_bytes: [u8; 4] = datagram.get(1..CONTROL_LEN)?.try_into().ok()?;
-  let id = u32::from_be_bytes(id_bytes);
-  match first {
-    PING_TYPE => Some(DirectDatagram::Control(DirectControl::Ping(id))),
-    PONG_TYPE => Some(DirectDatagram::Control(DirectControl::Pong(id))),
-    _ => None,
+  let control = match first {
+    PING_TYPE => DirectControl::Ping(read_numbered(datagram)?),
+    PONG_TYPE => DirectControl::Pong(read_numbered(datagram)?),
+    KEYFRAME_TYPE => DirectControl::Keyframe(MediaStreamId(read_numbered(datagram)?)),
+    WANTS_TYPE => DirectControl::Wants(read_wants(datagram)?),
+    _ => return None,
+  };
+  Some(DirectDatagram::Control(control))
+}
+
+/// A control datagram's number after its type; exactly that long.
+fn read_numbered(datagram: &[u8]) -> Option<u32> {
+  if datagram.len() != CONTROL_LEN {
+    return None;
   }
+  let bytes: [u8; 4] = datagram.get(1..CONTROL_LEN)?.try_into().ok()?;
+  Some(u32::from_be_bytes(bytes))
+}
+
+/// The tracks a [`DirectControl::Wants`] names: its count, at most [`MAX_DIRECT_WANTS`], matches
+/// its length, and no track twice.
+fn read_wants(datagram: &[u8]) -> Option<Vec<(MediaStreamId, u8)>> {
+  let count = usize::from(*datagram.get(1)?);
+  if count > MAX_DIRECT_WANTS || datagram.len() != 2 + count * WANT_LEN {
+    return None;
+  }
+  let mut wants: Vec<(MediaStreamId, u8)> = Vec::with_capacity(count);
+  for want in datagram.get(2..)?.chunks_exact(WANT_LEN) {
+    let id: [u8; 4] = want.get(..4)?.try_into().ok()?;
+    let stream_id = MediaStreamId(u32::from_be_bytes(id));
+    if wants.iter().any(|(seen, _)| *seen == stream_id) {
+      return None;
+    }
+    wants.push((stream_id, *want.get(4)?));
+  }
+  Some(wants)
 }
 
 /// How this device's NAT maps the direct path socket, from the SFU's reflections of it on two
@@ -557,15 +678,151 @@ pub fn probe_token(bytes: &[u8]) -> Option<[u8; DIRECT_PROBE_TOKEN_BYTES]> {
 }
 
 impl DirectControl {
-  pub fn to_bytes(self) -> [u8; CONTROL_LEN] {
-    let (kind, id) = match self {
-      Self::Ping(id) => (PING_TYPE, id),
-      Self::Pong(id) => (PONG_TYPE, id),
-    };
-    let mut bytes = [kind, 0, 0, 0, 0];
-    bytes[1..].copy_from_slice(&id.to_be_bytes());
-    bytes
+  /// The datagram. A [`Self::Wants`] beyond [`MAX_DIRECT_WANTS`] names the first ones only.
+  pub fn to_bytes(&self) -> Vec<u8> {
+    match self {
+      Self::Ping(id) => numbered(PING_TYPE, *id),
+      Self::Pong(id) => numbered(PONG_TYPE, *id),
+      Self::Keyframe(stream_id) => numbered(KEYFRAME_TYPE, stream_id.0),
+      Self::Wants(wants) => {
+        let wants = &wants[..wants.len().min(MAX_DIRECT_WANTS)];
+        let mut bytes = Vec::with_capacity(2 + wants.len() * WANT_LEN);
+        bytes.push(WANTS_TYPE);
+        // Invariant: at most MAX_DIRECT_WANTS, which fits a byte.
+        bytes.push(u8::try_from(wants.len()).unwrap_or(u8::MAX));
+        for (stream_id, max_layer) in wants {
+          bytes.extend_from_slice(&stream_id.0.to_be_bytes());
+          bytes.push(*max_layer);
+        }
+        bytes
+      },
+    }
   }
+}
+
+impl Default for DirectVideoBudget {
+  fn default() -> Self {
+    Self {
+      budget_bps: START_VIDEO_BUDGET_BPS,
+      maybe_min_rtt: None,
+      maybe_last: None,
+      maybe_hold_until: None,
+      maybe_congested_at: None,
+      congestions: 0,
+    }
+  }
+}
+
+impl DirectVideoBudget {
+  pub fn budget_bps(&self) -> u32 {
+    self.budget_bps
+  }
+
+  /// Looks at the connection; at most every [`BUDGET_INTERVAL`] (readings in between are skipped).
+  pub fn on_reading(&mut self, reading: PathReading) {
+    if !reading.rtt.is_zero() {
+      self.maybe_min_rtt = Some(self.maybe_min_rtt.map_or(reading.rtt, |min| min.min(reading.rtt)));
+    }
+    let Some(last) = self.maybe_last else {
+      self.maybe_last = Some(reading);
+      return;
+    };
+    let elapsed = reading.at.saturating_duration_since(last.at);
+    if elapsed < BUDGET_INTERVAL {
+      return;
+    }
+    self.maybe_last = Some(reading);
+    let sent_packets = reading.sent_packets.saturating_sub(last.sent_packets);
+    let lost_packets = reading.lost_packets.saturating_sub(last.lost_packets);
+    let is_lossy =
+      sent_packets >= MIN_PACKETS_FOR_LOSS && lost_packets as f64 > CONGESTION_LOSS * sent_packets as f64;
+    let is_queueing = self
+      .maybe_min_rtt
+      .is_some_and(|min| reading.rtt.saturating_sub(min) > CONGESTION_QUEUE_DELAY);
+    let has_dropped = reading.queue_drops > last.queue_drops;
+    if is_lossy || is_queueing || has_dropped {
+      let sent_bps = reading.sent_bytes.saturating_sub(last.sent_bytes) as f64 * 8.0 / elapsed.as_secs_f64();
+      self.on_congestion(sent_bps, reading.at);
+    } else {
+      self.on_calm(elapsed, reading.at);
+    }
+  }
+
+  /// Down to below what went through, and at least a step down; no growth for a while.
+  fn on_congestion(&mut self, sent_bps: f64, now: Instant) {
+    let stepped = f64::from(self.budget_bps) * 0.7;
+    let through = sent_bps * 0.85;
+    let target = if through > 0.0 {
+      stepped.min(through)
+    } else {
+      stepped
+    };
+    // Saturating float-to-int conversion is intended.
+    self.budget_bps = (target as u32).clamp(MIN_VIDEO_BUDGET_BPS, MAX_VIDEO_BUDGET_BPS);
+    let hold = FIRST_BUDGET_HOLD
+      .saturating_mul(1 << self.congestions.min(4))
+      .min(MAX_BUDGET_HOLD);
+    self.congestions = self.congestions.saturating_add(1);
+    self.maybe_hold_until = Some(now + hold);
+    self.maybe_congested_at = Some(now);
+  }
+
+  fn on_calm(&mut self, elapsed: Duration, now: Instant) {
+    if self
+      .maybe_congested_at
+      .is_some_and(|at| now.saturating_duration_since(at) >= BUDGET_CALM_AFTER)
+    {
+      self.congestions = 0;
+      self.maybe_congested_at = None;
+    }
+    if self.maybe_hold_until.is_some_and(|until| now < until) {
+      return;
+    }
+    let grown = f64::from(self.budget_bps) * (1.0 + BUDGET_GROWTH_PER_SECOND * elapsed.as_secs_f64());
+    // Saturating float-to-int conversion is intended.
+    self.budget_bps = (grown as u32).clamp(MIN_VIDEO_BUDGET_BPS, MAX_VIDEO_BUDGET_BPS);
+  }
+}
+
+/// The layer each own track goes on over the direct path, within `budget_bps`: a screen share
+/// first, then the camera; each the highest wanted layer that fits (a higher one than now only with
+/// [`UPSWITCH_HEADROOM`]), and at least the lowest layer of a wanted track. A track the receiver
+/// doesn't take goes on none.
+pub fn direct_video_layers(budget_bps: u32, tracks: &[DirectVideoTrack]) -> Vec<(MediaStreamId, Option<u8>)> {
+  let mut order: Vec<&DirectVideoTrack> = tracks.iter().collect();
+  order.sort_by_key(|track| (!track.is_screen, track.stream_id.0));
+  let mut remaining = f64::from(budget_bps.saturating_sub(AUDIO_RESERVE_BPS));
+  let mut chosen = Vec::with_capacity(tracks.len());
+  for track in order {
+    let Some(want) = track.maybe_want else {
+      chosen.push((track.stream_id, None));
+      continue;
+    };
+    let mut candidates: Vec<&VideoLayerInfo> =
+      track.layers.iter().filter(|info| info.layer <= want).collect();
+    candidates.sort_by_key(|info| std::cmp::Reverse(info.layer));
+    let fits = |info: &VideoLayerInfo| {
+      let is_up = track.maybe_current.is_none_or(|current| info.layer > current);
+      let headroom = if is_up { UPSWITCH_HEADROOM } else { 1.0 };
+      f64::from(info.max_bitrate_bps) * headroom <= remaining
+    };
+    let maybe_layer = candidates
+      .iter()
+      .find(|info| fits(info))
+      .or_else(|| candidates.last())
+      .copied();
+    if let Some(info) = maybe_layer {
+      remaining -= f64::from(info.max_bitrate_bps);
+    }
+    chosen.push((track.stream_id, maybe_layer.map(|info| info.layer)));
+  }
+  chosen
+}
+
+fn numbered(kind: u8, value: u32) -> Vec<u8> {
+  let mut bytes = vec![kind, 0, 0, 0, 0];
+  bytes[1..CONTROL_LEN].copy_from_slice(&value.to_be_bytes());
+  bytes
 }
 
 impl Pinger {
@@ -638,16 +895,28 @@ impl RelayArbiter {
     }
   }
 
-  /// Whether a datagram from the SFU is taken: anything but audio the direct path brings now.
+  /// Whether a datagram from the SFU is taken: anything but a stream the direct path brings now.
   pub fn admits_relay(&self, datagram: &[u8], now: Instant) -> bool {
     let Ok(header) = DatagramHeader::parse(datagram) else {
       return true;
     };
+    let preferred_for = if is_audio(datagram) {
+      DIRECT_PREFERRED_FOR
+    } else {
+      DIRECT_VIDEO_PREFERRED_FOR
+    };
     self
       .direct_at
       .get(&header.stream_id.0)
-      .is_none_or(|at| now.saturating_duration_since(*at) >= DIRECT_PREFERRED_FOR)
-      || !is_audio(datagram)
+      .is_none_or(|at| now.saturating_duration_since(*at) >= preferred_for)
+  }
+
+  /// Whether the direct path brought `stream_id` lately: its keyframes are asked for there too.
+  pub fn is_direct(&self, stream_id: MediaStreamId, now: Instant) -> bool {
+    self
+      .direct_at
+      .get(&stream_id.0)
+      .is_some_and(|at| now.saturating_duration_since(*at) < DIRECT_VIDEO_PREFERRED_FOR)
   }
 
   pub fn clear(&mut self) {
@@ -1173,7 +1442,13 @@ mod tests {
 
     #[test]
     fn pings_and_pongs_round_trip_and_media_is_never_taken_for_one() {
-      for control in [DirectControl::Ping(7), DirectControl::Pong(u32::MAX)] {
+      for control in [
+        DirectControl::Ping(7),
+        DirectControl::Pong(u32::MAX),
+        DirectControl::Keyframe(MediaStreamId(12)),
+        DirectControl::Wants(Vec::new()),
+        DirectControl::Wants(vec![(MediaStreamId(12), 2), (MediaStreamId(u32::MAX), 0)]),
+      ] {
         assert_eq!(
           read_direct(&control.to_bytes()),
           Some(DirectDatagram::Control(control))
@@ -1182,8 +1457,38 @@ mod tests {
       let media = audio(3, 0, true);
       assert_eq!(read_direct(&media), Some(DirectDatagram::Media(&media)));
       assert_eq!(read_direct(&[0xC1, 0, 0]), None, "truncated");
+      assert_eq!(read_direct(&[0xC1, 0, 0, 0, 1, 9]), None, "too long");
       assert_eq!(read_direct(&[0xC9, 0, 0, 0, 1]), None, "unknown type");
       assert_eq!(read_direct(&[]), None);
+    }
+
+    /// The other device names the tracks it takes; a datagram that lies about its count, names
+    /// too many or one twice is dropped whole.
+    #[test]
+    fn malformed_wants_are_refused() {
+      let one = DirectControl::Wants(vec![(MediaStreamId(5), 1)]).to_bytes();
+      assert_eq!(one, vec![0xC3, 1, 0, 0, 0, 5, 1]);
+      assert_eq!(read_direct(&one[..6]), None, "truncated");
+      let mut longer = one.clone();
+      longer.push(0);
+      assert_eq!(read_direct(&longer), None, "longer than its count");
+      assert_eq!(read_direct(&[0xC3]), None, "no count");
+      let twice = [0xC3, 2, 0, 0, 0, 5, 1, 0, 0, 0, 5, 2];
+      assert_eq!(read_direct(&twice), None, "a track twice");
+      let count = u8::try_from(MAX_DIRECT_WANTS + 1).unwrap();
+      let mut too_many = vec![0xC3, count];
+      for n in 0..=MAX_DIRECT_WANTS {
+        too_many.extend_from_slice(&u32::try_from(n).unwrap().to_be_bytes());
+        too_many.push(0);
+      }
+      assert_eq!(read_direct(&too_many), None, "too many");
+      let many: Vec<(MediaStreamId, u8)> = (0..20).map(|n| (MediaStreamId(n), 0)).collect();
+      let Some(DirectDatagram::Control(DirectControl::Wants(sent))) =
+        read_direct(&DirectControl::Wants(many).to_bytes())
+      else {
+        panic!("wants");
+      };
+      assert_eq!(sent.len(), MAX_DIRECT_WANTS, "only the first ones are sent");
     }
 
     #[test]
@@ -1197,7 +1502,11 @@ mod tests {
       );
       let mut video = audio(4, 0, false);
       video[6] = 96;
-      assert_eq!(direct_copy(&video), None, "video stays with the SFU");
+      assert_eq!(
+        direct_copy(&video),
+        None,
+        "the engine sends the video's direct layer itself"
+      );
     }
 
     #[test]
@@ -1209,13 +1518,200 @@ mod tests {
       arbiter.on_direct(&voice, start);
       assert!(!arbiter.admits_relay(&voice, start + Duration::from_millis(50)));
       assert!(arbiter.admits_relay(&audio(9, 0, false), start), "another stream");
-      let mut video = audio(3, 0, false);
-      video[6] = 96;
-      assert!(arbiter.admits_relay(&video, start), "not audio");
       assert!(
         arbiter.admits_relay(&voice, start + DIRECT_PREFERRED_FOR),
         "the direct path went quiet: the SFU's copy at once"
       );
+    }
+
+    /// A track's frames come further apart than a voice's packets: the SFU's copy, maybe another
+    /// layer, stays out for longer, so the two never mix in one decoder.
+    #[test]
+    fn the_sfu_copy_of_a_track_waits_longer() {
+      let start = Instant::now();
+      let mut arbiter = RelayArbiter::default();
+      let mut video = audio(4, 1, false);
+      video[6] = 96;
+      assert!(arbiter.admits_relay(&video, start));
+      arbiter.on_direct(&video, start);
+      let later = start + Duration::from_millis(500);
+      assert!(!arbiter.admits_relay(&video, later));
+      assert!(arbiter.is_direct(MediaStreamId(4), later));
+      assert!(arbiter.admits_relay(&video, start + DIRECT_VIDEO_PREFERRED_FOR));
+      assert!(!arbiter.is_direct(MediaStreamId(4), start + DIRECT_VIDEO_PREFERRED_FOR));
+    }
+
+    mod video_budget {
+      use super::*;
+
+      #[test]
+      fn grows_while_the_connection_keeps_up() {
+        let start = Instant::now();
+        let mut budget = DirectVideoBudget::default();
+        let mut counters = Counters::new(start);
+        for _ in 0..20 {
+          budget.on_reading(counters.step(100, 0, Duration::from_millis(30), 0));
+        }
+        assert!(
+          budget.budget_bps() > START_VIDEO_BUDGET_BPS,
+          "{}",
+          budget.budget_bps()
+        );
+        assert!(budget.budget_bps() <= MAX_VIDEO_BUDGET_BPS);
+      }
+
+      #[test]
+      fn loss_a_queue_or_drops_cut_it_below_what_went_through_and_hold_it() {
+        for (lost, rtt, drops) in [
+          (20, Duration::from_millis(30), 0),
+          (0, Duration::from_millis(400), 0),
+          (0, Duration::from_millis(30), 3),
+        ] {
+          let start = Instant::now();
+          let mut budget = DirectVideoBudget::default();
+          let mut counters = Counters::new(start);
+          budget.on_reading(counters.step(100, 0, Duration::from_millis(30), 0));
+          budget.on_reading(counters.step(100, 0, Duration::from_millis(30), 0));
+          let before = budget.budget_bps();
+          budget.on_reading(counters.step(100, lost, rtt, drops));
+          let cut = budget.budget_bps();
+          assert!(cut < before, "{lost} {rtt:?} {drops}: {cut} < {before}");
+          // 100 packets of 1200 bytes per 500 ms went through: 1.92 Mbit/s.
+          assert!(cut <= 1_632_000);
+          budget.on_reading(counters.step(100, 0, Duration::from_millis(30), 0));
+          assert_eq!(budget.budget_bps(), cut, "no growth right after");
+        }
+      }
+
+      #[test]
+      fn never_leaves_its_bounds_and_needs_packets_to_judge_loss() {
+        let start = Instant::now();
+        let mut budget = DirectVideoBudget::default();
+        let mut counters = Counters::new(start);
+        for _ in 0..50 {
+          budget.on_reading(counters.step(100, 90, Duration::from_millis(30), 0));
+        }
+        assert_eq!(budget.budget_bps(), MIN_VIDEO_BUDGET_BPS);
+        let mut quiet = DirectVideoBudget::default();
+        let mut counters = Counters::new(start);
+        quiet.on_reading(counters.step(5, 0, Duration::from_millis(30), 0));
+        quiet.on_reading(counters.step(5, 4, Duration::from_millis(30), 0));
+        assert!(
+          quiet.budget_bps() >= START_VIDEO_BUDGET_BPS,
+          "4 of 5 lost says nothing"
+        );
+      }
+
+      /// The counters of a connection that sends `packets` of 1200 bytes every [`BUDGET_INTERVAL`].
+      struct Counters {
+        at: Instant,
+        sent: u64,
+        lost: u64,
+        drops: u64,
+      }
+
+      impl Counters {
+        fn new(at: Instant) -> Self {
+          Self {
+            at,
+            sent: 0,
+            lost: 0,
+            drops: 0,
+          }
+        }
+
+        fn step(&mut self, packets: u64, lost: u64, rtt: Duration, drops: u64) -> PathReading {
+          self.at += BUDGET_INTERVAL;
+          self.sent += packets;
+          self.lost += lost;
+          self.drops += drops;
+          PathReading {
+            at: self.at,
+            sent_packets: self.sent,
+            lost_packets: self.lost,
+            sent_bytes: self.sent * 1200,
+            rtt,
+            queue_drops: self.drops,
+          }
+        }
+      }
+    }
+
+    mod video_layers {
+      use super::*;
+
+      #[test]
+      fn the_best_wanted_layer_that_fits_and_the_lowest_when_none_does() {
+        let camera = track(1, false, Some(2), None);
+        assert_eq!(
+          direct_video_layers(5_000_000, &[camera.clone()]),
+          vec![(MediaStreamId(1), Some(2))]
+        );
+        assert_eq!(
+          direct_video_layers(1_000_000, &[camera.clone()]),
+          vec![(MediaStreamId(1), Some(1))]
+        );
+        assert_eq!(
+          direct_video_layers(100_000, &[camera]),
+          vec![(MediaStreamId(1), Some(0))]
+        );
+        let capped = track(1, false, Some(0), None);
+        assert_eq!(
+          direct_video_layers(5_000_000, &[capped]),
+          vec![(MediaStreamId(1), Some(0))]
+        );
+        let unwanted = track(1, false, None, Some(1));
+        assert_eq!(
+          direct_video_layers(5_000_000, &[unwanted]),
+          vec![(MediaStreamId(1), None)]
+        );
+      }
+
+      #[test]
+      fn the_screen_share_comes_first_and_a_higher_layer_needs_headroom() {
+        let camera = track(1, false, Some(2), None);
+        let screen = track(2, true, Some(2), None);
+        let chosen = direct_video_layers(1_500_000, &[camera, screen]);
+        assert_eq!(
+          chosen,
+          vec![(MediaStreamId(2), Some(1)), (MediaStreamId(1), Some(0))]
+        );
+        // 800 kbit/s of layer 1 plus the voices fit 900 kbit/s, but not with headroom from below.
+        let from_below = track(1, false, Some(2), Some(0));
+        assert_eq!(
+          direct_video_layers(900_000, &[from_below]),
+          vec![(MediaStreamId(1), Some(0))]
+        );
+        let staying = track(1, false, Some(2), Some(1));
+        assert_eq!(
+          direct_video_layers(900_000, &[staying]),
+          vec![(MediaStreamId(1), Some(1))]
+        );
+      }
+
+      /// Layers of 200 kbit/s, 800 kbit/s and 2.5 Mbit/s.
+      fn track(
+        stream: u32,
+        is_screen: bool,
+        maybe_want: Option<u8>,
+        maybe_current: Option<u8>,
+      ) -> DirectVideoTrack {
+        let layer = |layer, max_bitrate_bps| VideoLayerInfo {
+          layer,
+          width: 320,
+          height: 180,
+          max_framerate: 30,
+          max_bitrate_bps,
+          maybe_codec: None,
+        };
+        DirectVideoTrack {
+          stream_id: MediaStreamId(stream),
+          is_screen,
+          layers: vec![layer(0, 200_000), layer(1, 800_000), layer(2, 2_500_000)],
+          maybe_want,
+          maybe_current,
+        }
+      }
     }
 
     #[test]
