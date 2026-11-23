@@ -53,6 +53,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `web_directory.rs`      | The directory in the web client: people cards, the Channels tab, resending and revoking an invitation |
 | `web_single_image.rs`   | One picture of an album in the web client: tile menu, a quote with its picture that opens it, a forward of it alone |
 | `desktop_perf.rs` (`desktop`) | The Linux desktop app on a large workspace, visible and closed to the tray: CPU, wakeups, memory per process, the server's requests (#1022) |
+| `desktop_downloads.rs` (`desktop`) | The downloads button stays in the top bar through a restart into a catch-up, also the first start after an update (`E2E_DESKTOP_PREVIOUS_BIN`, #2338) |
 | `desktop_call_mini.rs` (`desktop`) | The small call window (#2077): appears when the main window is minimized, mutes the call, "back to the call" and hang up; run it under a window manager that moves the focus (`kwin_wayland --virtual --xwayland`) |
 
 The `acceptance_*` scenarios cover the v1 sections of PLAN.md one by one; what each proves, the known gaps
@@ -157,6 +158,7 @@ cargo test -p teamcraft-e2e --features browser --test suite -- --include-ignored
 | `E2E_CONSOLE`            | Browser tests print the page's console as it happens (`web_calls.rs`)                      |
 | `RUST_MIN_STACK`         | Stack of a test thread: 16 MiB in `scripts/e2e.sh`, set it for a plain `cargo test`        |
 | `E2E_DESKTOP_BIN`        | The desktop app's binary for `desktop_perf.rs` (without it the test skips)                 |
+| `E2E_DESKTOP_PREVIOUS_BIN` | An earlier build of the app for `desktop_downloads.rs`'s first run, so its watched start follows an update |
 | `E2E_DESKTOP_REQUIRED=1` | A missing desktop binary or session (bus, keyring) fails instead of skipping               |
 
 A test that aborts (a stack overflow, a kill) leaves its server and Chromium running; the web tests share port
