@@ -235,6 +235,11 @@ jobs:
       SQLX_OFFLINE: "true"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_DEV_STRIP: "debuginfo"
+      # Three compiler processes, not one per core: at the end of a cold build the big test crates
+      # are compiled side by side at 3 to 5 GB each, and four of them took the 16 GB runner into
+      # swap until it was killed (exit 137 or a lost runner, #2344). The tests themselves need
+      # little memory.
+      CARGO_BUILD_JOBS: "3"
       DATABASE_URL: postgres://teamcraft:ci-only@postgres:5432/teamcraft
       TEST_DATABASE_REQUIRED: "true"
       TEST_SERVICES_REQUIRED: "true"
