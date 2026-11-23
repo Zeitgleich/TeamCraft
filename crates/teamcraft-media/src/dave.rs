@@ -33,6 +33,7 @@ use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
 #[cfg(feature = "native")]
 use teamcraft_crypto::call_recording::RecordingNoticeSigner;
+use teamcraft_crypto::call_signal::{CALL_SIGNAL_EXPORTER_LABEL, CALL_SIGNAL_EXPORTER_LEN, CallSignalKey};
 use teamcraft_crypto::direct_path::{DIRECT_PATH_EXPORTER_LABEL, DIRECT_PATH_EXPORTER_LEN, DirectPathKey};
 use teamcraft_crypto::secret::SecretBytes;
 use teamcraft_proto::{CallId, DaveTransitionId, DeviceId, Id, IdError, Snowflake};
@@ -277,6 +278,18 @@ impl DaveParticipant {
       DIRECT_PATH_EXPORTER_LEN,
     )?);
     DirectPathKey::from_exporter(epoch.0, exported.expose_secret()).ok()
+  }
+
+  /// The key that seals in-call signals (reactions, raised hands; #2324, e2ee.md §8.5) in the
+  /// current epoch: only the members of this epoch hold it. `None` before the group is established.
+  pub fn maybe_call_signal_key(&self) -> Option<CallSignalKey> {
+    let epoch = self.maybe_epoch()?;
+    let exported = SecretBytes::new(self.session.export_secret(
+      CALL_SIGNAL_EXPORTER_LABEL,
+      &[],
+      CALL_SIGNAL_EXPORTER_LEN,
+    )?);
+    CallSignalKey::from_exporter(epoch.0, exported.expose_secret()).ok()
   }
 
   pub fn maybe_leaf_index(&self) -> Option<DaveLeafIndex> {
@@ -614,6 +627,40 @@ mod tests {
       );
       let outsider = carol.maybe_direct_path_key().unwrap();
       assert!(outsider.open(&context, &sealed).is_err());
+    }
+
+    /// #2324: every member derives the same signal key, which isn't the direct path key.
+    #[test]
+    fn members_share_the_call_signal_key_of_their_epoch() {
+      use teamcraft_crypto::call_binding::CallId as BindingCallId;
+      use teamcraft_crypto::call_signal::SignalContext;
+      use teamcraft_crypto::ids::DeviceId as BindingDeviceId;
+
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_participant(&gateway, ALICE);
+      let mut bob = joined_participant(&gateway, BOB);
+      assert!(alice.maybe_call_signal_key().is_none(), "no group yet");
+      add_members(
+        &gateway,
+        &mut alice,
+        &mut [],
+        &mut [(BOB, &mut bob)],
+        &[ALICE, BOB],
+      );
+      let context = SignalContext {
+        call_id: BindingCallId::new(1),
+        from: BindingDeviceId::new(1),
+      };
+      let sealed = alice
+        .maybe_call_signal_key()
+        .unwrap()
+        .seal(&context, b"signal", &mut rand_core::OsRng)
+        .unwrap();
+      let bob_key = bob.maybe_call_signal_key().unwrap();
+      assert_eq!(
+        bob_key.open(&context, &sealed).unwrap().expose_secret(),
+        b"signal"
+      );
     }
 
     #[test]

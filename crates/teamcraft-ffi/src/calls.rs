@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::StreamExt;
+use teamcraft_client_api::calls::MAX_KEPT_REACTIONS;
 use teamcraft_core::client::{CallKeySigner, DirectMediaInputs};
 use teamcraft_core::connection::{ConnectionState as CoreConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
@@ -38,9 +39,9 @@ use teamcraft_media::video::{
 use teamcraft_media::video_capture::CaptureFormat;
 use teamcraft_media::video_pipeline::{VideoSendConfig, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallJoinTokenResponse, ConversationId, DeviceId, ErrorCode, GatewayEvent, MediaCapabilities,
-  MediaStreamId, ScreenContentMode, ScreenSharePolicy, ScreenShareResolution, UserId, VideoCodec,
-  VideoLayerInfo, VideoTrack, VideoTrackKind,
+  AudioCodec, CallJoinTokenResponse, CallReaction, ConversationId, DeviceId, ErrorCode, GatewayEvent,
+  MediaCapabilities, MediaStreamId, ScreenContentMode, ScreenSharePolicy, ScreenShareResolution, UserId,
+  VideoCodec, VideoLayerInfo, VideoTrack, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
@@ -234,6 +235,40 @@ pub struct VideoTrackInfo {
   pub is_screen: bool,
 }
 
+/// Somebody else's reaction in the call (#2324).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallReactionInfo {
+  /// Counts up within the call.
+  pub id: u64,
+  pub user_id: String,
+  /// The reaction's stable name (`thumbs_up`, `applause`, …), for its spoken name.
+  pub reaction: String,
+  /// The emoji it shows as (user content, not an icon).
+  pub emoji: String,
+}
+
+/// A reaction the call's picker offers (#2324).
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct CallReactionChoice {
+  /// The stable name to send ([`CallSession::send_reaction`]) and to name it by.
+  pub reaction: String,
+  pub emoji: String,
+}
+
+/// The reactions a call offers, in the picker's order (#2324): the same set on every platform.
+#[uniffi::export]
+pub fn call_reactions() -> Vec<CallReactionChoice> {
+  CallReaction::ALL
+    .iter()
+    .filter_map(|reaction| {
+      reaction.emoji().map(|emoji| CallReactionChoice {
+        reaction: reaction.as_str().to_owned(),
+        emoji: emoji.to_owned(),
+      })
+    })
+    .collect()
+}
+
 /// One other device in the call and whose it is (to name a video tile by its device).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CallPeer {
@@ -302,6 +337,16 @@ pub struct CallStateInfo {
   /// typically for its voice (#1891): their tiles say so instead of a frozen picture.
   #[uniffi(default)]
   pub paused_video_stream_ids: Vec<String>,
+  /// The users with a raised hand (#2324): their tiles show it. Lowered when they leave.
+  #[uniffi(default = [])]
+  pub raised_hand_user_ids: Vec<String>,
+  /// This device's hand is raised (#2324), as the call has it.
+  #[uniffi(default = false)]
+  pub is_hand_raised: bool,
+  /// The others' latest reactions (#2324), oldest first, at most [`MAX_KEPT_REACTIONS`]: the app
+  /// floats each one whose id is above the last it showed, and says it to screen readers.
+  #[uniffi(default = [])]
+  pub reactions: Vec<CallReactionInfo>,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -395,6 +440,10 @@ enum Control {
   SetMuted(bool),
   SetDeafened(bool),
   MoveHere,
+  /// A reaction to show the others (#2324).
+  SendReaction(CallReaction),
+  /// The hand raised or lowered (#2324).
+  SetHandRaised(bool),
   StartCamera {
     format: CaptureFormat,
     done: oneshot::Sender<Result<(), TeamCraftError>>,
@@ -462,6 +511,21 @@ impl CallSession {
   /// Takes the call over from the account's other devices, which leave it.
   pub fn move_here(&self) {
     self.send(Control::MoveHere);
+  }
+
+  /// Shows a reaction to everybody else in the call (#2324), end-to-end encrypted. `reaction` is
+  /// a name from [`call_reactions`]; an unknown one is ignored. Ephemeral: dropped while the call
+  /// isn't secured, and when this device sent too many just now.
+  pub fn send_reaction(&self, reaction: String) {
+    let reaction = CallReaction::from(reaction);
+    if reaction.emoji().is_some() {
+      self.send(Control::SendReaction(reaction));
+    }
+  }
+
+  /// Raises or lowers this device's hand for everybody else in the call (#2324).
+  pub fn set_hand_raised(&self, is_raised: bool) {
+    self.send(Control::SetHandRaised(is_raised));
   }
 
   /// Other devices' video and frames go to `listener` from now on.
@@ -767,6 +831,9 @@ pub(crate) async fn join(
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,
     paused_video_stream_ids: Vec::new(),
+    raised_hand_user_ids: Vec::new(),
+    is_hand_raised: false,
+    reactions: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: None,
     maybe_encryption_retry_after_secs: None,
@@ -872,6 +939,7 @@ async fn run_call(
   let mut roster = BTreeMap::new();
   let mut muted = BTreeSet::new();
   let mut refused = BTreeSet::new();
+  let mut signals = SignalState::default();
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
@@ -916,9 +984,13 @@ async fn run_call(
           if !encoded.is_active() {
             watch_video(&call, &event, context.own_device, &mut video);
           }
+          let has_signal = signals.apply(&roster, &event);
           if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, &mut muted, &mut refused, event) {
             reason = end;
             break;
+          }
+          if has_signal {
+            signals.report(state, &roster);
           }
           context.hub.report(state.clone());
         },
@@ -967,6 +1039,11 @@ async fn apply_control(
   match control {
     Control::SetMuted(is_muted) => call.set_muted(is_muted),
     Control::MoveHere => call.move_here(),
+    Control::SendReaction(reaction) => call.send_reaction(reaction),
+    Control::SetHandRaised(is_raised) => {
+      call.set_hand_raised(is_raised);
+      state.is_hand_raised = is_raised;
+    },
     Control::SetDeafened(is_deafened) => {
       call.set_deafened(is_deafened);
       state.is_deafened = is_deafened;
@@ -1384,6 +1461,59 @@ fn upright(width: u16, height: u16) -> VideoResolution {
   }
 }
 
+/// The others' raised hands and latest reactions (#2324).
+#[derive(Default)]
+struct SignalState {
+  raised: BTreeSet<DeviceId>,
+  reactions: Vec<CallReactionInfo>,
+  next_reaction_id: u64,
+}
+
+impl SignalState {
+  /// Follows an engine event; `true` when what the app shows of hands or reactions may change.
+  fn apply(&mut self, roster: &BTreeMap<DeviceId, UserId>, event: &CallEngineEvent) -> bool {
+    match event {
+      CallEngineEvent::HandRaised { device_id, is_raised } => {
+        if *is_raised {
+          self.raised.insert(*device_id)
+        } else {
+          self.raised.remove(device_id)
+        }
+      },
+      CallEngineEvent::Reaction { device_id, reaction } => {
+        let (Some(user), Some(emoji)) = (roster.get(device_id), reaction.emoji()) else {
+          return false;
+        };
+        self.next_reaction_id += 1;
+        if self.reactions.len() >= MAX_KEPT_REACTIONS {
+          self.reactions.remove(0);
+        }
+        self.reactions.push(CallReactionInfo {
+          id: self.next_reaction_id,
+          user_id: user.to_string(),
+          reaction: reaction.as_str().to_owned(),
+          emoji: emoji.to_owned(),
+        });
+        true
+      },
+      CallEngineEvent::ParticipantLeft(device_id) => self.raised.remove(device_id),
+      // The others tell their raised hands again once they see this device back.
+      CallEngineEvent::Reconnecting => {
+        let had_any = !self.raised.is_empty();
+        self.raised.clear();
+        had_any
+      },
+      _ => false,
+    }
+  }
+
+  fn report(&self, state: &mut CallStateInfo, roster: &BTreeMap<DeviceId, UserId>) {
+    let users: BTreeSet<UserId> = roster.values().copied().collect();
+    state.raised_hand_user_ids = users_with_any_device(&users, roster, &self.raised);
+    state.reactions = self.reactions.clone();
+  }
+}
+
 /// Updates the call's state; returns why the call ends if the event ends it. `reconnecting`:
 /// other devices that are rejoining; `roster`: other devices in the call and their users;
 /// `refused`: devices whose call key binding did not verify (kept out of the media group).
@@ -1593,6 +1723,9 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,
     paused_video_stream_ids: Vec::new(),
+    raised_hand_user_ids: Vec::new(),
+    is_hand_raised: false,
+    reactions: Vec::new(),
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
     maybe_encryption_retry_after_secs: None,
@@ -2203,6 +2336,66 @@ mod tests {
       CallEngineEvent::ParticipantLeft(device(30)),
     );
     assert_eq!(state.speaking_user_ids, vec!["2".to_string()]);
+  }
+
+  #[test]
+  fn raised_hands_and_reactions_follow_the_signals() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let mut roster = BTreeMap::from([(device(20), user(2)), (device(30), user(3))]);
+    let mut signals = SignalState::default();
+    let raise = CallEngineEvent::HandRaised {
+      device_id: device(20),
+      is_raised: true,
+    };
+    assert!(signals.apply(&roster, &raise));
+    assert!(signals.apply(
+      &roster,
+      &CallEngineEvent::Reaction {
+        device_id: device(30),
+        reaction: CallReaction::Applause,
+      },
+    ));
+    assert!(!signals.apply(
+      &roster,
+      &CallEngineEvent::Reaction {
+        device_id: device(99),
+        reaction: CallReaction::Heart,
+      },
+    ));
+    signals.report(&mut state, &roster);
+    assert_eq!(state.raised_hand_user_ids, vec!["2".to_string()]);
+    assert_eq!(state.reactions.len(), 1);
+    assert_eq!(state.reactions[0].user_id, "3");
+    assert_eq!(state.reactions[0].reaction, "applause");
+    // Leaving lowers it; so does this device's own reconnect, until the others say it again.
+    assert!(signals.apply(&roster, &CallEngineEvent::ParticipantLeft(device(20))));
+    roster.remove(&device(20));
+    signals.report(&mut state, &roster);
+    assert!(state.raised_hand_user_ids.is_empty());
+    signals.apply(&roster, &raise);
+    assert!(signals.apply(&roster, &CallEngineEvent::Reconnecting));
+    for _ in 0..MAX_KEPT_REACTIONS + 2 {
+      signals.apply(
+        &roster,
+        &CallEngineEvent::Reaction {
+          device_id: device(30),
+          reaction: CallReaction::Heart,
+        },
+      );
+    }
+    signals.report(&mut state, &roster);
+    assert_eq!(state.reactions.len(), MAX_KEPT_REACTIONS);
+    assert_eq!(
+      state.reactions.last().map(|shown| shown.id),
+      Some(MAX_KEPT_REACTIONS as u64 + 3)
+    );
+  }
+
+  #[test]
+  fn the_picker_offers_every_known_reaction() {
+    let offered = call_reactions();
+    assert_eq!(offered.len(), CallReaction::ALL.len());
+    assert_eq!(offered[0].reaction, "thumbs_up");
   }
 
   #[test]

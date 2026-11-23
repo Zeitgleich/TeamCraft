@@ -1321,6 +1321,8 @@ pub(crate) fn connect_calls(state: AppState) {
       CallEvent::Muted(is_muted) => backend.set_call_muted(is_muted),
       CallEvent::Deafened(is_deafened) => backend.set_call_deafened(is_deafened),
       CallEvent::MoveHere => backend.move_call_here(),
+      CallEvent::Reaction(reaction) => backend.send_call_reaction(reaction),
+      CallEvent::Hand(is_raised) => backend.set_call_hand_raised(is_raised),
       // An empty id is the system default.
       CallEvent::Microphone(device) => backend.select_microphone(Some(device).filter(|id| !id.is_empty())),
       CallEvent::Speakers(device) => backend.select_speakers(Some(device).filter(|id| !id.is_empty())),

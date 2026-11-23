@@ -65,8 +65,8 @@ use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
-  AudioCodec, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities, MediaStreamId,
-  VideoCodec, VideoTrackKind,
+  AudioCodec, CallReaction, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
+  MediaStreamId, VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -189,6 +189,10 @@ enum Control {
   Mute(bool),
   Deafen(bool),
   MoveHere,
+  /// A reaction to show the others (#2324).
+  Reaction(CallReaction),
+  /// The hand raised or lowered (#2324).
+  Hand(bool),
   Audio {
     source: AudioSource,
     sink: AudioSink,
@@ -785,6 +789,21 @@ impl CallHost {
   /// Takes the call over from the account's other devices (#505).
   pub async fn move_here(&self) {
     self.control(Control::MoveHere).await;
+  }
+
+  /// Shows a reaction to everybody else in the call (#2324).
+  pub async fn send_reaction(&self, reaction: CallReaction) {
+    self.control(Control::Reaction(reaction)).await;
+  }
+
+  /// Raises or lowers the hand for everybody else in the call (#2324).
+  pub async fn set_hand_raised(&self, is_raised: bool) {
+    self.control(Control::Hand(is_raised)).await;
+    // A reloaded page shows the hand as the call has it.
+    if let Some(active) = lock(&self.state).view.maybe_active.as_mut() {
+      active.is_hand_raised = is_raised;
+    }
+    self.changed();
   }
 
   /// The network changed or the computer woke up (the same signal the gateway reconnects on): a
@@ -1488,6 +1507,8 @@ async fn run_media(
         Some(Control::Mute(is_muted)) => call.set_muted(is_muted),
         Some(Control::Deafen(is_deafened)) => call.set_deafened(is_deafened),
         Some(Control::MoveHere) => call.move_here(),
+        Some(Control::Reaction(reaction)) => call.send_reaction(reaction),
+        Some(Control::Hand(is_raised)) => call.set_hand_raised(is_raised),
         Some(Control::Audio { source, sink, done }) => {
           let result = call.set_audio(source, sink).await.map_err(|error| call_failure_wire(&error));
           let _ = done.send(result);

@@ -58,8 +58,8 @@ use teamcraft_media::link_probe::PriorLink;
 use teamcraft_media::video::{ScreenProfile, VideoResolution, camera_limit};
 use teamcraft_media::voice_fec::protocol::worker_url as voice_worker_url;
 use teamcraft_proto::{
-  AudioCodec, CallId, CallRosterEntry, DeviceId, MediaCapabilities, MediaStreamId, ScreenContentMode,
-  ScreenShareResolution, VideoTrackKind,
+  AudioCodec, CallId, CallReaction, CallRosterEntry, DeviceId, MediaCapabilities, MediaStreamId,
+  ScreenContentMode, ScreenShareResolution, VideoTrackKind,
 };
 use tracing_subscriber::Layer;
 use tracing_subscriber::filter::LevelFilter;
@@ -199,6 +199,10 @@ enum Control {
   Mute(bool),
   Deafen(bool),
   MoveHere,
+  /// A reaction to show the others (#2324).
+  Reaction(CallReaction),
+  /// The hand raised or lowered (#2324).
+  Hand(bool),
   Audio {
     source: AudioSource,
     sink: AudioSink,
@@ -746,6 +750,8 @@ impl Host {
       CallAction::SetMuted { is_muted } => self.control(Control::Mute(is_muted)),
       CallAction::SetDeafened { is_deafened } => self.control(Control::Deafen(is_deafened)),
       CallAction::MoveHere => self.control(Control::MoveHere),
+      CallAction::SendReaction { reaction } => self.control(Control::Reaction(reaction)),
+      CallAction::SetHandRaised { is_raised } => self.control(Control::Hand(is_raised)),
       CallAction::SelectMicrophone { maybe_device } => {
         self.state.borrow_mut().microphone = device_choice(maybe_device);
         self.switch_audio().await?;
@@ -1948,6 +1954,8 @@ async fn apply(call: &WebCall, control: Control) {
     Control::Mute(is_muted) => call.set_muted(is_muted),
     Control::Deafen(is_deafened) => call.set_deafened(is_deafened),
     Control::MoveHere => call.move_here(),
+    Control::Reaction(reaction) => call.send_reaction(reaction),
+    Control::Hand(is_raised) => call.set_hand_raised(is_raised),
     // The asker may have given up waiting.
     Control::Audio { source, sink, done } => drop(done.send(call.set_audio(source, sink).await)),
     Control::Camera {

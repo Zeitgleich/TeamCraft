@@ -348,6 +348,16 @@ class CallController(
     maybeSession?.setDeafened(isDeafened)
   }
 
+  /** Shows a reaction to everybody else in the call (#2324), end-to-end encrypted. */
+  fun sendReaction(reaction: String) {
+    maybeSession?.sendReaction(reaction)
+  }
+
+  /** Raises or lowers the hand for everybody else in the call (#2324). */
+  fun setHandRaised(isRaised: Boolean) {
+    maybeSession?.setHandRaised(isRaised)
+  }
+
   /** Turns the camera on or off; the call screen asks for the permission and captures. */
   fun setCameraWanted(isWanted: Boolean) {
     wantsCamera.value = isWanted

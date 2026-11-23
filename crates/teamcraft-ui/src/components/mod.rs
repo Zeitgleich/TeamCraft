@@ -57,6 +57,7 @@ pub mod call_mini_window;
 pub mod call_notetaker;
 pub mod call_popover;
 pub mod call_prejoin;
+pub mod call_reactions;
 pub mod call_recording;
 pub mod call_screen;
 pub mod call_tile;

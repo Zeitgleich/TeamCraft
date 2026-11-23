@@ -102,6 +102,8 @@ impl FakeCalls {
         }
       },
       CallAction::MoveHere => {},
+      // Nobody else in a fake call to show them to.
+      CallAction::SendReaction { .. } | CallAction::SetHandRaised { .. } => {},
       CallAction::SetCamera { is_on } => {
         if let Some(active) = &mut snapshot.maybe_active {
           active.is_camera_on = is_on;
@@ -181,6 +183,8 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     maybe_encryption_failure: None,
     recorders: Vec::new(),
     maybe_own_recording: None,
+    reactions: Vec::new(),
+    is_hand_raised: false,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

@@ -7399,6 +7399,51 @@ only the chain of trust is replaced by the pin. ALPN `teamcraft-direct/1`.
 never the addresses. The SFU logs relayed offers by count, reports by state, and reflections by
 session, never the address it reflected.
 
+### 8.5 Reactions and raised hands (issue #2324)
+
+A participant can float a reaction over everybody's stage (a fixed set: thumbs up, applause,
+laughing, heart, celebrate, surprised) and raise or lower a hand. Both are end-to-end encrypted like
+the media: the SFU relays them and learns only that a device sent something.
+
+- **Key:** 32 bytes exported from the call's DAVE group for the current epoch (MLS exporter, RFC 9420
+  §8.5, label `TeamCraft-v1 call signal`, empty context), expanded with HKDF-SHA256 into a signal key
+  (`info` = `TeamCraft-v1 call signal key`). Only members of that epoch hold it; a device that left
+  or joined later can't read the epoch's signals (`teamcraft_crypto::call_signal`). It is not the
+  direct path's key: another exporter label.
+- **Seal:** XChaCha20-Poly1305 with a random 192-bit nonce. Associated data: a version byte, the call
+  ID, the epoch and the sender's device ID, so the SFU on its own can't move a signal into another
+  call or epoch or pass one device's signal off as another's.
+- **Wire format:** version (1 byte, `1`) ‖ epoch (8 bytes, big endian) ‖ nonce (24 bytes) ‖
+  ciphertext, in a `sealed_signal` message (at most 512 bytes) that the SFU sends on to every other
+  device in the call as `sealed_signal` with the sender's device ID.
+- **Inside:** a counter and the signal (`SealedSignalBody`). The counter counts up per sender; a
+  receiver drops a signal whose counter isn't above the last one it took from that sender in that
+  epoch, so the SFU can't replay an older one (raise a lowered hand again). A reaction is a name from
+  the fixed set, never free text: a receiver shows only reactions it knows.
+- **Epochs:** a signal sealed for an epoch the receiver doesn't hold yet (the sender switched a moment
+  earlier) waits in a small buffer (32 signals) until it does; one of an older epoch is dropped. A
+  raised hand is sent again after each new epoch and when another device comes back from a lost
+  connection, so devices that joined, or rejoined, see it. Nothing else is queued or replayed:
+  reactions lost to a reconnect stay lost.
+
+**What a hostile server can do.** Drop or delay signals (a reaction doesn't show, a hand shows late);
+see when and how often a device sends one, and its size. It can't read which reaction or whether a
+hand went up or down, forge or alter one, replay one, or show one to a device of another call.
+
+**Not signed.** Every member of the epoch holds the same signal key, and signals carry no signature.
+A member working together with a malicious SFU (which sets the `from_device_id` it relays) can seal
+a signal under another member's device ID and have the SFU relay it as theirs: a reaction or a raised
+hand that looks like someone else's. This is accepted: reactions and hands carry no content and have
+low impact. Anything that must be attributable (messages, recording notices) is signed.
+
+**What a hostile member can do.** Send reactions and raise its hand, as everybody can, within the
+SFU's limit per sender (`sealed_signal_burst`, `sealed_signals_per_second`, 8 at once and 2 a second
+by default) and the app's own pace (5 reactions in 2 s). On its own it can't name another device as
+sender: the SFU sets the sender, and the associated data binds it. Together with a malicious SFU it
+can (see "Not signed" above).
+
+**Logs.** Neither the apps nor the SFU log a signal's content; the SFU logs dropped ones by count.
+
 ## 9. Local storage
 
 - Local database: SQLite with SQLCipher; key in the sealed files of local secrets, under the one

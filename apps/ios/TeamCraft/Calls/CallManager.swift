@@ -34,6 +34,13 @@ struct ActiveCall: Identifiable, Equatable {
   var recordingUserIds: [String] = []
   /// The users who muted their microphone.
   var mutedUserIds: [String] = []
+  /// The users with a raised hand (#2324): their tiles show it.
+  var raisedHandUserIds: [String] = []
+  /// This device's hand is raised (#2324), as the call has it.
+  var isHandRaised = false
+  /// The others' latest reactions (#2324), oldest first: the screen floats each one above the
+  /// last id it showed.
+  var reactions: [CallReactionInfo] = []
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
@@ -244,6 +251,17 @@ final class CallManager: NSObject, @unchecked Sendable {
   func setMuted(_ isMuted: Bool) {
     guard let call = activeCall else { return }
     controller.request(CXTransaction(action: CXSetMutedCallAction(call: call.id, muted: isMuted)), completion: { _ in })
+  }
+
+  /// Shows a reaction (a name from `callReactions()`) to everybody else in the call (#2324),
+  /// end-to-end encrypted. Only queued for the call's thread: nothing here waits.
+  func sendReaction(_ reaction: String) {
+    maybeSession?.sendReaction(reaction: reaction)
+  }
+
+  /// Raises or lowers this device's hand for everybody else in the call (#2324).
+  func setHandRaised(_ isRaised: Bool) {
+    maybeSession?.setHandRaised(isRaised: isRaised)
   }
 
   /// Turns the camera on or off during a call (CallKit is told so the system UI shows a video call).
@@ -464,6 +482,9 @@ final class CallManager: NSObject, @unchecked Sendable {
     call.unverifiedUserIds = []
     call.recordingUserIds = []
     call.mutedUserIds = []
+    call.raisedHandUserIds = []
+    call.isHandRaised = false
+    call.reactions = []
     call.maybePrivacyCode = nil
     activeCall = call
     camera.stop()
@@ -884,6 +905,9 @@ extension CallManager: CallListener {
       call.unverifiedUserIds = state.unverifiedUserIds
       call.recordingUserIds = state.recordingUserIds
       call.mutedUserIds = state.mutedUserIds
+      call.raisedHandUserIds = state.raisedHandUserIds
+      call.isHandRaised = state.isHandRaised
+      call.reactions = state.reactions
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
       call.isOnLimitedNetwork = state.isOnLimitedNetwork

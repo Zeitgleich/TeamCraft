@@ -65,6 +65,17 @@ call-layout-gallery = Galerieansicht
 call-layout-speaker = Ansicht „Aktiver Sprecher“
 call-hand-raise = Hand heben
 call-hand-lower = Hand senken
+# The call's reactions button and its picker (#2324). The reactions are emoji; these are their names.
+call-reactions = Reaktionen
+call-reaction-thumbs-up = Daumen hoch
+call-reaction-applause = Applaus
+call-reaction-laugh = Lachen
+call-reaction-heart = Herz
+call-reaction-celebrate = Feiern
+call-reaction-surprise = Überrascht
+call-reaction-other = Reaktion
+# Said by screen readers: who reacted with what, as listed in call-announce-reacted.
+call-reaction-by = { $name } ({ $reaction })
 call-participants = { $count ->
     [one] { $count } Person
    *[other] { $count } Personen
@@ -496,5 +507,15 @@ call-announce-recording-by = { $names } hat die Aufzeichnung gestartet
 call-announce-recording-by-many = { $count } Personen haben die Aufzeichnung gestartet
 call-announce-recording-own = Du hast die Aufzeichnung gestartet
 call-announce-recording-stopped = Aufzeichnung beendet
+call-announce-hand-raised = { $count ->
+    [one] { $names } hat die Hand gehoben
+   *[other] { $names } haben die Hand gehoben
+}
+call-announce-hand-raised-many = { $count } Personen haben die Hand gehoben
+call-announce-reacted = { $count ->
+    [one] Reaktion: { $names }
+   *[other] Reaktionen: { $names }
+}
+call-announce-reacted-many = { $count } Reaktionen
 # The row of participant tiles; focusable so a keyboard can scroll it (#2287).
 call-filmstrip = Teilnehmende

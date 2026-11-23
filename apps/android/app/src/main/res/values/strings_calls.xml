@@ -165,4 +165,26 @@
   <string name="call_chat">Chat</string>
   <!-- The chat button with unread messages, for screen readers, e.g. "Chat, 3 unread messages". -->
   <string name="call_chat_unread">Chat, %1$s</string>
+  <!-- In-call reactions and the raised hand (#2324). The reactions are emoji; these are their names. -->
+  <string name="call_reactions">Reactions</string>
+  <string name="call_hand_raise">Raise hand</string>
+  <string name="call_hand_lower">Lower hand</string>
+  <string name="call_person_hand_raised">%1$s, hand raised</string>
+  <string name="call_reaction_thumbs_up">Thumbs up</string>
+  <string name="call_reaction_applause">Applause</string>
+  <string name="call_reaction_laugh">Laughing</string>
+  <string name="call_reaction_heart">Heart</string>
+  <string name="call_reaction_celebrate">Celebrate</string>
+  <string name="call_reaction_surprise">Surprised</string>
+  <string name="call_reaction_other">Reaction</string>
+  <string name="call_announce_hand_raised">%1$s raised a hand</string>
+  <plurals name="call_announce_hand_raised_many">
+    <item quantity="one">%d person raised a hand</item>
+    <item quantity="other">%d people raised their hands</item>
+  </plurals>
+  <string name="call_announce_reacted">Reaction: %1$s</string>
+  <plurals name="call_announce_reacted_many">
+    <item quantity="one">%d reaction</item>
+    <item quantity="other">%d reactions</item>
+  </plurals>
 </resources>

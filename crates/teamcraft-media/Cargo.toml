@@ -21,6 +21,9 @@ dave = [
   "dep:openmls_rust_crypto",
   "dep:tls_codec",
   "dep:teamcraft-crypto",
+  # Sealed in-call signals (#2324): the body's JSON and the seal's random nonce.
+  "dep:serde_json",
+  "dep:rand_core",
 ]
 # Native clients: Opus via libopus (C, built with cmake), audio device I/O via cpal (ALSA on Linux
 # needs libasound2-dev) and the WebTransport call driver. Browsers use WebCodecs and Web Audio.

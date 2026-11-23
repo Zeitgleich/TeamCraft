@@ -24,13 +24,14 @@ use std::time::Duration;
 
 #[cfg(feature = "call-view")]
 use teamcraft_client_api::video_stats::VideoStatsReport;
+use teamcraft_crypto::call_signal::CallSignalKey;
 use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
-  AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallServerMessage,
-  DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia, ErrorBody, ErrorCode,
-  LEGACY_SIMULCAST_LAYERS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS, MediaCapabilities, MediaStreamId,
-  ScreenAudioTrack, ScreenShareTakeover, TransportFeedback, UserId, VideoCodec, VideoFeature, VideoLayerInfo,
-  VideoPublicationId, VideoTrack, VideoTrackKind,
+  AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallReaction,
+  CallServerMessage, DaveKeyBinding, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia,
+  ErrorBody, ErrorCode, LEGACY_SIMULCAST_LAYERS, MAX_NACK_SEQUENCE_NUMBERS, MAX_SIMULCAST_LAYERS,
+  MediaCapabilities, MediaStreamId, ScreenAudioTrack, ScreenShareTakeover, TransportFeedback, UserId,
+  VideoCodec, VideoFeature, VideoLayerInfo, VideoPublicationId, VideoTrack, VideoTrackKind,
 };
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
@@ -43,6 +44,7 @@ use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
 use crate::call_recording_notice::{OwnRecording, Recorder, RecordingNotices};
 use crate::call_resilience::CallTransport;
+use crate::call_signals::{CallSignals, ReceivedSignal};
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
 use crate::capture_health::StallWindow;
 use crate::datagram::{
@@ -218,6 +220,8 @@ pub struct CallEngine {
   maybe_authenticator: Option<Arc<dyn CallKeyAuthenticator>>,
   /// The other device's direct path offers (#127), until the driver takes them.
   direct_offers: Vec<RelayedDirectOffer>,
+  /// This device's reactions and raised hand, and the others' it took (#2324).
+  signals: CallSignals,
   /// What the driver says its direct path carries; the SFU hears it again after every (re)join.
   maybe_direct_media: Option<DirectPathMedia>,
   /// DAVE keys of other members from verified call key bindings (e2ee.md §8).
@@ -446,6 +450,17 @@ pub enum CallEngineEvent {
   /// afresh (a short gap in media). For the crash reports' call problems.
   DaveResumeFailed(DaveResumeFailure),
   ActiveSpeakers(Vec<DeviceId>),
+  /// Another device reacted (#2324): the reaction floats over the stage for a moment.
+  Reaction {
+    device_id: DeviceId,
+    reaction: CallReaction,
+  },
+  /// Another device raised or lowered its hand (#2324). A device that leaves lowers it; after this
+  /// device's own reconnect, the others tell their raised hands again.
+  HandRaised {
+    device_id: DeviceId,
+    is_raised: bool,
+  },
   /// Another device muted or unmuted its microphone.
   ParticipantMuted {
     device_id: DeviceId,
@@ -837,6 +852,7 @@ impl CallEngine {
       maybe_trusted_roster: None,
       maybe_authenticator: None,
       direct_offers: Vec::new(),
+      signals: CallSignals::default(),
       maybe_direct_media: None,
       verified_keys: HashMap::new(),
       retired_keys: RetiredKeys::default(),
@@ -1465,6 +1481,35 @@ impl CallEngine {
   /// The other device's offers that arrived since the last call (#127).
   pub fn take_direct_offers(&mut self) -> Vec<RelayedDirectOffer> {
     std::mem::take(&mut self.direct_offers)
+  }
+
+  /// Shows a reaction to everybody else in the call (#2324), sealed for the current DAVE epoch.
+  /// Ephemeral: dropped while the call isn't secured, and when this device sent too many just now.
+  pub fn send_reaction(&mut self, reaction: CallReaction, now: Instant) {
+    if !matches!(self.phase, Phase::Joined { .. }) {
+      return;
+    }
+    let (Some(call_id), Some(key)) = (self.call_id(), self.call_signal_key()) else {
+      debug!("reaction dropped: the call isn't secured");
+      return;
+    };
+    let own = self.config.device_id;
+    if let Some(sealed) = self.signals.seal_reaction(&key, call_id, own, reaction, now) {
+      self.signal(CallClientMessage::SealedSignal { sealed });
+    }
+  }
+
+  /// Raises or lowers this device's hand for everybody else in the call (#2324). Kept while the
+  /// call isn't secured yet, and told again with every new epoch while it is raised, so devices that
+  /// join later see it.
+  pub fn set_hand_raised(&mut self, is_raised: bool) {
+    if self.signals.set_hand_raised(is_raised) {
+      self.announce_hand();
+    }
+  }
+
+  pub fn is_hand_raised(&self) -> bool {
+    self.signals.is_hand_raised()
   }
 
   /// Sends this device's sealed offer to the other device, through the SFU.
@@ -2243,6 +2288,10 @@ impl CallEngine {
       },
       CallEvent::ParticipantReconnected { device_id } => {
         self.event(CallEngineEvent::ParticipantReconnected(device_id));
+        // It forgot the others' hands while away (#2324): a raised one is told again.
+        if self.signals.is_hand_raised() {
+          self.announce_hand();
+        }
         Ok(())
       },
       CallEvent::ParticipantMuted { device_id, is_muted } => {
@@ -2425,8 +2474,55 @@ impl CallEngine {
         }
         Ok(())
       },
+      CallEvent::SealedSignal {
+        from_device_id,
+        sealed,
+      } => {
+        self.receive_signal(from_device_id, sealed);
+        Ok(())
+      },
       CallEvent::Unknown => Ok(()),
     }
+  }
+
+  /// Opens another device's reaction or hand (#2324) and tells the app.
+  fn receive_signal(&mut self, from: DeviceId, sealed: Base64Bytes) {
+    let Some(call_id) = self.call_id() else {
+      return;
+    };
+    if from == self.config.device_id || !self.participants.contains_key(&from) {
+      return;
+    }
+    let maybe_key = self.call_signal_key();
+    match self.signals.receive(maybe_key.as_ref(), call_id, from, sealed) {
+      Some(ReceivedSignal::Reaction { device_id, reaction }) => {
+        self.event(CallEngineEvent::Reaction { device_id, reaction });
+      },
+      Some(ReceivedSignal::Hand { device_id, is_raised }) => {
+        self.event(CallEngineEvent::HandRaised { device_id, is_raised });
+      },
+      None => {},
+    }
+  }
+
+  /// Sends the state of this device's hand, once in the call with a secured epoch; otherwise it is
+  /// sent when the epoch is secured.
+  fn announce_hand(&mut self) {
+    if !matches!(self.phase, Phase::Joined { .. }) {
+      return;
+    }
+    let (Some(call_id), Some(key)) = (self.call_id(), self.call_signal_key()) else {
+      return;
+    };
+    let own = self.config.device_id;
+    if let Some(sealed) = self.signals.seal_hand(&key, call_id, own) {
+      self.signal(CallClientMessage::SealedSignal { sealed });
+    }
+  }
+
+  /// The key that seals in-call signals in the current DAVE epoch (e2ee.md §8.5).
+  fn call_signal_key(&self) -> Option<CallSignalKey> {
+    self.maybe_dave.as_ref()?.maybe_call_signal_key()
   }
 
   fn on_joined(
@@ -2694,6 +2790,7 @@ impl CallEngine {
 
   fn remove_participant(&mut self, device_id: DeviceId) {
     self.participants.remove(&device_id);
+    self.signals.forget(device_id);
     if let Some(key) = self.verified_keys.remove(&device_id) {
       self.retired_keys.retire(device_id, key);
     }
@@ -4711,6 +4808,14 @@ impl CallEngine {
       self.event(event);
       // The group changed: notices that waited for their sender's key can be checked now.
       self.recheck_recording_notices();
+      // Signals sealed for this epoch that came before its key (#2324), and devices that joined
+      // see a raised hand.
+      for (from, sealed) in self.signals.take_pending() {
+        self.receive_signal(from, sealed);
+      }
+      if self.signals.is_hand_raised() {
+        self.announce_hand();
+      }
       // Pictures before this were dropped (nothing leaves unencrypted), and receivers that just
       // got the new epoch's keys start with a keyframe.
       let own: Vec<(MediaStreamId, Vec<u8>)> = self

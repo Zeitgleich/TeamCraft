@@ -62,6 +62,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Face
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.MoreVert
@@ -178,6 +179,8 @@ private val SPEAKER_OUTLINE = 2.dp
 
 /** The warning mark of a tile whose person could not be verified: amber, readable on the dark pill. */
 private val UNVERIFIED_TINT = Color(0xFFFFB74D)
+/** The raised hand on a tile's name (#2324): warm, to catch the eye on any picture. */
+private val HAND_TINT = Color(0xFFFFD54F)
 
 /** The one other person's avatar when nobody shows video (Google Phone's in-call screen). */
 private val SOLO_AVATAR_SIZE = 144.dp
@@ -250,6 +253,8 @@ internal class CallUiState(
   val isAwaitingEncryption: Boolean = false,
   /** What is unread in the call's conversation: the Chat button's badge (#1488). */
   val chat: CallChatBadge = CallChatBadge.NONE,
+  /** The user's own latest reaction, to float it as they press it (#2324). */
+  val ownReaction: OwnReaction? = null,
 ) {
   /** Its publisher holds the track's video back for its voice (#1891): the tile says so. */
   fun isPausedByPublisher(track: VideoTrackInfo): Boolean =
@@ -276,6 +281,8 @@ private class Person(
   val isUnverified: Boolean = false,
   /** "Host" or "Co-host" (a string resource) in a meeting's call (#1720). */
   val maybeHostLabel: Int? = null,
+  /** Their hand is raised (#2324): the tile's name carries the hand. */
+  val hasHandRaised: Boolean = false,
 )
 
 private fun CallUiState.people(): List<Person> {
@@ -284,7 +291,16 @@ private fun CallUiState.people(): List<Person> {
   // Speakers first, loudest first; the rest by name.
   return state.participantUserIds
     .map { id ->
-      Person(id, names[id].orEmpty(), id in speaking, id in state.reconnectingUserIds, id in state.mutedUserIds, id in state.unverifiedUserIds, hostLabels[id])
+      Person(
+        id,
+        names[id].orEmpty(),
+        id in speaking,
+        id in state.reconnectingUserIds,
+        id in state.mutedUserIds,
+        id in state.unverifiedUserIds,
+        hostLabels[id],
+        hasHandRaised = id in state.raisedHandUserIds,
+      )
     }
     .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
 }
@@ -392,6 +408,10 @@ internal class CallUiActions(
    * desktop's chat panel covers the stage on a phone; `null` before the call has a conversation.
    */
   val maybeOnChat: (() -> Unit)? = null,
+  /** Sends a reaction by its name from `callReactions()` (#2324); `null` where reactions aren't offered. */
+  val maybeOnReaction: ((String) -> Unit)? = null,
+  /** Raises or lowers the own hand (#2324). */
+  val maybeOnHand: ((Boolean) -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -435,7 +455,17 @@ internal fun InCallContent(
     Box(modifier.fillMaxSize().background(CALL_STAGE_COLOR)) {
       // Joins and leaves, said once to TalkBack (#2281).
       CallRosterAnnouncer(ui.maybeState?.participantUserIds.orEmpty(), ui.names)
+      // Raised hands and the others' reactions, said once each (#2324).
+      CallSignalAnnouncer(ui.maybeState?.raisedHandUserIds.orEmpty(), ui.maybeState?.reactions.orEmpty(), ui.names)
       Stage(ui, layout, status, chrome, reduceMotion, actions.onToggleControls, Modifier.fillMaxSize())
+      // Reactions rise over the stage, clear of the header and the controls.
+      FloatingReactions(
+        ui.maybeState?.reactions.orEmpty(),
+        ui.ownReaction,
+        ui.names,
+        reduceMotion,
+        Modifier.fillMaxSize().padding(top = chrome.top, bottom = chrome.bottom),
+      )
       if (ui.tracks.isNotEmpty()) Scrims(ui.areControlsShown, reduceMotion)
       Column(Modifier.fillMaxSize().safeDrawingPadding()) {
         AnimatedVisibility(
@@ -648,7 +678,7 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
     // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
     val size = (minOf(maxWidth, maxHeight) * 0.45f).coerceIn(48.dp, 128.dp)
     AvatarImage(person.userId, person.name, size)
-    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart), person.maybeHostLabel)
+    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart), person.maybeHostLabel, person.hasHandRaised)
   }
 }
 
@@ -741,13 +771,22 @@ private fun SpeakingAvatar(
  * call with the person's part after it ("Host", "Co-host", #1720).
  */
 @Composable
-private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, modifier: Modifier, maybeHostLabel: Int? = null) {
+private fun NameLabel(
+  name: String,
+  isMuted: Boolean,
+  isUnverified: Boolean,
+  modifier: Modifier,
+  maybeHostLabel: Int? = null,
+  hasHandRaised: Boolean = false,
+) {
   if (name.isEmpty()) return
-  // Said as one: who, and what is wrong or switched off.
+  // Said as one: who, whether their hand is up, and what is wrong or switched off.
+  val shownName = if (hasHandRaised) stringResource(R.string.call_person_hand_raised, name) else name
   val description = when {
-    isUnverified && isMuted -> stringResource(R.string.call_person_unverified_muted, name)
-    isUnverified -> stringResource(R.string.call_person_unverified, name)
-    isMuted -> stringResource(R.string.call_person_muted, name)
+    isUnverified && isMuted -> stringResource(R.string.call_person_unverified_muted, shownName)
+    isUnverified -> stringResource(R.string.call_person_unverified, shownName)
+    isMuted -> stringResource(R.string.call_person_muted, shownName)
+    hasHandRaised -> shownName
     else -> null
   }
   Row(
@@ -759,6 +798,7 @@ private fun NameLabel(name: String, isMuted: Boolean, isUnverified: Boolean, mod
     verticalAlignment = Alignment.CenterVertically,
     horizontalArrangement = Arrangement.spacedBy(4.dp),
   ) {
+    if (hasHandRaised) Icon(CallIcons.Hand, contentDescription = null, tint = HAND_TINT, modifier = Modifier.size(14.dp))
     if (isUnverified) Icon(CallIcons.Warning, contentDescription = null, tint = UNVERIFIED_TINT, modifier = Modifier.size(14.dp))
     if (isMuted) Icon(CallIcons.MicOff, contentDescription = null, tint = Color.White, modifier = Modifier.size(14.dp))
     Text(
@@ -845,7 +885,14 @@ private fun VideoTile(
       }
     }
     if (maybeOwner != null) {
-      NameLabel(maybeOwner.name, maybeOwner.isMuted, maybeOwner.isUnverified, Modifier.align(Alignment.BottomStart), maybeOwner.maybeHostLabel)
+      NameLabel(
+        maybeOwner.name,
+        maybeOwner.isMuted,
+        maybeOwner.isUnverified,
+        Modifier.align(Alignment.BottomStart),
+        maybeOwner.maybeHostLabel,
+        maybeOwner.hasHandRaised,
+      )
     }
   }
 }
@@ -1292,7 +1339,7 @@ private fun ControlRow(ui: CallUiState, actions: CallUiActions, isChatInBar: Boo
     }
     if (maybeOnChat != null && isChatInBar) ChatButton(ui.chat, maybeOnChat)
     val maybeMenuChat = ui.chat.takeIf { maybeOnChat != null && !isChatInBar }
-    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions, maybeMenuChat)
+    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions, maybeMenuChat, state?.isHandRaised == true)
     HangUpButton(actions.onHangUp, actions.maybeOnEndForEveryone)
   }
 }
@@ -1428,9 +1475,16 @@ private fun CallToggle(icon: ImageVector, label: String, isChecked: Boolean, isO
 /** "More options" and its menu: Material 3 Expressive's grouped menu, every item with its icon. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions, maybeChat: CallChatBadge?) {
+private fun MoreButton(
+  isDeafened: Boolean,
+  isSharingScreen: Boolean,
+  actions: CallUiActions,
+  maybeChat: CallChatBadge?,
+  isHandRaised: Boolean,
+) {
   var isMenuOpen by remember { mutableStateOf(false) }
-  val entries = menuEntries(isDeafened, isSharingScreen, actions, maybeChat)
+  var isReactionPickerOpen by remember { mutableStateOf(false) }
+  val entries = menuEntries(isDeafened, isSharingScreen, actions, maybeChat, isHandRaised) { isReactionPickerOpen = true }
   Box {
     FilledTonalIconButton(
       onClick = {
@@ -1465,6 +1519,9 @@ private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: C
         }
       }
     }
+    actions.maybeOnReaction?.let { onReaction ->
+      ReactionPicker(isReactionPickerOpen, onDismiss = { isReactionPickerOpen = false }, onPick = onReaction)
+    }
   }
 }
 
@@ -1478,11 +1535,30 @@ private class MenuEntry(
 )
 
 @Composable
-private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions, maybeChat: CallChatBadge?): List<MenuEntry> = buildList {
+private fun menuEntries(
+  isDeafened: Boolean,
+  isSharingScreen: Boolean,
+  actions: CallUiActions,
+  maybeChat: CallChatBadge?,
+  isHandRaised: Boolean,
+  onReactions: () -> Unit,
+): List<MenuEntry> = buildList {
   val maybeOnChat = actions.maybeOnChat
   if (maybeChat != null && maybeOnChat != null) {
     val maybeUnread = maybeChat.count.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.chat_unread, it, it) }
     add(MenuEntry(stringResource(R.string.call_chat), CallIcons.Chat, maybeSupporting = maybeUnread, onClick = maybeOnChat))
+  }
+  // Reactions and the raised hand reach everybody end-to-end encrypted (#2324).
+  if (actions.maybeOnReaction != null) {
+    add(MenuEntry(stringResource(R.string.call_reactions), Icons.Filled.Face, onClick = onReactions))
+  }
+  actions.maybeOnHand?.let { onHand ->
+    add(
+      MenuEntry(
+        text = stringResource(if (isHandRaised) R.string.call_hand_lower else R.string.call_hand_raise),
+        icon = CallIcons.Hand,
+      ) { onHand(!isHandRaised) },
+    )
   }
   if (isSharingScreen) {
     add(MenuEntry(stringResource(R.string.call_stop_sharing), CallIcons.StopScreenShare, onClick = actions.onStopScreenShare))

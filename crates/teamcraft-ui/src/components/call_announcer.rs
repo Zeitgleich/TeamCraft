@@ -35,6 +35,10 @@ pub enum CallNote {
   /// This device started recording.
   RecordingOwn,
   RecordingStopped,
+  /// Somebody raised their hand (#2324).
+  HandRaised(String),
+  /// Somebody reacted (#2324): their name and the reaction, worded ("Ada (applause)").
+  Reacted(String),
   /// A phase of the call, as the i18n key of its visible text.
   Phase(&'static str),
 }
@@ -55,6 +59,8 @@ pub fn sentences(notes: &[CallNote]) -> Vec<Sentence> {
   let mut left: Vec<String> = Vec::new();
   let mut waiting: Vec<String> = Vec::new();
   let mut recording_by: Vec<String> = Vec::new();
+  let mut hands: Vec<String> = Vec::new();
+  let mut reacted: Vec<String> = Vec::new();
   let mut order: Vec<&'static str> = Vec::new();
   let mut maybe_microphone = None;
   let mut is_recording_own = false;
@@ -107,6 +113,16 @@ pub fn sentences(notes: &[CallNote]) -> Vec<Sentence> {
         is_recording_own = false;
         see("recording-stopped");
       },
+      CallNote::HandRaised(name) => {
+        if !hands.contains(name) {
+          hands.push(name.clone());
+        }
+        see("hands");
+      },
+      CallNote::Reacted(worded) => {
+        reacted.push(worded.clone());
+        see("reacted");
+      },
       CallNote::Phase(key) => {
         if !phases.contains(key) {
           phases.push(key);
@@ -155,6 +171,16 @@ pub fn sentences(notes: &[CallNote]) -> Vec<Sentence> {
         "call-announce-recording-by",
         std::mem::take(&mut recording_by),
         "call-announce-recording-by-many",
+      )),
+      "hands" => out.extend(listed(
+        "call-announce-hand-raised",
+        std::mem::take(&mut hands),
+        "call-announce-hand-raised-many",
+      )),
+      "reacted" => out.extend(listed(
+        "call-announce-reacted",
+        std::mem::take(&mut reacted),
+        "call-announce-reacted-many",
       )),
       "microphone" => out.extend(maybe_microphone.map(|is_on| Sentence {
         key: if is_on {
@@ -210,6 +236,10 @@ pub fn CallAnnouncer(
   lobby: Signal<Vec<(UserId, String)>>,
   /// The phase texts to say when they appear: (is shown, i18n key).
   phases: Signal<Vec<(bool, &'static str)>>,
+  /// Who has their hand raised besides the user, by id and name (#2324).
+  hands: Signal<Vec<(UserId, String)>>,
+  /// The others' reactions, worded, with their id: each new one is said once (#2324).
+  reactions: Signal<Vec<(u64, String)>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -270,6 +300,22 @@ pub fn CallAnnouncer(
   };
   watch(remote, CallNote::Joined, Some(CallNote::Left));
   watch(lobby, CallNote::Waiting, None);
+  watch(hands, CallNote::HandRaised, None);
+
+  // Reactions: those above the last id said; the first look is the baseline.
+  let last_reaction = StoredValue::new(None::<u64>);
+  Effect::new(move |_| {
+    let all = reactions.get();
+    let newest = all.iter().map(|(id, _)| *id).max().unwrap_or(0);
+    let Some(said) = last_reaction.get_value() else {
+      last_reaction.set_value(Some(newest));
+      return;
+    };
+    last_reaction.set_value(Some(newest.max(said)));
+    for (_, worded) in all.into_iter().filter(|(id, _)| *id > said) {
+      note(CallNote::Reacted(worded));
+    }
+  });
 
   // The own microphone, when it changed away from the control bar: its button names its state
   // itself. The global shortcut (mute_shortcut.rs) and the tray come here.
@@ -411,6 +457,30 @@ mod tests {
         said.iter().map(|s| s.key).collect::<Vec<_>>(),
         ["call-announce-joined", "call-announce-left"]
       );
+    }
+  }
+
+  mod hands_and_reactions {
+    use super::*;
+
+    #[test]
+    fn raised_hands_are_listed_once_and_reactions_counted_in_a_flood() {
+      let said = sentences(&[
+        CallNote::HandRaised("Ada".into()),
+        CallNote::HandRaised("Ada".into()),
+        CallNote::Reacted("Bo (applause)".into()),
+      ]);
+      assert_eq!(said.len(), 2);
+      assert_eq!(said[0].key, "call-announce-hand-raised");
+      assert_eq!(said[0].names, "Ada");
+      assert_eq!(said[1].key, "call-announce-reacted");
+      assert_eq!(said[1].names, "Bo (applause)");
+      let flood: Vec<CallNote> = (0..8)
+        .map(|n| CallNote::Reacted(format!("P{n} (heart)")))
+        .collect();
+      let said = sentences(&flood);
+      assert_eq!(said[0].key, "call-announce-reacted-many");
+      assert_eq!(said[0].count, 8);
     }
   }
 

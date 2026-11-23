@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, EncryptionFailure, Participant,
-  RemoteVideoTrack, ScreenShareSound,
+  ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, EncryptionFailure, MAX_KEPT_REACTIONS,
+  Participant, RemoteVideoTrack, ScreenShareSound, ShownReaction,
 };
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKind};
 
@@ -29,6 +29,10 @@ pub struct CallRoster {
   reconnecting: BTreeSet<DeviceId>,
   /// Others' devices whose microphone is muted (their own report).
   muted: BTreeSet<DeviceId>,
+  /// Others' devices with a raised hand (their sealed signal, #2324).
+  raised_hands: BTreeSet<DeviceId>,
+  /// The id of the next reaction shown (#2324).
+  next_reaction_id: u64,
   /// Others' devices that record the call (e2ee.md §8.3), as the engine reports them.
   recording: Vec<Recorder>,
   /// Others' devices whose call key didn't verify: kept out of the encryption.
@@ -86,6 +90,7 @@ impl CallRoster {
         roster.sharing_screen.remove(&device_id);
         roster.reconnecting.remove(&device_id);
         roster.muted.remove(&device_id);
+        roster.raised_hands.remove(&device_id);
         active.reconnecting = roster.reconnecting_users();
         if roster.refused.remove(&device_id) {
           active.unverified = roster.refused_users();
@@ -129,6 +134,29 @@ impl CallRoster {
           roster.muted.remove(&device_id);
         }
       },
+      CallEngineEvent::HandRaised { device_id, is_raised } => {
+        if is_raised {
+          roster.raised_hands.insert(device_id);
+        } else {
+          roster.raised_hands.remove(&device_id);
+        }
+      },
+      CallEngineEvent::Reaction { device_id, reaction } => {
+        let Some(user) = roster.users_by_device.get(&device_id).copied() else {
+          return false;
+        };
+        roster.next_reaction_id += 1;
+        if active.reactions.len() >= MAX_KEPT_REACTIONS {
+          active.reactions.remove(0);
+        }
+        active.reactions.push(ShownReaction {
+          id: roster.next_reaction_id,
+          user,
+          reaction,
+          at: now_ms(),
+        });
+        return true;
+      },
       CallEngineEvent::Reconnecting => {
         active.is_reconnecting = true;
         // The SFU says again after the rejoin what is paused (#1891).
@@ -136,8 +164,10 @@ impl CallRoster {
         for track in view.video_tracks.values_mut() {
           track.is_paused_by_publisher = false;
         }
-        // The SFU's answer to the rejoin names the muted devices again.
+        // The SFU's answer to the rejoin names the muted devices again, and the others tell their
+        // raised hands again once they see this device back (#2324).
         roster.muted.clear();
+        roster.raised_hands.clear();
         // Who else is away comes again with the SFU's answer to the rejoin.
         roster.reconnecting.clear();
         active.reconnecting.clear();
@@ -433,6 +463,7 @@ impl CallRoster {
         is_recording: false,
       });
       participant.is_muted &= self.muted.contains(device);
+      participant.has_hand_raised |= self.raised_hands.contains(device);
       participant.is_recording |= self
         .recording
         .iter()
@@ -445,6 +476,13 @@ impl CallRoster {
     }
     by_user.into_values().collect()
   }
+}
+
+/// The wall clock in milliseconds, for when a reaction arrived.
+fn now_ms() -> i64 {
+  web_time::SystemTime::now()
+    .duration_since(web_time::UNIX_EPOCH)
+    .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// The status sounds the user's setting asks for.
@@ -712,6 +750,71 @@ mod tests {
       roster.apply(&mut view, CallEngineEvent::Reconnecting);
       roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
       assert!(!is_muted(&view), "forgotten until the SFU says it again");
+    }
+
+    #[test]
+    fn a_raised_hand_shows_on_its_person_until_lowered_left_or_reconnected() {
+      let mut view = active_view();
+      let mut roster = CallRoster::new(device(10));
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      let has_hand = |view: &CallView| view.maybe_active.as_ref().unwrap().participants[0].has_hand_raised;
+      assert!(!has_hand(&view));
+      let raise = CallEngineEvent::HandRaised {
+        device_id: device(20),
+        is_raised: true,
+      };
+      roster.apply(&mut view, raise.clone());
+      assert!(has_hand(&view));
+      roster.apply(
+        &mut view,
+        CallEngineEvent::HandRaised {
+          device_id: device(20),
+          is_raised: false,
+        },
+      );
+      assert!(!has_hand(&view));
+      roster.apply(&mut view, raise.clone());
+      roster.apply(&mut view, CallEngineEvent::Reconnecting);
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      assert!(
+        !has_hand(&view),
+        "told again once the others see this device back"
+      );
+      roster.apply(&mut view, raise);
+      roster.apply(&mut view, CallEngineEvent::ParticipantLeft(device(20)));
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      assert!(!has_hand(&view), "leaving lowers it");
+    }
+
+    #[test]
+    fn reactions_are_kept_by_person_with_rising_ids_and_bounded() {
+      use teamcraft_proto::CallReaction;
+
+      let mut view = active_view();
+      let mut roster = CallRoster::new(device(10));
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      // Of a device the roster doesn't know: nobody to show it for.
+      assert!(!roster.apply(
+        &mut view,
+        CallEngineEvent::Reaction {
+          device_id: device(99),
+          reaction: CallReaction::Heart,
+        },
+      ));
+      for _ in 0..MAX_KEPT_REACTIONS + 3 {
+        assert!(roster.apply(
+          &mut view,
+          CallEngineEvent::Reaction {
+            device_id: device(20),
+            reaction: CallReaction::Applause,
+          },
+        ));
+      }
+      let reactions = &view.maybe_active.as_ref().unwrap().reactions;
+      assert_eq!(reactions.len(), MAX_KEPT_REACTIONS);
+      assert!(reactions.iter().all(|shown| shown.user == user(2)));
+      assert_eq!(reactions.last().unwrap().id, (MAX_KEPT_REACTIONS + 3) as u64);
+      assert!(reactions.windows(2).all(|pair| pair[0].id < pair[1].id));
     }
 
     #[test]

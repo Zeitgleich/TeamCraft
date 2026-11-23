@@ -163,4 +163,26 @@
   </plurals>
   <string name="call_chat">Chat</string>
   <string name="call_chat_unread">Chat, %1$s</string>
+  <!-- In-call reactions and the raised hand (#2324). The reactions are emoji; these are their names. -->
+  <string name="call_reactions">Reaktionen</string>
+  <string name="call_hand_raise">Hand heben</string>
+  <string name="call_hand_lower">Hand senken</string>
+  <string name="call_person_hand_raised">%1$s, Hand gehoben</string>
+  <string name="call_reaction_thumbs_up">Daumen hoch</string>
+  <string name="call_reaction_applause">Applaus</string>
+  <string name="call_reaction_laugh">Lachen</string>
+  <string name="call_reaction_heart">Herz</string>
+  <string name="call_reaction_celebrate">Feiern</string>
+  <string name="call_reaction_surprise">Überrascht</string>
+  <string name="call_reaction_other">Reaktion</string>
+  <string name="call_announce_hand_raised">%1$s hat die Hand gehoben</string>
+  <plurals name="call_announce_hand_raised_many">
+    <item quantity="one">%d Person hat die Hand gehoben</item>
+    <item quantity="other">%d Personen haben die Hand gehoben</item>
+  </plurals>
+  <string name="call_announce_reacted">Reaktion: %1$s</string>
+  <plurals name="call_announce_reacted_many">
+    <item quantity="one">%d Reaktion</item>
+    <item quantity="other">%d Reaktionen</item>
+  </plurals>
 </resources>
