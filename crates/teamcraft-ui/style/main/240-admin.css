@@ -508,3 +508,98 @@
   margin-bottom: 4px;
   font-weight: var(--weight-semibold);
 }
+
+/* The save bar at the foot of every console form (issue #958): its status on the left, the form's
+   actions on the right. It sticks to the bottom of the page while its form is in view; with unsaved
+   changes it lifts off the page as a translucent layer so the status can't be missed. */
+.save-bar {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 16px -12px 0;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: var(--surface);
+  transition:
+    box-shadow 200ms ease-out,
+    border-color 200ms ease-out,
+    background-color 200ms ease-out;
+}
+
+.save-bar.is-dirty {
+  border-color: var(--border);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
+  box-shadow: var(--shadow-card);
+}
+
+.save-status {
+  display: flex;
+  flex: 1 1 14rem;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 24px;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.save-bar.is-dirty .save-status {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.save-bar.is-saved .save-status {
+  color: var(--accent-strong);
+}
+
+.save-bar.is-failed .save-status {
+  color: var(--danger);
+}
+
+.save-status .icon {
+  flex: none;
+}
+
+.save-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.save-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+@media (max-width: 600px) {
+  .save-actions {
+    flex: 1 1 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .save-bar {
+    transition: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .save-bar.is-dirty {
+    background: var(--surface);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+}

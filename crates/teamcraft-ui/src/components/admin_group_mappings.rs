@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use teamcraft_proto::{ConversationId, GroupMappingRule, MAX_GROUP_MAPPINGS, Snowflake, SpaceId};
 
 use crate::components::admin_fields::{list_text, parse_list};
+use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
@@ -38,33 +39,70 @@ pub fn GroupMappingsForm() -> impl IntoView {
   let next_key = StoredValue::new(0_u64);
   let draft = RwSignal::new(Vec::<RuleDraft>::new());
   let show_errors = RwSignal::new(false);
+  let tracker = use_save_tracker();
+  let load = move |stored: teamcraft_proto::GroupMappingsResponse| {
+    let rules = stored
+      .mappings
+      .into_iter()
+      .map(|rule| RuleDraft {
+        key: take_key(next_key),
+        path: rule.group_path,
+        spaces: list_text(&rule.space_ids.iter().map(ToString::to_string).collect::<Vec<_>>()),
+        channels: list_text(
+          &rule
+            .channel_ids
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>(),
+        ),
+      })
+      .collect();
+    draft.set(rules);
+    show_errors.set(false);
+  };
   Effect::new(move |_| {
     if let Some(stored) = stored.get() {
-      let rules = stored
-        .mappings
-        .into_iter()
-        .map(|rule| RuleDraft {
-          key: take_key(next_key),
-          path: rule.group_path,
-          spaces: list_text(&rule.space_ids.iter().map(ToString::to_string).collect::<Vec<_>>()),
-          channels: list_text(
-            &rule
-              .channel_ids
-              .iter()
-              .map(ToString::to_string)
-              .collect::<Vec<_>>(),
-          ),
+      load(stored);
+      tracker.settled();
+    }
+  });
+  // Row keys are only for the DOM: a form is unchanged when its rules read the same as stored.
+  let is_dirty = Signal::derive(move || {
+    let Some(stored) = stored.get() else {
+      return false;
+    };
+    draft.with(|rules| {
+      rules.len() != stored.mappings.len()
+        || rules.iter().zip(&stored.mappings).any(|(rule, saved)| {
+          rule.path != saved.group_path
+            || parse_list(&rule.spaces)
+              != saved
+                .space_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+            || parse_list(&rule.channels)
+              != saved
+                .channel_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
         })
-        .collect();
-      draft.set(rules);
-      show_errors.set(false);
+    })
+  });
+  let discard = Callback::new(move |()| {
+    if let Some(stored) = stored.get_untracked() {
+      load(stored);
     }
   });
   let save = move |ev: web_sys::SubmitEvent| {
     ev.prevent_default();
     show_errors.set(true);
     match draft.with_untracked(|rules| to_rules(rules)) {
-      Some(rules) => state.write(|backend| backend.save_group_mappings(rules)),
+      Some(rules) => {
+        state.write(|backend| backend.save_group_mappings(rules));
+        tracker.begin();
+      },
       None => focus_first_invalid(FORM_ID),
     }
   };
@@ -85,7 +123,7 @@ pub fn GroupMappingsForm() -> impl IntoView {
         <For each=move || draft.get() key=|rule| rule.key let:rule>
           <RuleRow key=rule.key draft=draft show_errors=show_errors />
         </For>
-        <div class="policy-footer">
+        <p>
           <button
             type="button"
             class="btn"
@@ -94,9 +132,8 @@ pub fn GroupMappingsForm() -> impl IntoView {
           >
             {move || i18n.t("settings-group-mappings-add")}
           </button>
-          <span class="grow"></span>
-          <button type="submit" class="btn btn-primary">{move || i18n.t("admin-save")}</button>
-        </div>
+        </p>
+        <SaveBar tracker=tracker is_dirty=is_dirty on_discard=discard />
       </fieldset>
     </form>
   }

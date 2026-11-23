@@ -6,6 +6,7 @@ use leptos::prelude::*;
 use teamcraft_proto::WorkspacePolicy;
 
 use crate::admin::PolicyBlocker;
+use crate::components::admin_save::{SaveBar, SaveTracker, use_save_tracker};
 use crate::components::icons::{Icon, IconName};
 use crate::form_errors::error_id;
 use crate::i18n::use_i18n;
@@ -21,6 +22,7 @@ pub struct PolicyDraft {
   /// keeps the edits instead of snapping back to the old values.
   pending_after: RwSignal<Option<u64>>,
   saved_version: RwSignal<Option<u64>>,
+  tracker: SaveTracker,
 }
 
 /// A role name left empty means the usual one: no role at the provider has an empty name.
@@ -42,6 +44,7 @@ pub fn use_policy_draft() -> PolicyDraft {
   let blocker = Memo::new(move |_| state.read(|backend| backend.policy_edit_blocker()));
   let pending_after = RwSignal::new(None::<u64>);
   let saved_version = RwSignal::new(None::<u64>);
+  let tracker = use_save_tracker();
   // Follow the server while the form is untouched; keep the edits otherwise, except right after
   // our own save arrives.
   Effect::new(move |previous: Option<(u64, WorkspacePolicy)>| {
@@ -57,6 +60,7 @@ pub fn use_policy_draft() -> PolicyDraft {
       if our_save_arrived {
         pending_after.set(None);
         saved_version.set(Some(current.0));
+        tracker.settled();
       }
     }
     current
@@ -67,6 +71,7 @@ pub fn use_policy_draft() -> PolicyDraft {
     blocker,
     pending_after,
     saved_version,
+    tracker,
   }
 }
 
@@ -80,6 +85,7 @@ impl PolicyDraft {
   }
 
   pub fn reset(&self) {
+    self.pending_after.set(None);
     self.draft.set(self.stored.get_untracked().1);
   }
 
@@ -94,12 +100,14 @@ impl PolicyDraft {
     let before = self.stored.get_untracked().0;
     self.draft.update(fill_in_role_names);
     state.write(|backend| backend.set_workspace_policy(self.draft.get_untracked()));
+    self.tracker.begin();
     let saved = self.stored.get_untracked();
     if saved.0 == before {
       self.pending_after.set(Some(before));
     } else {
       self.saved_version.set(Some(saved.0));
       self.draft.set(saved.1);
+      self.tracker.settled();
     }
   }
 }
@@ -121,35 +129,30 @@ pub fn PolicyBlockerNote(policy: PolicyDraft) -> impl IntoView {
   }
 }
 
-/// Version note, save status and the reset/save buttons.
+/// What saving a policy does, in plain words, and the page's save bar.
 #[component]
 pub fn PolicyFooter(policy: PolicyDraft) -> impl IntoView {
   let i18n = use_i18n();
+  let is_dirty = Signal::derive(move || policy.is_dirty());
   view! {
-    <footer class="policy-footer">
-      <p class="signing-note">
-        <Icon name=IconName::Key />
-        <span>{move || i18n.t_with("policy-signing", &[("version", &policy.stored.get().0.to_string())])}</span>
-      </p>
-      <span class="status-line" role="status">
-        {move || {
-          if policy.pending_after.get().is_some() {
-            Some(i18n.t("policy-saving"))
-          } else {
-            policy
-              .saved_version
-              .get()
-              .map(|version| i18n.t_with("policy-saved", &[("version", &version.to_string())]))
-          }
-        }}
-      </span>
-      <button type="button" class="btn" disabled=move || !policy.is_dirty() on:click=move |_| policy.reset()>
-        {move || i18n.t("policy-reset")}
-      </button>
-      <button type="submit" class="btn btn-primary" disabled=move || !policy.is_dirty() || policy.is_locked()>
-        {move || i18n.t("policy-save")}
-      </button>
-    </footer>
+    <p class="signing-note">
+      <Icon name=IconName::Key />
+      <span>{move || i18n.t_with("policy-signing", &[("version", &policy.stored.get().0.to_string())])}</span>
+    </p>
+    <SaveBar
+      tracker=policy.tracker
+      is_dirty=is_dirty
+      on_discard=Callback::new(move |()| policy.reset())
+      is_locked=Signal::derive(move || policy.is_locked())
+      save_label=Signal::derive(move || i18n.t("policy-save"))
+      saving_text=Signal::derive(move || i18n.t("policy-saving"))
+      saved_text=Signal::derive(move || {
+        policy
+          .saved_version
+          .get()
+          .map_or_else(|| i18n.t("admin-save-saved"), |version| i18n.t_with("policy-saved", &[("version", &version.to_string())]))
+      })
+    />
   }
 }
 

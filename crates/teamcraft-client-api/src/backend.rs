@@ -1754,6 +1754,13 @@ pub trait AdminBackend {
   fn admin_error(&self) -> Option<String> {
     None
   }
+
+  /// How many administrative changes have had their answer, refused or not. The console's save bar
+  /// compares it before and after a save to tell "saving" from "saved" (issue #958). Backends that
+  /// apply changes at once keep it at zero: their stored values change in the same step.
+  fn admin_writes_done(&self) -> u64 {
+    0
+  }
 }
 
 /// The user's own devices and identity-key warnings.

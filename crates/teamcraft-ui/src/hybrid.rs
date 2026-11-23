@@ -2532,6 +2532,10 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
       .and_then(AdminLive::maybe_error)
       .or_else(|| self.chat.last_action_error())
   }
+
+  fn admin_writes_done(&self) -> u64 {
+    self.maybe_admin.as_ref().map_or(0, AdminLive::writes_done)
+  }
 }
 
 impl<C: ChatBackend> SecurityBackend for Hybrid<C> {

@@ -7,6 +7,7 @@ use crate::components::admin_fields::{
   CheckField, FieldErrors, SourceBadge, TextField, Validated, accept_or_refuse, bind, bind_bool, is_web_url,
 };
 use crate::components::admin_mail::secret_update;
+use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::i18n::use_i18n;
 use crate::state::use_app_state;
 
@@ -26,12 +27,20 @@ pub fn CalendarSection() -> impl IntoView {
   let draft = RwSignal::new(CalendarDraft::from_settings(caldav.get_untracked().as_ref()));
   let show_errors = RwSignal::new(false);
   let is_testing = RwSignal::new(false);
+  let tracker = use_save_tracker();
   Effect::new(move |previous: Option<()>| {
     let latest = caldav.get();
     if previous.is_some() {
       draft.set(CalendarDraft::from_settings(latest.as_ref()));
       show_errors.set(false);
+      tracker.settled();
     }
+  });
+  let is_dirty =
+    Signal::derive(move || draft.with(|draft| *draft != CalendarDraft::from_settings(caldav.get().as_ref())));
+  let discard = Callback::new(move |()| {
+    draft.set(CalendarDraft::from_settings(caldav.get_untracked().as_ref()));
+    show_errors.set(false);
   });
   let is_available = Memo::new(move |_| current.get().is_some_and(|calendar| calendar.is_available));
   let can_store_secrets =
@@ -95,6 +104,7 @@ pub fn CalendarSection() -> impl IntoView {
     }
     let request = draft.with_untracked(|draft| draft.to_request(can_store_secrets.get_untracked()));
     state.write(|backend| backend.save_calendar_settings(request));
+    tracker.begin();
   };
 
   view! {
@@ -164,8 +174,7 @@ pub fn CalendarSection() -> impl IntoView {
           on_input=template.on_input
           error=template.error
         />
-        <div class="policy-footer">
-          <button type="submit" class="btn btn-primary">{move || i18n.t("admin-save")}</button>
+        <SaveBar tracker=tracker is_dirty=is_dirty on_discard=discard>
           <button
             type="button"
             class="btn"
@@ -174,7 +183,7 @@ pub fn CalendarSection() -> impl IntoView {
           >
             {move || i18n.t("admin-reset-to-config")}
           </button>
-        </div>
+        </SaveBar>
       </fieldset>
       <section class="policy-group">
         <h3>{move || i18n.t("admin-calendar-test")}</h3>

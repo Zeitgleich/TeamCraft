@@ -13,6 +13,7 @@ use crate::components::admin_fields::{
   CheckField, FieldErrors, SourceBadge, TextAreaField, TextField, format_scaled, is_web_url, list_text,
   parse_list, parse_scaled,
 };
+use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::form_errors::focus_first_invalid;
 use crate::i18n::use_i18n;
 use crate::meetings::holiday_region_key;
@@ -588,6 +589,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
   };
   let draft = RwSignal::new(stored.get_untracked().unwrap_or_default());
   let show_errors = RwSignal::new(false);
+  let tracker = use_save_tracker();
   Effect::new(move |previous: Option<()>| {
     let latest = stored.get();
     // The first run only subscribes; later changes of the stored values replace the draft.
@@ -596,7 +598,21 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
     {
       draft.set(values);
       show_errors.set(false);
+      tracker.settled();
     }
+  });
+  let is_dirty = Signal::derive(move || {
+    stored.with(|maybe_stored| {
+      maybe_stored
+        .as_ref()
+        .is_some_and(|stored| draft.with(|values| values != stored))
+    })
+  });
+  let discard = Callback::new(move |()| {
+    if let Some(values) = stored.get_untracked() {
+      draft.set(values);
+    }
+    show_errors.set(false);
   });
   let source = {
     let key = key.clone();
@@ -630,7 +646,10 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
       ev.prevent_default();
       show_errors.set(true);
       match draft.with_untracked(|values| check(&key, values)) {
-        Ok(section) => state.write(|backend| backend.save_runtime_settings(section)),
+        Ok(section) => {
+          state.write(|backend| backend.save_runtime_settings(section));
+          tracker.begin();
+        },
         Err(_) => focus_first_invalid(form_id(slug)),
       }
     }
@@ -652,8 +671,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
           .collect_view()}
         {(slug == "holidays").then(|| view! { <HolidayFeedLine /> })}
         {move || group_error.get().map(|key| view! { <p class="field-error" role="alert">{i18n.t(key)}</p> })}
-        <div class="policy-footer">
-          <button type="submit" class="btn btn-primary">{move || i18n.t("admin-save")}</button>
+        <SaveBar tracker=tracker is_dirty=is_dirty on_discard=discard>
           <button
             type="button"
             class="btn"
@@ -665,7 +683,7 @@ fn GroupForm(slug: &'static str) -> impl IntoView {
           >
             {move || i18n.t("admin-reset-to-config")}
           </button>
-        </div>
+        </SaveBar>
       </fieldset>
     </form>
   }
