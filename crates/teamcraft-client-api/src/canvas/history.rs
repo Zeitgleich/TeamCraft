@@ -26,6 +26,9 @@ pub const GROUP_SPAN_MS: i64 = 30 * 60 * 1000;
 /// The most versions a page keeps; older ones fold into the next (their changes stay part of
 /// every later version, only the entry goes).
 pub const MAX_MARKS: usize = 300;
+/// Who edited a page this recently counts as editing it now ([`editors_since`]): the line under
+/// the editor's toolbar and on the phones.
+pub const EDITING_WINDOW_MS: i64 = 2 * 60 * 1000;
 
 /// Who sent an update of the page and when (the server's time for a received one, the device's for
 /// an own one), and whether it was a snapshot.

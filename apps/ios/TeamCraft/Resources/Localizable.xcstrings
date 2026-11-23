@@ -26648,6 +26648,74 @@
           }
         }
       }
+    },
+    "channel_notes_open_by_one %@": {
+      "comment": "The notes' line of who else has the page open or edited it lately (#1456); the names joined by commas.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ has this page open"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ hat diese Seite offen"
+          }
+        }
+      }
+    },
+    "channel_notes_open_by_other %@": {
+      "comment": "The notes' line of who else has the page open or edited it lately (#1456); the names joined by commas.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ have this page open"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ haben diese Seite offen"
+          }
+        }
+      }
+    },
+    "channel_notes_editing_one %@": {
+      "comment": "The notes' line of who else has the page open or edited it lately (#1456); the names joined by commas.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ is editing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ bearbeitet gerade"
+          }
+        }
+      }
+    },
+    "channel_notes_editing_other %@": {
+      "comment": "The notes' line of who else has the page open or edited it lately (#1456); the names joined by commas.",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ are editing"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ bearbeiten gerade"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

@@ -92,6 +92,12 @@ pub enum CoreCommand {
     conversation: ConversationId,
     maybe_thread: Option<ThreadId>,
   },
+  /// This device has a page of the conversation's notes open or left it (e2ee.md §4.11, "Who has
+  /// the page open"): sealed and sent on the gateway by the sync loop, dropped while offline.
+  AnnounceCanvas {
+    conversation: ConversationId,
+    note: teamcraft_client_api::model::CanvasPresenceNote,
+  },
   MarkRead {
     conversation: ConversationId,
   },
@@ -729,6 +735,7 @@ impl CoreCommand {
       | Self::ChangeMeetingHosts { .. } => CommandPart::Member,
       Self::FlushOutbox
       | Self::Typing { .. }
+      | Self::AnnounceCanvas { .. }
       | Self::MarkRead { .. }
       | Self::MarkReadNotified { .. }
       | Self::SetSaved { .. }
@@ -4225,6 +4232,14 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self
       .canvas_presence
       .peers(conversation, maybe_page, self.me, self.clock.now_ms())
+  }
+
+  fn announce_canvas(
+    &self,
+    conversation: ConversationId,
+    note: teamcraft_client_api::model::CanvasPresenceNote,
+  ) {
+    self.command(CoreCommand::AnnounceCanvas { conversation, note });
   }
 
   fn note_canvas_pages(

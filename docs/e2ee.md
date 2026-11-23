@@ -5181,13 +5181,23 @@ other devices are remembered at once.
 The line under the toolbar shows the avatars and names of the others who have the page open, and
 names the members whose edits arrived in the last two minutes without having it open (a phone, a
 client from before presence) as editing. The carets are thin bars in the hue of each member's
-avatar, with their name. The phones neither send nor show presence: they show the page read-only.
+avatar, with their name.
+
+The phones show the page read-only, without a caret, and take part in presence all the same: while
+a page is shown and the app is in the foreground, the app asks the core every 10 s and whenever
+something changed (`teamcraft-ffi::canvas`, `canvas_presence`). The core answers who else has the
+page open and who edited it lately, the same line as above with avatars and names, and says "open"
+when it is due by the editor's rules without the caret (`CanvasPresencePacer`): when the page opens,
+every 20 s, and as soon as another device appears, never twice within a second. Leaving the page,
+closing the sheet or going to the background says "closed" (`leave_canvas_page`). It is the same
+sealed word over the same frame, so nothing about the protocol or what the server learns changes,
+and "Show when I'm typing" covers it on the phones too.
 
 **On the phones (issue #1456).** Android and iOS show a channel's pages read-only (the channel's
 menu, "Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document
 (`CanvasDoc`) and hands the apps the blocks, their formatted runs, numbers of numbered items and file
-references, and the list of further pages; the apps carry no CRDT of their own and send nothing, so
-nothing about the protocol changes. A link reaches the apps only as a web address, and the apps check
+references, and the list of further pages; the apps carry no CRDT of their own and send no edits
+(only the words about who has a page open, above), so nothing about the protocol changes. A link reaches the apps only as a web address, and the apps check
 it once more with the rule for messages. A file block opens from the channel's files the device
 holds, like the desktop's, or says that the file isn't there. While a page is open the app reads the
 channel's older history a page at a time, at most 20 per opening, as the editor does. A phone
@@ -5196,7 +5206,7 @@ page counts as unlisted and shares the 50 places above: the store stays bounded,
 made-up page IDs can push out a real page that nobody edited lately, as on a device whose editor
 never read the list.
 
-**Not in this step** (issue #1245 and its follow-up): presence on the phones, mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
+**Not in this step** (issue #1245 and its follow-up): mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
 page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
 over pages, editing and the version history on the phones, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so

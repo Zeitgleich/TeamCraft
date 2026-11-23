@@ -33,9 +33,9 @@ use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::canvas::{
-  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, FileRef, InlineMark, TextStyle, byte_offset,
-  caret_after_change, compaction, editors_since, is_page_link, merge_updates, numbered_position, page_at,
-  typed_range, versions,
+  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, EDITING_WINDOW_MS, FileRef, InlineMark, TextStyle,
+  byte_offset, caret_after_change, compaction, editors_since, is_page_link, merge_updates, numbered_position,
+  page_at, typed_range, versions,
 };
 use teamcraft_client_api::model::CanvasPeer;
 use teamcraft_client_api::model::OlderHistory;
@@ -70,8 +70,6 @@ const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
 const COMPACT_ABOVE: usize = 32;
 /// Pages of older history read per opening, so the page holds the edits from before this device.
 const MAX_HISTORY_PAGES: u32 = 20;
-/// Who edited the page this recently counts as editing it now.
-const EDITING_WINDOW_MS: i64 = 2 * 60 * 1000;
 /// How often that line is looked at again.
 const EDITING_CHECK_MS: u64 = 20_000;
 /// The element IDs of the blocks' text fields.
