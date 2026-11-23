@@ -1192,6 +1192,8 @@ fn rejected(error: ErrorBody) -> CoreError {
 mod tests {
   use super::*;
 
+  // tokio's paused clock is native only; the browser build of these tests has no tokio.
+  #[cfg(not(target_arch = "wasm32"))]
   mod a_socket_that_does_not_drain {
     use super::*;
 
