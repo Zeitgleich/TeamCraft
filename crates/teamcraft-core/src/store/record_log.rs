@@ -824,17 +824,22 @@ fn read_checkpoint<F: LogFile>(
   if !is_ours || covered > size || covered < HEADER_LEN || body.len() != INDEX_HEAD + count * INDEX_ENTRY {
     return Ok(None);
   }
-  let index = body[INDEX_HEAD..]
-    .as_chunks::<INDEX_ENTRY>()
-    .0
-    .iter()
-    .map(|entry| {
-      let id = lookup_id(&entry[..LOOKUP_ID_LEN]);
-      let offset = u64::from_le_bytes(array(&entry[LOOKUP_ID_LEN..LOOKUP_ID_LEN + 8]));
-      let len = u32::from_le_bytes(array(&entry[LOOKUP_ID_LEN + 8..]));
-      (id, Place { offset, len })
-    })
-    .collect();
+  let mut index = BTreeMap::new();
+  for entry in body[INDEX_HEAD..].as_chunks::<INDEX_ENTRY>().0 {
+    let id = lookup_id(&entry[..LOOKUP_ID_LEN]);
+    let offset = u64::from_le_bytes(array(&entry[LOOKUP_ID_LEN..LOOKUP_ID_LEN + 8]));
+    let len = u32::from_le_bytes(array(&entry[LOOKUP_ID_LEN + 8..]));
+    // A place outside the covered log would read garbage or allocate a damaged length: the
+    // checkpoint is only a hint, so the log is scanned instead.
+    let is_inside = offset
+      .checked_add(u64::from(len))
+      .is_some_and(|end| end <= covered);
+    if len > MAX_PAYLOAD || offset < HEADER_LEN || !is_inside {
+      tracing::warn!("the local store's index points outside its log; scanning the log instead");
+      return Ok(None);
+    }
+    index.insert(id, Place { offset, len });
+  }
   Ok(Some(Checkpoint { covered, index }))
 }
 
@@ -960,6 +965,39 @@ mod tests {
       let log = files.open().unwrap();
       assert_eq!(log.get(&id(3)).unwrap(), None);
       assert_eq!(log.get(&id(4)).unwrap(), Some(vec![4; 10]));
+    }
+
+    /// A forged entry with a valid CRC (a damaged writer, a hostile copy) never makes the store
+    /// read or allocate what it says: the open scans the log instead.
+    #[test]
+    fn an_index_entry_outside_the_log_costs_a_scan_only() {
+      let forgeries: [(Option<u64>, Option<u32>); 3] =
+        [(None, Some(u32::MAX)), (Some(0), None), (Some(1 << 40), None)];
+      for (maybe_offset, maybe_len) in forgeries {
+        let files = Files::default();
+        drop(files.create((0..10).map(|n| (id(n), vec![n; 10])).collect()));
+        forge_first_entry(&files, maybe_offset, maybe_len);
+        *files.reads.borrow_mut() = [0; 3];
+        let log = files.open().unwrap();
+        assert!(files.reads(0) > 0, "the log was scanned");
+        assert_eq!(log.get(&id(0)).unwrap(), Some(vec![0; 10]));
+        assert_eq!(log.sizes().0, 10);
+      }
+    }
+
+    /// Rewrites the index file's first entry and its CRC.
+    fn forge_first_entry(files: &Files, maybe_offset: Option<u64>, maybe_len: Option<u32>) {
+      let mut index = files.index.borrow_mut();
+      let entry = INDEX_HEAD + LOOKUP_ID_LEN;
+      if let Some(offset) = maybe_offset {
+        index[entry..entry + 8].copy_from_slice(&offset.to_le_bytes());
+      }
+      if let Some(len) = maybe_len {
+        index[entry + 8..entry + 12].copy_from_slice(&len.to_le_bytes());
+      }
+      let body = index.len() - 4;
+      let crc = crc32fast::hash(&index[..body]);
+      index[body..].copy_from_slice(&crc.to_le_bytes());
     }
 
     #[test]
