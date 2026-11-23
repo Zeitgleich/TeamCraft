@@ -103,6 +103,23 @@ async fn the_downloads_button_stays_while_the_app_catches_up() {
     json!(0),
     "the button disappeared while the app caught up: {watch}"
   );
+  // Before the button shows, the top bar may still settle (its first paint, the first start after
+  // an update); once it is there, the search beside it stays put.
+  let shown_at = watch["changes"]
+    .as_array()
+    .and_then(|changes| changes.iter().find(|change| change[1] == json!(true)))
+    .and_then(|change| change[0].as_f64())
+    .unwrap();
+  let moved_after = watch["moves"]
+    .as_array()
+    .unwrap()
+    .iter()
+    .filter(|step| step[0].as_f64().is_some_and(|at| at > shown_at))
+    .count();
+  assert_eq!(
+    moved_after, 0,
+    "the search moved after the button showed: {watch}"
+  );
   app.quit().await.unwrap();
 }
 
