@@ -541,8 +541,10 @@ fn read_nack(datagram: &[u8]) -> Option<DirectControl> {
   }
   let sequence_numbers = datagram
     .get(NACK_HEADER_LEN..)?
-    .chunks_exact(2)
-    .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+    .as_chunks::<2>()
+    .0
+    .iter()
+    .map(|pair| u16::from_be_bytes(*pair))
     .collect();
   Some(DirectControl::Nack {
     stream_id: MediaStreamId(u32::from_be_bytes(id)),
@@ -559,13 +561,12 @@ fn read_wants(datagram: &[u8]) -> Option<Vec<(MediaStreamId, u8)>> {
     return None;
   }
   let mut wants: Vec<(MediaStreamId, u8)> = Vec::with_capacity(count);
-  for want in datagram.get(2..)?.chunks_exact(WANT_LEN) {
-    let id: [u8; 4] = want.get(..4)?.try_into().ok()?;
-    let stream_id = MediaStreamId(u32::from_be_bytes(id));
+  for [a, b, c, d, max_layer] in datagram.get(2..)?.as_chunks::<WANT_LEN>().0 {
+    let stream_id = MediaStreamId(u32::from_be_bytes([*a, *b, *c, *d]));
     if wants.iter().any(|(seen, _)| *seen == stream_id) {
       return None;
     }
-    wants.push((stream_id, *want.get(4)?));
+    wants.push((stream_id, *max_layer));
   }
   Some(wants)
 }

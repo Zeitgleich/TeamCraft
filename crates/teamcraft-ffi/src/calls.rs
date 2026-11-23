@@ -700,12 +700,20 @@ impl CallHub {
   }
 }
 
+/// How this device joins a call, besides what the core prepared.
+pub(crate) struct JoinChoices {
+  /// The microphone stays muted from the first frame.
+  pub(crate) is_muted: bool,
+  /// What the app measured of its link before the call.
+  pub(crate) maybe_prior_link: Option<PriorLink>,
+  /// "Connect directly in calls" (#127), followed while the call runs.
+  pub(crate) direct_connections: watch::Receiver<bool>,
+}
+
 /// Joins the prepared call on a new call thread; returns once connected.
 pub(crate) async fn join(
   preparation: CallPreparation,
-  is_muted: bool,
-  maybe_prior_link: Option<PriorLink>,
-  direct_connections: watch::Receiver<bool>,
+  choices: JoinChoices,
   hub: CallHub,
   jobs: mpsc::UnboundedSender<Job>,
   network: &NetworkChanges,
@@ -715,6 +723,11 @@ pub(crate) async fn join(
   let conversation = preparation.conversation;
   let own_device = preparation.device_id;
   let screen_policy = preparation.screen_policy.clone();
+  let JoinChoices {
+    is_muted,
+    maybe_prior_link,
+    direct_connections,
+  } = choices;
   let does_user_allow_direct = *direct_connections.borrow();
   let mut config = native_config(preparation, does_user_allow_direct, &jobs)?;
   config.is_muted_at_start = is_muted;

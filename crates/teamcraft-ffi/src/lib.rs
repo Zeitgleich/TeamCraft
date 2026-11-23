@@ -2107,9 +2107,11 @@ impl TeamCraft {
     let maybe_prior_link = self.link.take_fresh(self.network.generation());
     calls::join(
       preparation,
-      is_muted,
-      maybe_prior_link,
-      self.direct_connections.subscribe(),
+      calls::JoinChoices {
+        is_muted,
+        maybe_prior_link,
+        direct_connections: self.direct_connections.subscribe(),
+      },
       hub,
       self.engine_jobs()?.clone(),
       &self.network,
