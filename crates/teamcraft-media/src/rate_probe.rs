@@ -38,16 +38,28 @@
 //!   overflowed: short of the rate, whatever the delays. Less is the link's own loss (hotel or
 //!   train Wi-Fi loses 1–3 % in bursts, #2191): one lost datagram made every cluster fall short
 //!   there, and a presenter's video held for its voice never got its proof back.
+//! - **Own threads that stall** (a loaded machine, #2245): a train that comes
+//!   [`STARVED_TRAINS`] spacings or more after the one before means the sender's threads didn't
+//!   run meanwhile. Its padding would go out in one burst with whatever else waited, and the
+//!   cluster's trains aren't spaced as the comparison needs: it is given up uncounted
+//!   ([`UplinkProbe::on_timer`]), and the next one comes once a cluster's length has passed. Judged,
+//!   such clusters fell short one after the other on a loaded laptop and kept a presenter's video
+//!   held for its voice from 7 to 22 s.
 //! - **Nothing to learn:** padding carries zeros; the receiver sees only how much arrived when.
 
 use std::time::Duration;
 
 use teamcraft_proto::TransportFeedback;
+use tracing::debug;
 // `std::time::Instant` on native; the browser clock on wasm, where `std` has none.
 use web_time::Instant;
 
 use crate::bwe::SendSideEstimator;
 use crate::datagram::{TransportSeq, padding_datagram};
+
+/// A train this many spacings after the one before found the sender's threads stalled: two and a
+/// half (a timer a tick late still sends its train, carrying the time since).
+const STARVED_TRAINS: f64 = 2.5;
 
 /// Settings of the probes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -344,6 +356,25 @@ impl RateProbe {
     }
   }
 
+  /// Gives up, uncounted, a cluster whose next train is [`STARVED_TRAINS`] spacings or more late
+  /// at `now`: the sender's own threads stalled, and what it would show is the stall. The next
+  /// one may start once a cluster's length has passed. Returns whether it was given up.
+  pub fn abandon_if_starved(&mut self, config: &RateProbeConfig, now: Instant) -> bool {
+    let is_starved = self.maybe_cluster.as_ref().is_some_and(|cluster| {
+      let is_sending = cluster.trains.len() < usize::from(config.trains);
+      let starved_after = config.train_spacing.mul_f64(STARVED_TRAINS);
+      is_sending
+        && cluster
+          .maybe_last_train_at
+          .is_some_and(|last| now.saturating_duration_since(last) >= starved_after)
+    });
+    if is_starved {
+      self.maybe_cluster = None;
+      self.maybe_next_at = Some(now + config.train_spacing * u32::from(config.trains));
+    }
+    is_starved
+  }
+
   fn finish(&mut self, config: &RateProbeConfig, outcome: ProbeOutcome, now: Instant) {
     self.maybe_cluster = None;
     match outcome {
@@ -384,6 +415,9 @@ impl UplinkProbe {
     maybe_wanted_bps: Option<u32>,
     now: Instant,
   ) -> Vec<Vec<u8>> {
+    if self.probe.abandon_if_starved(config, now) {
+      debug!("uplink probe given up: the own threads stalled between its trains");
+    }
     self.probe.on_timer(config, now);
     if !self.probe.is_running() && !self.start_if_due(config, uplink, maybe_wanted_bps, now) {
       return Vec::new();
@@ -718,6 +752,30 @@ mod tests {
       thinnest.due_train(&config, now),
       Some(vec![config.min_datagram_bytes; 2])
     );
+  }
+
+  /// #2245: a train that comes far too late found the sender's threads stalled. The cluster is
+  /// given up without counting as one that fell short: no longer wait, no smaller step.
+  #[test]
+  fn a_cluster_whose_sender_stalled_is_given_up_uncounted() {
+    let config = RateProbeConfig::default();
+    let mut probe = RateProbe::new();
+    let now = Instant::now();
+    probe.start(2_000_000, 0, 0, now);
+    let sizes = probe.due_train(&config, now).unwrap();
+    probe.sent(TransportSeq(0), &sizes, now);
+    // A timer two ticks late still sends its train.
+    let late = now + Duration::from_millis(200);
+    assert!(!probe.abandon_if_starved(&config, late));
+    assert!(probe.due_train(&config, late).is_some());
+    // Half a second: the threads stalled.
+    let stalled = now + Duration::from_millis(500);
+    assert!(probe.abandon_if_starved(&config, stalled));
+    assert!(!probe.is_running());
+    assert!(!probe.may_start(stalled + Duration::from_millis(200)));
+    assert!(probe.may_start(stalled + Duration::from_millis(300)));
+    assert_eq!(probe.failures, 0);
+    assert_eq!(probe.target_bps(&config, 10_000_000, 1_000_000), 1_500_000);
   }
 
   #[test]
