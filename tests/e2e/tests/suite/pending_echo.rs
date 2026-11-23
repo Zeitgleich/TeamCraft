@@ -50,7 +50,7 @@ const WAIT: Duration = Duration::from_secs(60);
 /// One photo as a phone takes it (12 MP JPEG, a few MB of noise that doesn't compress away) into the
 /// composer's file input, as a picker does; its name is filled in. A small picture hides what a
 /// real one costs on the way to the row: reading it and making its thumbnail.
-const PICK_PICTURE: &str = r"(async name => {
+pub(crate) const PICK_PICTURE: &str = r"(async name => {
   const canvas = document.createElement('canvas');
   canvas.width = 4032;
   canvas.height = 3024;
@@ -72,7 +72,7 @@ const PICK_PICTURE: &str = r"(async name => {
 })";
 
 /// What the page notes of a send: when Enter went in and when the row with the text was added.
-const ECHO_PROBE: &str = r"(() => {
+pub(crate) const ECHO_PROBE: &str = r"(() => {
   if (window.__echo) return;
   window.__echo = { enter: null, shown: null, expect: null };
   document.addEventListener('keydown', event => {
