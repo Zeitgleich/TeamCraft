@@ -5,6 +5,7 @@ import android.net.Uri
 import android.text.format.Formatter
 import android.util.Log
 import android.view.GestureDetector
+import android.view.LayoutInflater
 import android.view.MotionEvent
 import androidx.annotation.OptIn
 import androidx.compose.foundation.background
@@ -32,6 +33,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,6 +60,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.Tracks
@@ -66,6 +69,7 @@ import androidx.media3.common.util.RepeatModeUtil
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.FileDataSource
 import androidx.media3.exoplayer.DefaultRenderersFactory
+import androidx.media3.exoplayer.ExoPlaybackException
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
@@ -207,7 +211,9 @@ private fun BoxScope.Notice(text: String, action: @Composable () -> Unit = {}) {
 /**
  * Media3's player with its own controls: play and pause, seeking, the scrubber, speed, repeat and
  * captions, translated by the library. The device's decoders do the work, hardware first; a decoder
- * that fails to start falls back to the next one, usually the platform's software decoder.
+ * that fails to start falls back to the next one, usually the platform's software decoder. AV1 and
+ * VP9 the device has no decoder for go to the app's own (dav1d, libvpx; apps/android/decoders), and
+ * when a device decoder claims them but fails, the video is opened once more with the app's first.
  */
 @OptIn(UnstableApi::class)
 @SuppressLint("ClickableViewAccessibility") // The listener only watches for double taps; the view's own click stays.
@@ -219,13 +225,24 @@ private fun VideoSurface(file: File, label: String, onUnplayable: () -> Unit) {
   // Saved with the screen: a rotation goes on where it was.
   var positionMs by rememberSaveable(file.path) { mutableLongStateOf(0L) }
   var wasPlaying by rememberSaveable(file.path) { mutableStateOf(true) }
-  val player = remember(file) {
+  var prefersBundledDecoder by rememberSaveable(file.path) { mutableStateOf(false) }
+  var isPlaying by remember(file) { mutableStateOf(false) }
+  val player = remember(file, prefersBundledDecoder) {
     // Opening counts as use: the downloads are trimmed least recently used first.
     file.setLastModified(System.currentTimeMillis())
     // Its messages and stack traces can name the file's path, so the sender's file name; the
     // listener below logs the error's code instead.
     MediaLog.setLogLevel(MediaLog.LOG_LEVEL_OFF)
-    ExoPlayer.Builder(context, DefaultRenderersFactory(context).setEnableDecoderFallback(true))
+    val renderers = DefaultRenderersFactory(context)
+      .setEnableDecoderFallback(true)
+      .setExtensionRendererMode(
+        if (prefersBundledDecoder) {
+          DefaultRenderersFactory.EXTENSION_RENDERER_MODE_PREFER
+        } else {
+          DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON
+        },
+      )
+    ExoPlayer.Builder(context, renderers)
       .setSeekBackIncrementMs(SEEK_STEP_MS)
       .setSeekForwardIncrementMs(SEEK_STEP_MS)
       .setAudioAttributes(
@@ -244,10 +261,20 @@ private fun VideoSurface(file: File, label: String, onUnplayable: () -> Unit) {
   }
   DisposableEffect(player, lifecycle) {
     val listener = object : Player.Listener {
+      override fun onIsPlayingChanged(playing: Boolean) {
+        isPlaying = playing
+      }
+
       override fun onPlayerError(error: PlaybackException) {
         // The code says enough, and the file's name and content stay out of the logs.
         Log.i(TAG, "the video can't be played: ${error.errorCodeName}")
-        currentOnUnplayable()
+        val maybeMimeType = (error as? ExoPlaybackException)?.rendererFormat?.sampleMimeType
+        if (!prefersBundledDecoder && canRetryWithBundledDecoder(error.errorCode, maybeMimeType)) {
+          positionMs = player.currentPosition
+          prefersBundledDecoder = true
+        } else {
+          currentOnUnplayable()
+        }
       }
 
       override fun onTracksChanged(tracks: Tracks) {
@@ -273,23 +300,56 @@ private fun VideoSurface(file: File, label: String, onUnplayable: () -> Unit) {
       player.release()
     }
   }
+  // The retry with the app's decoder draws through OpenGL (the layout's surface type), so its view is
+  // made anew with the player.
+  key(prefersBundledDecoder) {
+    PlayerSurface(player, label, isPlaying, usesDecoderGlSurface = prefersBundledDecoder)
+  }
+}
+
+@OptIn(UnstableApi::class)
+@SuppressLint("ClickableViewAccessibility", "InflateParams") // The listener only watches for double taps; the view's own click stays.
+@Composable
+private fun PlayerSurface(player: ExoPlayer, label: String, isPlaying: Boolean, usesDecoderGlSurface: Boolean) {
+  val context = LocalContext.current
+  val lifecycle = LocalLifecycleOwner.current.lifecycle
+  val view = remember {
+    if (usesDecoderGlSurface) {
+      LayoutInflater.from(context).inflate(R.layout.video_player_decoder_gl, null) as PlayerView
+    } else {
+      PlayerView(context)
+    }
+  }
+  if (usesDecoderGlSurface) {
+    DisposableEffect(view, lifecycle) {
+      // An OpenGL surface draws only between the view's onResume and onPause.
+      val observer = LifecycleEventObserver { _, event ->
+        when (event) {
+          Lifecycle.Event.ON_RESUME -> view.onResume()
+          Lifecycle.Event.ON_PAUSE -> view.onPause()
+          else -> {}
+        }
+      }
+      lifecycle.addObserver(observer)
+      onDispose {
+        lifecycle.removeObserver(observer)
+        view.onPause()
+      }
+    }
+  }
   AndroidView(
     modifier = Modifier.fillMaxSize(),
+    update = { it.keepScreenOn = isPlaying },
     factory = { viewContext ->
-      PlayerView(viewContext).apply {
-        contentDescription = label
+      view.apply {
         this.player = player
+        contentDescription = label
         controllerShowTimeoutMs = CONTROLS_TIMEOUT_MS
         setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
         setShowNextButton(false)
         setShowPreviousButton(false)
         setShowSubtitleButton(true)
         setRepeatToggleModes(RepeatModeUtil.REPEAT_TOGGLE_MODE_ONE)
-        player.addListener(object : Player.Listener {
-          override fun onIsPlayingChanged(isPlaying: Boolean) {
-            keepScreenOn = isPlaying
-          }
-        })
         val doubleTaps = GestureDetector(viewContext, object : GestureDetector.SimpleOnGestureListener() {
           override fun onDoubleTap(event: MotionEvent): Boolean {
             player.seekTo((player.currentPosition + doubleTapSeekMs(event.x, width.toFloat())).coerceAtLeast(0L))
@@ -304,6 +364,22 @@ private fun VideoSurface(file: File, label: String, onUnplayable: () -> Unit) {
     },
   )
 }
+
+/**
+ * Whether a playback error is worth a second try with the app's own decoder first: a device decoder
+ * that failed on a format the app bundles one for (AV1, VP9).
+ */
+internal fun canRetryWithBundledDecoder(errorCode: Int, maybeMimeType: String?): Boolean =
+  maybeMimeType in BUNDLED_DECODER_TYPES && errorCode in DECODER_FAILURES
+
+private val BUNDLED_DECODER_TYPES = setOf(MimeTypes.VIDEO_AV1, MimeTypes.VIDEO_VP9)
+private val DECODER_FAILURES = setOf(
+  PlaybackException.ERROR_CODE_DECODER_INIT_FAILED,
+  PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
+  PlaybackException.ERROR_CODE_DECODING_FAILED,
+  PlaybackException.ERROR_CODE_DECODING_FORMAT_EXCEEDS_CAPABILITIES,
+  PlaybackException.ERROR_CODE_DECODING_FORMAT_UNSUPPORTED,
+)
 
 /** A double tap seeks back on the left half of the video, forward on the right. */
 internal fun doubleTapSeekMs(x: Float, width: Float): Long = if (x < width / 2) -SEEK_STEP_MS else SEEK_STEP_MS

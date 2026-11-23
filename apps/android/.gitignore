@@ -7,3 +7,10 @@ app/src/main/jniLibs/
 app/src/main/java/uniffi/
 # Fetched by scripts/build.sh (crates/teamcraft-media/models/fetch.sh).
 app/src/main/assets/models/
+# Symlinks to the decoder libraries decoders/build-native.sh fetched and built.
+decoders/av1/src/main/jni/dav1d
+decoders/av1/src/main/jni/cpu_features
+decoders/av1/src/main/jni/nativelib
+decoders/vp9/src/main/jni/libvpx
+decoders/vp9/src/main/jni/libvpx_android_configs
+decoders/*/.cxx/

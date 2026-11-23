@@ -74,6 +74,9 @@ build() {
     --library "${CARGO_TARGET_DIR}/x86_64-linux-android/${profile_dir}/libteamcraft_ffi.so" \
     --language kotlin --out-dir "${APP_DIR}/app/src/main/java"
 
+  # The bundled AV1 and VP9 decoders' native libraries (decoders/README.md); reused while unchanged.
+  "${APP_DIR}/decoders/build-native.sh"
+
   cd "${APP_DIR}"
   if [ "$#" -eq 0 ]; then
     set -- assembleDebug testFullDebugUnitTest testLibreDebugUnitTest

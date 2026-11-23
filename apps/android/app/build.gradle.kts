@@ -223,6 +223,10 @@ dependencies {
   // The in-app video player (#200): the platform's decoders behind Media3's demuxers and controls.
   implementation(libs.androidx.media3.exoplayer)
   implementation(libs.androidx.media3.ui)
+  // AV1 (dav1d, BSD-2) and VP9 (libvpx, BSD-3) for devices without a decoder of their own: Media3's
+  // decoder modules, built here (decoders/README.md). Loaded by DefaultRenderersFactory by name.
+  implementation(project(":decoder-av1"))
+  implementation(project(":decoder-vp9"))
   // Trim, mute and scale videos on the device before sending (#1358): Media3 Transformer, Apache-2.0.
   implementation(libs.androidx.media3.transformer)
   implementation(libs.androidx.media3.effect)

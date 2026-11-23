@@ -6,6 +6,9 @@ FROM rust:1.99.1-slim-trixie
 RUN apt-get update \
   && apt-get install -y --no-install-recommends \
     openjdk-21-jdk-headless unzip curl ca-certificates git cmake perl python3 \
+    # The bundled video decoders (decoders/build-native.sh): dav1d builds with Meson and its x86
+    # assembly with nasm; Gradle's CMake build of their JNI wrappers runs Ninja.
+    meson ninja-build nasm xz-utils make \
     # Libraries the emulator loads even when headless (scripts/emulator-test.sh).
     libpulse0 libnss3 libxcomposite1 libxcursor1 libxdamage1 libxi6 libxtst6 libxrandr2 \
     libgl1 libegl1 libdbus-1-3 libasound2t64 libxkbfile1 libxkbcommon0 \

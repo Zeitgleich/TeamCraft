@@ -88,3 +88,8 @@ updates:
     groups:
       android-minor:
         update-types: [minor, patch]
+    # apps/android/decoders vendors Media3's AV1 and VP9 modules: a new Media3 minor release comes
+    # with them, by hand (decoders/README.md, "Updates"). Patch releases still come through.
+    ignore:
+      - dependency-name: "androidx.media3:*"
+        update-types: [version-update:semver-major, version-update:semver-minor]
