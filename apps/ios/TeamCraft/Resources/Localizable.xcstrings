@@ -582,13 +582,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This conversation is under legal hold (%@). Retention doesn't delete its messages and files, and it can't be deleted until the hold is released."
+            "value": "This conversation is under legal hold (%@). Retention doesn't delete its messages and files, it can't be deleted, and a message you delete stays on the server, hidden, until the hold is released."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, %@). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, und das Gespräch kann nicht gelöscht werden, bis die Anordnung aufgehoben ist."
+            "value": "Für dieses Gespräch gilt eine Aufbewahrungsanordnung (Legal Hold, %@). Nachrichten und Dateien werden nicht nach den Aufbewahrungsfristen gelöscht, das Gespräch kann nicht gelöscht werden, und eine Nachricht, die du löschst, bleibt verborgen auf dem Server, bis die Anordnung aufgehoben ist."
           }
         }
       }
