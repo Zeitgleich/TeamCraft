@@ -122,6 +122,37 @@ text-preview-truncated = Nur die ersten { $count } Zeilen werden angezeigt. Lade
 text-preview-encoding-repaired = Einige Bytes sind kein gültiges UTF-8 und werden als Ersatzzeichen angezeigt.
 text-preview-encoding-utf16 = Als UTF-16 gelesen.
 text-preview-encoding-latin1 = Kein UTF-8, daher als Latin-1 (Windows-1252) gelesen.
+table-preview-view = Ansicht
+table-preview-table = Tabelle
+table-preview-text = Text
+table-preview-parsing = Tabelle wird gelesen…
+table-preview-content = Tabelle von { $name }
+table-preview-delimiter = Trennzeichen
+table-preview-delimiter-auto = Automatisch ({ $detected })
+table-preview-delimiter-comma = Komma
+table-preview-delimiter-semicolon = Semikolon
+table-preview-delimiter-tab = Tabulator
+table-preview-delimiter-pipe = Senkrechter Strich
+table-preview-delimiter-colon = Doppelpunkt
+table-preview-delimiter-custom = Andere…
+table-preview-delimiter-custom-label = Zeichen zwischen den Feldern
+table-preview-delimiter-custom-invalid = Bis zu 8 Zeichen, ohne Anführungszeichen und Zeilenumbrüche.
+table-preview-header = Erste Zeile ist Kopfzeile
+table-preview-wrap = Zellen umbrechen
+table-preview-go-to-row = Gehe zu Zeile
+table-preview-row = Zeile
+table-preview-row-number = Zeilennummer
+table-preview-copy-cell = Zelle kopieren
+table-preview-copy-row = Zeile kopieren
+table-preview-copy-all = Auswahl oder ganze Datei kopieren
+table-preview-truncated = Nur die ersten { $count } Zeilen werden angezeigt. Lade die Datei herunter, um alles zu sehen.
+table-preview-columns-dropped = Nur die ersten { $count } Spalten werden angezeigt.
+table-preview-refused-not-delimited = Kein Trennzeichen teilt alle Zeilen in gleich viele Spalten, daher wird die Datei als Text angezeigt.
+table-preview-refused-quote = Ein Feld in Anführungszeichen ab Zeile { $line } wird nie geschlossen, daher wird die Datei als Text angezeigt.
+table-preview-refused-ragged = { $count ->
+    [one] { $count } von { $rows } Zeilen hat eine andere Spaltenzahl, daher wird die Datei als Text angezeigt.
+   *[other] { $count } von { $rows } Zeilen haben eine andere Spaltenzahl, daher wird die Datei als Text angezeigt.
+  }
 file-share = Freigabelink…
 
 # Workspace management

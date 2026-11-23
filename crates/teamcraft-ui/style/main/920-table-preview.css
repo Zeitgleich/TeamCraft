@@ -1,0 +1,174 @@
+/* The table view of file previews (#2341). A real <table> (header cells, row headers, row
+   indexes for screen readers) of which only the rows in view are in the page: spacer rows above and
+   below stand in for the rest. Rows are one line high (the virtual list's arithmetic rests on the
+   measured probe), or as many lines as their cells wrap to. The header row and the row numbers stay
+   put while the table scrolls; numbers align at the end with tabular figures. */
+.tt-view-switch { flex: none; }
+.tt-delimiter, .tt-switch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  letter-spacing: var(--tracking-xs);
+  white-space: nowrap;
+}
+.tt-delimiter select { min-width: 0; }
+.tt-switch { cursor: pointer; color: var(--text); }
+.tt-switch input[role="switch"] {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: 9px;
+  background: var(--border-strong);
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.tt-switch input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--on-fill);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2);
+  transition: transform var(--dur-fast) var(--ease-standard);
+}
+.tt-switch input[role="switch"]:checked { background: var(--accent); }
+.tt-switch input[role="switch"]:checked::after { transform: translateX(12px); }
+.tt-switch input[role="switch"]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.tt-custom { display: flex; flex-direction: column; gap: 2px; }
+.tt-custom-input { width: 5.5em; font-family: var(--font-mono); }
+.tt-custom-error { max-width: 16rem; white-space: normal; }
+
+.tt-scroller {
+  --tt-pad-y: 5px;
+  --tt-pad-x: 10px;
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  background: var(--surface);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+  font-variant-numeric: tabular-nums;
+  outline-offset: -2px;
+}
+.tt {
+  table-layout: fixed;
+  border-collapse: separate;
+  border-spacing: 0;
+  color: var(--text);
+}
+.tt th, .tt td {
+  padding: var(--tt-pad-y) var(--tt-pad-x);
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+  text-align: start;
+  vertical-align: top;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.tt td { cursor: default; }
+.tt .tt-cell { overflow: hidden; text-overflow: ellipsis; }
+.tt-scroller.is-wrapped .tt td { white-space: pre-wrap; overflow-wrap: anywhere; }
+.tt-scroller.is-wrapped .tt .tt-cell {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--tt-lines, 1);
+  line-clamp: var(--tt-lines, 1);
+  max-height: calc(var(--tt-lines, 1) * var(--tt-line));
+}
+.tt .is-numeric { text-align: end; }
+/* An empty cell reads as empty, not as a gap in the layout. */
+.tt td.is-empty { background: color-mix(in srgb, var(--surface-2) 60%, transparent); }
+.tt td.is-missing {
+  background: repeating-linear-gradient(135deg, transparent 0 5px, var(--surface-2) 5px 6px);
+}
+.tt td.is-selected { box-shadow: inset 0 0 0 2px var(--accent); background: var(--accent-soft); }
+.tt tr.is-selected > td, .tt tr.is-selected > th { background: var(--accent-soft); }
+.tt-spacer, .tt-spacer:hover { border: 0; }
+.tt-spacer { padding: 0; }
+
+/* The header row stays at the top. */
+.tt thead th {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--surface-2);
+  color: var(--text);
+  font-weight: var(--weight-semibold);
+  border-bottom-color: var(--border-strong);
+}
+.tt-head { position: relative; }
+.tt-head-text { display: block; overflow: hidden; text-overflow: ellipsis; }
+/* The column's edge: drag it to make the column wider or narrower. */
+.tt-resize {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  z-index: 1;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.tt-resize::after {
+  content: "";
+  position: absolute;
+  top: 20%;
+  bottom: 20%;
+  left: 3px;
+  width: 2px;
+  border-radius: 1px;
+  background: transparent;
+  transition: background-color var(--dur-fast) var(--ease-standard);
+}
+.tt-head:hover .tt-resize::after, .tt-resize:active::after { background: var(--accent); }
+
+/* Row numbers stay at the left edge, the corner above them in front of both. */
+.tt .tt-n {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--surface-2);
+  color: var(--text-muted);
+  font-weight: var(--weight-regular);
+  text-align: end;
+  user-select: none;
+  cursor: pointer;
+}
+.tt thead .tt-corner { z-index: 3; left: 0; cursor: default; }
+.tt tr.is-selected > .tt-n { color: var(--accent-strong); }
+
+.tt-probe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  padding: var(--tt-pad-y) var(--tt-pad-x);
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+@media (hover: hover) {
+  .tt tbody tr:not(.tt-spacer):hover > td { background-color: color-mix(in srgb, var(--surface-2) 70%, transparent); }
+  .tt tbody tr:not(.tt-spacer):hover > td.is-selected { background: var(--accent-soft); }
+}
+
+/* At phone width the toolbar's options share rows. */
+@media (max-width: 600px) {
+  .tt-delimiter { flex: 1 1 10rem; }
+  .tt-delimiter select { flex: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tt-switch input[role="switch"], .tt-switch input[role="switch"]::after, .tt-resize::after { transition: none; }
+}

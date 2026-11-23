@@ -22,6 +22,7 @@ use wasm_bindgen_futures::JsFuture;
 
 use crate::components::icons::{Icon, IconName};
 use crate::components::message_actions::copy_text;
+use crate::components::table_viewer::{TableOptions, ViewMode, table_pane};
 use crate::i18n::I18n;
 use crate::model::LogLevel;
 use crate::preview::TextFormat;
@@ -33,18 +34,21 @@ use crate::text_preview::json::{self, JsonFormatError};
 use crate::text_preview::layout::{self, Deco, Heights, Mark, Piece, Row, ScrollMap};
 use crate::text_preview::log::{entry_levels, level_of, looks_like_log, timestamp_of};
 use crate::text_preview::search::{self, Found};
+use crate::text_preview::table::{self, Sniffed};
 use crate::text_preview::{MAX_LINES, Span, TextDoc, ansi, index_lines};
 
 /// Lines indexed (and levels read) per step before the browser gets a turn.
 const LINES_PER_STEP: usize = 100_000;
+/// Rows a plain text file needs (all with the same number of fields) to be offered as a table.
+const MIN_SNIFFED_RECORDS: usize = 3;
 /// Screen rows drawn above and below the viewport, so scrolling shows no blank rows.
 const OVERSCAN_ROWS: u32 = 24;
 /// From this size a query applies after a short pause instead of at every key: finding in a large
 /// file takes a few milliseconds.
-const DEBOUNCE_FROM_BYTES: usize = 1024 * 1024;
-const FIND_PAUSE: Duration = Duration::from_millis(150);
+pub(crate) const DEBOUNCE_FROM_BYTES: usize = 1024 * 1024;
+pub(crate) const FIND_PAUSE: Duration = Duration::from_millis(150);
 /// The longest query; a find field is no place for a paragraph.
-const MAX_QUERY_CHARS: usize = 200;
+pub(crate) const MAX_QUERY_CHARS: usize = 200;
 /// Columns that are not text in a row, besides the line number's digits: the gutter's padding
 /// around the number ([`GUTTER_PADDING_COLUMNS`]) and the padding at the end (the stylesheet's `.tv-row`).
 const ROW_CHROME_COLUMNS: f64 = GUTTER_PADDING_COLUMNS + 1.0;
@@ -64,6 +68,8 @@ struct Prepared {
   doc: Rc<TextDoc>,
   encoding: TextEncoding,
   format: TextFormat,
+  /// How the text reads as a table, when it does (#2341).
+  maybe_sniffed: Option<Sniffed>,
 }
 
 /// The shown document's rows and their widths.
@@ -143,7 +149,7 @@ pub fn text_viewer(
         </div>
       }
       .into_any(),
-      Phase::Ready(prepared) => text_pane(state, i18n, &prepared, name.get_value()),
+      Phase::Ready(prepared) => prepared_view(state, i18n, prepared, name.get_value()),
     }}
   }
   .into_any()
@@ -188,7 +194,14 @@ async fn prepare(
   let is_log = match format {
     TextFormat::Log => true,
     TextFormat::Plain => looks_like_log(&text, &lines),
-    TextFormat::Json => false,
+    TextFormat::Json | TextFormat::Table => false,
+  };
+  let maybe_sniffed = match format {
+    TextFormat::Table => table::sniff(&text),
+    // A plain text file is offered as a table only when its lines clearly are one.
+    TextFormat::Plain if !is_log => table::sniff(&text)
+      .filter(|found| found.records >= MIN_SNIFFED_RECORDS && found.consistent_percent == 100),
+    TextFormat::Plain | TextFormat::Log | TextFormat::Json => None,
   };
   let mut maybe_levels = None;
   if is_log {
@@ -213,11 +226,12 @@ async fn prepare(
     }),
     encoding,
     format,
+    maybe_sniffed,
   }))
 }
 
 /// Lets the browser paint and handle input before the next step.
-async fn yield_to_browser() {
+pub(crate) async fn yield_to_browser() {
   let timer = js_sys::Promise::new(&mut |resolve, _reject| {
     if let Some(window) = web_sys::window() {
       drop(window.set_timeout_with_callback_and_timeout_and_arguments_0(&resolve, 0));
@@ -227,12 +241,44 @@ async fn yield_to_browser() {
   drop(JsFuture::from(timer).await);
 }
 
-/// The toolbar, the notes and the rows of a prepared file.
-fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> AnyView {
+/// A prepared file: the text pane, or for delimited data the table pane with a switch between the
+/// two. A table that can't be read falls back to the text with a note.
+fn prepared_view(state: AppState, i18n: I18n, prepared: Rc<Prepared>, name: String) -> AnyView {
+  let is_table = !prepared.doc.text.trim().is_empty()
+    && (prepared.format == TextFormat::Table || prepared.maybe_sniffed.is_some());
+  if !is_table {
+    return text_pane(state, i18n, &prepared, name, None);
+  }
+  let options = TableOptions::load(&name);
+  let prepared = StoredValue::new_local(prepared);
+  let name = StoredValue::new(name);
+  view! {
+    {move || match options.view.get() {
+      ViewMode::Table => {
+        let (doc, encoding, maybe_sniffed) =
+          prepared.with_value(|prepared| (Rc::clone(&prepared.doc), prepared.encoding, prepared.maybe_sniffed));
+        table_pane(state, i18n, doc, encoding, maybe_sniffed, options, name.get_value())
+      },
+      ViewMode::Text => prepared.with_value(|prepared| text_pane(state, i18n, prepared, name.get_value(), Some(options))),
+    }}
+  }
+  .into_any()
+}
+
+/// The toolbar, the notes and the rows of a prepared file; `maybe_table` when it can also be shown
+/// as a table.
+fn text_pane(
+  state: AppState,
+  i18n: I18n,
+  prepared: &Prepared,
+  name: String,
+  maybe_table: Option<TableOptions>,
+) -> AnyView {
   let original = Rc::clone(&prepared.doc);
   let is_log = original.is_log();
   let has_ansi = !original.runs.is_empty();
   let is_json = prepared.format == TextFormat::Json;
+  let is_table = prepared.format == TextFormat::Table;
   let encoding = prepared.encoding;
   let shown: RwSignal<Rc<TextDoc>, LocalStorage> = RwSignal::new_local(Rc::clone(&original));
   let original = StoredValue::new_local(original);
@@ -240,7 +286,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
   let json_view = RwSignal::new(JsonView::Original);
   let min_level = RwSignal::new(LogLevel::Debug);
   // Prose reads better wrapped; logs and data keep their columns.
-  let is_wrapped = RwSignal::new(!is_log && !is_json);
+  let is_wrapped = RwSignal::new(!is_log && !is_json && !is_table && maybe_table.is_none());
   let has_colors = RwSignal::new(true);
   let metrics = RwSignal::new(Metrics::default());
   let scroll_top = RwSignal::new(0.0f64);
@@ -312,7 +358,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
     scroller,
   };
 
-  listen_for_find_keys(find_input, view_state);
+  listen_for_find_keys(find_input, move |is_forward| view_state.step(is_forward));
   let cancel_pending_query = move || {
     pending_query.update_value(|maybe_pending| {
       if let Some(pending) = maybe_pending.take() {
@@ -465,6 +511,9 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
   let line_count = move || shown.with(|doc| doc.lines.len());
   let notes = move || {
     let mut notes: Vec<String> = Vec::new();
+    if let Some(note) = maybe_table.and_then(|options| options.refusal_note(i18n)) {
+      notes.push(note);
+    }
     match encoding {
       TextEncoding::Utf8 => {},
       TextEncoding::Utf8Repaired => notes.push(i18n.t("text-preview-encoding-repaired")),
@@ -506,6 +555,7 @@ fn text_pane(state: AppState, i18n: I18n, prepared: &Prepared, name: String) -> 
   view! {
     <div class="tv">
       <div class="tv-tools" role="toolbar" aria-label=move || i18n.t("text-preview-tools")>
+        {maybe_table.map(|options| options.view_switch(i18n))}
         <div class="tv-find" role="search">
           <Icon name=IconName::Search class="tv-find-icon" />
           <input
@@ -1005,7 +1055,7 @@ fn shown_text(
 /// rows in the page) and Ctrl/Cmd+G or F3 go to the next match, with Shift to the previous. The
 /// keys are taken on the window's capture phase, before the app's shortcuts see them (Ctrl/Cmd+F
 /// opens the top bar's search elsewhere, which would close the preview).
-fn listen_for_find_keys(find_input: NodeRef<html::Input>, view_state: ViewState) {
+pub(crate) fn listen_for_find_keys(find_input: NodeRef<html::Input>, step: impl Fn(bool) + 'static) {
   let callback = Closure::<dyn Fn(web_sys::KeyboardEvent)>::new(move |ev: web_sys::KeyboardEvent| {
     let is_command = (ev.ctrl_key() || ev.meta_key()) && !ev.alt_key();
     let key = ev.key();
@@ -1019,7 +1069,7 @@ fn listen_for_find_keys(find_input: NodeRef<html::Input>, view_state: ViewState)
     } else if key == "F3" || (is_command && key.eq_ignore_ascii_case("g")) {
       ev.prevent_default();
       ev.stop_propagation();
-      view_state.step(!ev.shift_key());
+      step(!ev.shift_key());
     }
   });
   let Some(window) = web_sys::window() else {
