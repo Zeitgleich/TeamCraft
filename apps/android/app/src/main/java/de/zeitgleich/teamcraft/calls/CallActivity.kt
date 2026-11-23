@@ -98,6 +98,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import de.zeitgleich.teamcraft.core.ChatClient
 import de.zeitgleich.teamcraft.core.User
 import de.zeitgleich.teamcraft.notifications.MeetingNoticeReport
+import de.zeitgleich.teamcraft.notifications.openConversationIntent
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
 import uniffi.teamcraft_ffi.MeetingPart
@@ -177,6 +178,7 @@ class CallActivity : ComponentActivity() {
             calls,
             maybeState,
             onMinimise = ::minimise,
+            onOpenChat = ::openChat,
             isInPictureInPicture = isInPictureInPicture.value,
             onPipState = ::updatePictureInPicture,
           )
@@ -204,6 +206,17 @@ class CallActivity : ComponentActivity() {
     runCatching {
       startActivity(Intent(this, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
     }.onFailure { Log.w(TAG, "minimise: app not opened", it) }
+    finish()
+  }
+
+  /**
+   * The call's chat (#1488): its conversation in the app, the call going on behind the app's bar as
+   * after [minimise]. The conversation's own feed and composer are the chat, as on desktop (#936),
+   * so reading it there marks it read.
+   */
+  private fun openChat(conversationId: String) {
+    runCatching { startActivity(openConversationIntent(this, conversationId)) }
+      .onFailure { Log.w(TAG, "chat: app not opened", it) }
     finish()
   }
 
@@ -452,6 +465,7 @@ private fun CallScreen(
   calls: CallController,
   maybeState: CallStateInfo?,
   onMinimise: () -> Unit,
+  onOpenChat: (String) -> Unit,
   isInPictureInPicture: Boolean,
   onPipState: (PipState) -> Unit,
 ) {
@@ -580,6 +594,11 @@ private fun CallScreen(
   // A running call can be put away (#2066); back does the same instead of leaving the app.
   val canMinimise = maybeState != null && maybeState.phase != CallPhase.ENDED
   BackHandler(enabled = canMinimise, onBack = onMinimise)
+  // The Chat button's badge, read again on every change while the call screen shows (#1488).
+  val changes by calls.moves.changes.collectAsStateWithLifecycle()
+  val chatBadge by produceState(CallChatBadge.NONE, maybeConversationId, changes) {
+    value = maybeConversationId?.let { calls.chatBadge(it) } ?: CallChatBadge.NONE
+  }
   // "End for everyone…" from the hang-up (#1930): the meeting's hosts confirm, then the core ends
   // it for everybody and this device leaves.
   var isEndAsked by remember { mutableStateOf(false) }
@@ -674,6 +693,7 @@ private fun CallScreen(
       isSharingScreen = screenShareStatus != ScreenShareStatus.Off,
       hostLabels = hostLabels,
       isAwaitingEncryption = isAwaitingEncryption,
+      chat = chatBadge,
     ),
     actions = CallUiActions(
       onToggleControls = { areControlsShown = !areControlsShown },
@@ -722,6 +742,7 @@ private fun CallScreen(
       maybeOnLobby = if (maybeShownLobby != null) ({ isLobbyShown = true }) else null,
       maybeOnEndForEveryone = if (hosts != null && calls.hosts.canEndForEveryone && isConnected) ({ isEndAsked = true }) else null,
       maybeOnMinimise = if (canMinimise) onMinimise else null,
+      maybeOnChat = maybeConversationId?.takeIf { canMinimise }?.let { id -> { onOpenChat(id) } },
     ),
     banner = {
       // Picture-in-picture shows the stage only.

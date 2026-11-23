@@ -68,6 +68,8 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuGroup
@@ -199,6 +201,15 @@ private val TOP_CHROME_FALLBACK = 112.dp
 private val BOTTOM_CHROME_FALLBACK = 88.dp
 
 private val CONTROL_GAP = 8.dp
+/** The gap with six controls in the bar (Chat among them). */
+private val CONTROL_GAP_TIGHT = 6.dp
+/**
+ * Where Chat fits as a button of its own: five medium buttons, the wide hang-up and seven tight
+ * gaps (56 × 5 + 72 + 6 × 7 = 394 dp), with a little to spare; narrower, it is in "More options".
+ */
+private val CHAT_IN_BAR_MIN_WIDTH = 400.dp
+/** Beyond this the badge says "99+". */
+private const val MAX_BADGE_COUNT = 99
 
 /** Up to this many tiles share the screen; more scroll. */
 private const val GRID_FIXED_MAX = 6
@@ -237,10 +248,22 @@ internal class CallUiState(
   val hostLabels: Map<String, Int> = emptyMap(),
   /** The join waits for this device's way into the call's encryption (#1994). */
   val isAwaitingEncryption: Boolean = false,
+  /** What is unread in the call's conversation: the Chat button's badge (#1488). */
+  val chat: CallChatBadge = CallChatBadge.NONE,
 ) {
   /** Its publisher holds the track's video back for its voice (#1891): the tile says so. */
   fun isPausedByPublisher(track: VideoTrackInfo): Boolean =
     maybeState?.pausedVideoStreamIds?.contains(track.streamId.toString()) == true
+}
+
+/**
+ * The badge of the call's Chat button, as desktop and web count it (#936): what is unread in the
+ * call's conversation, and whether it asks for the user (a mention, a DM), which colours it.
+ */
+internal data class CallChatBadge(val count: Int, val isLoud: Boolean) {
+  companion object {
+    val NONE = CallChatBadge(0, false)
+  }
 }
 
 /** Somebody else in the call, as the tiles show them. */
@@ -364,6 +387,11 @@ internal class CallUiActions(
   val maybeOnEndForEveryone: (() -> Unit)? = null,
   /** Puts the call screen away while the call goes on (#2066); a bar in the app leads back. */
   val maybeOnMinimise: (() -> Unit)? = null,
+  /**
+   * "Chat" (#1488): the call's conversation in the app, while the call goes on behind its bar, as
+   * desktop's chat panel covers the stage on a phone; `null` before the call has a conversation.
+   */
+  val maybeOnChat: (() -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -1212,11 +1240,22 @@ internal fun encryptionRetryMinutesLeft(retryAfterSecs: Long, shownAtMs: Long, n
  */
 @Composable
 private fun ControlBar(ui: CallUiState, actions: CallUiActions, modifier: Modifier) {
+  BoxWithConstraints(modifier.fillMaxWidth()) {
+    // Chat is a button of its own where six fit; on a narrow phone it goes into "More options".
+    val hasRoomForChat = maxWidth >= CHAT_IN_BAR_MIN_WIDTH
+    ControlRow(ui, actions, isChatInBar = hasRoomForChat)
+  }
+}
+
+@Composable
+private fun ControlRow(ui: CallUiState, actions: CallUiActions, isChatInBar: Boolean) {
   val state = ui.maybeState
   val isMuted = state?.isMuted == true
+  val maybeOnChat = actions.maybeOnChat
+  val gap = if (maybeOnChat != null && isChatInBar) CONTROL_GAP_TIGHT else CONTROL_GAP
   Row(
-    modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 16.dp),
-    horizontalArrangement = Arrangement.spacedBy(CONTROL_GAP, Alignment.CenterHorizontally),
+    Modifier.fillMaxWidth().padding(horizontal = gap, vertical = 16.dp),
+    horizontalArrangement = Arrangement.spacedBy(gap, Alignment.CenterHorizontally),
     verticalAlignment = Alignment.CenterVertically,
   ) {
     // Checked is the state the label names: "Mute" checked is muted, "Camera off" checked is off.
@@ -1251,10 +1290,50 @@ private fun ControlBar(ui: CallUiState, actions: CallUiActions, modifier: Modifi
         actions.onSpeaker(it)
       }
     }
-    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions)
+    if (maybeOnChat != null && isChatInBar) ChatButton(ui.chat, maybeOnChat)
+    val maybeMenuChat = ui.chat.takeIf { maybeOnChat != null && !isChatInBar }
+    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions, maybeMenuChat)
     HangUpButton(actions.onHangUp, actions.maybeOnEndForEveryone)
   }
 }
+
+/** "Chat" with what is unread on it, as desktop's Chat button (#936, #1488). */
+@Composable
+private fun ChatButton(badge: CallChatBadge, onChat: () -> Unit) {
+  val label = chatLabel(badge)
+  FilledTonalIconButton(
+    onClick = onChat,
+    shapes = IconButtonDefaults.shapes(
+      shape = IconButtonDefaults.mediumRoundShape,
+      pressedShape = IconButtonDefaults.mediumPressedShape,
+    ),
+    modifier = Modifier.size(IconButtonDefaults.mediumContainerSize()).semantics { contentDescription = label },
+  ) {
+    BadgedBox(badge = { ChatBadge(badge, isDot = false) }) {
+      Icon(CallIcons.Chat, contentDescription = null, modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
+    }
+  }
+}
+
+/** The unread count (or, on "More options", a dot); nothing while all is read. */
+@Composable
+private fun ChatBadge(badge: CallChatBadge, isDot: Boolean) {
+  if (badge.count <= 0) return
+  val scheme = MaterialTheme.colorScheme
+  val colors = if (badge.isLoud) scheme.error to scheme.onError else scheme.inverseSurface to scheme.inverseOnSurface
+  Badge(containerColor = colors.first, contentColor = colors.second) {
+    if (!isDot) Text(if (badge.count > MAX_BADGE_COUNT) "$MAX_BADGE_COUNT+" else badge.count.toString())
+  }
+}
+
+/** "Chat", or "Chat, 3 unread messages" for screen readers. */
+@Composable
+private fun chatLabel(badge: CallChatBadge): String =
+  if (badge.count > 0) {
+    stringResource(R.string.call_chat_unread, pluralStringResource(R.plurals.chat_unread, badge.count, badge.count))
+  } else {
+    stringResource(R.string.call_chat)
+  }
 
 /** The sound's route: a button that opens the list of places it can go to, the current one marked (#2060). */
 @Composable
@@ -1349,9 +1428,9 @@ private fun CallToggle(icon: ImageVector, label: String, isChecked: Boolean, isO
 /** "More options" and its menu: Material 3 Expressive's grouped menu, every item with its icon. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions) {
+private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions, maybeChat: CallChatBadge?) {
   var isMenuOpen by remember { mutableStateOf(false) }
-  val entries = menuEntries(isDeafened, isSharingScreen, actions)
+  val entries = menuEntries(isDeafened, isSharingScreen, actions, maybeChat)
   Box {
     FilledTonalIconButton(
       onClick = {
@@ -1364,7 +1443,10 @@ private fun MoreButton(isDeafened: Boolean, isSharingScreen: Boolean, actions: C
       ),
       modifier = Modifier.size(IconButtonDefaults.mediumContainerSize()),
     ) {
-      Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.call_more), modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
+      // With Chat in the menu, a dot says something there is unread.
+      BadgedBox(badge = { maybeChat?.let { ChatBadge(it, isDot = true) } }) {
+        Icon(Icons.Filled.MoreVert, contentDescription = stringResource(R.string.call_more), modifier = Modifier.size(IconButtonDefaults.mediumIconSize))
+      }
     }
     DropdownMenuPopup(expanded = isMenuOpen, onDismissRequest = { isMenuOpen = false }) {
       DropdownMenuGroup(shapes = MenuDefaults.groupShape(index = 0, count = 1)) {
@@ -1396,7 +1478,12 @@ private class MenuEntry(
 )
 
 @Composable
-private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions): List<MenuEntry> = buildList {
+private fun menuEntries(isDeafened: Boolean, isSharingScreen: Boolean, actions: CallUiActions, maybeChat: CallChatBadge?): List<MenuEntry> = buildList {
+  val maybeOnChat = actions.maybeOnChat
+  if (maybeChat != null && maybeOnChat != null) {
+    val maybeUnread = maybeChat.count.takeIf { it > 0 }?.let { pluralStringResource(R.plurals.chat_unread, it, it) }
+    add(MenuEntry(stringResource(R.string.call_chat), CallIcons.Chat, maybeSupporting = maybeUnread, onClick = maybeOnChat))
+  }
   if (isSharingScreen) {
     add(MenuEntry(stringResource(R.string.call_stop_sharing), CallIcons.StopScreenShare, onClick = actions.onStopScreenShare))
   } else {

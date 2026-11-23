@@ -798,6 +798,21 @@ class CallController(
     isTelecomRegistered = true
   }
 
+  /**
+   * What is unread in the call's conversation, for its Chat button (#1488): from the conversation
+   * list the app reads once per change (#1466), so the badge costs no read of its own. A DM or
+   * group DM, or a mention, makes it loud, as on desktop. Nothing while the store can't be read.
+   */
+  internal suspend fun chatBadge(conversationId: String): CallChatBadge {
+    val maybeConversation = runCatching { core.conversations().firstOrNull { it.id == conversationId } }
+      .onFailure { if (it is CancellationException) throw it }
+      .getOrNull()
+    val conversation = maybeConversation ?: return CallChatBadge.NONE
+    val isDirectLike = conversation.kind == ConversationKind.DIRECT || conversation.kind == ConversationKind.GROUP
+    val isLoud = conversation.mentionCount > 0u || isDirectLike
+    return CallChatBadge(maxOf(conversation.unreadCount, conversation.mentionCount).toInt(), isLoud)
+  }
+
   /** The name the call screen shows for a conversation. */
   suspend fun displayName(conversationId: String): String = displayNameOf(conversationId)
 

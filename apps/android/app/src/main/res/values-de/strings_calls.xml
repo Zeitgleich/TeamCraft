@@ -161,4 +161,6 @@
     <item quantity="one">%d Person hat den Anruf verlassen</item>
     <item quantity="other">%d Personen haben den Anruf verlassen</item>
   </plurals>
+  <string name="call_chat">Chat</string>
+  <string name="call_chat_unread">Chat, %1$s</string>
 </resources>
