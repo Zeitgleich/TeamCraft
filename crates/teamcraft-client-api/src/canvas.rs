@@ -48,7 +48,8 @@
 mod history;
 
 pub use history::{
-  CanvasMark, CanvasOrigin, CanvasVersion, compaction, editors_since, marks, origin_of, page_at, versions,
+  CanvasMark, CanvasOrigin, CanvasVersion, EDITING_WINDOW_MS, compaction, editors_since, marks, origin_of,
+  page_at, versions,
 };
 use std::sync::{Arc, Mutex};
 

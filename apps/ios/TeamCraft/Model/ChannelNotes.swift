@@ -6,6 +6,31 @@ import SwiftUI
 enum ChannelNotes {
   /// Pages of older history read per opening, as on desktop and web ("A device catching up").
   static let maxHistoryPages = 20
+  /// How often the shown page asks who else has it open: an entry runs out without an event, and the
+  /// core says "open" on its refresh ("Who has the page open").
+  static let presenceCheck = Duration.seconds(10)
+  /// Avatars in the presence line at most; the text names everyone.
+  static let maxPresenceAvatars = 5
+
+  /// "Anna has this page open · Ben is editing"; empty when nobody else is on the page.
+  static func presenceText(_ presence: CanvasPresenceItem) -> String {
+    var parts: [String] = []
+    if !presence.openBy.isEmpty {
+      let names = presence.openBy.map(\.displayName).joined(separator: ", ")
+      parts.append(
+        presence.openBy.count == 1
+          ? String(localized: "channel_notes_open_by_one \(names)")
+          : String(localized: "channel_notes_open_by_other \(names)"))
+    }
+    if !presence.editing.isEmpty {
+      let names = presence.editing.map(\.displayName).joined(separator: ", ")
+      parts.append(
+        presence.editing.count == 1
+          ? String(localized: "channel_notes_editing_one \(names)")
+          : String(localized: "channel_notes_editing_other \(names)"))
+    }
+    return parts.joined(separator: " · ")
+  }
 
   /// The page's line of state: unreadable, loading or missing earlier changes; `nil` when all is here.
   static func statusKey(_ page: CanvasPageItem, history: OlderHistory) -> String? {
@@ -55,5 +80,17 @@ extension AppModel {
   /// can't answer.
   func canvasPage(_ conversationId: String, pageId: String?) async -> CanvasPageItem? {
     try? await core().canvasPage(conversationId: conversationId, maybePageId: pageId)
+  }
+
+  /// Who else has the page open and who edited it lately; says this device has it open when due
+  /// (e2ee.md §4.11, "Who has the page open"). `isShared` is "Show when I'm typing".
+  func canvasPresence(_ conversationId: String, pageId: String?, isShared: Bool) async -> CanvasPresenceItem? {
+    try? await core().canvasPresence(conversationId: conversationId, maybePageId: pageId, isShared: isShared)
+  }
+
+  /// The page is no longer shown: the others drop this device at once instead of after 50 s.
+  func leaveCanvasPage(_ conversationId: String, pageId: String?, isShared: Bool) async {
+    // Nothing to tell the user: without a connection the others drop the phone after 50 s anyway.
+    _ = try? await core().leaveCanvasPage(conversationId: conversationId, maybePageId: pageId, isShared: isShared)
   }
 }

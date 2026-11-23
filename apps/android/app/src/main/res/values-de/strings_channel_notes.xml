@@ -17,4 +17,13 @@
   <string name="channel_notes_file_downloading">Wird heruntergeladen …</string>
   <string name="channel_notes_checked">Erledigt</string>
   <string name="channel_notes_unchecked">Nicht erledigt</string>
+  <!-- Who else has the page open now, and who edited it lately without having it open; names joined by commas. -->
+  <plurals name="channel_notes_open_by">
+    <item quantity="one">%1$s hat diese Seite offen</item>
+    <item quantity="other">%1$s haben diese Seite offen</item>
+  </plurals>
+  <plurals name="channel_notes_editing">
+    <item quantity="one">%1$s bearbeitet gerade</item>
+    <item quantity="other">%1$s bearbeiten gerade</item>
+  </plurals>
 </resources>

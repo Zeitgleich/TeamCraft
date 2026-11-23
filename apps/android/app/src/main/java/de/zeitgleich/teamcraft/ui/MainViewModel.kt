@@ -98,6 +98,7 @@ import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.CanvasPageItem
+import uniffi.teamcraft_ffi.CanvasPresenceItem
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
@@ -982,6 +983,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
   /** A page of the channel's notes (#1456); `null` when the core can't answer. */
   suspend fun canvasPage(conversationId: String, maybePageId: String?): CanvasPageItem? = readChat { canvasPage(conversationId, maybePageId) }
+
+  /** Who else has the page open, and says this device has it when due (#1456); `null` when the core can't answer. */
+  suspend fun canvasPresence(conversationId: String, maybePageId: String?, isShared: Boolean): CanvasPresenceItem? =
+    readChat { canvasPresence(conversationId, maybePageId, isShared) }
+
+  /** The page is no longer shown; outlives the sheet that left it, so the word still goes out. */
+  fun leaveCanvasPage(conversationId: String, maybePageId: String?, isShared: Boolean) = viewModelScope.launch {
+    readChat { leaveCanvasPage(conversationId, maybePageId, isShared) }
+  }
 
   /** The members section opened: the members and signed roles are read afresh, as on desktop and web. */
   fun refreshChannelMembers(conversationId: String) = viewModelScope.launch {

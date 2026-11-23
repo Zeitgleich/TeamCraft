@@ -1,18 +1,20 @@
 //! Who has a page of a channel's notes open, and where their caret is (issue #1456, e2ee.md
 //! §4.11, "Who has the page open"), shared by the shells like [`crate::typing`]: the other devices'
-//! words ([`CanvasPresenceState`], filled from `canvas_presence` events once opened) and the
-//! numbering of this device's own ([`CanvasPresenceAnnouncer`]).
+//! words ([`CanvasPresenceState`], filled from `canvas_presence` events once opened), the
+//! numbering of this device's own ([`CanvasPresenceAnnouncer`]), and when a shell that shows a page
+//! without a caret (the phones) says it has the page open ([`CanvasPresencePacer`]).
 //!
 //! Ephemeral on both sides: the server relays the sealed words without numbering or buffering
 //! them, and the clients keep them in memory only. A device that stops saying so (closed the app,
 //! lost its connection) runs out after [`CANVAS_PRESENCE_TIMEOUT_MS`] by itself.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use teamcraft_proto::{
-  CANVAS_PRESENCE_TIMEOUT_MS, CanvasCaret, CanvasPageId, CanvasPageState, CanvasPeer, CanvasPresence,
-  CanvasPresenceNote, ConversationId, DeviceId, UserId,
+  CANVAS_PRESENCE_INTERVAL_MS, CANVAS_PRESENCE_REFRESH_MS, CANVAS_PRESENCE_TIMEOUT_MS, CanvasCaret,
+  CanvasPageId, CanvasPageState, CanvasPeer, CanvasPresence, CanvasPresenceNote, ConversationId, DeviceId,
+  UserId,
 };
 
 use crate::api::{GatewayConnection, ServerApi};
@@ -50,6 +52,19 @@ struct Heard {
 #[derive(Debug, Default)]
 pub struct CanvasPresenceAnnouncer {
   last_seq: u64,
+}
+
+/// When a device that shows a page without a caret of its own (the phones, read-only) says it has
+/// the page open: the editor's rules without the caret. It says so when the page opens, every
+/// [`CANVAS_PRESENCE_REFRESH_MS`] while it is shown, and as soon as another device appears (so that
+/// one learns of it without waiting for the refresh), never twice within
+/// [`CANVAS_PRESENCE_INTERVAL_MS`]. The shell asks on its own tick and whenever the core changed,
+/// only while the page is shown, and says "closed" itself when it leaves the page.
+#[derive(Debug, Default)]
+pub struct CanvasPresencePacer {
+  maybe_said_at_ms: Option<i64>,
+  /// The other devices that had the page open when this one last said so.
+  known: BTreeSet<(UserId, DeviceId)>,
 }
 
 impl CanvasPresenceState {
@@ -191,6 +206,29 @@ impl CanvasPresenceAnnouncer {
       state: note.state,
       maybe_caret: note.maybe_caret,
     }
+  }
+}
+
+impl CanvasPresencePacer {
+  /// Whether to say "open" now, with `peers` the other devices that have the page open at
+  /// `now_ms`; noted as said when it is. After the clock went back it is said again (the last word
+  /// would otherwise hold it back for as long as the jump).
+  pub fn is_due(&mut self, peers: &[CanvasPeer], now_ms: i64) -> bool {
+    let devices: BTreeSet<(UserId, DeviceId)> = peers.iter().map(|peer| (peer.user, peer.device)).collect();
+    let has_new = devices.iter().any(|device| !self.known.contains(device));
+    let is_due = match self.maybe_said_at_ms.map(|at| now_ms.saturating_sub(at)) {
+      None => true,
+      Some(elapsed) if elapsed < 0 => true,
+      Some(elapsed) => {
+        elapsed >= CANVAS_PRESENCE_REFRESH_MS || (has_new && elapsed >= CANVAS_PRESENCE_INTERVAL_MS)
+      },
+    };
+    // A device that appeared within the interval is still new on the next ask.
+    if is_due {
+      self.maybe_said_at_ms = Some(now_ms);
+      self.known = devices;
+    }
+    is_due
   }
 }
 
@@ -370,6 +408,56 @@ mod tests {
         maybe_page: None,
         state: CanvasPageState::Open,
         maybe_caret: None,
+      }
+    }
+  }
+
+  mod pacer {
+    use super::*;
+
+    #[test]
+    fn says_open_at_once_then_on_the_refresh() {
+      let mut pacer = CanvasPresencePacer::default();
+      assert!(pacer.is_due(&[], 1_000));
+      assert!(!pacer.is_due(&[], 11_000));
+      assert!(!pacer.is_due(&[], 1_000 + CANVAS_PRESENCE_REFRESH_MS - 1));
+      assert!(pacer.is_due(&[], 1_000 + CANVAS_PRESENCE_REFRESH_MS));
+    }
+
+    #[test]
+    fn a_new_device_hears_of_it_at_once_but_not_within_the_interval() {
+      let mut pacer = CanvasPresencePacer::default();
+      assert!(pacer.is_due(&[], 0));
+      let alice = [peer(ALICE, 20)];
+      assert!(!pacer.is_due(&alice, CANVAS_PRESENCE_INTERVAL_MS - 1));
+      // Still new on the next ask, once the interval allows.
+      assert!(pacer.is_due(&alice, CANVAS_PRESENCE_INTERVAL_MS));
+      assert!(!pacer.is_due(&alice, 5_000));
+      // A further device of the same user is new too.
+      assert!(pacer.is_due(&[peer(ALICE, 20), peer(ALICE, 21)], 6_000));
+    }
+
+    #[test]
+    fn a_device_that_left_is_no_reason_to_speak() {
+      let mut pacer = CanvasPresencePacer::default();
+      assert!(pacer.is_due(&[peer(ALICE, 20), peer(BOB, 30)], 0));
+      assert!(!pacer.is_due(&[peer(BOB, 30)], 5_000));
+    }
+
+    #[test]
+    fn the_clock_going_back_says_it_again() {
+      let mut pacer = CanvasPresencePacer::default();
+      assert!(pacer.is_due(&[], 50_000));
+      assert!(pacer.is_due(&[], 10_000));
+      assert!(!pacer.is_due(&[], 12_000));
+    }
+
+    fn peer(user_id: i64, device_id: i64) -> CanvasPeer {
+      CanvasPeer {
+        user: user(user_id),
+        device: device(device_id),
+        maybe_caret: None,
+        heard_at_ms: 0,
       }
     }
   }
