@@ -31,6 +31,10 @@ const MAX_PENDING: usize = 256;
 const REORDER_PACKETS: u64 = 3;
 /// The fastest voice datagram's delay within this long is the path's own: what comes later waited.
 const BASELINE_WINDOW: Duration = Duration::from_secs(10);
+/// A periodic check ([`VoiceGuard::on_timer`], every ~100 ms) this much after the one before came
+/// late: the client's own threads didn't run meanwhile (a loaded machine, #2245), and the feedback
+/// that came in for that long hasn't been read yet. Two missed ticks and a half.
+const STARVED_TICK_GAP: Duration = Duration::from_millis(250);
 
 /// When voice counts as hurt.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -86,6 +90,11 @@ pub struct VoiceGuard {
   /// The episode since then had voice stuck in a queue ([`VoiceGuard::on_timer`]): congestion,
   /// whatever its length.
   is_episode_congested: bool,
+  /// When [`VoiceGuard::on_timer`] last ran, to tell a late one.
+  maybe_last_tick_at: Option<Instant>,
+  /// When the client's threads last ran again after a pause ([`STARVED_TICK_GAP`]): voice counts
+  /// as unreported only from then on.
+  maybe_resumed_at: Option<Instant>,
 }
 
 impl Default for VoiceGuardConfig {
@@ -147,6 +156,8 @@ impl VoiceGuard {
       maybe_hurt_at: None,
       maybe_hurt_since: None,
       is_episode_congested: false,
+      maybe_last_tick_at: None,
+      maybe_resumed_at: None,
     }
   }
 
@@ -257,7 +268,19 @@ impl VoiceGuard {
   /// `has_sent_burst`: the client itself just sent a burst the link has to queue (a slide
   /// change, a keyframe), behind which voice waits and still arrives. Nothing before the first
   /// reports: there is no baseline yet.
+  ///
+  /// A check that comes [`STARVED_TICK_GAP`] or more after the one before finds the client's own
+  /// threads were starved (#2245): the feedback is waiting to be read, not the voice in the link's
+  /// queue. Voice counts as unreported only for the time since: on a loaded laptop a screen share
+  /// was held for its voice for the rest of a call with no packet lost at all.
   pub fn on_timer(&mut self, has_sent_burst: bool, now: Instant) {
+    let is_late = self
+      .maybe_last_tick_at
+      .is_some_and(|last| now.saturating_duration_since(last) >= STARVED_TICK_GAP);
+    self.maybe_last_tick_at = Some(now);
+    if is_late {
+      self.maybe_resumed_at = Some(now);
+    }
     let Some(fastest) = self.report_times.iter().map(|(_, took)| *took).min() else {
       return;
     };
@@ -265,11 +288,13 @@ impl VoiceGuard {
       return;
     }
     let bound = fastest.saturating_add(self.config.max_unreported);
+    let maybe_resumed_at = self.maybe_resumed_at;
     let is_stuck = self
       .pending
       .front()
       .and_then(|seq| self.pending_since.get(&seq.0))
-      .is_some_and(|sent_at| now.saturating_duration_since(*sent_at) > bound);
+      .map(|sent_at| maybe_resumed_at.map_or(*sent_at, |resumed_at| resumed_at.max(*sent_at)))
+      .is_some_and(|since| now.saturating_duration_since(since) > bound);
     if is_stuck {
       // Random loss doesn't hold voice back: the link queues it, it is congested.
       self.note_hurt(now, true);
@@ -289,6 +314,7 @@ impl VoiceGuard {
     self.maybe_hurt_at = None;
     self.maybe_hurt_since = None;
     self.is_episode_congested = false;
+    self.maybe_resumed_at = None;
   }
 
   /// When voice was last found hurt (the hold not counted).
@@ -634,6 +660,57 @@ mod tests {
     assert!(!guard.is_hurt(stuck_from + 700 * MS));
     guard.on_timer(false, stuck_from + 900 * MS);
     assert!(guard.is_hurt(stuck_from + 900 * MS));
+  }
+
+  /// #2245: a loaded machine runs the client's threads late. A check that comes long after the
+  /// one before finds the feedback still unread, not the voice stuck: the voice counts as
+  /// unreported only from then on, and the feedback read right after reports it.
+  #[test]
+  fn a_late_check_is_the_own_threads_not_the_link() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    guard.on_feedback(&on_time, start + 500 * MS);
+    guard.on_timer(false, start + 500 * MS);
+    guard.on_send(TransportSeq(25), start + 520 * MS);
+    // The threads stall for a second; the check comes first, the feedback right after it.
+    let resumed_at = start + 1520 * MS;
+    guard.on_timer(false, resumed_at);
+    assert!(!guard.is_hurt(resumed_at), "the feedback waits unread");
+    let reported = TransportFeedback {
+      base_seq: 25,
+      arrivals_us: vec![Some(520_000)],
+    };
+    guard.on_feedback(&reported, resumed_at + MS);
+    let mut at = resumed_at;
+    for _ in 0..10 {
+      at += 100 * MS;
+      guard.on_timer(false, at);
+    }
+    assert!(!guard.is_hurt(at));
+  }
+
+  /// After a stall, voice that the link still holds is stuck once it went unreported for the
+  /// bound since the threads ran again.
+  #[test]
+  fn voice_still_unreported_after_a_stall_is_stuck() {
+    let start = Instant::now();
+    let mut guard = VoiceGuard::new(VoiceGuardConfig::own_uplink());
+    let on_time = send_voice(&mut guard, 0, 25, start, |_| true);
+    guard.on_feedback(&on_time, start + 500 * MS);
+    guard.on_timer(false, start + 500 * MS);
+    guard.on_send(TransportSeq(25), start + 520 * MS);
+    let resumed_at = start + 1520 * MS;
+    guard.on_timer(false, resumed_at);
+    // The fastest report took 20 ms: 420 ms is the bound, counted from the resume.
+    let mut at = resumed_at;
+    while at < resumed_at + 400 * MS {
+      at += 100 * MS;
+      guard.on_timer(false, at);
+      assert!(!guard.is_hurt(at));
+    }
+    guard.on_timer(false, resumed_at + 500 * MS);
+    assert!(guard.is_hurt(resumed_at + 500 * MS));
   }
 
   /// Before any report there is no baseline: nothing counts as unreported.

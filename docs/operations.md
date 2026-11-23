@@ -530,7 +530,10 @@ depend on any of it.
   share) or `TEAMCRAFT_SFU_UPLINK_REPAIR_CAMERA_KEYFRAME_AFTER_MS` (default 500, a camera) is given
   up and the publisher asked for a keyframe of the layer, at most once per
   `TEAMCRAFT_SFU_UPLINK_REPAIR_MIN_KEYFRAME_INTERVAL_MS` (default 1000) per track and layer, so a
-  lossy uplink doesn't loop on keyframes. It costs the SFU a few hundred bytes per track and layer
+  lossy uplink doesn't loop on keyframes. Each keyframe the uplink loses as well doubles that wait,
+  up to `TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_KEYFRAME_INTERVAL_MS` (default 4000), and the layer's other
+  keyframe requests wait with it (#2246): a limited uplink whose queue can't hold a keyframe of a
+  screen's top layer drains it instead of overflowing on the next one. It costs the SFU a few hundred bytes per track and layer
   (the missing numbers, at most 256); the packets are kept by the publisher. Turning the
   retransmission window off turns this off too. `rate()` of
   `teamcraft_sfu_uplink_packets_requested_total` shows how lossy the publishers' uplinks are.

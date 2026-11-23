@@ -454,6 +454,9 @@ fn apply_uplink_repair_env(repair: &mut UplinkRepairConfig) -> anyhow::Result<()
   if let Some(interval) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_REPAIR_MIN_KEYFRAME_INTERVAL_MS")? {
     repair.min_keyframe_interval = interval;
   }
+  if let Some(interval) = env_duration_millis("TEAMCRAFT_SFU_UPLINK_REPAIR_MAX_KEYFRAME_INTERVAL_MS")? {
+    repair.max_keyframe_interval = interval;
+  }
   Ok(())
 }
 

@@ -73,7 +73,7 @@ use crate::layers::{
   LayerAllocationConfig, LayerAllocator, ProbeRequest, TrackDemand, UpgradeProof, full_demand_bps,
 };
 use crate::speakers::{SpeakerSelectionConfig, SpeakerSelector};
-use crate::uplink_repair::{RepairStep, UplinkRepair, UplinkRepairConfig};
+use crate::uplink_repair::{KeyframeFragment, RepairStep, UplinkRepair, UplinkRepairConfig};
 use teamcraft_media::retransmit::{PacketHistory, RetransmitBudget, RetransmitConfig};
 
 /// An estimate below the thin bound makes a downlink thin only after this long; a probe at the
@@ -1111,7 +1111,22 @@ impl Forwarder {
       let sequence_number = rtp_header.sequence_number.0;
       let receivers = self.video_receivers(header.stream_id, layer, &rtp_header, now)?;
       let is_wanted = !receivers.is_empty() || self.is_layer_wanted(header.stream_id, layer);
-      let step = self.note_uplink_arrival(header.stream_id, layer, sequence_number, is_wanted, now);
+      // `video_receivers` read the fragment already: a packet without one went no further.
+      let maybe_keyframe = FrameFragment::from_header(&rtp_header)
+        .ok()
+        .filter(|fragment| fragment.is_keyframe)
+        .map(|fragment| KeyframeFragment {
+          index: fragment.index,
+          count: fragment.count,
+        });
+      let step = self.note_uplink_arrival(
+        header.stream_id,
+        layer,
+        sequence_number,
+        maybe_keyframe,
+        is_wanted,
+        now,
+      );
       route
         .effects
         .extend(self.repair_effects(sender, header.stream_id, layer, step, now));
@@ -1441,6 +1456,7 @@ impl Forwarder {
     stream_id: StreamId,
     layer: u8,
     sequence_number: u16,
+    maybe_keyframe: Option<KeyframeFragment>,
     is_wanted: bool,
     now: Instant,
   ) -> RepairStep {
@@ -1448,7 +1464,7 @@ impl Forwarder {
       .video_tracks
       .get_mut(&stream_id)
       .and_then(|route| route.repair.get_mut(usize::from(layer)))
-      .map(|repair| repair.on_arrival(sequence_number, is_wanted, now))
+      .map(|repair| repair.on_arrival(sequence_number, maybe_keyframe, is_wanted, now))
       .unwrap_or_default()
   }
 
@@ -1504,8 +1520,9 @@ impl Forwarder {
       });
     }
     if step.needs_keyframe {
+      // The repair's own wait (#2246) decided already: its hold is for the other requests.
       let interval = self.config.keyframes.per_layer_interval;
-      effects.extend(self.keyframe_request(publisher, stream_id, layer, interval, now));
+      effects.extend(self.limited_keyframe_request(publisher, stream_id, layer, interval, now));
     }
     effects
   }
@@ -1832,8 +1849,31 @@ impl Forwarder {
     Some((route.track.device_id, layer))
   }
 
-  /// Asks `publisher` for a keyframe on `layer`, unless one was asked for within the interval.
+  /// Asks `publisher` for a keyframe on `layer`, unless one was asked for within the interval or
+  /// the layer's uplink repair holds them ([`UplinkRepair::holds_keyframes`]).
   fn keyframe_request(
+    &mut self,
+    publisher: DeviceId,
+    stream_id: StreamId,
+    layer: u8,
+    interval: Duration,
+    now: Instant,
+  ) -> Option<Effect> {
+    // The uplink lost the layer's latest keyframes: its repair asks for the next one once the
+    // link drained them (#2246), another now would overflow its queue again.
+    let is_held = self
+      .video_tracks
+      .get(&stream_id)
+      .and_then(|route| route.repair.get(usize::from(layer)))
+      .is_some_and(|repair| repair.holds_keyframes(now));
+    if is_held {
+      return None;
+    }
+    self.limited_keyframe_request(publisher, stream_id, layer, interval, now)
+  }
+
+  /// A keyframe request for `layer` of `stream_id`, unless one went out within `interval`.
+  fn limited_keyframe_request(
     &mut self,
     publisher: DeviceId,
     stream_id: StreamId,
@@ -2761,6 +2801,31 @@ mod tests {
       assert!((4..=5).contains(&keyframes), "{keyframes} keyframes in 5 s");
     }
 
+    /// #2246: the uplink lost the tail of a keyframe and nothing repairs it. The repair asks for
+    /// the next one; the receiver, which lost the same packets, asks only once the uplink had time
+    /// to drain what it queued, not with the next per-layer interval.
+    #[test]
+    fn a_keyframe_the_uplink_lost_holds_the_receivers_requests() {
+      let (mut forwarder, now) = video_room();
+      on_layer_zero(&mut forwarder, &[2], now);
+      // A keyframe of ten packets numbered 2 to 11: the last two never arrive.
+      for index in 0..8u16 {
+        send_keyframe_fragment(&mut forwarder, 2 + index, index, 10, now);
+      }
+      send_numbered(&mut forwarder, 0, 12, now);
+      let maybe_asked_at = (1..=10u32)
+        .map(|tick| now + Duration::from_millis(100) * tick)
+        .find(|at| forwarder.on_timer(device(1), *at).contains(&keyframe_request(0)));
+      let asked_at = maybe_asked_at.expect("the repair asks for a keyframe");
+      let later = asked_at + Duration::from_millis(600);
+      assert!(forwarder.request_keyframe(device(2), VIDEO, later).is_empty());
+      let after_wait = asked_at + Duration::from_secs(2);
+      assert_eq!(
+        forwarder.request_keyframe(device(2), VIDEO, after_wait),
+        vec![keyframe_request(0)]
+      );
+    }
+
     #[test]
     fn a_camera_waits_longer_for_a_lost_packet_than_a_screen() {
       let config = UplinkRepairConfig::default();
@@ -2879,6 +2944,30 @@ mod tests {
       .write_to(&mut rtp);
       forwarder
         .route(device(1), &rtp_datagram(VIDEO.0, layer, rtp), now)
+        .unwrap()
+    }
+
+    /// Fragment `index` of `count` of a keyframe on layer 0 of [`VIDEO`] with RTP
+    /// `sequence_number`.
+    fn send_keyframe_fragment(
+      forwarder: &mut Forwarder,
+      sequence_number: u16,
+      index: u16,
+      count: u16,
+      now: Instant,
+    ) -> Route {
+      let mut rtp = header();
+      rtp.sequence_number = SequenceNumber(sequence_number);
+      FrameFragment {
+        frame_number: 100,
+        index,
+        count,
+        is_keyframe: true,
+        is_capture_stalled: false,
+      }
+      .write_to(&mut rtp);
+      forwarder
+        .route(device(1), &rtp_datagram(VIDEO.0, 0, rtp), now)
         .unwrap()
     }
 

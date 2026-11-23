@@ -184,6 +184,14 @@ impl MissingPackets {
     self.missing.keys().next().copied()
   }
 
+  /// How many packets of `sequence_numbers` are missing.
+  pub fn count_in(&self, sequence_numbers: std::ops::Range<u64>) -> usize {
+    if sequence_numbers.is_empty() {
+      return 0;
+    }
+    self.missing.range(sequence_numbers).count()
+  }
+
   pub fn is_empty(&self) -> bool {
     self.missing.is_empty()
   }
