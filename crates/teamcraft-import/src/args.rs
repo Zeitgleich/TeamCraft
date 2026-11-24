@@ -1,11 +1,17 @@
-//! The command line (docs/import-synology.md §7–§9).
+//! The command line (docs/import-synology.md §7–§9, docs/import-slack.md).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use crate::sources::SourceKind;
+
 pub const USAGE: &str = "usage: teamcraft-import --state <dir> <command> [options]
+       teamcraft-import convert --from <slack|mattermost> --source <path> --out <dir>
 
 commands:
+  convert                               turn a Slack export (unpacked folder) or a Mattermost
+                                        bulk export (its .jsonl file) into an export the other
+                                        commands read, with mapping templates (no --state)
   login  --server <url>                 sign in as the import account in the browser
   plan   <inputs>                       dry run: what the import would do (report-plan.md)
   run    <inputs>                       import; stop and start again at any time
@@ -24,13 +30,15 @@ inputs:
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Args {
-  pub state: PathBuf,
+  /// Required by every command but `convert`.
+  pub maybe_state: Option<PathBuf>,
   pub command: Command,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
   Login { server: String },
+  Convert(ConvertInputs),
   Plan(Inputs),
   Run(Inputs),
   Serve(Inputs),
@@ -48,6 +56,14 @@ pub struct Inputs {
   pub maybe_max_file_bytes: Option<u64>,
   /// How long to wait for a member's device; `None` is the run's default.
   pub maybe_join_wait: Option<Duration>,
+}
+
+/// What `convert` reads and where it writes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConvertInputs {
+  pub from: SourceKind,
+  pub source: PathBuf,
+  pub out: PathBuf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,7 +103,9 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
       None => return Err(format!("unexpected argument {argument:?}")),
     }
   }
-  let state = maybe_state.ok_or("--state is missing")?;
+  if maybe_state.is_none() && maybe_command.as_deref() != Some("convert") {
+    return Err("--state is missing".into());
+  }
   let take = |name: &str| {
     options
       .iter()
@@ -96,6 +114,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
   };
   let known: &[&str] = match maybe_command.as_deref() {
     Some("login") => &["server"],
+    Some("convert") => &["from", "source", "out"],
     _ => &[
       "export",
       "uploads",
@@ -143,6 +162,11 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
     Some("login") => Command::Login {
       server: take("server").ok_or("--server is missing")?,
     },
+    Some("convert") => Command::Convert(ConvertInputs {
+      from: take("from").ok_or("--from is missing")?.parse()?,
+      source: take("source").ok_or("--source is missing")?.into(),
+      out: take("out").ok_or("--out is missing")?.into(),
+    }),
     Some("plan") => Command::Plan(inputs()?),
     Some("run") => Command::Run(inputs()?),
     Some("serve") => Command::Serve(inputs()?),
@@ -150,7 +174,7 @@ pub fn parse(arguments: impl IntoIterator<Item = String>) -> Result<Args, String
     Some(other) => return Err(format!("unknown command {other:?}")),
     None => return Err("no command".into()),
   };
-  Ok(Args { state, command })
+  Ok(Args { maybe_state, command })
 }
 
 #[cfg(test)]
@@ -189,6 +213,35 @@ mod tests {
     assert_eq!(inputs.maybe_join_wait, Some(Duration::from_secs(5)));
     assert!(args("--state s run --export e --channels c --users u --join-wait soon").is_err());
     assert!(args("--state s run --export e --channels c --users u --max-file-mib x").is_err());
+  }
+
+  #[test]
+  fn convert_needs_no_state() {
+    let convert = args("convert --from slack --source export --out converted").unwrap();
+    assert_eq!(convert.maybe_state, None);
+    assert_eq!(
+      convert.command,
+      Command::Convert(ConvertInputs {
+        from: SourceKind::Slack,
+        source: "export".into(),
+        out: "converted".into(),
+      })
+    );
+    assert!(
+      args("convert --from teams --source e --out o")
+        .unwrap_err()
+        .contains("teams")
+    );
+    assert!(
+      args("convert --from slack --out o")
+        .unwrap_err()
+        .contains("--source")
+    );
+    assert!(
+      args("convert --from slack --source e --out o --users u")
+        .unwrap_err()
+        .contains("--users")
+    );
   }
 
   #[test]

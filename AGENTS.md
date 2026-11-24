@@ -34,6 +34,8 @@ Read before changing behaviour:
 | [docs/release.md](docs/release.md)                       | Versions and the release procedure                            |
 | [docs/updates.md](docs/updates.md)                       | Desktop self-update, package repositories, update policy      |
 | [docs/import-synology.md](docs/import-synology.md)       | Importing history from Synology Chat (runbook)                |
+| [docs/import-slack.md](docs/import-slack.md)             | Importing history from Slack (runbook)                        |
+| [docs/import-mattermost.md](docs/import-mattermost.md)   | Importing history from Mattermost (runbook)                   |
 
 ## Repository layout
 

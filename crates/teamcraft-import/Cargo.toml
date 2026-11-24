@@ -1,6 +1,6 @@
 [package]
 name = "teamcraft-import"
-description = "Imports the history of another chat system (Synology Chat) into TeamCraft, end-to-end encrypted"
+description = "Imports the history of another chat system (Synology Chat, Slack, Mattermost) into TeamCraft, end-to-end encrypted"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -7,7 +7,7 @@ use teamcraft_import::export::Export;
 use teamcraft_import::mapping::Mapping;
 use teamcraft_import::progress::Progress;
 use teamcraft_import::run::{Importer, RunOptions};
-use teamcraft_import::{app, auth, files, report};
+use teamcraft_import::{app, auth, files, report, sources};
 use tracing::{error, info, warn};
 
 /// How often `serve` looks for people who set up the app and conversations it can leave.
@@ -47,8 +47,18 @@ fn main() -> ExitCode {
 }
 
 async fn execute(parsed: args::Args) -> anyhow::Result<()> {
-  files::make_state_dir(&parsed.state).context("the state directory")?;
-  let state = parsed.state;
+  if let Command::Convert(convert) = &parsed.command {
+    let summary = sources::convert(convert.from, &convert.source, &convert.out)
+      .with_context(|| format!("converting {}", convert.source.display()))?;
+    files::say(&summary.to_string());
+    files::say(&format!(
+      "Written to {}: pass it as --export, fill in channels.csv and users.csv there",
+      convert.out.display()
+    ));
+    return Ok(());
+  }
+  let state = parsed.maybe_state.context("--state is missing")?;
+  files::make_state_dir(&state).context("the state directory")?;
   let (inputs, command) = match parsed.command {
     Command::Login { server } => {
       auth::login(&server, &state).await?;
@@ -60,6 +70,7 @@ async fn execute(parsed: args::Args) -> anyhow::Result<()> {
       ));
       return Ok(());
     },
+    Command::Convert(_) => return Ok(()),
     Command::Plan(inputs) => (inputs, "plan"),
     Command::Run(inputs) => (inputs, "run"),
     Command::Serve(inputs) => (inputs, "serve"),

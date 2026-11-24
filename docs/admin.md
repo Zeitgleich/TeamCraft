@@ -1115,9 +1115,10 @@ OpenRouter (a company in the USA) and the provider that runs the model are proce
 
 Teams moving from another chat system bring their channels, direct messages, files, threads,
 reactions and read state. The import is end-to-end encrypted like every message: it runs on a client,
-`teamcraft-import`, on a host the operator trusts (e2ee.md §4.10); the runbook for Synology Chat is
-[import-synology.md](import-synology.md). The server only lets the import account post with the
-original order and keeps imports quiet.
+`teamcraft-import`, on a host the operator trusts (e2ee.md §4.10). Runbooks:
+[Synology Chat](import-synology.md), [Slack](import-slack.md) and [Mattermost](import-mattermost.md)
+(issue #209; the last two are converted into the Synology format first, then imported the same way).
+The server only lets the import account post with the original order and keeps imports quiet.
 
 **Setting up.**
 

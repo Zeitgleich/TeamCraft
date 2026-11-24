@@ -121,6 +121,10 @@ pub struct Post {
   pub mentions: Option<Vec<SourceId>>,
   #[serde(default)]
   pub file_props: Option<FileProps>,
+  /// Where the attachment is, when the export names it itself (a converted Slack or Mattermost
+  /// export, docs/import-slack.md); else it is under `raw/uploads/{channel}/{post}`.
+  #[serde(default)]
+  pub source_path: Option<PathBuf>,
 }
 
 impl Post {
@@ -318,6 +322,9 @@ impl Export {
 
   /// Where a post's attachment is.
   pub fn upload_path(&self, post: &Post) -> PathBuf {
+    if let Some(path) = &post.source_path {
+      return path.clone();
+    }
     self
       .uploads
       .join(post.channel_id.to_string())
