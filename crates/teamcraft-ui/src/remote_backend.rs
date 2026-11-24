@@ -180,6 +180,20 @@ pub async fn link_cancel() -> Result<(), String> {
   call("core_link_cancel", &json!({})).await
 }
 
+/// Resolves in a later task, after the page has run its microtasks (the pending row's effects and
+/// the mutation observers); the browser paints no earlier than that.
+async fn next_task() {
+  let (done, wait) = oneshot::channel::<()>();
+  set_timeout(
+    move || {
+      // The receiver is gone only when the page is closing; nothing is left to wake.
+      let _ = done.send(());
+    },
+    Duration::ZERO,
+  );
+  let _ = wait.await;
+}
+
 /// Hands a chat action to the core: typed to the core in this page (the browser), which never puts
 /// it into JSON (#1413), or as the desktop shell's `core_action` command. Their JSON is in a
 /// module of its own (`areas::shell_action`), which only the desktop app loads.
@@ -1984,7 +1998,14 @@ impl RemoteChat {
   fn act_showing(&self, action: ChatAction, maybe_pending: Option<PendingRow>) {
     let backend = self.clone();
     let maybe_ticket = ActionTicket::current();
+    // A message with files carries their bytes: handing them to the shell serializes megabytes in
+    // one task, which would hold back the pending row's frame (#2364). The row goes first.
+    let is_heavy = maybe_pending.is_some()
+      && matches!(&action, ChatAction::SendMessage { message } if !message.files.is_empty());
     spawn_local(async move {
+      if is_heavy {
+        next_task().await;
+      }
       let outcome = core_action(action).await;
       *backend.maybe_error.borrow_mut() = outcome.as_ref().err().cloned();
       if let Err(error) = outcome {
