@@ -111,6 +111,8 @@ struct ChatPane: View {
   @State private var isLoadingOlder = false
   /// Holes in the history among the messages (issue #1438): a catch-up read the newest ones first.
   @State private var gaps: [HistoryGap] = []
+  /// What the notification that opened it showed, until the store has it (#1065, #2374).
+  @State private var maybeNotified: NotifiedConversation?
   /// A page of a hole was asked for; the next read says how it stands.
   @State private var isFillingGap = false
   /// Older history the store doesn't hold: asked for when the feed reaches the store's end.
@@ -1974,12 +1976,8 @@ struct ChatPane: View {
       Perf.end(.messageSend, key: conversation.id)
     }
     guard let catchUp = maybeCatchUp else { return }
-    let conversationId = conversation.id
-    let isCatchingUp = conversation.isCatchingUp
-    Task {
-      let maybeNotified = await model.notifiedConversation(conversationId)
-      catchUp.observe(isBehind: maybeNotified != nil || isCatchingUp, isFromPush: maybeNotified != nil, hasGaps: !gaps.isEmpty)
-    }
+    let isFromPush = maybeNotified != nil
+    catchUp.observe(isBehind: isFromPush || conversation.isCatchingUp, isFromPush: isFromPush, hasGaps: !gaps.isEmpty)
   }
 
   private func reload() async {
@@ -2013,6 +2011,10 @@ struct ChatPane: View {
       }
       let readExtras = await model.extras(conversationId: conversation.id, messageIds: page.messages.map(\.id))
       await loadDisplayNamesOnce()
+      // A read that fails keeps the notified row shown, until one says the store has it (#2374).
+      if case .success(let notified) = await model.readNotifiedConversation(conversation.id) {
+        maybeNotified = notified
+      }
       // A message that arrives at the end eases in (the list sees it, `MessageFeed.isArrival`); the
       // first load and history paging don't animate (#2005).
       messages = page.messages
@@ -2066,7 +2068,8 @@ struct ChatPane: View {
   private func rebuildFeed() {
     // A read that brought nothing new (a change elsewhere in the store) keeps the revision: the
     // list isn't applied again, which would stop a scroll in flight.
-    var next = messageFeed(messages, gaps: threadId == nil ? gaps : [], revision: feed.revision)
+    let shown = threadId == nil ? withNotified(messages, maybeNotified) : messages
+    var next = messageFeed(shown, gaps: threadId == nil ? gaps : [], revision: feed.revision)
     guard next != feed else { return }
     next.revision = feed.revision &+ 1
     feed = next

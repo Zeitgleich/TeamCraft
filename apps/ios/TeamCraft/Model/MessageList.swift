@@ -107,6 +107,24 @@ struct MessageFeed: Equatable {
   }
 }
 
+/// The feed with the message the notification showed, while the store doesn't have it yet (#1065,
+/// #2374): a message like the others, with its sender and time, so it doesn't vanish when a read
+/// comes back before the catch-up stored it (the tap resumed a suspended app, the client is still
+/// opening). It has the stored message's ID, which takes its place without a jump. A reply in a
+/// thread isn't part of the conversation's own feed.
+func withNotified(_ messages: [Message], _ maybeNotified: NotifiedConversation?) -> [Message] {
+  guard let notified = maybeNotified?.maybeMessage, notified.maybeThreadId == nil,
+    let body = notified.maybeText ?? notified.maybeFileName,
+    !messages.contains(where: { $0.id == notified.messageId })
+  else { return messages }
+  let source = notified.isSenderSource ? notified.maybeSenderName.map { Message.Source(name: $0) } : nil
+  let message = Message(
+    id: notified.messageId, conversationId: maybeNotified?.conversationId ?? "",
+    authorId: notified.maybeSenderId ?? "", sentAtMs: notified.sentAtMs, body: body,
+    authorName: notified.maybeSenderName ?? "", maybeSource: source)
+  return (messages + [message]).sorted { $0.sentAtMs < $1.sentAtMs }
+}
+
 /// Builds the list's days from a page of messages (oldest first) and its holes (`feedSections`).
 func messageFeed(
   _ messages: [Message], gaps: [HistoryGap], revision: Int, calendar: Calendar = .current
