@@ -1,0 +1,1 @@
+[{"type":"message","user":"U1","text":"Hi <@U1> *bold* <https://example.com|x> &amp;","ts":"1700000000.000100","thread_ts":"1700000000.000100","reactions":[{"name":"thumbsup","users":["U1"]}],"files":[{"id":"F1","name":"a.pdf"}]}]

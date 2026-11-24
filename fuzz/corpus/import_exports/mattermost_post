@@ -1,0 +1,1 @@
+{"type":"post","post":{"team":"team-a","channel":"town-square","user":"anna","message":"hi @anna `code`","create_at":1700000000000,"replies":[{"user":"anna","message":"x","create_at":2}],"attachments":[{"path":"data/a.png"}],"props":{"from_webhook":"true"}}}

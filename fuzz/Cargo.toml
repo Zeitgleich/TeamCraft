@@ -18,6 +18,7 @@ teamcraft-bridge = { path = "../crates/teamcraft-bridge" }
 teamcraft-client-api = { path = "../crates/teamcraft-client-api" }
 teamcraft-core = { path = "../crates/teamcraft-core" }
 teamcraft-crypto = { path = "../crates/teamcraft-crypto" }
+teamcraft-import = { path = "../crates/teamcraft-import" }
 teamcraft-media = { path = "../crates/teamcraft-media", default-features = false, features = ["voice-decode"] }
 teamcraft-proto = { path = "../crates/teamcraft-proto" }
 teamcraft-server = { path = "../crates/teamcraft-server" }
@@ -147,6 +148,13 @@ bench = false
 [[bin]]
 name = "motion_photo"
 path = "fuzz_targets/motion_photo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "import_exports"
+path = "fuzz_targets/import_exports.rs"
 test = false
 doc = false
 bench = false

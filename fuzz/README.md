@@ -35,6 +35,7 @@ the lockfile. Fuzzing itself stays manual (`run.sh`).
 | `crypto_decoders`      | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
 | `dpop_proof`           | DPoP proofs from the `DPoP` header or a first WebSocket frame, also valid ones with bytes changed: never a panic |
 | `scim`                 | SCIM filters, PATCH paths and operations, user and group resources: no panic, bounded, stable round trip         |
+| `import_exports`       | Slack day files, Mattermost bulk export lines, Slack timestamps and both systems' texts for `teamcraft-import`   |
 
 There is no target for CalDAV responses: the CalDAV client only looks at HTTP status codes and
 parses no XML.

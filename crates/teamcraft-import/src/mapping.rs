@@ -70,6 +70,15 @@ fn read_file(path: &Path) -> Result<String, MappingError> {
   })
 }
 
+/// A name the template quoted with an apostrophe so a spreadsheet doesn't run it (`'=x`), as it
+/// was.
+fn without_formula_guard(value: &str) -> String {
+  match value.strip_prefix('\'') {
+    Some(rest) if rest.starts_with(['=', '+', '-', '@']) => rest.to_owned(),
+    _ => value.to_owned(),
+  }
+}
+
 /// `f`, `false`, `n` or `no` (any case) say no; anything else (also empty) says yes.
 fn is_yes(value: &str) -> bool {
   !matches!(
@@ -121,7 +130,7 @@ pub fn parse_channels(text: &str, file: &str) -> Result<BTreeMap<SourceId, Chann
     let value = |column: usize| record.get(column).map_or("", |value| value.trim()).to_owned();
     let row = ChannelRow {
       channel_id,
-      name: value(name),
+      name: without_formula_guard(&value(name)),
       maybe_teamcraft_name: maybe_teamcraft_name
         .map(value)
         .filter(|teamcraft_name| !teamcraft_name.is_empty()),
@@ -140,7 +149,10 @@ pub fn parse_channels(text: &str, file: &str) -> Result<BTreeMap<SourceId, Chann
 
 pub fn parse_users(text: &str, file: &str) -> Result<BTreeMap<SourceId, String>, MappingError> {
   let table = Table::parse(text, file)?;
-  let id = table.column("synology_id")?;
+  // `source_id` in the templates of a converted export (docs/import-slack.md), else Synology's.
+  let id = table
+    .optional_column("source_id")
+    .map_or_else(|| table.column("synology_id"), Ok)?;
   let user = table.column("teamcraft_user")?;
   let mut users = BTreeMap::new();
   for (line, record) in table.records() {
@@ -151,7 +163,7 @@ pub fn parse_users(text: &str, file: &str) -> Result<BTreeMap<SourceId, String>,
       .ok_or_else(|| MappingError::Row {
         file: file.to_owned(),
         line,
-        reason: "synology_id is not a number".into(),
+        reason: "the user ID is not a number".into(),
       })?;
     let username = record.get(user).map_or("", |value| value.trim());
     if !username.is_empty() {
