@@ -78,18 +78,32 @@ mkdir "$staging/.background"
 tiffutil -cathidpicheck "$here/dmg-background.png" "$here/dmg-background@2x.png" \
   -out "$staging/.background/background.tiff"
 
+# hdiutil fails now and then with "Resource busy" on CI runners (a scan or Spotlight still holds
+# the staging folder or the image); a short retry gets past it.
+hdiutil_retry() {
+  local attempt
+  for attempt in 1 2 3 4 5; do
+    if hdiutil "$@"; then
+      return 0
+    fi
+    echo "hdiutil $1 failed (attempt $attempt), retrying" >&2
+    sleep $(( attempt * 5 ))
+  done
+  hdiutil "$@"
+}
+
 # Laid out on a writable image (with room for Finder's .DS_Store), then compressed.
 size_mb=$(( $(du -sm "$staging" | cut -f1) + 20 ))
-hdiutil create -volname "$name" -srcfolder "$staging" -fs HFS+ -format UDRW -size "${size_mb}m" -ov "$writable"
-hdiutil attach -readwrite -noverify -noautoopen -mountpoint "$mount" "$writable" >/dev/null
+hdiutil_retry create -volname "$name" -srcfolder "$staging" -fs HFS+ -format UDRW -size "${size_mb}m" -ov "$writable"
+hdiutil_retry attach -readwrite -noverify -noautoopen -mountpoint "$mount" "$writable" >/dev/null
 if ! layout "$mount" 2>&1; then
   echo "warning: Finder could not lay out the dmg window; it opens as a plain window" >&2
   [ -n "${GITHUB_ACTIONS:-}" ] && echo "::warning::the dmg window has no background layout"
 fi
 sync
-hdiutil detach "$mount" -quiet
+hdiutil_retry detach "$mount" -quiet
 rm -f "$dmg"
-hdiutil convert "$writable" -format UDZO -imagekey zlib-level=9 -ov -o "$dmg"
+hdiutil_retry convert "$writable" -format UDZO -imagekey zlib-level=9 -ov -o "$dmg"
 if [ "$identity" != "-" ]; then
   codesign --force --sign "$identity" --timestamp "$dmg"
 fi
