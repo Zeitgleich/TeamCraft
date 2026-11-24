@@ -1925,10 +1925,12 @@ mod tests {
     #[test]
     fn every_mode_against_every_account() {
       // Owner (an admin of the roster), member, recorder bot, another bot, guest, unknown account.
+      // An account this device has no record of counts as a member, as before the bot: only the
+      // server's word that it is a guest or a bot takes the right away.
       let cases = [
         (CallRecorders::Off, [false, false, false, false, false, false]),
         (CallRecorders::Admins, [true, false, true, false, false, false]),
-        (CallRecorders::Members, [true, true, true, false, false, false]),
+        (CallRecorders::Members, [true, true, true, false, false, true]),
         (
           CallRecorders::RecorderBotOnly,
           [false, false, true, false, false, false],
