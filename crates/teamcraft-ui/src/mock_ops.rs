@@ -600,6 +600,23 @@ impl AdminBackend for MockBackend {
     Some(self.ops.borrow().settings.runtime.clone())
   }
 
+  fn group_mappings(&self) -> Option<teamcraft_proto::GroupMappingsResponse> {
+    Some(teamcraft_proto::GroupMappingsResponse {
+      mappings: self.ops.borrow().settings.group_mappings.clone(),
+    })
+  }
+
+  fn save_group_mappings(&self, rules: Vec<teamcraft_proto::GroupMappingRule>) {
+    let mut ops = self.ops.borrow_mut();
+    ops.settings.group_mappings = rules;
+    ops.record(
+      self.now,
+      AuditAction::SettingsChanged,
+      "group mappings",
+      "updated",
+    );
+  }
+
   fn save_runtime_settings(&self, section: RuntimeSettingsSection) {
     let mut ops = self.ops.borrow_mut();
     let name = section.key().as_str().to_owned();

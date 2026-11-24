@@ -192,10 +192,28 @@ pub fn SelectRow(
   #[prop(into)] selected: Signal<String>,
   #[prop(into)] on_select: Callback<String>,
   #[prop(into, optional)] disabled: Signal<bool>,
+  /// What the chosen option means for people, in plain words, below the row (issue #2360).
+  #[prop(into, optional)]
+  consequence: Option<Signal<String>>,
   /// What is wrong with the choice, shown below the row (forms.md).
   #[prop(into, optional)]
   error: Signal<Option<String>>,
 ) -> impl IntoView {
+  let consequence_id = format!("{id}-consequence");
+  let has_consequence = consequence.is_some();
+  let described = {
+    let consequence_id = consequence_id.clone();
+    move || {
+      let ids: Vec<String> = [
+        has_consequence.then(|| consequence_id.clone()),
+        error.with(Option::is_some).then(|| error_id(id)),
+      ]
+      .into_iter()
+      .flatten()
+      .collect();
+      (!ids.is_empty()).then(|| ids.join(" "))
+    }
+  };
   view! {
     <div class="field inline">
       <label for=id>{move || label.get()}</label>
@@ -203,7 +221,7 @@ pub fn SelectRow(
         id=id
         class="input"
         aria-invalid=move || error.with(Option::is_some).then_some("true")
-        aria-describedby=move || error.with(Option::is_some).then(|| error_id(id))
+        aria-describedby=described
         prop:disabled=move || disabled.get()
         prop:value=move || selected.get()
         on:change=move |ev| on_select.run(event_target_value(&ev))
@@ -221,6 +239,9 @@ pub fn SelectRow(
         }}
       </select>
     </div>
+    {consequence.map(|text| {
+      view! { <p class="muted-text small policy-consequence" id=consequence_id aria-live="polite">{move || text.get()}</p> }
+    })}
     <p class="field-error" id=error_id(id)>{move || error.get()}</p>
   }
 }

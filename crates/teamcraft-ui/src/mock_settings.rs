@@ -26,6 +26,8 @@ pub(super) struct SettingsMock {
   pub(super) runtime: RuntimeSettingsResponse,
   pub(super) last_test: Option<(SettingsTestKind, SettingsTestResponse)>,
   pub(super) notetaker: teamcraft_proto::AdminNotetakerResponse,
+  /// Identity provider groups to spaces: one rule into the first demo space.
+  pub(super) group_mappings: Vec<teamcraft_proto::GroupMappingRule>,
 }
 
 impl SettingsMock {
@@ -89,6 +91,11 @@ impl SettingsMock {
       },
       runtime: default_runtime(),
       last_test: None,
+      group_mappings: vec![teamcraft_proto::GroupMappingRule {
+        group_path: "/engineering".to_owned(),
+        space_ids: vec![super::id_from_raw(900)],
+        channel_ids: Vec::new(),
+      }],
       notetaker: teamcraft_proto::AdminNotetakerResponse {
         is_key_stored: false,
         can_store_secrets: true,

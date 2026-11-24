@@ -903,7 +903,7 @@ fn FieldRow(
       .into_any()
     },
     Kind::IdList(pick) => view! {
-      <IdPicker id=leak_key(dom_id) label=label kind=pick value=value on_input=on_input error=error />
+      <IdPicker id=dom_id label=label kind=pick value=value on_input=on_input error=error />
     }
     .into_any(),
     Kind::TextList => view! {

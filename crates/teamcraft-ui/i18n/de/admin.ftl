@@ -480,12 +480,12 @@ policy-saving = Wird signiert und veröffentlicht…
 
 ## Administration console: permissions, people, announcement, instance
 admin-permissions-title = Rollen und Berechtigungen
-admin-permissions-subtitle = Was jede Rolle darf. Änderungen gelten sofort; ein Kanal kann Berechtigungen nur wieder entziehen.
+admin-permissions-subtitle = Was jede Rolle darf. Änderungen werden gesammelt und unter der Tabelle beschrieben; erst „Änderungen anwenden“ setzt sie in Kraft. Ein Kanal kann Berechtigungen nur wieder entziehen.
 permissions-scope = Gilt für
 permissions-instance = Die ganze Instanz
 permissions-instance-hint = Diese Änderungen gelten überall, sofern ein Bereich sie nicht überschreibt.
 permissions-space-hint = Änderungen hier gelten nur in diesem Bereich und haben Vorrang vor der Instanz.
-permissions-legend = Zelle anklicken, um zu erlauben oder zu entziehen. Eine hervorgehobene Zelle ist eine Änderung von dir; erneutes Anklicken stellt den Standard wieder her. Eigentümer und Signierrecht lassen sich nicht ändern.
+permissions-legend = Zelle anklicken, um zu erlauben oder zu entziehen. Eine markierte Zelle weicht vom Standard ab; erneutes Anklicken stellt ihn wieder her. Eigentümer und Signierrecht lassen sich nicht ändern.
 permissions-permission = Berechtigung
 permissions-granted = erlaubt
 permissions-revoked = entzogen
@@ -499,6 +499,22 @@ permissions-group-content = In Unterhaltungen
 permissions-group-channel = Kanal verwalten
 permissions-group-space = Bereich verwalten
 permissions-group-instance = Instanzweit
+permissions-scope-locked = Vor dem Wechsel die Änderungen anwenden oder verwerfen.
+permissions-cell = { $permission }: { $role }
+permissions-default = Standard
+permissions-apply = Änderungen anwenden
+permissions-changes-instance = Beim Anwenden, überall, sofern ein Bereich nichts anderes festlegt:
+permissions-changes-space = Beim Anwenden, nur in { $space }:
+permissions-change-grant = { $role } erhalten „{ $permission }“.
+permissions-change-revoke = { $role } verlieren „{ $permission }“.
+permissions-change-inherit-instance = { $role }: „{ $permission }“ kehrt zum eingebauten Standard zurück.
+permissions-change-inherit-space = { $role }: „{ $permission }“ folgt wieder der ganzen Instanz.
+permissions-roles-guest = Gäste
+permissions-roles-member = Mitglieder
+permissions-roles-space_admin = Bereichsadmins
+permissions-roles-channel_admin = Kanaladmins
+permissions-roles-admin = Admins
+permissions-roles-owner = Eigentümer
 admin-moderation = Kanalmoderation
 admin-moderation-hint = Entzieht Mitgliedern und Gästen dieses Kanals Berechtigungen. Erlaubt heißt: das Schema entscheidet.
 admin-moderation-allowed = Erlaubt
@@ -514,6 +530,35 @@ policy-signin-hint = Gilt für alle. Sitzungen über dem Limit enden bei der nä
 policy-mfa-hint = Tokens des Identitätsanbieters brauchen einen zweiten Faktor; lokale Konten einen Authenticator-Code.
 policy-password = Kürzestes Passwort lokaler Konten
 policy-password-hint = Nur für Konten, die in TeamCraft liegen, etwa lokale Gäste.
+policy-call-recording-off-hint = Niemand kann in TeamCraft Anrufe aufzeichnen.
+policy-call-recording-admins-hint = Eigentümer und Admins können aufzeichnen; alle im Anruf sehen das.
+policy-call-recording-members-hint = Jedes Mitglied kann aufzeichnen, Gäste nicht.
+policy-session-consequence-none = Man bleibt angemeldet, bis man sich abmeldet oder länger als unten erlaubt inaktiv ist.
+policy-session-consequence = { $count ->
+    [one] Alle melden sich einen Tag nach der Anmeldung neu an, egal was sie gerade tun.
+   *[other] Alle melden sich { $count } Tage nach der Anmeldung neu an, egal was sie gerade tun.
+  }
+policy-idle-consequence-none = Niemand wird wegen Inaktivität abgemeldet.
+policy-idle-consequence = { $count ->
+    [one] Wer eine Minute lang nichts tut, wird abgemeldet.
+   *[other] Wer { $count } Minuten lang nichts tut, wird abgemeldet.
+  }
+policy-recovery-approvals-consequence = { $count ->
+    [one] Der Zugang wird wiederhergestellt, sobald ein Admin zustimmt.
+   *[other] Der Zugang wird erst wiederhergestellt, wenn { $count } verschiedene Admins zugestimmt haben; so kann kein einzelner Admin ein Konto übernehmen.
+  }
+policy-guest-dm-consequence-default = Die Konfigurationsdatei des Servers entscheidet.
+policy-guest-dm-consequence-nobody = Gäste können nicht zuerst schreiben. Sie antworten, wenn ihnen jemand schreibt.
+policy-guest-dm-consequence-shared = Gäste können Personen zuerst schreiben, mit denen sie schon einen Kanal oder eine Unterhaltung teilen.
+policy-guest-dm-consequence-anyone = Gäste können allen zuerst schreiben, die sie per Namen finden.
+policy-guest-expiry-consequence-default = Die Konfigurationsdatei des Servers entscheidet, wann der Zugang eines neuen Gasts endet.
+policy-guest-expiry-consequence-never = Ein neuer Gast behält den Zugang, bis ihn jemand entfernt.
+policy-guest-expiry-consequence = { $count ->
+    [one] Der Zugang eines neuen Gasts endet einen Tag nach der Einladung, sofern ihn kein Sponsor oder Admin verlängert.
+   *[other] Der Zugang eines neuen Gasts endet { $count } Tage nach der Einladung, sofern ihn kein Sponsor oder Admin verlängert.
+  }
+policy-history-consequence-from_join = Wer zu einem neuen Kanal hinzukommt, liest nur, was danach geschrieben wird.
+policy-history-consequence-full = Wer zu einem neuen Kanal hinzukommt, kann auch alles lesen, was vorher geschrieben wurde.
 policy-guests = Gäste
 policy-guest-domains-hint = Gäste können nur mit diesen Domains und deren Subdomains eingeladen werden. Leer: die Serverdatei entscheidet.
 policy-guest-dm = Gäste dürfen Direktnachrichten beginnen mit
@@ -1136,13 +1181,13 @@ health-check-oidc_sync = Abgleich mit dem Identitätsanbieter
 health-check-oidc_sync-hint = Gleicht die Personen regelmäßig mit dem Identitätsanbieter ab. Überfällig nach der eingestellten Zahl verpasster Läufe, standardmäßig drei.
 oidc-sync-title = Abgleich mit dem Identitätsanbieter
 settings-group-mappings = Gruppen des Identitätsanbieters
-settings-group-mappings-hint = Mitglieder einer Gruppe beim Identitätsanbieter treten diesen Spaces und darin diesen öffentlichen Kanälen bei, jeweils einmal, beim nächsten Lauf des Abgleichs. Wer die Gruppe verlässt, wird nicht entfernt. IDs eine pro Zeile eingeben, wie bei den Standard-Spaces.
+settings-group-mappings-hint = Mitglieder einer Gruppe beim Identitätsanbieter treten diesen Spaces und darin diesen öffentlichen Kanälen bei, jeweils einmal, beim nächsten Lauf des Abgleichs. Wer die Gruppe verlässt, wird nicht entfernt.
 settings-group-mappings-rule = Regel
 settings-group-mappings-path = Gruppenpfad
 settings-group-mappings-path-error = Den Pfad der Gruppe eingeben, zum Beispiel /engineering.
-settings-group-mappings-spaces = Space-IDs
-settings-group-mappings-spaces-error = Mindestens eine Space-ID eingeben.
-settings-group-mappings-channels = IDs öffentlicher Kanäle (optional)
+settings-group-mappings-spaces = Spaces
+settings-group-mappings-spaces-error = Mindestens einen Space wählen.
+settings-group-mappings-channels = Öffentliche Kanäle dieser Spaces (optional)
 settings-group-mappings-add = Regel hinzufügen
 settings-group-mappings-remove = Regel entfernen
 provider-events-title = Ereignisse des Identitätsanbieters
