@@ -132,10 +132,15 @@ async fn send_and_measure(app: &mut DesktopApp, text: &str, is_photo: bool) -> f
     if let Some(millis) = value.as_f64().filter(|millis| *millis >= 0.0) {
       return millis;
     }
-    assert!(
-      Instant::now() < deadline,
-      "the sent message {text:?} never appeared"
-    );
+    if Instant::now() >= deadline {
+      let state = app
+        .evaluate(
+          "JSON.stringify({ echo: window.__echo, composer: document.querySelector('[data-composer]')?.textContent, \
+           rows: [...document.querySelectorAll('[data-msg-id]')].map(row => row.textContent.slice(0, 60)).slice(-5) })",
+        )
+        .await;
+      panic!("the sent message {text:?} never appeared: {state:?}");
+    }
     tokio::time::sleep(Duration::from_millis(20)).await;
   }
 }
