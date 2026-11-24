@@ -94,7 +94,13 @@ pub(crate) const ECHO_PROBE: &str = r"(() => {
         if (inRow(node) && (node.textContent || '').includes(echo.expect)) { echo.shown = at; return; }
       }
     }
-  }).observe(document.body, { childList: true, subtree: true, characterData: true });
+    // The row may be built in steps (its attribute or text set after it was added): look at the last
+    // rows once per batch, in the same task, so the time is still the frame's.
+    const rows = document.querySelectorAll('[data-msg-id]');
+    for (let index = rows.length - 1; index >= 0 && index >= rows.length - 3; index--) {
+      if ((rows[index].textContent || '').includes(echo.expect)) { echo.shown = at; return; }
+    }
+  }).observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['data-msg-id'] });
 })()";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
