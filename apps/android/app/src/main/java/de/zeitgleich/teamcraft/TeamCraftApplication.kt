@@ -38,6 +38,7 @@ import de.zeitgleich.teamcraft.core.ActivityReports
 import de.zeitgleich.teamcraft.core.CoreRepository
 import de.zeitgleich.teamcraft.core.NetworkTrust
 import de.zeitgleich.teamcraft.core.OutboxWork
+import de.zeitgleich.teamcraft.core.QueuedSinceForeground
 import de.zeitgleich.teamcraft.notifications.AvatarCache
 import de.zeitgleich.teamcraft.ui.VersionedPictureCache
 import de.zeitgleich.teamcraft.notifications.JoinRequestNotifier
@@ -246,6 +247,9 @@ class TeamCraftApplication : Application(), Configuration.Provider {
     override fun onStop(owner: LifecycleOwner) {
       maybeStarting?.cancel()
       graph.isSyncStartFailing.value = false
+      // Before anything that can wait: a swipe from the recent apps may kill the process right
+      // after this (#2358). Signed out meanwhile, the run finds nothing to send.
+      if (QueuedSinceForeground.shared.take()) OutboxWork.enqueue(context)
       maybeStopping?.cancel()
       maybeStopping = graph.scope.launch {
         if (graph.auth.isSignedIn.value) scheduleOutbox()

@@ -142,7 +142,11 @@ class ChatClient(
   /** A query whose answer goes back to the core undecoded (the image viewer's pages). */
   suspend fun rawQuery(query: String): String = core().query(query)
 
-  suspend fun act(action: String) = core().act(action)
+  /** Runs a `ChatAction`; what it queues for the server is sent in the background too ([QueuedSinceForeground]). */
+  suspend fun act(action: String) {
+    QueuedSinceForeground.shared.note()
+    core().act(action)
+  }
 
   /**
    * People whose name or username matches [query], at most [limit], without the user and bots. The

@@ -67,6 +67,7 @@ import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.commandFailureText
 import de.zeitgleich.teamcraft.core.ComposerSend
 import de.zeitgleich.teamcraft.core.ComposerSendState
+import de.zeitgleich.teamcraft.core.QueuedSinceForeground
 import de.zeitgleich.teamcraft.core.SendAttempt
 import de.zeitgleich.teamcraft.core.DraftFiles
 import de.zeitgleich.teamcraft.ui.media.MediaDraftStore
@@ -934,6 +935,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   private fun deletedUserName(): String = getApplication<Application>().getString(R.string.user_deleted_name)
 
   fun send(conversationId: String, maybeThreadId: String?, body: String) = viewModelScope.launch {
+    QueuedSinceForeground.shared.note()
     runCatching { graph.core.core().sendMessage(conversationId, maybeThreadId, body) }
   }
 
@@ -1077,6 +1079,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
    */
   fun sendSticker(conversationId: String, maybeThreadId: String?, pack: String, name: String, fallback: String) =
     viewModelScope.launch {
+      QueuedSinceForeground.shared.note()
       reportFailure { graph.core.core().sendSticker(conversationId, maybeThreadId, pack, name, fallback) }
     }
 
