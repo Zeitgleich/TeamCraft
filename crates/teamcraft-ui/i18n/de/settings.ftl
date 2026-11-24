@@ -771,6 +771,26 @@ security-kit-replace = Passphrase durch Wiederherstellungs-Kit ersetzen
 security-kit-new = Neues Wiederherstellungs-Kit erstellen
 security-kit-save = Dieses Wiederherstellungs-Kit verwenden
 security-kit-done = Dein neues Wiederherstellungs-Kit schützt dein Schlüssel-Backup. Dein bisheriges Kit oder deine Passphrase funktioniert nicht mehr.
+security-passkeys-row = Passkeys
+security-passkeys-hint = Mit einem Passkey stellst du deine Schlüssel per Face ID, Fingerabdruck oder Sicherheitsschlüssel wieder her, ohne das Kit. Dein Browser fragt zweimal: zum Erstellen und zum Verwenden.
+security-passkeys-count = { $count ->
+    [one] Ein Passkey stellt deine Schlüssel wieder her, in Browsern, in denen er verfügbar ist.
+   *[other] { $count } Passkeys stellen deine Schlüssel wieder her, in Browsern, in denen sie verfügbar sind.
+}
+security-passkey-add = Passkey hinzufügen
+security-passkey-added = Dein Passkey stellt deine Schlüssel jetzt ebenfalls wieder her.
+security-passkey-name = Passkey { $number }
+security-passkey-remove = Passkey entfernen
+security-passkey-remove-question = Dieser Passkey stellt deine Schlüssel dann nicht mehr wieder her. Dein Wiederherstellungs-Kit und andere Passkeys funktionieren weiter.
+security-passkey-no-prf = Dieser Passkey kann deine Schlüssel nicht schützen. Versuche einen anderen, etwa den deines Geräts oder deines Passwort-Managers.
+security-passkey-unsupported = Dieser Browser kann keine Passkeys für deine Schlüssel verwenden. Dein Wiederherstellungs-Kit funktioniert weiterhin.
+security-rotate-row = Backup-Schlüssel ersetzen
+security-rotate-hint = Falls jemand dein Wiederherstellungs-Kit, deine Passphrase oder deinen Passkey gesehen haben könnte, ersetze den Schlüssel, der dein Backup schützt. Für ein verlorenes Gerät melde es stattdessen unter Geräte ab.
+security-rotate = Backup-Schlüssel ersetzen…
+security-rotate-question = Dein jetziges Wiederherstellungs-Kit, deine Passphrase und deine Passkeys funktionieren dann nicht mehr. Deine angemeldeten Geräte wechseln von selbst zum neuen Schlüssel. Als Nächstes speicherst du ein neues Wiederherstellungs-Kit.
+security-rotate-continue = Weiter
+security-rotate-save = Durch dieses Wiederherstellungs-Kit ersetzen
+security-rotate-done = Dein Backup hat einen neuen Schlüssel. Nur dein neues Wiederherstellungs-Kit stellt es wieder her; füge deine Passkeys erneut hinzu.
 settings-help-server = Server
 settings-help-server-loading = Server wird gefragt …
 settings-help-server-unknown = Der Server ist gerade nicht erreichbar.

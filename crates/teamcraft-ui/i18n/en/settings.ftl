@@ -771,6 +771,26 @@ security-kit-replace = Replace passphrase with recovery kit
 security-kit-new = Make a new recovery kit
 security-kit-save = Use this recovery kit
 security-kit-done = Your new recovery kit protects your key backup. Your previous kit or passphrase no longer works.
+security-passkeys-row = Passkeys
+security-passkeys-hint = A passkey restores your keys with Face ID, a fingerprint or a security key, without the kit. Your browser asks twice: to create the passkey and to use it.
+security-passkeys-count = { $count ->
+    [one] One passkey restores your keys, in browsers where it is available.
+   *[other] { $count } passkeys restore your keys, in browsers where they are available.
+}
+security-passkey-add = Add passkey
+security-passkey-added = Your passkey now restores your keys too.
+security-passkey-name = Passkey { $number }
+security-passkey-remove = Remove passkey
+security-passkey-remove-question = This passkey will no longer restore your keys. Your recovery kit and other passkeys keep working.
+security-passkey-no-prf = This passkey can't protect your keys. Try another one, such as your device's own or your password manager's.
+security-passkey-unsupported = This browser can't use passkeys for your keys. Your recovery kit still works.
+security-rotate-row = Replace backup key
+security-rotate-hint = If someone may have seen your recovery kit, passphrase or passkey, replace the key that protects your backup. For a lost device, sign it out under Devices instead.
+security-rotate = Replace backup key…
+security-rotate-question = Your current recovery kit, passphrase and passkeys stop working. Your signed-in devices switch to the new key by themselves. You save a new recovery kit next.
+security-rotate-continue = Continue
+security-rotate-save = Replace with this recovery kit
+security-rotate-done = Your backup has a new key. Only your new recovery kit restores it; add your passkeys again.
 settings-help-server = Server
 settings-help-server-loading = Asking the server…
 settings-help-server-unknown = The server can't be reached right now.

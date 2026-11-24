@@ -8,6 +8,7 @@ pub mod account;
 pub mod attachment;
 pub mod attestation;
 pub mod backup;
+pub mod backup_handoff;
 pub mod call_binding;
 pub mod call_recording;
 pub mod call_signal;

@@ -37,7 +37,7 @@ use teamcraft_client_api::model::{CanvasPresenceNote, Message, ThreadId};
 use teamcraft_client_api::remote::{
   AttachmentPriority, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, ContactKeys, CoreConnection,
   CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, OrgRecoveryStatus,
-  PhoneLinkStatus, SecuritySnapshot, StoreHealth, StoreProblem,
+  PasskeyWire, PhoneLinkStatus, SecuritySnapshot, StoreHealth, StoreProblem,
 };
 use teamcraft_client_api::snapshot_changes::{SnapshotChanges, SnapshotCursor};
 use teamcraft_core::api::dpop::DpopProver;
@@ -66,7 +66,7 @@ use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment, UnreadableStore, parse_recovery_key, platform,
+  PendingEnrollment, UnreadableStore, parse_recovery_key, passkey_wire, platform,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::{IdentityPublicKey, VerifiedDevice};
@@ -663,6 +663,7 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
       )
     },
     "core_org_recovery_status" => to_value(ask(Request::OrgRecoveryStatus).await??),
+    "core_passkey_credentials" => to_value(ask(Request::PasskeyCredentials).await??),
     "core_org_recovery_cancel" => {
       send(Request::OrgRecoveryCancel)?;
       Ok(Value::Null)
@@ -1499,6 +1500,9 @@ enum Request {
   },
   OrgRecoveryStatus(oneshot::Sender<Result<OrgRecoveryStatus, String>>),
   OrgRecoveryCancel,
+  /// New device: the passkeys that open the account's backup (e2ee.md §6.2.1), to ask the
+  /// authenticator for.
+  PasskeyCredentials(oneshot::Sender<Result<Vec<PasskeyWire>, String>>),
   LinkRequests(oneshot::Sender<Vec<LinkRequestView>>),
   LinkRequestReview {
     id: String,
@@ -2272,6 +2276,12 @@ impl Core {
         let started = self.org_recovery.start(&self.api(), maybe_previous).await;
         drop(reply.send(started.map_err(describe_failure)));
       },
+      Request::PasskeyCredentials(reply) => {
+        let listed = teamcraft_core::passkey_credentials(&self.api())
+          .await
+          .map(|credentials| credentials.iter().map(passkey_wire::to_wire).collect());
+        drop(reply.send(listed.map_err(describe_failure)));
+      },
       Request::OrgRecoveryStatus(reply) => {
         drop(
           reply.send(
@@ -2463,6 +2473,10 @@ impl Core {
         .enrollment_secret(&self.api(), &recovery_key)
         .await
         .map_err(describe_failure)?,
+      EnrollSecret::Passkey { passkey, prf_output } => EnrollmentSecret::Passkey {
+        credential: passkey_wire::from_wire(&passkey).map_err(describe_failure)?,
+        prf_output: passkey_wire::prf_output(&prf_output.0).map_err(describe_failure)?,
+      },
     };
     let options = EnrollmentOptions {
       device_name: request.device_name,
@@ -2954,6 +2968,9 @@ impl Core {
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
       | ChatAction::SetRecoveryKey { .. }
+      | ChatAction::RotateBackupKey { .. }
+      | ChatAction::AddPasskey { .. }
+      | ChatAction::RemovePasskey { .. }
       | ChatAction::SetActivity { .. }
       | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }
@@ -3909,7 +3926,11 @@ impl EnginePart {
   fn of(action: &ChatAction) -> Option<Self> {
     match action {
       ChatAction::CreateChannel { .. } | ChatAction::AddMember { .. } => Some(Self::Workspace),
-      ChatAction::ChangePassphrase { .. } | ChatAction::SetRecoveryKey { .. } => Some(Self::Settings),
+      ChatAction::ChangePassphrase { .. }
+      | ChatAction::SetRecoveryKey { .. }
+      | ChatAction::RotateBackupKey { .. }
+      | ChatAction::AddPasskey { .. }
+      | ChatAction::RemovePasskey { .. } => Some(Self::Settings),
       ChatAction::PublishPolicy { .. }
       | ChatAction::PublishRoster { .. }
       | ChatAction::ForgetProviderAccount { .. }
@@ -3974,6 +3995,21 @@ pub(crate) async fn settings_action(client: &mut WebClient, action: ChatAction) 
     ChatAction::SetRecoveryKey { recovery_key } => {
       let recovery_key = parse_recovery_key(&recovery_key)?;
       client.set_recovery_key(&recovery_key).await
+    },
+    ChatAction::RotateBackupKey { recovery_key } => {
+      let recovery_key = parse_recovery_key(&recovery_key.0)?;
+      client.rotate_backup_key_with_kit(&recovery_key).await
+    },
+    ChatAction::AddPasskey { passkey, prf_output } => {
+      let credential = passkey_wire::from_wire(&passkey)?;
+      client
+        .add_passkey(credential, &passkey_wire::prf_output(&prf_output.0)?)
+        .await
+    },
+    ChatAction::RemovePasskey { credential_id } => {
+      client
+        .remove_passkey(&passkey_wire::credential_id(&credential_id)?)
+        .await
     },
     _ => Err(not_this_part()),
   }

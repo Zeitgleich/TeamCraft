@@ -51,6 +51,8 @@ pub mod motion_photo;
 pub mod notetaker;
 pub mod notified;
 pub mod notify_rules;
+#[cfg(feature = "ui")]
+pub mod passkey_wire;
 pub mod pending_work;
 pub mod people_names;
 pub mod picked_files;
@@ -129,8 +131,8 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   DirectMediaInputs, EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess,
   HistoryReading, HistoryScan, JwksSource, LinkAnnouncement, LinkCodeKind, LinkOffer, LinkRequestInfo,
-  LinkRequestList, MAX_VIEWER_BYTES, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment, SyncPhase,
-  parse_recovery_key,
+  LinkRequestList, MAX_PASSKEYS, MAX_VIEWER_BYTES, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment,
+  SyncPhase, parse_recovery_key, passkey_credentials,
 };
 pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};
 pub use typing::TypingState;

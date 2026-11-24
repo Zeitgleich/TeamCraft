@@ -5,7 +5,7 @@
 //! sealed values these methods produce are handed over by the caller.
 
 use rand_core::OsRng;
-use teamcraft_crypto::backup::{BackupKeyWrapper, WrapMethod, WrappedBackupKey};
+use teamcraft_crypto::backup::{BackupKey, BackupKeyWrapper, WrapMethod, WrappedBackupKey};
 use teamcraft_crypto::identity::{DeviceAgreementPublicKey, SignedDeviceCertificate};
 use teamcraft_crypto::org_recovery::{
   ConfirmedRecoveryRequest, OrgRecoveryPublicKey, OrgRecoveryShare, OrgRecoveryWrapper, RecoveryRequest,
@@ -98,6 +98,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The backup key wrapped to the org key of the verified roster, if the workspace has one.
   pub(crate) fn org_recovery_wrap(&self) -> Result<Option<WrappedBackupKey>, CoreError> {
+    self.org_recovery_wrap_for(&self.account.backup_key())
+  }
+
+  /// `backup_key` wrapped to the org key of the verified roster (a rotation's new key, §6.6).
+  pub(crate) fn org_recovery_wrap_for(
+    &self,
+    backup_key: &BackupKey,
+  ) -> Result<Option<WrappedBackupKey>, CoreError> {
     let Some(key) = self.workspace()?.roster.maybe_org_recovery_key else {
       return Ok(None);
     };
@@ -106,7 +114,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let wrapper = OrgRecoveryWrapper::for_wrapping(OrgRecoveryPublicKey::from_bytes(key));
     Ok(Some(wrapper.wrap_key(
       convert::user(self.account.user_id),
-      &self.account.backup_key(),
+      backup_key,
       &mut OsRng,
     )?))
   }
@@ -215,7 +223,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// The X25519 keys of `user`'s devices whose registration certificate verifies against the
   /// trusted identity key (roster or pinned).
-  async fn verified_agreement_keys(
+  pub(crate) async fn verified_agreement_keys(
     &mut self,
     user: UserId,
   ) -> Result<Vec<(DeviceId, DeviceAgreementPublicKey)>, CoreError> {

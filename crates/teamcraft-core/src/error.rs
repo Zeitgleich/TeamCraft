@@ -84,6 +84,13 @@ pub enum CoreError {
   /// (e2ee.md §6.5.8). The message starts with the server's stable code, which the UI localizes.
   #[error("recovery_passphrase_not_allowed: the workspace policy allows only a recovery kit")]
   PassphraseNotAllowed,
+  /// Another device of the user replaced the backup key while this one changed a recovery factor;
+  /// this device switched to the new key, and the change has to be made again (e2ee.md §6.6).
+  #[error("another device replaced the backup key meanwhile; try again")]
+  BackupKeyRotated,
+  /// The backup is already wrapped with the most passkeys an account may have.
+  #[error("at most {max} passkeys can protect the backup")]
+  TooManyPasskeys { max: usize },
   /// The text is not a recovery key (a typo, another format); never echoes the text.
   #[error("recovery key: {0}")]
   RecoveryKeyInvalid(#[from] teamcraft_crypto::recovery_key::RecoveryKeyError),

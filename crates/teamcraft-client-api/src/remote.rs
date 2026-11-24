@@ -720,6 +720,13 @@ pub enum EnrollSecret {
   /// Recovery through the organization (e2ee.md §6.3.1), once the admins approved this device's
   /// open request: the new kit's key protects the account from then on.
   OrgRecovery { recovery_key: String },
+  /// Browser: a passkey's PRF output for one of the account's passkey wraps (e2ee.md §6.2.1),
+  /// all base64url as [`PasskeyWire`] names them.
+  Passkey {
+    #[serde(flatten)]
+    passkey: PasskeyWire,
+    prf_output: SecretText,
+  },
   /// The device of a meeting guest (browser only): an ephemeral identity with no backup.
   Guest,
 }
@@ -731,8 +738,35 @@ impl std::fmt::Debug for EnrollSecret {
       Self::Passphrase { .. } => "Passphrase([redacted])",
       Self::KeptOnDevice => "KeptOnDevice",
       Self::OrgRecovery { .. } => "OrgRecovery([redacted])",
+      Self::Passkey { .. } => "Passkey([redacted])",
       Self::Guest => "Guest",
     })
+  }
+}
+
+/// A passkey that protects the key backup (e2ee.md §6.2.1): its WebAuthn credential ID and the PRF
+/// input its wrap was made with, both base64url without padding. Neither is secret.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasskeyWire {
+  pub credential_id: String,
+  pub prf_salt: String,
+}
+
+/// Text that is a secret (a recovery key, a passkey's PRF output): serialized as the plain string,
+/// never shown by `Debug`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SecretText(pub String);
+
+impl std::fmt::Debug for SecretText {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("[redacted]")
+  }
+}
+
+impl Drop for SecretText {
+  fn drop(&mut self) {
+    zeroize::Zeroize::zeroize(&mut self.0);
   }
 }
 
@@ -867,6 +901,22 @@ pub enum ChatAction {
   /// kit and a legacy passphrase stop working for recovery (e2ee.md §6.5.7).
   SetRecoveryKey {
     recovery_key: String,
+  },
+  /// Replaces the backup key with a fresh one protected by a new recovery kit the user saved
+  /// (e2ee.md §6.6): the old kit, a passphrase and passkeys stop working; the user's other devices
+  /// receive the new key.
+  RotateBackupKey {
+    recovery_key: SecretText,
+  },
+  /// Browser: wraps the backup key with a passkey's PRF output (e2ee.md §6.2.1).
+  AddPasskey {
+    #[serde(flatten)]
+    passkey: PasskeyWire,
+    prf_output: SecretText,
+  },
+  /// Stops a passkey (by its base64url credential ID) from opening the backup.
+  RemovePasskey {
+    credential_id: String,
   },
   /// This device became idle (no input for a while) or active again; the server shows idle devices
   /// as away (docs/gateway.md).
@@ -3522,6 +3572,36 @@ mod tests {
       .expect("serialize"),
       r#"{"action":"set_recovery_key","recovery_key":"K"}"#
     );
+    let rotate = ChatAction::RotateBackupKey {
+      recovery_key: SecretText("QQQQ-ZZZZ".into()),
+    };
+    assert_eq!(
+      serde_json::to_string(&rotate).expect("serialize"),
+      r#"{"action":"rotate_backup_key","recovery_key":"QQQQ-ZZZZ"}"#
+    );
+    assert!(!format!("{rotate:?}").contains("QQQQ"));
+    let passkey = PasskeyWire {
+      credential_id: "Y3JlZA".into(),
+      prf_salt: "c2FsdA".into(),
+    };
+    let add = ChatAction::AddPasskey {
+      passkey: passkey.clone(),
+      prf_output: SecretText("T1VU".into()),
+    };
+    assert_eq!(
+      serde_json::to_string(&add).expect("serialize"),
+      r#"{"action":"add_passkey","credential_id":"Y3JlZA","prf_salt":"c2FsdA","prf_output":"T1VU"}"#
+    );
+    assert!(!format!("{add:?}").contains("T1VU"));
+    let enroll = EnrollSecret::Passkey {
+      passkey,
+      prf_output: SecretText("T1VU".into()),
+    };
+    assert_eq!(
+      serde_json::to_string(&enroll).expect("serialize"),
+      r#"{"kind":"passkey","credential_id":"Y3JlZA","prf_salt":"c2FsdA","prf_output":"T1VU"}"#
+    );
+    assert!(!format!("{enroll:?}").contains("T1VU"));
   }
 
   #[test]

@@ -3,15 +3,16 @@
 //! The key bag is encrypted with a random backup key. The backup key itself is stored on the server
 //! only in wrapped form, once per [`WrapMethod`]: by the device keystore (§6.1), by a passkey PRF
 //! output (§6.2), by the recovery key of a recovery kit (§6.5), by a legacy recovery passphrase
-//! stretched with Argon2id (§6.2 fallback) and by the organization recovery key (§6.3). Every
-//! wrapper implements [`BackupKeyWrapper`]. The wraps are stored as one list next to the key bag
+//! stretched with Argon2id (§6.2 fallback), by the organization recovery key (§6.3) and, after a
+//! rotation, sealed to each of the user's devices (§6.6, `backup_handoff`). Every wrapper
+//! implements [`BackupKeyWrapper`]. The wraps are stored as one list next to the key bag
 //! ([`encode_wrapped_key_list`]).
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
 use rand_core::CryptoRngCore;
 use sha2::Sha256;
-use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize};
+use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
 use zeroize::Zeroizing;
 
 use crate::aead::{self, NONCE_LEN};
@@ -25,6 +26,12 @@ const PASSPHRASE_SALT_LEN: usize = 16;
 const RECOVERY_KEY_SALT_LEN: usize = 16;
 /// `kdf` of a recovery-key wrap: HKDF-SHA256 (e2ee.md §6.5.2).
 const RECOVERY_KEY_KDF_HKDF_SHA256: u8 = 1;
+/// `kdf` of a passkey wrap: HKDF-SHA256 over the PRF output, salted with the PRF input (§6.2.1).
+const PASSKEY_KDF_HKDF_SHA256: u8 = 1;
+/// Length of the PRF input (WebAuthn `prf.eval.first`) a passkey wrap stores.
+pub const PASSKEY_PRF_SALT_LEN: usize = 32;
+/// Longest credential ID WebAuthn allows (Level 3, §6.1: at most 1023 bytes).
+pub const MAX_PASSKEY_CREDENTIAL_ID_LEN: usize = 1023;
 /// Most wraps one list holds (its count is one byte).
 pub const MAX_WRAPPED_KEYS: usize = u8::MAX as usize;
 
@@ -44,8 +51,9 @@ pub struct BackupKey(SymmetricKey);
 
 /// Wraps and unwraps the backup key with one recovery factor.
 ///
-/// Implementations: [`PassphraseWrapper`], [`RecoveryKeyWrapper`], [`SymmetricKeyWrapper`] (device
-/// keystore, passkey PRF) and the organization recovery wrapper (`org_recovery`).
+/// Implementations: [`PassphraseWrapper`], [`RecoveryKeyWrapper`], [`PasskeyPrfWrapper`],
+/// [`SymmetricKeyWrapper`] (device keystore), the organization recovery wrapper (`org_recovery`)
+/// and the device hand-off after a rotation (`backup_handoff`).
 pub trait BackupKeyWrapper {
   fn method(&self) -> WrapMethod;
 
@@ -70,6 +78,9 @@ pub enum WrapMethod {
   OrgRecovery = 4,
   /// The recovery key of a recovery kit (e2ee.md §6.5).
   RecoveryKey = 5,
+  /// Sealed to one of the user's devices after a backup-key rotation and signed by the identity
+  /// key (e2ee.md §6.6, `backup_handoff`).
+  DeviceHandoff = 6,
 }
 
 /// A backup key encrypted under one recovery factor, as stored on the server.
@@ -103,11 +114,26 @@ pub struct RecoveryKeyWrapper {
   recovery_key: RecoveryKey,
 }
 
-/// Wraps with a 256-bit key-encryption key that comes from outside: the OS keystore (§6.1) or a
-/// passkey PRF output (§6.2).
+/// Wraps with a 256-bit key-encryption key that comes from outside: the OS keystore (§6.1).
 pub struct SymmetricKeyWrapper {
   method: WrapMethod,
   key_encryption_key: SymmetricKey,
+}
+
+/// Wraps with the PRF output of one passkey (WebAuthn PRF extension, e2ee.md §6.2.1). The wrap
+/// names its credential and the PRF input, so a recovering client knows what to ask the
+/// authenticator for; the output itself never leaves the client.
+pub struct PasskeyPrfWrapper {
+  credential: PasskeyCredential,
+  key_encryption_key: SymmetricKey,
+}
+
+/// The public half of a passkey wrap: which credential, and the PRF input it was evaluated with.
+/// Neither is secret (the server stores both); without the authenticator they give nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PasskeyCredential {
+  credential_id: Vec<u8>,
+  prf_salt: [u8; PASSKEY_PRF_SALT_LEN],
 }
 
 /// Public parameters of a passphrase-wrapped key.
@@ -123,6 +149,14 @@ struct PassphraseParameters {
 struct RecoveryKeyParameters {
   kdf: u8,
   salt: [u8; RECOVERY_KEY_SALT_LEN],
+}
+
+/// Public parameters of a passkey wrap. `kdf` is a plain byte, like the recovery key's.
+#[derive(TlsSerialize, TlsDeserializeBytes, TlsSize)]
+struct PasskeyParameters {
+  kdf: u8,
+  credential_id: VLBytes,
+  prf_salt: [u8; PASSKEY_PRF_SALT_LEN],
 }
 
 /// One entry of a wrap list, undecoded: what a reader needs that only looks at the method (the
@@ -163,6 +197,15 @@ pub enum BackupError {
   PrfOutputTooShort,
   #[error("unsupported recovery key derivation {0}")]
   UnsupportedKdf(u8),
+  #[error("a passkey credential ID must be 1 to {MAX_PASSKEY_CREDENTIAL_ID_LEN} bytes long")]
+  InvalidCredentialId,
+  /// The wrap belongs to another passkey (or another PRF input): try the next one.
+  #[error("the wrap was made with another passkey")]
+  OtherPasskey,
+  /// The hand-off is for another device, or its signature doesn't verify against the user's
+  /// identity key (e2ee.md §6.6).
+  #[error("the backup key hand-off is not for this device or not signed by the identity key")]
+  HandoffNotTrusted,
   #[error("malformed list of wrapped backup keys")]
   MalformedList,
   #[error("a list holds at most {MAX_WRAPPED_KEYS} wrapped backup keys")]
@@ -419,22 +462,6 @@ impl SymmetricKeyWrapper {
       key_encryption_key: key,
     }
   }
-
-  /// Derives the wrapping key from a WebAuthn PRF extension output via HKDF-SHA256.
-  pub fn passkey_prf(prf_output: &SecretBytes) -> Result<Self, BackupError> {
-    if prf_output.len() < SYMMETRIC_KEY_LEN {
-      return Err(BackupError::PrfOutputTooShort);
-    }
-    let hkdf = Hkdf::<Sha256>::new(None, prf_output.expose_secret());
-    let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
-    hkdf
-      .expand(domain::PASSKEY_PRF_KDF.as_bytes(), output.as_mut())
-      .map_err(|_| BackupError::KeyDerivation)?;
-    Ok(Self {
-      method: WrapMethod::PasskeyPrf,
-      key_encryption_key: SymmetricKey::from_bytes(*output),
-    })
-  }
 }
 
 impl BackupKeyWrapper for SymmetricKeyWrapper {
@@ -468,6 +495,118 @@ impl std::fmt::Debug for SymmetricKeyWrapper {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("SymmetricKeyWrapper")
       .field("method", &self.method)
+      .finish_non_exhaustive()
+  }
+}
+
+impl PasskeyCredential {
+  /// A credential with a fresh random PRF input, to evaluate the passkey with before wrapping.
+  pub fn generate(credential_id: Vec<u8>, rng: &mut dyn CryptoRngCore) -> Result<Self, BackupError> {
+    let mut prf_salt = [0u8; PASSKEY_PRF_SALT_LEN];
+    rng.fill_bytes(&mut prf_salt);
+    Self::new(credential_id, prf_salt)
+  }
+
+  pub fn new(credential_id: Vec<u8>, prf_salt: [u8; PASSKEY_PRF_SALT_LEN]) -> Result<Self, BackupError> {
+    if credential_id.is_empty() || credential_id.len() > MAX_PASSKEY_CREDENTIAL_ID_LEN {
+      return Err(BackupError::InvalidCredentialId);
+    }
+    Ok(Self {
+      credential_id,
+      prf_salt,
+    })
+  }
+
+  /// The credential a passkey wrap names, read from its public parameters.
+  pub fn of_wrap(wrapped: &WrappedBackupKey) -> Result<Self, BackupError> {
+    ensure_method(WrapMethod::PasskeyPrf, wrapped)?;
+    let parameters = PasskeyParameters::tls_deserialize_exact_bytes(&wrapped.parameters)?;
+    if parameters.kdf != PASSKEY_KDF_HKDF_SHA256 {
+      return Err(BackupError::UnsupportedKdf(parameters.kdf));
+    }
+    Self::new(parameters.credential_id.as_slice().to_vec(), parameters.prf_salt)
+  }
+
+  pub fn credential_id(&self) -> &[u8] {
+    &self.credential_id
+  }
+
+  /// The PRF input (`prf.eval.first`) the authenticator must evaluate.
+  pub fn prf_salt(&self) -> &[u8; PASSKEY_PRF_SALT_LEN] {
+    &self.prf_salt
+  }
+}
+
+/// The credentials of every passkey wrap in `wraps` that this version can read, in list order.
+pub fn passkey_credentials(wraps: &[WrappedBackupKey]) -> Vec<PasskeyCredential> {
+  wraps
+    .iter()
+    .filter(|wrapped| wrapped.method == WrapMethod::PasskeyPrf)
+    .filter_map(|wrapped| PasskeyCredential::of_wrap(wrapped).ok())
+    .collect()
+}
+
+impl PasskeyPrfWrapper {
+  /// `prf_output` is what the authenticator returned for `credential`'s PRF input (32 bytes).
+  pub fn new(credential: PasskeyCredential, prf_output: &SecretBytes) -> Result<Self, BackupError> {
+    if prf_output.len() < SYMMETRIC_KEY_LEN {
+      return Err(BackupError::PrfOutputTooShort);
+    }
+    let hkdf = Hkdf::<Sha256>::new(Some(&credential.prf_salt), prf_output.expose_secret());
+    let mut output = Zeroizing::new([0u8; SYMMETRIC_KEY_LEN]);
+    hkdf
+      .expand(domain::PASSKEY_PRF_KDF.as_bytes(), output.as_mut())
+      .map_err(|_| BackupError::KeyDerivation)?;
+    Ok(Self {
+      credential,
+      key_encryption_key: SymmetricKey::from_bytes(*output),
+    })
+  }
+
+  pub fn credential(&self) -> &PasskeyCredential {
+    &self.credential
+  }
+}
+
+impl BackupKeyWrapper for PasskeyPrfWrapper {
+  fn method(&self) -> WrapMethod {
+    WrapMethod::PasskeyPrf
+  }
+
+  fn wrap_key(
+    &self,
+    user_id: UserId,
+    backup_key: &BackupKey,
+    rng: &mut dyn CryptoRngCore,
+  ) -> Result<WrappedBackupKey, BackupError> {
+    let parameters = PasskeyParameters {
+      kdf: PASSKEY_KDF_HKDF_SHA256,
+      credential_id: VLBytes::new(self.credential.credential_id.clone()),
+      prf_salt: self.credential.prf_salt,
+    }
+    .tls_serialize_detached()?;
+    seal_backup_key(
+      user_id,
+      WrapMethod::PasskeyPrf,
+      parameters,
+      &self.key_encryption_key,
+      backup_key,
+      rng,
+    )
+  }
+
+  fn unwrap_key(&self, user_id: UserId, wrapped: &WrappedBackupKey) -> Result<BackupKey, BackupError> {
+    if PasskeyCredential::of_wrap(wrapped)? != self.credential {
+      return Err(BackupError::OtherPasskey);
+    }
+    open_backup_key(user_id, &self.key_encryption_key, wrapped)
+  }
+}
+
+impl std::fmt::Debug for PasskeyPrfWrapper {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("PasskeyPrfWrapper")
+      .field("credential", &self.credential)
       .finish_non_exhaustive()
   }
 }
@@ -615,27 +754,128 @@ mod tests {
   }
 
   #[test]
-  fn keystore_and_passkey_round_trip() {
+  fn keystore_round_trip() {
     let backup_key = BackupKey::generate(&mut OsRng);
-    let prf_output = SecretBytes::new(vec![7u8; 32]);
-    let wrappers = [
-      SymmetricKeyWrapper::device_keystore(SymmetricKey::generate(&mut OsRng)),
-      SymmetricKeyWrapper::passkey_prf(&prf_output).unwrap(),
-    ];
-    for wrapper in wrappers {
+    let wrapper = SymmetricKeyWrapper::device_keystore(SymmetricKey::generate(&mut OsRng));
+    let wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
+    let unwrapped = wrapper.unwrap_key(ALICE, &wrapped).unwrap();
+    assert!(bool::from(unwrapped.key().ct_eq(backup_key.key())));
+  }
+
+  mod passkey {
+    use super::*;
+
+    #[test]
+    fn round_trips_and_names_its_credential() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let credential = PasskeyCredential::generate(b"credential one".to_vec(), &mut OsRng).unwrap();
+      let wrapper = PasskeyPrfWrapper::new(credential.clone(), &prf_output(7)).unwrap();
       let wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
-      let unwrapped = wrapper.unwrap_key(ALICE, &wrapped).unwrap();
+      let decoded = WrappedBackupKey::from_bytes(&wrapped.to_bytes().unwrap()).unwrap();
+
+      assert_eq!(decoded.method(), WrapMethod::PasskeyPrf);
+      assert_eq!(
+        passkey_credentials(std::slice::from_ref(&decoded)),
+        std::slice::from_ref(&credential)
+      );
+      // Another device evaluating the same passkey with the stored PRF input opens it.
+      let other_device = PasskeyPrfWrapper::new(credential, &prf_output(7)).unwrap();
+      let unwrapped = other_device.unwrap_key(ALICE, &decoded).unwrap();
       assert!(bool::from(unwrapped.key().ct_eq(backup_key.key())));
     }
-    // The same PRF output derives the same wrapping key on another device.
-    let wrapped = SymmetricKeyWrapper::passkey_prf(&prf_output)
-      .unwrap()
-      .wrap_key(ALICE, &backup_key, &mut OsRng)
-      .unwrap();
-    SymmetricKeyWrapper::passkey_prf(&prf_output)
-      .unwrap()
-      .unwrap_key(ALICE, &wrapped)
-      .unwrap();
+
+    #[test]
+    fn every_wrap_has_its_own_prf_input() {
+      let first = PasskeyCredential::generate(b"id".to_vec(), &mut OsRng).unwrap();
+      let second = PasskeyCredential::generate(b"id".to_vec(), &mut OsRng).unwrap();
+      assert_ne!(first.prf_salt(), second.prf_salt());
+    }
+
+    #[test]
+    fn rejects_a_wrong_passkey_output() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let credential = PasskeyCredential::generate(b"id".to_vec(), &mut OsRng).unwrap();
+      let wrapped = PasskeyPrfWrapper::new(credential.clone(), &prf_output(7))
+        .unwrap()
+        .wrap_key(ALICE, &backup_key, &mut OsRng)
+        .unwrap();
+      assert!(matches!(
+        PasskeyPrfWrapper::new(credential, &prf_output(8))
+          .unwrap()
+          .unwrap_key(ALICE, &wrapped),
+        Err(BackupError::UnwrapFailed)
+      ));
+    }
+
+    #[test]
+    fn skips_the_wraps_of_other_passkeys() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let mine = PasskeyCredential::generate(b"mine".to_vec(), &mut OsRng).unwrap();
+      let other = PasskeyCredential::generate(b"other".to_vec(), &mut OsRng).unwrap();
+      let wrapped = PasskeyPrfWrapper::new(other, &prf_output(7))
+        .unwrap()
+        .wrap_key(ALICE, &backup_key, &mut OsRng)
+        .unwrap();
+      assert!(matches!(
+        PasskeyPrfWrapper::new(mine, &prf_output(7))
+          .unwrap()
+          .unwrap_key(ALICE, &wrapped),
+        Err(BackupError::OtherPasskey)
+      ));
+    }
+
+    #[test]
+    fn rejects_tampered_wraps_and_other_users() {
+      let backup_key = BackupKey::generate(&mut OsRng);
+      let credential = PasskeyCredential::generate(b"id".to_vec(), &mut OsRng).unwrap();
+      let wrapper = PasskeyPrfWrapper::new(credential, &prf_output(7)).unwrap();
+      let wrapped = wrapper.wrap_key(ALICE, &backup_key, &mut OsRng).unwrap();
+      assert!(matches!(
+        wrapper.unwrap_key(UserId::new(2), &wrapped),
+        Err(BackupError::UnwrapFailed)
+      ));
+
+      let mut ciphertext = wrapped.clone();
+      ciphertext.ciphertext[0] ^= 1;
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &ciphertext),
+        Err(BackupError::UnwrapFailed)
+      ));
+
+      let mut unknown_kdf = wrapped.clone();
+      unknown_kdf.parameters[0] = 9;
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &unknown_kdf),
+        Err(BackupError::UnsupportedKdf(9))
+      ));
+
+      let mut salt = wrapped;
+      let last = salt.parameters.len() - 1;
+      salt.parameters[last] ^= 1;
+      assert!(matches!(
+        wrapper.unwrap_key(ALICE, &salt),
+        Err(BackupError::OtherPasskey)
+      ));
+    }
+
+    #[test]
+    fn rejects_short_outputs_and_bad_credential_ids() {
+      let credential = PasskeyCredential::generate(b"id".to_vec(), &mut OsRng).unwrap();
+      assert!(matches!(
+        PasskeyPrfWrapper::new(credential, &SecretBytes::new(vec![1; 16])),
+        Err(BackupError::PrfOutputTooShort)
+      ));
+      for id in [Vec::new(), vec![0; MAX_PASSKEY_CREDENTIAL_ID_LEN + 1]] {
+        assert!(matches!(
+          PasskeyCredential::new(id, [0; PASSKEY_PRF_SALT_LEN]),
+          Err(BackupError::InvalidCredentialId)
+        ));
+      }
+    }
+
+    fn prf_output(byte: u8) -> SecretBytes {
+      SecretBytes::new(vec![byte; 32])
+    }
   }
 
   #[test]
@@ -814,7 +1054,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_local_settings_and_short_prf() {
+    fn rejects_invalid_local_settings() {
       let too_many = Argon2Settings {
         iterations: MAX_ARGON2_ITERATIONS + 1,
         ..TEST_SETTINGS
@@ -826,10 +1066,6 @@ mod tests {
       for settings in [too_many, no_memory] {
         assert!(PassphraseWrapper::new(SecretBytes::new(b"x".to_vec()), settings).is_err());
       }
-      assert!(matches!(
-        SymmetricKeyWrapper::passkey_prf(&SecretBytes::new(vec![1; 16])),
-        Err(BackupError::PrfOutputTooShort)
-      ));
     }
 
     #[test]

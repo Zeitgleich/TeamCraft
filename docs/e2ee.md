@@ -5788,7 +5788,9 @@ drop or swap a wrap (a passkey, the org wrap) without the bag failing to open. A
 server's wraps only after the bag next to them opened. (A device with no history, such as one being
 recovered, can't tell an old bag from the newest; it gets what the server serves.)
 
-The backup key is stored *wrapped* in up to three ways:
+The backup key is stored *wrapped* in several ways: by devices (§6.1), passkeys (§6.2), the
+organization (§6.3), a recovery kit (§6.5) and, after a rotation, sealed to each of the user's
+devices (§6.6).
 
 ### 6.1 Wrapped by devices
 
@@ -5811,6 +5813,47 @@ when its local data is lost (§6.5.6).
   enrollment with a passphrase creates a new identity: a linked or recovering device that the server
   tells "this account has no identity" stops, instead of creating one the server could unwrap.
 - Changing the passphrase replaces only the passphrase wrap; the other wraps stay.
+
+#### 6.2.1 Construction (issue #1965)
+
+A passkey is an additional factor next to the recovery kit, not a replacement for it: it recovers on
+any browser the user's passkey provider syncs to, without the kit file. Nothing below is a new
+primitive: WebAuthn's PRF extension (HMAC-SHA-256 in the authenticator), HKDF-SHA256 and the
+XChaCha20-Poly1305 wrap of §6.5.2 (`teamcraft-crypto::backup::PasskeyPrfWrapper`).
+
+```text
+prf_salt   = 32 random bytes, new for every wrap         (WebAuthn prf.eval.first)
+prf_output = the authenticator's PRF result for prf_salt  (32 bytes, never leaves the client)
+KEK        = HKDF-SHA256(salt = prf_salt, IKM = prf_output, info = "TeamCraft-v1 passkey prf backup key wrap")
+parameters = TLS { kdf: u8 = 1, credential_id: <1..1023 bytes>, prf_salt: [u8; 32] }
+wrap       = XChaCha20-Poly1305(KEK, random nonce, backup key,
+                                AAD = labeled("TeamCraft-v1 backup key wrap", TLS { 1, user ID, method 2, parameters }))
+```
+
+- **Ceremonies in the page.** Adding a passkey creates a credential with the PRF extension, then
+  asks for it once more with `evalByCredential { id: prf_salt }` to get the output; the core wraps
+  the backup key with it and uploads the key bag (`WrapsOnMerge::KeepOwn`, like a new kit). The
+  WebAuthn challenge is random and checked by nobody: no server verifies an assertion, only the PRF
+  output matters, and only the authenticator holding the credential can compute it.
+- **Recovery.** A device without keys reads the passkey wraps' credential IDs and PRF inputs from
+  the server's list (`passkey_credentials`), asks the browser for any of them in one prompt, and
+  unwraps the wrap that names the credential the user picked (`EnrollmentSecret::Passkey`). A
+  wrong output fails the AEAD; a credential no wrap names is `NotEnrolled`.
+- **Several passkeys**, at most 10 (`MAX_PASSKEYS`), one wrap each. Adding a credential again
+  replaces its wrap; removing one drops it from the list (a server that kept the old list can still
+  use it with the passkey, as for every replaced factor; §6.6 ends that).
+- **What the server learns:** the credential IDs and PRF inputs (public; useless without the
+  authenticator) and how many passkeys protect the backup. An unknown `kdf` is refused
+  (`UnsupportedKdf`). The wrap parameters are authenticated, so a server that swaps the PRF input or
+  credential ID gets a wrap that doesn't open, not a different key.
+- **Where.** Browsers only. The relying party is the web client's own host (the browser's default),
+  so a passkey works wherever that web client is opened and the provider syncs it. The desktop
+  app's webview has no origin a passkey could belong to, and the phone apps would need the
+  server's host in their associated domains (iOS) or asset links (Android), which a self-hosted
+  server's host can't be at build time; they don't offer passkeys (follow-up).
+- **Strength.** The PRF output is 256 bits from the authenticator: an offline attack on the wrap is
+  out of reach. Whoever can use the passkey (the user's unlocked phone or password manager) and
+  read the key bag can open the backup, as with the kit file.
 
 ### 6.3 Wrapped by the organization recovery key (optional, per workspace)
 
@@ -5862,7 +5905,7 @@ sharing); nothing below is a new primitive.
   it: it draws a new backup key, re-encrypts the key bag and wraps it with the key of a new recovery
   kit the user saves and checks during the recovery (§6.5.4; `NewBackupSecret::RecoveryKey`, since
   #1701; `NewBackupSecret::Passphrase` remains for a legacy passphrase) and the current org key. Older wraps (passkeys) are dropped and enrolled again; the user's
-  other devices, if any survived, link again.
+  other devices, if any survived, receive the new key in a signed hand-off (§6.6) and keep working.
 - **Consequences.** The combining admin learns `s` (Shamir over GF(2⁸) can't do threshold decryption
   without reconstructing it), so an owner rotates the org key after each recovery: new `s`, new
   shares, a new key in the roster. Members' clients notice the changed key on their next sync and
@@ -6234,7 +6277,8 @@ bag is still needed to read anything.
 - **Make a new recovery kit** (kit lost or seen by others) does the same with a fresh key.
 - Changing the passphrase stays possible where the policy allows it (§6.5.8), for users who still
   have one; users with a kit aren't offered a passphrase.
-- **Older apps** decode the wrap list strictly and don't know method 5: an app older than this
+- **Older apps** decode the wrap list strictly and don't know method 5 (nor 2's parameters from
+  #1965, nor method 6 of §6.6; the clients are in alpha, so no compatibility is kept for them): an app older than this
   change can't change the passphrase of, or recover with a passphrase into, an account whose list
   holds a recovery-key wrap. The web client is always current, desktop apps update themselves, and
   phone apps of the same release decode the new method; they just don't offer the kit yet.
@@ -6277,16 +6321,90 @@ bots' passphrase comes from the bridge's configuration; both are exempt):
 - **Replacing a factor doesn't rotate the backup key.** The server could have kept an older wrap
   list. After *Replace passphrase with a recovery kit* such a server can still attack the old
   passphrase wrap offline (Argon2id-stretched), and after *Make a new recovery kit* whoever holds the
-  old kit and an old wrap can still unwrap the backup key. Rotating the backup key would stop that,
-  but the user's other devices would then have to link again (§6.3.1 does this after an org
-  recovery). Offering "new backup key, link your devices again" for a kit that was seen by others is
-  a follow-up.
+  old kit and an old wrap can still unwrap the backup key. *Replace backup key* (§6.6) stops that:
+  the old wraps wrap a key that no longer opens anything new.
 - **Phishing.** The app asks for the key only on the setup screen of a device that has no keys,
   and the kit says so. It is never typed into a page of the server's choosing other than the web
   client itself, whose integrity is §9.3's.
 - **Keychain** trade-offs: §6.5.6.
-- **Out of scope:** additionally wrapping the backup key with a passkey (WebAuthn PRF, §6.2) for
-  recovery without the file; tracked as a follow-up of issue #738.
+- **Passkeys** (WebAuthn PRF) wrap the backup key as a further factor since issue #1965 (§6.2.1).
+
+### 6.6 Replacing the backup key (issue #1965)
+
+After a recovery kit, a legacy passphrase or a passkey was exposed (seen by others, copied, synced
+to an account that leaked), replacing the factor alone isn't enough (§6.5.9). Settings > Security & privacy > **Replace backup key** draws a new backup key, encrypts the
+key bag with it and uploads it with a new wrap list. The user saves and checks a new kit first, as
+in §6.5.4 (`Client::rotate_backup_key_with_kit`).
+
+**The new wrap list:**
+
+- the new kit's recovery-key wrap (§6.5.2);
+- the org wrap to the current org key of the verified roster, if the workspace has one (§6.3.1);
+- one **hand-off** per other active device of the user (`WrapMethod::DeviceHandoff = 6`,
+  `teamcraft-crypto::backup_handoff`):
+
+  ```text
+  target     = TLS { device ID, device's X25519 agreement key }
+  sealed     = HPKE base mode (DHKEM X25519, HKDF-SHA256, ChaCha20-Poly1305) to the agreement key,
+               info = labeled("TeamCraft-v1 backup key handoff", user ID ‖ device ID),
+               aad  = labeled("TeamCraft-v1 backup key wrap", TLS { 1, user ID, method 6, target }),
+               plaintext = the new backup key
+  signature  = identity key over labeled("TeamCraft-v1 backup key handoff signature",
+                                         TLS { user ID, target, sealed })
+  parameters = TLS { target, signature }
+  ```
+
+  The devices are those whose registration certificate verifies against the identity key and that
+  the signed device list names (the same rule as §6.3.1's custodians); revoked devices get none.
+
+Passkey and legacy passphrase wraps are dropped: they wrap the old key, and re-making them needs the
+user (passkeys are added again). The key bag's contents don't change, so nothing is lost.
+
+**The other devices.** A device whose merge finds a bag its backup key doesn't open looks for a
+hand-off addressed to it (its device ID and agreement key), checks the signature against the
+identity key **it holds in its own key bag** (never one the server supplies), opens the seal with
+its agreement key, and adopts the new key only if the bag then opens and carries its identity. It
+takes the server's wrap list with it: a change of its own to the wraps that was waiting for upload
+wraps the old key and is dropped (`BackupKeyRotated`; the user makes it again). A device offline for
+weeks finds its hand-off whenever it comes back, as long as no later rotation left it out; a device
+linked afterwards gets the key by linking (§5). The desktop app writes the new key into its kept
+copy (§6.5.6) on its next start.
+
+**Why the signature.** The server knows every device's public agreement key and could seal a key
+of its own choosing; a device that adopted it would decrypt a bag the server forged (pins, content
+keys). Only holders of the user's identity key can sign a hand-off: the user's devices, and also a
+device that was lost or stolen with its data (see below). A replayed
+older hand-off gives an older key, which doesn't open the current bag (and older bags are refused
+by their sequence, §6), so it is never adopted.
+
+**Interruptions.** The new key and its wrap list are stored in the device's sealed local store
+before the upload (`pending_backup_key_rotation`). Every account data sync first finishes such a
+rotation: if the server's bag opens with the pending key, the earlier upload landed (its answer was
+lost) and the device switches; otherwise it merges the server's newer bag (under the old key, so a
+change another device made meanwhile is kept) and uploads again. The kit the user saved stays the
+one that counts. Until then the old key and factors keep working; nothing is half-switched on the
+server, since the bag and its wraps are one compare-and-swap write.
+
+**Two rotations at once** on two devices: the later upload wins (compare-and-swap, then merge and
+retry); the earlier device adopts the winner's key through its hand-off, and its kit stops working.
+Settings shows when the kit that counts was made (`recovery_key_set_at`).
+
+**What it protects against, and what not.** Rotation retires an **exposed recovery factor**: whoever
+holds the old kit, passphrase or passkey (alone or together with the server's old wrap lists) can no
+longer open the backup from then on. It does **not** protect against a **lost or stolen device**
+that still has its data: that device holds the identity key and the old backup key. Its holder (with
+or without the server) can sign a hand-off of a backup key of their own choosing and build a bag that
+carries the identity, so the user's other devices would accept it; and the same identity key lets it
+sign device lists and certificates. Rotating the backup key changes none of that, and the
+confirmation in Settings doesn't offer it for a lost device.
+
+The remedy for a lost device is to **revoke** it from another device (§3, signed device list): the
+server ends its session at once, the signed list drops it, and it is removed from every group, so it
+gets no new content keys through a server that follows the list. What it already holds (the identity
+key, the old backup key, what it could read) stays with it. Replacing the identity key while keeping
+the account's history isn't designed yet (follow-up); today only a full reset gives the account a
+new identity key (§3.2). A server that kept old bags still has them under the old key; their
+contents are what the old key's holder could read anyway.
 
 ## 7. Push notifications (Threema model, extended)
 

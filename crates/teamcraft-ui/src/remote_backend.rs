@@ -38,7 +38,7 @@ use teamcraft_client_api::model::{
 use teamcraft_client_api::remote::{
   CORE_CHANGED_EVENT, CORE_FAILED_EVENT, ChatAction, ChatAnswer, ChatQuery, ChatSnapshot, CoreConnection,
   CoreStatus, EnrollRequest, EnrollSecret, LinkRequestView, LinkStatus, MessageWindow, OrgRecoveryStatus,
-  PhoneLinkStatus, StoreHealth,
+  PasskeyWire, PhoneLinkStatus, SecretText, StoreHealth,
 };
 use teamcraft_client_api::scheduled::ScheduledOverview;
 use teamcraft_client_api::search::{ParsedQuery, SavedSearch, SearchHit, SearchResults};
@@ -371,6 +371,33 @@ pub async fn set_recovery_key(recovery_key: &str) -> Result<(), String> {
     recovery_key: recovery_key.to_owned(),
   })
   .await
+}
+
+/// Replaces the backup key with a fresh one protected by the new kit the user saved (e2ee.md
+/// §6.6): the old kit, a passphrase and passkeys stop working, the user's other devices switch.
+pub async fn rotate_backup_key(recovery_key: &str) -> Result<(), String> {
+  core_action(ChatAction::RotateBackupKey {
+    recovery_key: SecretText(recovery_key.to_owned()),
+  })
+  .await
+}
+
+/// Wraps the backup key with a passkey the page just made and evaluated (e2ee.md §6.2.1).
+pub async fn add_passkey(passkey: PasskeyWire, prf_output: SecretText) -> Result<(), String> {
+  core_action(ChatAction::AddPasskey { passkey, prf_output }).await
+}
+
+/// Stops a passkey from opening the backup.
+pub async fn remove_passkey(credential_id: &str) -> Result<(), String> {
+  core_action(ChatAction::RemovePasskey {
+    credential_id: credential_id.to_owned(),
+  })
+  .await
+}
+
+/// New device: the passkeys that open the account's backup, to ask the browser for.
+pub async fn passkey_credentials() -> Result<Vec<PasskeyWire>, String> {
+  call("core_passkey_credentials", &json!({})).await
 }
 
 /// Existing device: joins the link of a new device. The short code appears only on the new device.

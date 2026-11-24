@@ -550,11 +550,22 @@ fn seal(
 }
 
 fn seal_with(recipient: &[u8; KEY_LEN], info: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, OrgRecoveryError> {
+  hpke_seal(recipient, info, &[], plaintext)
+}
+
+/// HPKE base-mode seal (DHKEM X25519, HKDF-SHA256, ChaCha20-Poly1305) with associated data:
+/// `encapsulated key (32) || ciphertext`. Also seals the backup-key hand-off (`backup_handoff`).
+pub(crate) fn hpke_seal(
+  recipient: &[u8; KEY_LEN],
+  info: &[u8],
+  aad: &[u8],
+  plaintext: &[u8],
+) -> Result<Vec<u8>, OrgRecoveryError> {
   let (mut sealed, ciphertext) = hpke()
     .seal(
       &HpkePublicKey::new(recipient.to_vec()),
       info,
-      &[],
+      aad,
       plaintext,
       None,
       None,
@@ -579,13 +590,23 @@ fn open_with(
   info: &[u8],
   sealed: &[u8],
 ) -> Result<SecretBytes, OrgRecoveryError> {
+  hpke_open(private_key, info, &[], sealed)
+}
+
+/// Opens what [`hpke_seal`] sealed with the same info and associated data.
+pub(crate) fn hpke_open(
+  private_key: &[u8; KEY_LEN],
+  info: &[u8],
+  aad: &[u8],
+  sealed: &[u8],
+) -> Result<SecretBytes, OrgRecoveryError> {
   let (encapsulated, ciphertext) = split_encapsulated(sealed).ok_or(OrgRecoveryError::OpenFailed)?;
   hpke()
     .open(
       encapsulated,
       &HpkePrivateKey::new(private_key.to_vec()),
       info,
-      &[],
+      aad,
       ciphertext,
       None,
       None,

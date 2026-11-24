@@ -578,7 +578,210 @@ fn RecoveryCard() -> impl IntoView {
       >
         <PassphraseRow editing=editing maybe_done=maybe_done />
       </Show>
+      // Passkeys need WebAuthn with an origin they belong to: the browser, not the desktop app.
+      {crate::passkey::is_supported().then(|| view! { <PasskeysRow backup=backup editing=editing /> })}
+      <Show when=move || has_kit.get() || has_passphrase.get() fallback=|| ()>
+        <RotateRow editing=editing />
+      </Show>
     </SettingsCard>
+  }
+}
+
+/// The passkeys that open the backup (e2ee.md §6.2.1): add one (the browser asks twice, to create
+/// and to use it), remove one after a confirmation.
+#[component]
+fn PasskeysRow(backup: Memo<Option<KeyBackupState>>, editing: RwSignal<Editing>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let adding = PendingAction::new();
+  let maybe_note = RwSignal::new(None::<&'static str>);
+  let passkeys = Memo::new(move |_| {
+    backup.with(|maybe| {
+      maybe
+        .as_ref()
+        .map(|state| state.passkeys.clone())
+        .unwrap_or_default()
+    })
+  });
+  let hint = Signal::derive(move || match maybe_note.get() {
+    Some(key) => i18n.t(key),
+    None if passkeys.with(Vec::is_empty) => i18n.t("security-passkeys-hint"),
+    None => i18n.t_count("security-passkeys-count", passkeys.with(Vec::len)),
+  });
+  let add = move |_| {
+    maybe_note.set(None);
+    let me = state.me();
+    adding.spawn(async move {
+      let created = match crate::passkey::create(me.id.to_string().as_bytes(), &me.display_name).await {
+        Ok(created) => created,
+        Err(failure) => {
+          maybe_note.set_if_alive(passkey_failure_key(failure));
+          return Ok(());
+        },
+      };
+      crate::remote_backend::add_passkey(created.passkey, created.prf_output)
+        .await
+        .map_err(|error| ActionFailure::from_wire(&error))?;
+      maybe_note.set_if_alive(Some("security-passkey-added"));
+      Ok(())
+    });
+  };
+
+  view! {
+    <SettingRow label="security-passkeys-row" live_hint=hint is_stacked=true>
+      <div class="set-devices">
+        <For
+          each=move || passkeys.get().into_iter().enumerate()
+          key=|(_, passkey)| passkey.credential_id.clone()
+          children=move |(index, passkey)| view! { <PasskeyItem number=index + 1 credential_id=passkey.credential_id /> }
+        />
+      </div>
+      <Show when=move || editing.get() == Editing::Nothing fallback=|| ()>
+        <PendingButton pending=adding class="btn btn-small" on_click=add>
+          {move || i18n.t("security-passkey-add")}
+        </PendingButton>
+      </Show>
+    </SettingRow>
+  }
+}
+
+/// What the row says when the browser gave no passkey; a closed prompt says nothing.
+fn passkey_failure_key(failure: crate::passkey::PasskeyFailure) -> Option<&'static str> {
+  use crate::passkey::PasskeyFailure;
+  match failure {
+    PasskeyFailure::Cancelled => None,
+    PasskeyFailure::NoPrf => Some("security-passkey-no-prf"),
+    PasskeyFailure::Unsupported | PasskeyFailure::Unknown => Some("security-passkey-unsupported"),
+  }
+}
+
+/// One passkey: removing it asks first, since it stops opening the backup.
+#[component]
+fn PasskeyItem(number: usize, credential_id: String) -> impl IntoView {
+  let i18n = use_i18n();
+  let removing = PendingAction::new();
+  let is_confirming = RwSignal::new(false);
+  let label = move || i18n.t_with("security-passkey-name", &[("number", &number.to_string())]);
+  let remove = move || {
+    let credential_id = credential_id.clone();
+    removing.spawn(async move {
+      crate::remote_backend::remove_passkey(&credential_id)
+        .await
+        .map_err(|error| ActionFailure::from_wire(&error))
+    });
+  };
+  view! {
+    <div class="set-device">
+      <span class="set-device-icon" aria-hidden="true"><Icon name=IconName::Key /></span>
+      <div class="set-device-text">
+        <span class="set-device-name">{label}</span>
+      </div>
+      <div class="set-device-actions">
+        <Show when=move || !is_confirming.get() fallback=|| ()>
+          <PendingButton pending=removing class="btn btn-small btn-danger-quiet" on_click=move |_| is_confirming.set(true)>
+            {move || i18n.t("security-passkey-remove")}
+          </PendingButton>
+        </Show>
+      </div>
+      <Show when=move || is_confirming.get() fallback=|| ()>
+        <div class="set-confirm is-inline" role="alertdialog" aria-label=move || i18n.t("security-passkey-remove")>
+          <p>{move || i18n.t("security-passkey-remove-question")}</p>
+          <div class="set-confirm-actions">
+            <button type="button" class="btn btn-small" data-autofocus on:click=move |_| is_confirming.set(false)>
+              {move || i18n.t("cancel")}
+            </button>
+            <button
+              type="button"
+              class="btn btn-small btn-danger"
+              on:click={
+                let remove = remove.clone();
+                move |_| {
+                  is_confirming.set(false);
+                  remove();
+                }
+              }
+            >
+              {move || i18n.t("security-passkey-remove")}
+            </button>
+          </div>
+        </div>
+      </Show>
+    </div>
+  }
+}
+
+/// Replacing the backup key (e2ee.md §6.6), after a kit, passphrase or passkey was exposed (not for a
+/// lost device, which is signed out instead):
+/// a confirmation that says what stops working, then the kit steps for the new key.
+#[component]
+fn RotateRow(editing: RwSignal<Editing>) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let rotating = PendingAction::new();
+  let is_confirming = RwSignal::new(false);
+  let maybe_done = RwSignal::new(None::<&'static str>);
+  let account = state.me().display_name;
+  let hint = Signal::derive(move || match maybe_done.get() {
+    Some(key) => i18n.t(key),
+    None => i18n.t("security-rotate-hint"),
+  });
+  let rotate = Callback::new(move |recovery_key: String| {
+    rotating.spawn(async move {
+      crate::remote_backend::rotate_backup_key(&recovery_key)
+        .await
+        .map_err(|error| ActionFailure::from_wire(&error))?;
+      editing.set_if_alive(Editing::Nothing);
+      maybe_done.set_if_alive(Some("security-rotate-done"));
+      Ok(())
+    });
+  });
+
+  view! {
+    <SettingRow label="security-rotate-row" live_hint=hint>
+      <Show when=move || editing.get() == Editing::Nothing && !is_confirming.get() fallback=|| ()>
+        <button
+          type="button"
+          class="btn btn-small btn-danger-quiet"
+          on:click=move |_| {
+            maybe_done.set(None);
+            is_confirming.set(true);
+          }
+        >
+          {move || i18n.t("security-rotate")}
+        </button>
+      </Show>
+    </SettingRow>
+    <Show when=move || is_confirming.get() fallback=|| ()>
+      <div class="set-confirm is-inline" role="alertdialog" aria-label=move || i18n.t("security-rotate")>
+        <p>{move || i18n.t("security-rotate-question")}</p>
+        <div class="set-confirm-actions">
+          <button type="button" class="btn btn-small" data-autofocus on:click=move |_| is_confirming.set(false)>
+            {move || i18n.t("cancel")}
+          </button>
+          <button
+            type="button"
+            class="btn btn-small btn-danger"
+            on:click=move |_| {
+              is_confirming.set(false);
+              editing.set(Editing::Rotate);
+            }
+          >
+            {move || i18n.t("security-rotate-continue")}
+          </button>
+        </div>
+      </div>
+    </Show>
+    <Show when=move || editing.get() == Editing::Rotate fallback=|| ()>
+      <div class="set-subform">
+        <RecoveryKitSetup
+          account=account.clone()
+          finish_label=Signal::derive(move || i18n.t("security-rotate-save"))
+          is_busy=Signal::derive(move || rotating.is_pending())
+          on_confirmed=rotate
+          maybe_on_cancel=Callback::new(move |()| editing.set(Editing::Nothing))
+        />
+      </div>
+    </Show>
   }
 }
 
@@ -588,6 +791,8 @@ enum Editing {
   Nothing,
   Kit,
   Passphrase,
+  /// The kit steps of a backup key rotation (e2ee.md §6.6).
+  Rotate,
 }
 
 /// Changing a legacy recovery passphrase (e2ee.md §6.2): the new one replaces the old wrap.

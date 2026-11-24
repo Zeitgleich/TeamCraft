@@ -9,8 +9,8 @@ use std::collections::{HashMap, HashSet};
 
 use rand_core::OsRng;
 use teamcraft_crypto::backup::{
-  self, Argon2Settings, BackupError, BackupKey, BackupKeyWrapper, PassphraseWrapper, RecoveryKeyWrapper,
-  WrapMethod, WrappedBackupKey,
+  self, Argon2Settings, BackupError, BackupKey, BackupKeyWrapper, PasskeyCredential, PasskeyPrfWrapper,
+  PassphraseWrapper, RecoveryKeyWrapper, WrapMethod, WrappedBackupKey,
 };
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair, SignedDeviceCertificate};
 use teamcraft_crypto::key_bag::{EncryptedKeyBag, KeyBag, KeyBagBinding};
@@ -61,6 +61,12 @@ pub enum EnrollmentSecret {
   KeptBackupKey(SymmetricKey),
   /// Secrets received from an existing device by linking (e2ee.md §5).
   Linked(super::LinkedSecrets),
+  /// A passkey's PRF output for one of the passkey wraps on the server (e2ee.md §6.2.1): recovers an
+  /// existing identity only. `credential` names the wrap (from [`passkey_credentials`]).
+  Passkey {
+    credential: PasskeyCredential,
+    prf_output: SecretBytes,
+  },
   /// Recovering through the organization (e2ee.md §6.3.1); `new_secret` wraps the fresh backup key
   /// the device switches to, since the admins saw the old one.
   OrgRecovery {
@@ -475,7 +481,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// Switches the account to a fresh backup key, after a recovery in which others saw the old one
   /// (e2ee.md §6.3.1). The key bag is re-encrypted and wrapped with `new_secret` (a new recovery
   /// kit's key, or a legacy passphrase) and, if the workspace has one, the current org recovery
-  /// key; other factors (passkeys) must be enrolled again, and the user's other devices link again.
+  /// key; other factors (passkeys) must be enrolled again. The user's other devices, if any
+  /// survived, receive the new key sealed to them (e2ee.md §6.6).
   ///
   /// Only during enrollment, before the account is stored: the new backup key is stored with the
   /// account once the bag encrypted with it is on the server.
@@ -499,6 +506,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if let Some(org_wrap) = self.org_recovery_wrap()? {
       keys.push(org_wrap);
     }
+    // Devices of the user that survived keep working with the new key (e2ee.md §6.6).
+    // Boxed: an org recovery is rare, and enrollment's future stays small.
+    keys.extend(Box::pin(self.handoff_wraps(&self.account.backup_key())).await?);
     self.store_wrapped_keys(&keys)?;
     match new_secret {
       NewBackupSecret::RecoveryKey(_) => self.note_recovery_key_set()?,
@@ -661,6 +671,16 @@ async fn recover_key_bag(
       let backup_key = unwrap_any(crypto_user, &RecoveryKeyWrapper::new(recovery_key), &wraps)?;
       return open_stored(api, crypto_user, backup_key).await;
     },
+    EnrollmentSecret::Passkey {
+      credential,
+      prf_output,
+    } => {
+      let stored = api.key_bag().await?;
+      let wraps = decode_wrapped_keys(stored.wrapped_backup_keys.as_slice())?;
+      let wrapper = PasskeyPrfWrapper::new(credential.clone(), prf_output)?;
+      let backup_key = unwrap_passkey(crypto_user, &wrapper, &wraps)?;
+      return open_stored(api, crypto_user, backup_key).await;
+    },
     EnrollmentSecret::Linked(linked) => {
       let backup_key = BackupKey::from_key(linked.backup_secret.duplicate());
       let encrypted = EncryptedKeyBag::from_bytes(&linked.encrypted_key_bag)?;
@@ -724,6 +744,33 @@ fn unwrap_any(
     }
   }
   Err(last_error.map_or(CoreError::NotEnrolled, CoreError::from))
+}
+
+/// The backup key from the passkey wrap that names `wrapper`'s credential; `NotEnrolled` when no
+/// wrap does (the passkey was removed, or belongs to another account).
+fn unwrap_passkey(
+  user: teamcraft_crypto::ids::UserId,
+  wrapper: &PasskeyPrfWrapper,
+  wraps: &[WrappedBackupKey],
+) -> Result<BackupKey, CoreError> {
+  let wrapped = wraps
+    .iter()
+    .filter(|wrapped| wrapped.method() == WrapMethod::PasskeyPrf)
+    .find(|wrapped| PasskeyCredential::of_wrap(wrapped).is_ok_and(|named| &named == wrapper.credential()))
+    .ok_or(CoreError::NotEnrolled)?;
+  Ok(wrapper.unwrap_key(user, wrapped)?)
+}
+
+/// The passkeys that protect the account's backup (credential and PRF input of each wrap the
+/// server stores), for a device without keys to ask the authenticator for (e2ee.md §6.2.1).
+pub async fn passkey_credentials(api: &impl ServerApi) -> Result<Vec<PasskeyCredential>, CoreError> {
+  match api.key_bag().await {
+    Ok(stored) => Ok(backup::passkey_credentials(&decode_wrapped_keys(
+      stored.wrapped_backup_keys.as_slice(),
+    )?)),
+    Err(error) if error.is_not_found() => Ok(Vec::new()),
+    Err(error) => Err(error.into()),
+  }
 }
 
 /// Whether one of `wrapped_keys` (as stored with the key bag) opens with `recovery_key`.
