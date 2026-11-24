@@ -8,7 +8,8 @@
 //! address down; [`DesktopSession::sign_in_at_keycloak`] fills in Keycloak's form from there.
 //!
 //! Needs a debug build of `teamcraft-desktop` with the web client embedded (`E2E_DESKTOP_BIN`, see
-//! README.md), a display (`DISPLAY`, e.g. `xvfb-run`), `dbus-daemon` and `gnome-keyring-daemon`.
+//! README.md), a display (`DISPLAY`, e.g. `xvfb-run`, or a virtual compositor's Wayland socket in
+//! `E2E_DESKTOP_WAYLAND_DISPLAY`), `dbus-daemon` and `gnome-keyring-daemon`.
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -30,6 +31,10 @@ use crate::process::{Service, free_tcp_port};
 const NULL_AUDIO: &str = "pcm.!default { type null }\n";
 /// The desktop binary under test.
 pub const BINARY_VARIABLE: &str = "E2E_DESKTOP_BIN";
+/// A Wayland socket to run the app on instead of X11: a virtual compositor's
+/// (`kwin_wayland --virtual`), where WebKit paints on the GPU; never the user's own session's. An
+/// absolute path: the app gets an `XDG_RUNTIME_DIR` of its own.
+const WAYLAND_VARIABLE: &str = "E2E_DESKTOP_WAYLAND_DISPLAY";
 /// The app's identifier: its config directory below `XDG_CONFIG_HOME`.
 const APP_IDENTIFIER: &str = "de.zeitgleich.teamcraft";
 const KEYRING_PASSWORD: &str = "e2e";
@@ -180,11 +185,7 @@ impl DesktopSession {
           "WEBKIT_INSPECTOR_HTTP_SERVER",
           &format!("127.0.0.1:{inspector_port}"),
         ),
-        // X11 through `DISPLAY` (a virtual one in CI), never the user's own Wayland session.
-        ("GDK_BACKEND", "x11"),
-        ("WAYLAND_DISPLAY", ""),
         ("XDG_CURRENT_DESKTOP", ""),
-        ("XDG_SESSION_TYPE", "x11"),
         ("LANG", "en_US.UTF-8"),
         ("LANGUAGE", "en"),
         // No accessibility bus in the session.
@@ -195,6 +196,7 @@ impl DesktopSession {
       ]
       .map(|(key, value)| (key.to_owned(), value.to_owned())),
     );
+    envs.extend(display_env());
     let path = std::env::var("PATH").unwrap_or_default();
     envs.push((
       "PATH".to_owned(),
@@ -618,6 +620,20 @@ async fn fill_in_keycloak_form(url: &str, user: &str) -> anyhow::Result<()> {
 }
 
 /// The environment of everything in the session: its own home, XDG directories and bus.
+/// X11 through `DISPLAY` (a virtual one in CI), never the user's own Wayland session; or the
+/// virtual compositor's Wayland socket that [`WAYLAND_VARIABLE`] names.
+fn display_env() -> Vec<(String, String)> {
+  let (backend, wayland_display, session_type) = match std::env::var(WAYLAND_VARIABLE) {
+    Ok(socket) if !socket.is_empty() => ("wayland", socket, "wayland"),
+    _ => ("x11", String::new(), "x11"),
+  };
+  vec![
+    ("GDK_BACKEND".to_owned(), backend.to_owned()),
+    ("WAYLAND_DISPLAY".to_owned(), wayland_display),
+    ("XDG_SESSION_TYPE".to_owned(), session_type.to_owned()),
+  ]
+}
+
 fn session_env(dir: &Path, bus_address: &str) -> Vec<(String, String)> {
   let path = |sub: &str| dir.join(sub).display().to_string();
   vec![

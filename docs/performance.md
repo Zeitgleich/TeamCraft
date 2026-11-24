@@ -2459,12 +2459,14 @@ page (`webview_recovery.rs`), and no run logged a terminated web process.
 | WebKit's settings (3 GB, 0.33 / 0.5, 30 s)      | 386 MiB (319)     | 357 MiB (292)      | 0.04 / 0.05 %                   |
 | 512 MiB, 0.3 / 0.5, 5 s                         | 307 MiB (239)     | 305 MiB (239)      | 0.14 / 0.14 %                   |
 | 384 MiB, 0.3 / 0.5, 10 s                        | 301 MiB (233)     | 299 MiB (234)      | 0.10 / 0.11 %                   |
-| 512 MiB, 0.5 / 0.7, 10 s (the default)          | 307 MiB (240)     | 305 MiB (240)      | 0.10 / 0.11 %                   |
+| 512 MiB, 0.33 / 0.7, 10 s (the default)         | 307 MiB (240)     | 305 MiB (240)      | 0.10 / 0.11 %                   |
 
 Below about 240 MiB anonymous nothing more comes free: a strict threshold the page sits above
 (384 MiB × 0.5) saved 6 MiB more than a conservative one, and costs a full collection every poll.
 The default limit keeps the page near that floor with the least work: WebKit checks every 10 s and
-releases while the page is above 256 MiB by its measure. Channel switches stayed at 101–106 ms p50
+releases while the page is above about 170 MiB by its measure. (The app asked for 0.5, which WebKit
+refused while its own strict threshold was still 0.5, so the run and every one since had WebKit's
+third; #2362 sets the thresholds in an order WebKit takes and makes 0.33 the default.) Channel switches stayed at 101–106 ms p50
 and 156–173 ms p95 in all runs (the same within the spread between runs). Each value is a
 `TEAMCRAFT_WEBVIEW_MEMORY_*` variable (`LIMIT_MIB`, 0 for WebKit's own settings; `CONSERVATIVE`,
 `STRICT`; `POLL_SECS`).
@@ -2649,6 +2651,77 @@ that conversation changed (405 calls).
 Still above the budget in this measurement after 40 switches; what is left is what the section
 above names (compiled WebAssembly, the JavaScript heap, the debug binary). The use doesn't add to
 it any more as it did.
+
+### Desktop on Linux: the release build on a GPU (issue #2362)
+
+The number the budget is about: the release build as the packages ship it (`cargo build --release
+--features custom-protocol`, stripped as `desktop-release.yml` strips it, the release web client
+embedded), same harness and large workspace as the sections above (`desktop_perf.rs`, 40 channel
+switches), measured 2026-11-24 on main 66af5f70e, WebKitGTK 2.54.2, AMD Ryzen 9 5900X, Radeon RX
+7800 XT.
+
+On the GPU: the app runs as a native Wayland client of a virtual KWin with its OpenGL compositor
+(`KWIN_COMPOSE=O2 kwin_wayland --virtual --xwayland`, its own socket, never the real screen) through
+the harness's `E2E_DESKTOP_WAYLAND_DISPLAY`. Without `KWIN_COMPOSE=O2` the virtual KWin composites in
+software and offers no `linux-dmabuf`, and WebKit falls back to shared-memory buffers. With it the
+web process holds 114–138 MiB of VRAM and the shell 34 MiB. WebKitGTK 2.54 paints hybrid: GPU
+painting threads first, its CPU painting threads (eight here, half the cores) when those are busy;
+the CPU threads exist in every run.
+
+| Release on the GPU, large workspace (PSS) | Window shown           | Closed to the tray     | Budget  |
+|-------------------------------------------|------------------------|------------------------|---------|
+| Whole app                                 | 485 MiB (336 anon)     | 481 MiB (332 anon)     | 400 MiB |
+| Page (`WebKitWebProcess`)                 | 306 MiB (243 anon)     | 310 MiB (247 anon)     | -       |
+| Shell and core                            | 157 MiB (80 anon)      | 149 MiB (72 anon)      | -       |
+| Network process                           | 22 MiB (13 anon)       | 22 MiB (13 anon)       | -       |
+| Idle CPU, whole app                       | 0.8 %                  | 0.18 %                 | 0.5 %   |
+
+Runs alone varied by about ±10 MiB (the same build: 465 to 485 MiB shown); the start to the first
+channel took 1.6–2.8 s and a switch 136–153 ms at p50. The same release build painting on the CPU
+(the software compositor) came to 493 MiB shown: on this machine the GPU keeps little out of RAM.
+The page's floor is the same as the debug shell's (about 240 MiB anonymous), so the backing stores
+the earlier sections suspected in it aren't there. The shell's mapped files are 77 MiB, 53 of them
+the release binary (86 MB of code and 23 MB of read-only data, of which the start and a session
+touch about half), not the 44 MiB of the 1.0 release.
+
+**What of the page's floor is the app's.** The UI's wasm memory was 21.5 MiB after the switches. A
+dump of it, walked chunk by chunk through the allocator's (dlmalloc's) headers, showed 17.2 MiB of
+it in use, in 116,000 allocations, and 3 MiB free: most of it is data the page holds, not the
+high-water mark of a peak. The largest part: 2,098 B-tree nodes of 2,000 bytes (eleven 176-byte
+rows each) and their message texts, about 22,000 message rows of about 300 conversations in the
+page's mirror of the core (`remote_backend.rs`), which bounds the feeds it keeps to 10. The
+notifier looks at the newest 10 rows of every conversation whose newest message moved, and read
+them as the UI reads a feed: a page of 100 rows of each conversation, loaded into the mirror's
+feeds, all of them at the first look after the start.
+
+The notifier now reads its rows with `newest_rows`: in the page, a tail of each conversation's
+newest 10 rows, kept apart from the feeds (one small read from the shell instead of a page), marked
+stale when the conversation changes and read again on the next look; a feed that is current
+answers first. The sidebar's preview of a conversation (#2078) shows the tail when no feed holds the
+rows. Opening a conversation reads its page from the core then, where it was often in the mirror
+already.
+
+| Large workspace, after 40 switches                  | Before         | After          |
+|-----------------------------------------------------|----------------|----------------|
+| Wasm memory                                         | 21.5 MiB       | 16.0 MiB       |
+| Of it in use                                        | 17.2 MiB       | 10.1 MiB       |
+| Row B-tree nodes in it                              | 2,098          | 117            |
+| Window shown: whole app, anonymous (side by side)   | 337.1 MiB      | 324.3 MiB      |
+| Of it the page                                      | 235.5 MiB      | 229.8 MiB      |
+| Of it the shell and core                            | 88.6 MiB       | 79.7 MiB       |
+| Closed to the tray: whole app, anonymous            | 321.0 MiB      | 314.4 MiB      |
+| Idle CPU shown / hidden (side by side)              | 1.13 / 0.17 %  | 1.08 / 0.14 %  |
+
+The side-by-side runs share the machine and split the shared libraries' PSS between them, so the
+anonymous memory compares; their switch times (both slower, run together) don't. The shell gains
+as well: it answered 300 pages of 100 rows at the start, now 300 reads of 10.
+
+What else of the page is ours, by the measurements of the sections above: the compiled WebAssembly
+(45–60 MiB, which only less code loaded at the start would shrink) and the 16 MiB wasm memory; the
+rest of the about 230 MiB is WebKit's (JavaScript heap and allocator arenas, layers, fonts, Skia,
+JIT code). With the app's part down to what the first screen needs, the budget of 400 MiB isn't
+met on Linux: the release build on the GPU sits at about 460–485 MiB, of it about 300 MiB
+WebKit's web process and 75 MiB mapped files of the shell.
 
 ### Coming back and bad networks, end to end (issue #972)
 
