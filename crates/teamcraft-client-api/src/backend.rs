@@ -167,6 +167,14 @@ pub trait ChatBackend {
   fn held_recent_messages(&self, _conversation: ConversationId, _len: usize) -> Vec<Message> {
     Vec::new()
   }
+  /// The newest `len` feed rows, oldest first, for a watcher that looks at every conversation
+  /// (the notifier): like [`Self::messages`] of the last `len` rows, all or nothing, but a backend
+  /// that loads asynchronously may keep these few rows apart from the feeds the UI reads, so a look
+  /// at every conversation doesn't load and hold a page of each (#2362).
+  fn newest_rows(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    let count = self.message_count(conversation);
+    self.messages(conversation, count.saturating_sub(len), len)
+  }
   /// Messages `start..start + len` will be read soon (the rows just beyond what the feed shows):
   /// a backend that loads them asynchronously starts now, so they are there when scrolled to
   /// (issue #1050). Like a read, it says the rows are wanted: asked again after every change, so

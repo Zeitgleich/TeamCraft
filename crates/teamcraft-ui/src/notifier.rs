@@ -313,8 +313,7 @@ impl Notifier {
     ) {
       return;
     }
-    let start = count.saturating_sub(WATCH_WINDOW);
-    let rows = backend.messages(conversation.id, start, WATCH_WINDOW);
+    let rows = backend.newest_rows(conversation.id, WATCH_WINDOW);
     // A placeholder newest fills in later without moving the mark: looked at again until it has.
     let is_settled = rows
       .last()
