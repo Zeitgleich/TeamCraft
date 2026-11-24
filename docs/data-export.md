@@ -196,7 +196,7 @@ Without the vault node:
 - a legal hold keeps the ciphertext on the server, so the vault (later) or a member's own device
   (now) can still read what the hold kept.
 
-### 4.1 Compliance archive (design, issue #211; not built yet)
+### 4.1 Compliance archive (design, issue #2134; first part built)
 
 **Who holds the keys.** Only the vault node. It is a TeamCraft device of a dedicated **archive
 account** (a system account, MLS credential type `system:archive`), running `teamcraft-vault` on the
@@ -207,11 +207,15 @@ vault's machine does, which is why it is on company hardware and not on the VPS.
 
 **Turning it on.** Only by the signed workspace policy (`compliance_archive`):
 
-| Field     | Meaning                                                                                    |
-|-----------|--------------------------------------------------------------------------------------------|
-| `mode`    | `off` (default) or `on`; the server refuses `on` until the vault node ships                |
-| `archive` | the archive account's user ID and the fingerprint of its identity key, as the owner pinned |
-| `covers`  | `all` conversations (DMs too), or the IDs of the spaces whose channels it covers           |
+| Field                    | Meaning                                                                                       |
+|--------------------------|-----------------------------------------------------------------------------------------------|
+| `mode`                   | `off` (default) or `on`; the server refuses `on` until member apps enforce the archive        |
+| `archive`                | the archive account's user ID and the fingerprint of its identity key, as the owner pinned    |
+| `covers`                 | `scope` `all` (DMs too), or `spaces` with the IDs of the spaces whose channels it covers      |
+| `exports`                | `approvals_required` (2 to 10, default 2) and `notify_people` (default on)                    |
+| `archive_retention_days` | how long the vault keeps its copy on top of the workspace retention; unlimited when absent    |
+
+The protocol (signatures, what the vault checks, threats) is e2ee.md §11.
 
 The fingerprint is in the owner's signature, so the server can't swap in another "archive" device: a
 member app adds only devices of that account whose identity key matches. Every member app shows a
@@ -226,8 +230,9 @@ them, and refuse to send while the archive is missing from the group for more th
 the server can neither hide nor fake. Guests are told before they join a covered conversation.
 
 **Exporting.** An admin asks for an export in the console: which conversations or people, which
-period, and a reference. A second admin approves it (`exports.approvals_required`, default 2, in the
-signed policy). Both are signed with the admins' device keys; the server only relays the request.
+period, and a reference. A second admin approves it (`exports.approvals_required`, default 2, never fewer, in the
+signed policy). Both sign the same request bytes with their device keys; the server only relays the
+request and the signatures (e2ee.md §11.4).
 The vault verifies the signatures against the verified roster and the policy itself, then writes an
 archive in the format of §1.1 (`scope`: `compliance`, with the request in `manifest.json`),
 encrypted to the recipient key named in the request, and hands it out through the server (which sees
@@ -369,9 +374,18 @@ the desktop app saves it to the downloads folder). Admins and owners only (`Read
 
 ### 4.4 What remains
 
-| What                                                          | Issue |
-|---------------------------------------------------------------|-------|
-| Vault node, archive mode and approved export requests (§4.1)  | #2134 |
+Built for §4.1 (issue #2134, first part): the policy fields, checked by the server and the owners'
+apps (which still refuse `mode: on`), and in `teamcraft-core` the coverage, the pinned-identity check,
+signing export requests and the vault's verification of them.
+
+| What                                                                                         | Issue |
+|----------------------------------------------------------------------------------------------|-------|
+| `teamcraft-vault`: headless client of the archive account, own store, setup with fingerprint | #2134 |
+| Member apps add the archive, share history, refuse to send without it; accept `mode: on`     | #2134 |
+| Banner, start/stop lines, guests told before joining (all platforms)                         | #2134 |
+| Export request API, console (request, approve, refuse), audit entries, notifying people      | #2134 |
+| Writing the §1.1 archive on the vault, HPKE to the recipient, handing it out                 | #2134 |
+| Retention on the vault's copy, legal hold suspending it                                      | #2134 |
 
 ## 5. Manual test steps
 

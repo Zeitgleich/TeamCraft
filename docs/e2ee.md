@@ -8637,7 +8637,7 @@ Implemented (`teamcraft-core::search`, first version):
 
 ### 10.2 Optional: vault node for compliance and file contents
 
-A **vault node** (`teamcraft-vault`) on company hardware (e.g. a NAS or on-prem server) is only needed for the
+A **vault node** (`teamcraft-vault`, §11.1) on company hardware (e.g. a NAS or on-prem server) is only needed for the
 compliance archive (§11) and, optionally, for extracting text from PDFs/Office files into index
 segments. It's not required for normal search.
 
@@ -8647,32 +8647,176 @@ Keyed search tokens (`HMAC(search_key, term)`) would let the VPS match queries, 
 messages share words and which match a search; frequency analysis can then reveal common words. With
 §10.1 available, this isn't worth the leakage.
 
-## 11. Compliance archive (planned in the protocol from day one)
+## 11. Compliance archive (issue #2134, design for review)
 
-Not needed for the current team size, but designed in so it can be switched on later without a
-protocol change:
+Some organisations must be able to hand conversations to an auditor or a court. The server has no
+plaintext and admins hold no keys (admin.md), so the only way to export other people's messages is
+a **member that keeps them**: the vault node. This section is the protocol; data-export.md §4.1 is
+the product view, §4.2 there is legal hold, which works without the vault.
 
-- The signed workspace policy has a field `compliance_archive` (`off` by default). When on, it names
-  the archive device (the vault node, §10.2).
-- Member clients then **must** add the archive device to every conversation covered by the policy and
-  share history keys with it. Clients refuse to send into a covered conversation without it, so the
-  archive is complete.
-- Every covered conversation shows a banner "Messages are archived by the company".
-- Policy changes are signed by owners (admin roster, [admin.md](admin.md) §2.3), so the server can't
-  switch archiving on silently.
-- The archive node provides export (e.g. EML/JSON per conversation), legal hold (suspends retention
-  deletion for selected users/conversations) and retention enforcement on its copy.
-- Credential type `system:archive` is reserved in the MLS credentials from the start.
+Three properties hold throughout:
 
-The full design of the archive, its export requests and what the server learns is in
-[data-export.md](data-export.md) §4.1; the vault node is not built yet (issue #211). What exists:
-each user's own export, written by their own device from what it can decrypt, the server's record
-of them (`GET /me/personal-data`), and **legal hold** (data-export.md §4.2): a list of conversations
-in the same signed `compliance_archive` group that the server keeps whatever retention or a deletion
-would do, shown to their members as held. Like every policy group, it is verified from the owner's
-signature, so the server can't forge a hold; like any policy update, it can delay or withhold a
-newer policy (and so a new hold or a release) from a member. Without the vault
-node an admin can't export anybody's messages.
+- **Nobody is archived silently.** Archiving is switched on only by the owner-signed policy, which
+  every member's app verifies and shows; the server can't switch it on, hide it or fake it.
+- **The server can't substitute the archive.** The policy pins the archive account *and its
+  identity key*; member apps add only devices certified by that key.
+- **No single person exports.** An export needs signatures of at least two admins of the verified
+  roster over the same request, verified by the vault itself, not by the server.
+
+### 11.1 The vault node
+
+`teamcraft-vault` is a headless TeamCraft client (the shared `teamcraft-core`, no UI) of a dedicated
+**archive account**, running on the organisation's own hardware with its own encrypted store (§9).
+It is a member device in every sense: it has an identity key and device certificates like any user
+(§3), publishes key packages, joins covered conversations through MLS commits and receives content
+keys like any member (§4.3). It holds no other power: it is not an admin, signs no policy and can't
+approve an export.
+
+- **Keys under the organisation's control.** The archive account's identity key is created on the
+  vault machine and never leaves it except in the vault's own backup (§6.3 org recovery, when the
+  organisation enables it). Whoever runs that machine can read the archive; that is the point, and
+  why it is not the VPS. Admins, owners and the server operator hold no archive key.
+- **Credential.** The vault uses the ordinary certificate-based MLS credential (§3). The reserved
+  type `system:archive` stays unused: a credential type is asserted by whoever certifies the
+  device, while the pin in the signed policy (§11.2) is the owners' statement, which is what member
+  apps need to trust. Other members see the archive as a member of the conversation, by name.
+- **Setup.** An owner creates the archive account at the identity provider (a system account, no
+  person), signs the vault in, compares the fingerprint the vault shows with the one in the console
+  (like a safety number), and signs the policy naming it. Only then does any member app add it.
+
+### 11.2 Archive mode in the signed policy
+
+The `compliance_archive` group of the workspace policy (admin.md §2.3), signed by an owner:
+
+| Field                         | Meaning                                                                                        |
+|-------------------------------|------------------------------------------------------------------------------------------------|
+| `mode`                        | `off` (default) or `on`                                                                        |
+| `archive`                     | `user_id` and `identity_fingerprint` (SHA-256 identity fingerprint, §3) of the archive account |
+| `covers`                      | `scope`: `all` (every channel, DM, group and meeting chat) or `spaces` with the space IDs      |
+| `exports`                     | `approvals_required` (2 to 10, default 2) and `notify_people` (default on)                     |
+| `archive_retention_days`      | how long the vault keeps its copy; unlimited when absent                                       |
+| `legal_holds`, `person_holds` | legal hold, data-export.md §4.2                                                                |
+
+- `archive` may be named while `mode` is `off`, so it can be pinned and checked before the switch.
+  `on` without `archive` is refused by the owners' apps and the server.
+- Under `spaces`, only channels of those spaces are covered; direct messages and groups only under
+  `all`.
+- **Reading newer values.** A member app that doesn't know a `mode` or `scope` (a newer owner app)
+  reads it as the widest one: archived, everything covered. The banner then shows where it might not
+  have to; it never hides archiving. The vault reads an unknown mode as *off* and exports nothing:
+  each side fails toward telling and against exporting.
+- **What the server learns.** The policy is readable by every signed-in user: that archiving is on,
+  which account archives and what it covers. The server checks the fields (sizes, ranges, the
+  fingerprint length) so no owner publishes a policy apps would refuse; it makes no trust decision.
+
+### 11.3 What members see and do
+
+From the verified policy only (`teamcraft_core::compliance_archive::archive_of_conversation`), in a
+covered conversation every member app:
+
+- shows a banner "Messages in this conversation are archived by your organization", like the legal
+  hold banner (data-export.md §4.2), on every platform;
+- shows a line in the conversation when archiving starts or stops covering it (the policy version
+  that changed it), so a switch is never silent;
+- adds the archive account's devices whose identity key matches the pinned fingerprint
+  (`is_pinned_archive_identity`) through the conversation's normal signed membership change
+  (§4.6.2), authorized by the owners' policy signature, and shares history with them (§4.3, as for a
+  new device of a member with `HistoryPolicy::Full`);
+- refuses to send while no pinned archive device is in the group, after a short grace for the add
+  to land (the composer says "Waiting for the archive"), so the archive is complete; drafts and the
+  outbox keep the message until it can go;
+- tells a guest before joining a covered conversation (meeting lobby, guest invitation), so nobody
+  outside the organisation is archived without knowing.
+
+A device of the archive account that the fingerprint doesn't match is refused like any unknown
+device and reported (§3.2). Removing a member device that matches is refused while the policy
+covers the conversation, except by the owners' policy turning archiving off.
+
+### 11.4 Export requests
+
+An admin asks for an export in the console. The request (`ComplianceExportRequest`, JSON) names:
+
+| Field                     | Meaning                                                                         |
+|---------------------------|---------------------------------------------------------------------------------|
+| `request_id`              | 16 random bytes from the requester's app; the vault carries out each ID once    |
+| `requested_by`            | the requesting admin                                                            |
+| `requested_at`            | the requester's clock; the vault refuses requests older than its maximum age    |
+| `policy_version`          | the policy the requester saw (shown to approvers; the vault applies its own)    |
+| `conversations`, `people` | what to export: conversations, and people in every covered conversation (≤ 500) |
+| `from`, `until`           | the period; open ends mean from the start, up to the request                    |
+| `reference`               | the case reference, 1 to 64 characters, as for a legal hold                     |
+| `recipient_key`           | X25519 public key (HPKE, RFC 9180) the archive is encrypted to                  |
+
+**Signing.** The requester's device signs the request bytes, then each approving admin's device
+signs *the same bytes* after their app has shown what they say, with the workspace log signature
+(`teamcraft_crypto::workspace`, `WorkspaceLog::ComplianceExport`, version = request format 1). The kind is its
+own, so a policy entry, an emoji or any other signed document can never pass for an approval, and an
+approval of other bytes (a wider scope, another period) doesn't count for this one. The server
+stores the request and the signatures and relays them; it can withhold or delay one, never forge
+one. Refusals are not signed: any admin may refuse in the console, which ends the request on the
+server and in the audit log; that protects nothing against a hostile server, but the signatures do.
+
+**What the vault checks** (`verify_export_request`), against the roster and policy *it* verified
+(admin.md §2.3), before reading a single message:
+
+1. the request parses and keeps the rules above;
+2. `mode` is `on` and an archive is named (an unknown mode refuses);
+3. `requested_at` is no older than the vault's maximum age (default 14 days) and no more than 5
+   minutes ahead of its clock;
+4. each signature verifies against the identity key the **current** roster lists for an owner or
+   admin; others (members, former admins, unknown keys, the archive account itself, garbage) are
+   left out, and each admin counts once;
+5. the requester is among them, and they number at least `exports.approvals_required`, never fewer
+   than two whatever a policy says;
+6. the `request_id` was not carried out before (the vault keeps the IDs of the last maximum age).
+
+An admin demoted between approving and the export no longer counts: the roster at the time of the
+export decides.
+
+**The archive.** The vault writes the archive in the format of data-export.md §1.1 (`scope`:
+`compliance`, the request and its approvers in `manifest.json`), of the covered conversations it
+holds, within the period, encrypted to `recipient_key` with HPKE, and uploads it as an encrypted
+blob that the console offers to the requester. The server sees its size, never its content; the
+recipient's private key never touches the server or the vault.
+
+**Notifying people.** With `exports.notify_people` on, the server relays the completed request to
+the apps of the people named and the members of the conversations named; their apps show which
+reference exported what and when, verified from the signed request.
+
+**Audit.** Turning archiving on or off (a policy entry), every request, approval, refusal and
+completion are audit log entries (admin.md §4), metadata only: who, the subjects, the period, the
+reference, the size.
+
+### 11.5 Retention and legal hold on the vault
+
+The vault applies the workspace retention (the policy's `retention`) to its copy, then
+`archive_retention_days` on top; a legal hold (data-export.md §4.2) suspends both for what it holds,
+as on the server. Its copy is what protects against a hostile server deleting ciphertext.
+
+### 11.6 Threats
+
+| Threat                                               | Answer                                                                                                     |
+|------------------------------------------------------|------------------------------------------------------------------------------------------------------------|
+| Server switches archiving on, or names its own vault | Only an owner signature switches it; the pin names account and key fingerprint                             |
+| Server hides archiving from some members             | It must withhold the whole newer policy, like any policy update (members compare log heads, admin.md §2.3) |
+| One admin exports alone                              | At least two admins' signatures over the same bytes, minimum enforced by the vault                         |
+| Server replays an old approved request               | Request ID done once, maximum age, clock leeway                                                            |
+| Server widens a request after approval               | Approvals are over the exact bytes; changed bytes have no approvals                                        |
+| Approver's demotion ignored                          | The vault judges by its own current verified roster                                                        |
+| Vault machine compromised                            | It can read the archive: the organisation's trust in its own hardware, by design                           |
+| Server reads the export                              | Encrypted to the recipient's HPKE key; the server sees only the size                                       |
+
+### 11.7 What is built
+
+- The policy fields of §11.2 on the wire, checked by the server and the owners' apps; the server and
+  the owners' apps still refuse `mode: on` until member apps do what §11.3 says (a banner with no
+  archive behind it, or an archive members can't see, would both be wrong).
+- `teamcraft_core::compliance_archive`: which archive covers a conversation, the pinned-identity
+  check, signing an export request and the vault's verification (§11.4), with tests.
+
+The rest is tracked in issue #2134: the vault binary, member apps adding the archive and refusing to
+send without it, the banner and lines on every platform, the export request API, console and audit
+entries, writing and encrypting the archive, and retention on the vault.
 
 ## 12. Link previews
 

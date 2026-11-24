@@ -350,10 +350,15 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
     )));
   }
   let policy = &document.policy;
-  // Reserved: archiving can't be switched on until the vault node exists (e2ee.md §11).
+  policy
+    .compliance_archive
+    .check_archive()
+    .map_err(|error| ApiError::InvalidRequest(format!("compliance_archive: {error}")))?;
+  // Not yet: archiving stays off until member apps add the archive to covered conversations and
+  // refuse to send without it (e2ee.md §11.6, issue #2134). The archive account may be pinned.
   if policy.compliance_archive.mode != ComplianceArchiveMode::Off {
     return Err(ApiError::InvalidRequest(
-      "compliance_archive is reserved and must be off".into(),
+      "compliance_archive: archiving can't be switched on yet".into(),
     ));
   }
   if policy.org_recovery.admins_required == 0 || policy.org_recovery.admins_required > MAX_ORG_RECOVERY_ADMINS

@@ -14,6 +14,7 @@ mod calls;
 mod canvas_page;
 mod canvas_presence;
 pub mod channel_name;
+mod compliance_archive;
 mod conversation;
 pub mod custom_emoji_set;
 mod error;
@@ -71,6 +72,13 @@ pub use canvas_presence::{
   CANVAS_PRESENCE_INTERVAL_MS, CANVAS_PRESENCE_REFRESH_MS, CANVAS_PRESENCE_SERVER_GAP_MS,
   CANVAS_PRESENCE_TIMEOUT_MS, CanvasCaret, CanvasPageState, CanvasPeer, CanvasPresence, CanvasPresenceNote,
   MAX_CANVAS_PRESENCE_BYTES,
+};
+pub use compliance_archive::{
+  ARCHIVE_FINGERPRINT_BYTES, ArchiveAccount, ArchiveCoverage, ArchiveScope, ComplianceArchiveError,
+  ComplianceExportRequest, ComplianceExportRequestError, DEFAULT_EXPORT_APPROVALS,
+  EXPORT_RECIPIENT_KEY_BYTES, EXPORT_REQUEST_FORMAT, EXPORT_REQUEST_ID_BYTES, ExportPolicy,
+  MAX_ARCHIVE_SPACES, MAX_EXPORT_APPROVALS, MAX_EXPORT_REFERENCE_CHARS, MAX_EXPORT_SUBJECTS,
+  MIN_EXPORT_APPROVALS, check_archive_settings,
 };
 pub use conversation::{ConversationKind, ConversationVisibility, HistoryPolicy};
 pub use error::{ErrorBody, ErrorCode, SignInReason};
