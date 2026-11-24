@@ -19,6 +19,7 @@ pub mod commands;
 mod preview;
 pub(crate) mod push_to_talk;
 mod recording;
+mod recording_video;
 mod self_view;
 pub(crate) mod video;
 
@@ -32,9 +33,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, AudioSystem, BackgroundEffect as UiBackgroundEffect, CallCaptions, CallEndReason, CallPreview,
-  CallRequest, CallStatusSounds, CameraFallback, CaptionLanguage, CaptionModelState, DevicePresence,
-  MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
+  ActiveCall, AudioSystem, BackgroundEffect as UiBackgroundEffect, CallCaptions, CallEndReason, CallLayout,
+  CallPreview, CallRequest, CallStatusSounds, CameraFallback, CaptionLanguage, CaptionModelState,
+  DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk, RecordingLabel, ScreenShareSound,
+  VideoQuality,
 };
 use teamcraft_client_api::crash_reporting::CallRef;
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
@@ -54,6 +56,7 @@ use teamcraft_media::call_native::{
   DecodeReporter, DirectPathConfig, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError,
   TicketFuture, TrustFuture, TrustSource,
 };
+use teamcraft_media::call_recording_video::{OwnSource, VideoRecordingConfig};
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
 use teamcraft_media::call_video::ReceivedVideoFrame;
@@ -75,6 +78,7 @@ use tokio::sync::{mpsc, oneshot};
 use self::captions::{CaptionModels, CaptionSession};
 use self::codec_library::CodecLibrary;
 use self::preview::{CameraCheck, LevelWatch, MicrophoneCheck, Preview};
+use self::recording_video::RecordingVideoTap;
 use self::self_view::SelfView;
 pub(crate) use self::video::BUNDLED_MODEL;
 use self::video::OpenedCamera;
@@ -115,6 +119,8 @@ pub struct CallHost {
   screen_picker: OpenPicker,
   /// Where call recordings are written.
   recording_folder: recording::RecordingFolder,
+  /// Where a recording with video gets its pictures (#2250).
+  recording_video: RecordingVideoTap,
   /// The speech model of live captions (#215).
   captions: CaptionModels,
 }
@@ -195,6 +201,8 @@ struct CallState {
 struct MediaCall {
   controls: mpsc::UnboundedSender<Control>,
   task: tokio::task::JoinHandle<()>,
+  /// This device in the call: a recording's own tiles are always in it (#2250).
+  own_device: DeviceId,
 }
 
 enum Control {
@@ -329,6 +337,7 @@ impl CallHost {
     files: MediaFiles,
   ) -> Self {
     let captions = CaptionModels::new(files.caption_model_folder);
+    let recording_video = RecordingVideoTap::default();
     let state = CallState {
       maybe_captions_model: Some(captions.initial_state()),
       ..CallState::default()
@@ -339,14 +348,15 @@ impl CallHost {
       report_failure,
       media: tokio::sync::Mutex::new(None),
       video_sinks: Arc::default(),
-      self_view: SelfView::default(),
-      screen_view: SelfView::for_screen(),
+      self_view: SelfView::default().recorded_by(recording_video.clone(), OwnSource::Camera),
+      screen_view: SelfView::for_screen().recorded_by(recording_video.clone(), OwnSource::Screen),
       codecs: CodecLibrary::new(files.codec_directory),
       maybe_segmentation_model: files.maybe_segmentation_model,
       preview: tokio::sync::Mutex::default(),
       levels: LevelWatch::default(),
       screen_picker: OpenPicker::default(),
       recording_folder: recording::RecordingFolder::new(files.recording_folder, files.maybe_recording_keys),
+      recording_video,
       captions,
     }
   }
@@ -532,9 +542,14 @@ impl CallHost {
         video_sinks: Arc::clone(&self.video_sinks),
         decode_reporter,
         levels: self.levels.clone(),
+        recording_video: self.recording_video.clone(),
       },
     ));
-    *media = Some(MediaCall { controls, task });
+    *media = Some(MediaCall {
+      controls,
+      task,
+      own_device,
+    });
     self.changed();
     Ok(())
   }
@@ -707,6 +722,7 @@ impl CallHost {
       is_current && sinks.remove(&stream_id).is_some()
     };
     if is_removed {
+      self.recording_video.forget(stream_id);
       self
         .control(Control::Subscribe {
           stream_id,
@@ -764,14 +780,34 @@ impl CallHost {
   /// Starts recording the call on this device (e2ee.md §8.3); the call tells everybody in it.
   /// With `requires_consent` (the verified policy's `all_consent`, #2115) it asks everybody first
   /// and records only who allowed it.
-  pub async fn start_recording(&self, max_secs: u32, requires_consent: bool) -> Result<(), String> {
-    if self.media.lock().await.is_none() {
+  pub async fn start_recording(
+    &self,
+    max_secs: u32,
+    requires_consent: bool,
+    records_video: bool,
+  ) -> Result<(), String> {
+    let Some(own_device) = self.media.lock().await.as_ref().map(|media| media.own_device) else {
       return Err("no call to record".to_owned());
-    }
-    let sink = self
+    };
+    // The picture needs the H.264 codec (downloaded on first use); without it, the sound only.
+    let maybe_video = if records_video {
+      match self.ensure_video_codec().await {
+        Ok(()) => Some((VideoRecordingConfig::default(), own_device)),
+        Err(error) => {
+          tracing::warn!(%error, "no video codec: the call recording keeps the sound only");
+          None
+        },
+      }
+    } else {
+      None
+    };
+    let (sink, maybe_video_sink) = self
       .recording_folder
-      .start(&self.state, max_secs, unix_ms())
+      .start(&self.state, max_secs, unix_ms(), maybe_video)
       .await?;
+    if let Some(video_sink) = maybe_video_sink {
+      self.recording_video.start(video_sink);
+    }
     let rule = if requires_consent {
       RecordingConsentRule::AskEverybody
     } else {
@@ -780,6 +816,12 @@ impl CallHost {
     self.control(Control::Recording(Some((sink, rule)))).await;
     self.changed();
     Ok(())
+  }
+
+  /// What the call screen shows, for a recording with video (#2250): its layout and the label of a
+  /// tile left out, drawn by the page.
+  pub fn set_recording_view(&self, layout: CallLayout, maybe_label: Option<&RecordingLabel>) {
+    self.recording_video.set_view(layout, maybe_label);
   }
 
   /// Starts a recording that waits for consent without those who haven't answered (#2115): they
@@ -799,6 +841,7 @@ impl CallHost {
   /// the file failed (the error is `ActionFailure` wire text).
   pub async fn stop_recording(&self) -> Result<(), String> {
     self.control(Control::Recording(None)).await;
+    self.recording_video.stop();
     let finished = recording::finish(&self.state).await;
     self.changed();
     finished
@@ -1031,6 +1074,7 @@ impl CallHost {
   pub async fn set_camera(&self, is_on: bool) -> Result<(), String> {
     if !is_on {
       self.control(Control::StopVideo(VideoTrackKind::Camera)).await;
+      self.recording_video.forget_own(OwnSource::Camera);
       self.update_active(|active| active.is_camera_on = false);
       let mut state = lock(&self.state);
       state.maybe_effect_handle = None;
@@ -1235,6 +1279,7 @@ impl CallHost {
     self.screen_picker.cancel();
     self.control(Control::StopScreenAudio).await;
     self.control(Control::StopVideo(VideoTrackKind::Screen)).await;
+    self.recording_video.forget_own(OwnSource::Screen);
     self.update_active(|active| {
       active.is_sharing_screen = false;
       active.screen_sound = ScreenShareSound::Off;
@@ -1592,6 +1637,8 @@ struct MediaShared {
   decode_reporter: DecodeReporter,
   /// Where the call's microphone level goes while the device menu watches it (#986).
   levels: LevelWatch,
+  /// A recording with video gets the watched tracks' frames too (#2250).
+  recording_video: RecordingVideoTap,
 }
 
 async fn run_media(
@@ -1834,8 +1881,15 @@ fn on_event(
         // received video down when this device falls behind (#1775).
         shared.decode_reporter.frame_decoding(frame, sink.queued());
         sink.deliver(frame);
+        // A recording with video shows the tiles the page shows (#2250).
+        if let Some(kind) = roster.video_kind(frame.stream_id) {
+          shared.recording_video.received(frame, kind);
+        }
       }
       return;
+    },
+    CallEngineEvent::ActiveSpeakers(devices) => {
+      shared.recording_video.set_focus(devices.first().copied());
     },
     // Before its first picture: the start's own check says why (`failed_rx`).
     CallEngineEvent::OwnVideoEnded {
@@ -2791,6 +2845,7 @@ mod tests {
         video_sinks: Arc::default(),
         decode_reporter: call.decode_reporter(),
         levels: LevelWatch::default(),
+        recording_video: RecordingVideoTap::default(),
       };
       let telemetry = CallTelemetry::new(
         random_call_ref(),

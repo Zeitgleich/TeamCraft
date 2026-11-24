@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
   AdminSelfJoin, CallRecorders, DirectMediaMode, GuestDmStart, HistoryPolicy, LeaverRemovalMode,
-  RecordingConsentMode, RecordingFiles, ScreenShareResolution,
+  RecordingConsentMode, RecordingFiles, RecordingVideo, ScreenShareResolution,
 };
 
 use crate::components::admin_console::SectionHeader;
@@ -441,6 +441,23 @@ pub fn SecuritySection() -> impl IntoView {
                 RecordingConsentMode::AllConsent
               } else {
                 RecordingConsentMode::NoticeOnly
+              };
+            })
+          }
+        />
+        // A picture of the call too (#2250): off by default, the recording keeps the sound only.
+        <CheckRow
+          name="call_recording_video"
+          label=Signal::derive(move || i18n.t("policy-call-recording-video"))
+          hint=Signal::derive(move || i18n.t("policy-call-recording-video-hint"))
+          checked=Signal::derive(move || draft.get().call_recording.records_video())
+          disabled=Signal::derive(move || !draft.get().call_recording.is_enabled())
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.call_recording.video = if value {
+                RecordingVideo::AudioAndVideo
+              } else {
+                RecordingVideo::AudioOnly
               };
             })
           }

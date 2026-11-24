@@ -404,8 +404,16 @@ pub async fn call_action(
       };
       // Whether to ask everybody first is the signed policy's too (#2115), never the page's.
       calls
-        .start_recording(max_secs.min(allowance.max_secs), allowance.requires_consent)
+        .start_recording(
+          max_secs.min(allowance.max_secs),
+          allowance.requires_consent,
+          // And whether to keep a picture of the call (#2250).
+          allowance.records_video,
+        )
         .await?
+    },
+    CallAction::SetRecordingView { layout, maybe_label } => {
+      calls.set_recording_view(layout, maybe_label.as_ref());
     },
     CallAction::StartRecordingNow => calls.start_recording_now().await,
     CallAction::AnswerRecording { recorder, is_allowed } => {

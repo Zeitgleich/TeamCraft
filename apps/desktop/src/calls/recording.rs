@@ -18,6 +18,9 @@
 //!   be read. Without kept keys the start doesn't touch the local secrets at all.
 //! - Sign-out deletes the folder and forgets the recording key, so a kept key a deletion missed
 //!   doesn't open any more.
+//! - **With video (#2250):** where the verified policy says `audio_and_video`, the recording also
+//!   keeps a picture of the call (what the call screen shows, `recording_video`) and the file is an
+//!   MP4 video instead of an Ogg audio file; everything above holds for it alike.
 //! - Nothing about the file (name, path) is logged.
 
 use std::fs::{self, File, OpenOptions};
@@ -34,9 +37,10 @@ use teamcraft_core::store::SecretVault;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_media::call_recording::{
   CallRecorder, CallRecordingError, CallRecordingTake as CallRecordingTakeFile, FolderAtStart, KeptKey,
-  LeftoverRecording, RecordingSink, clear_recordings, delete_recording,
+  LeftoverRecording, RecordingFormat, RecordingSink, clear_recordings, delete_recording,
 };
-use teamcraft_proto::{ConversationId, MAX_RECORDING_MINUTES};
+use teamcraft_media::call_recording_video::{VideoRecordingConfig, VideoRecordingSink};
+use teamcraft_proto::{ConversationId, DeviceId, MAX_RECORDING_MINUTES};
 
 use super::{CallState, lock};
 use crate::video_playback::create_private_dir;
@@ -198,12 +202,15 @@ impl RecordingFolder {
   /// Starts recording the active call; returns where its loop hands the audio. `now_ms` is the
   /// wall clock the UI counts from. The recording's key is kept for a crash when the local
   /// secrets give the recording key; without it the recording runs all the same.
+  /// With `maybe_video` (its size, and this device in the call) it keeps a picture of the call
+  /// too (#2250), whose sink comes back as well.
   pub(super) async fn start(
     &self,
     state: &Mutex<CallState>,
     max_secs: u32,
     now_ms: i64,
-  ) -> Result<RecordingSink, String> {
+    maybe_video: Option<(VideoRecordingConfig, DeviceId)>,
+  ) -> Result<(RecordingSink, Option<VideoRecordingSink>), String> {
     let max_secs = max_secs.clamp(60, u32::from(MAX_RECORDING_MINUTES) * 60);
     let conversation = {
       let state = lock(state);
@@ -221,10 +228,23 @@ impl RecordingFolder {
     create_private_dir(&self.folder).map_err(|error| error.to_string())?;
     let number = self.next.fetch_add(1, Ordering::Relaxed);
     // The start time keeps the name apart from what the last run left in the folder.
-    let path = self.folder.join(format!("recording-{now_ms}-{number}.ogg"));
-    let recorder = CallRecorder::start(&path, Duration::from_secs(u64::from(max_secs)), maybe_kept)
-      .map_err(|error| error.to_string())?;
+    let format = if maybe_video.is_some() {
+      RecordingFormat::Mp4
+    } else {
+      RecordingFormat::OggOpus
+    };
+    let path = self
+      .folder
+      .join(format!("recording-{now_ms}-{number}.{}", format.extension()));
+    let recorder = CallRecorder::start_with_video(
+      &path,
+      Duration::from_secs(u64::from(max_secs)),
+      maybe_kept,
+      maybe_video,
+    )
+    .map_err(|error| error.to_string())?;
     let sink = recorder.sink();
+    let maybe_video_sink = recorder.video_sink();
     let mut state = lock(state);
     if state.recordings.is_running() {
       recorder.cancel();
@@ -242,7 +262,7 @@ impl RecordingFolder {
         maybe_consent: None,
       });
     }
-    Ok(sink)
+    Ok((sink, maybe_video_sink))
   }
 
   /// Deletes the take the user discarded; the next one waiting is offered.
@@ -352,6 +372,7 @@ pub(super) async fn finish(state: &Mutex<CallState>) -> Result<(), String> {
       is_at_limit,
       is_at_memory_limit: false,
       maybe_left_over: None,
+      has_video: take.format == RecordingFormat::Mp4,
     },
     recorded: take,
   });
@@ -506,6 +527,7 @@ fn left_over_take(leftover: LeftoverRecording) -> Option<Take> {
         started_at: note.started_at,
         is_unfinished: take.is_unfinished(),
       }),
+      has_video: take.format == RecordingFormat::Mp4,
     },
     recorded: take,
   })
@@ -582,11 +604,12 @@ fn claim_staging_file(recorded: &CallRecordingTakeFile, staging: &Path) -> Resul
     .file_stem()
     .map(|name| name.to_string_lossy().into_owned())
     .unwrap_or_else(|| "recording".to_owned());
+  let extension = recorded.format.extension();
   for attempt in 1..=MAX_STAGING_NAMES {
     let target = if attempt == 1 {
-      staging.join(format!("call-{stem}.ogg"))
+      staging.join(format!("call-{stem}.{extension}"))
     } else {
-      staging.join(format!("call-{stem}-{attempt}.ogg"))
+      staging.join(format!("call-{stem}-{attempt}.{extension}"))
     };
     match OpenOptions::new().write(true).create_new(true).open(&target) {
       Ok(file) => return Ok((target, file)),
@@ -883,6 +906,7 @@ mod tests {
         is_at_limit: false,
         is_at_memory_limit: false,
         maybe_left_over: None,
+        has_video: false,
       },
       recorded,
     }

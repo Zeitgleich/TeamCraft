@@ -150,6 +150,7 @@ impl FakeCalls {
       | CallAction::StartRecordingNow
       | CallAction::AnswerRecording { .. }
       | CallAction::DiscardRecording
+      | CallAction::SetRecordingView { .. }
       | CallAction::SetCaptions { .. }
       | CallAction::DeleteCaptionModel
       | CallAction::TestSpeakers { .. }

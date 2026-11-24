@@ -145,6 +145,8 @@ impl Recordings {
       is_at_memory_limit: recorded.is_at_memory_limit,
       // A page's recordings never outlive it: their key is only in its memory (e2ee.md §8.3).
       maybe_left_over: None,
+      // The browser records the sound only (#2250: video is the desktop's so far).
+      has_video: false,
     };
     let maybe_previous = self.maybe_take.replace(Some(Take { shown, recorded }));
     if let Some(previous) = maybe_previous {

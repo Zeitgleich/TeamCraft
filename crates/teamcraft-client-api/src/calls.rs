@@ -20,7 +20,8 @@ pub enum CallKind {
 }
 
 /// Arrangement of the tiles in the call screen.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CallLayout {
   Gallery,
   ActiveSpeaker,
@@ -1021,6 +1022,36 @@ pub struct CallRecordingTake {
   /// desktop app offers it again at its next start.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_left_over: Option<LeftOverRecording>,
+  /// A recording with a picture of the call (#2250): an MP4 video, not an Ogg audio file.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_video: bool,
+}
+
+/// The label of a tile left out of a recording with video (#2250), as the page drew it in the
+/// user's language and font: one coverage byte per pixel (0 transparent, 255 the text), base64.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingLabel {
+  pub width: u16,
+  pub height: u16,
+  pub coverage_base64: String,
+}
+
+impl RecordingLabel {
+  /// The largest label the shell takes (a line of text at twice the call screen's size).
+  pub const MAX_PIXELS: usize = 1024 * 128;
+
+  /// The coverage bytes, when they are what the size says and within [`Self::MAX_PIXELS`].
+  pub fn coverage(&self) -> Option<Vec<u8>> {
+    use base64::Engine as _;
+    let pixels = usize::from(self.width) * usize::from(self.height);
+    if pixels == 0 || pixels > Self::MAX_PIXELS {
+      return None;
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+      .decode(&self.coverage_base64)
+      .ok()?;
+    (bytes.len() == pixels).then_some(bytes)
+  }
 }
 
 /// A recording the app's last run left behind (#2116).

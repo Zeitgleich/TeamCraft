@@ -18,12 +18,16 @@
 //! [`SCREEN_PREVIEW_MAX_SIZE`] and [`SCREEN_PREVIEW_INTERVAL`], whatever the preview's size. Its
 //! frames come from the encoder's last picture ([`SelfView::picture_tap`]), because a still screen
 //! delivers none for a viewer who looks at it only now.
+//!
+//! A recording with video (#2250) gets the same pictures ([`SelfView::recorded_by`]): the
+//! recording copies one per frame of its own rate, and nothing while none runs.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc as std_mpsc;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use teamcraft_media::call_recording_video::OwnSource;
 use teamcraft_media::video::{VideoFrame, VideoResolution};
 use teamcraft_media::video_jpeg::encode_jpeg;
 use teamcraft_media::video_pipeline::{FrameFilter, PictureTap};
@@ -31,6 +35,7 @@ use teamcraft_proto::MediaStreamId;
 use tracing::{debug, warn};
 
 use super::ChannelId;
+use super::recording_video::RecordingVideoTap;
 use super::video::jpeg_message;
 
 /// About 15 images per second: enough for a preview, a fraction of the camera's 30.
@@ -70,6 +75,8 @@ pub(crate) struct SelfView {
   /// The size the webview draws the self view in, in device pixels ([`pack_size`]); 0 while it
   /// hasn't said.
   drawn_size: Arc<AtomicU32>,
+  /// A recording with video that shows this capture (#2250).
+  maybe_recording: Option<(RecordingVideoTap, OwnSource)>,
 }
 
 /// How large and how good the images of a [`SelfView`] are.
@@ -111,6 +118,20 @@ impl SelfView {
       maybe_viewer: Arc::default(),
       watchers: Arc::default(),
       drawn_size: Arc::default(),
+      maybe_recording: None,
+    }
+  }
+
+  /// Hands the capture to a recording with video too, as `source`.
+  pub(crate) fn recorded_by(mut self, tap: RecordingVideoTap, source: OwnSource) -> Self {
+    self.maybe_recording = Some((tap, source));
+    self
+  }
+
+  /// A recording with video takes its copy of `frame`, if one runs and one is due.
+  fn record(&self, frame: &VideoFrame) {
+    if let Some((tap, source)) = &self.maybe_recording {
+      tap.own(*source, frame);
     }
   }
 
@@ -179,6 +200,7 @@ impl SelfView {
       if is_due && self_view.offer(&frame) {
         maybe_last_us = Some(timestamp_us);
       }
+      self_view.record(&frame);
       frame
     })
   }
@@ -194,6 +216,7 @@ impl SelfView {
       if pace.is_due(frame.timestamp_us(), watchers, now) && self_view.offer(frame) {
         pace.offered(frame.timestamp_us(), watchers, now);
       }
+      self_view.record(frame);
     })
   }
 

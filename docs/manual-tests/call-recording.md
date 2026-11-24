@@ -1,4 +1,4 @@
-# Manual test: call recording (issues #216, #2116)
+# Manual test: call recording (issues #216, #2116, #2250)
 
 What the automated tests can't show: the indicator, banner and tone on real screens, the file a
 real call produces, and what people who join late see. Design: [e2ee.md](../e2ee.md) §8.3, admin
@@ -97,7 +97,31 @@ B records in the browser; repeat in Chrome, Firefox and Safari.
 - [ ] Two tabs of B's account: the recording runs in the active tab; making the other tab active
   (the app moves) ends it and deletes the take.
 
-## 5. Logs
+## 5. Video (#2250)
+
+Administration → Security → Call recording: "Everybody except guests" and "Record video too".
+
+- [ ] The switch is greyed out while recording is off; B's console shows it after A signed it.
+- [ ] A (desktop) records a call of A, B and C with B's camera and C's camera on, for about a
+  minute, switching between "Gallery" and "Speaker" once. The card says "Video · 1:0x · …"; posted,
+  it is an `.mp4` that plays in VLC and in a browser (and in the Windows media player) with
+  picture and sound in sync. It shows the tiles as A's screen did, the layout switch included, A's
+  own camera too.
+- [ ] B shares a screen during the recording: the share is large in the file from then on, with
+  the cameras beside it; it ends when B stops sharing.
+- [ ] With "Ask everybody for consent": C declines. C's tile in the file is a grey tile with "Not
+  recorded" (in A's language), never C's picture; after C allows it, C's picture appears.
+- [ ] About 160 MB an hour: a ten-minute recording is roughly 25 to 30 MB.
+- [ ] Kill A's app after about a minute of video: at the next start the card offers it as "not
+  finished"; the posted `.mp4` plays to within a few seconds of the kill.
+- [ ] B in the browser and C on the phone record the sound only (an `.ogg`), with the same setting.
+- [ ] Cost on A's computer while recording a gallery of four cameras: CPU and memory (Task
+  Manager, Activity Monitor, `top`) stay about where they are without video plus one encoder; the
+  memory doesn't grow over an hour.
+
+## 6. Logs
 
 - [ ] The desktop log has "call recording started" and "call recording finished" with the length,
-  never the file name or path. The SFU log shows nothing about recordings at `info`.
+  never the file name or path. The SFU log shows nothing about recordings at `info`. A recording
+  with video adds "call recording video started" (size and rate) and "call recording video ended"
+  (pictures and frames dropped), and which encoder it used.

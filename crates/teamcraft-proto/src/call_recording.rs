@@ -9,6 +9,9 @@
 //!
 //! With `consent: all_consent` (#2115) a recording asks everybody in the call first and records
 //! only the voices of those who allowed it, each answer signed by the answering device.
+//!
+//! With `video: audio_and_video` (#2250) a recording also keeps a picture of the call: the layout
+//! the recording device shows, composited into one video track, an objecting person's tile blanked.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -48,6 +51,19 @@ pub struct CallRecordingPolicy {
   /// Whether a recording only tells everybody, or asks everybody first and records only who
   /// allowed it (#2115).
   pub consent: RecordingConsentMode,
+  /// Whether a recording keeps only the sound, or a picture of the call too (#2250).
+  pub video: RecordingVideo,
+}
+
+wire_enum! {
+  /// What a recording keeps (#2250).
+  pub enum RecordingVideo {
+    /// The mix of what the recording device hears: the default (about 14 MB an hour).
+    AudioOnly => "audio_only",
+    /// The sound and the layout the recording device shows (speaker, gallery, screen share first)
+    /// as one video, about 150 to 200 MB an hour. Apps that can't record video record the sound.
+    AudioAndVideo => "audio_and_video",
+  }
 }
 
 wire_enum! {
@@ -119,6 +135,7 @@ impl Default for CallRecordingPolicy {
       local_files: RecordingFiles::Allowed,
       maybe_bot: None,
       consent: RecordingConsentMode::NoticeOnly,
+      video: RecordingVideo::AudioOnly,
     }
   }
 }
@@ -190,6 +207,12 @@ impl CallRecordingPolicy {
     !matches!(self.consent, RecordingConsentMode::NoticeOnly)
   }
 
+  /// Whether a recording keeps a picture of the call too (#2250). A value from a newer app
+  /// (`Unknown`) records the sound only: what every app can do.
+  pub fn records_video(&self) -> bool {
+    matches!(self.video, RecordingVideo::AudioAndVideo)
+  }
+
   /// Whether owners' apps may sign it: the length in range, no unknown values, and the bot named
   /// where only the bot records.
   pub fn is_valid(&self) -> bool {
@@ -197,6 +220,7 @@ impl CallRecordingPolicy {
       && !matches!(self.recorders, CallRecorders::Unknown(_))
       && !matches!(self.local_files, RecordingFiles::Unknown(_))
       && !matches!(self.consent, RecordingConsentMode::Unknown(_))
+      && !matches!(self.video, RecordingVideo::Unknown(_))
       && !(self.is_recorder_bot_only() && self.maybe_bot.is_none())
   }
 }
@@ -213,7 +237,7 @@ mod tests {
       let policy = CallRecordingPolicy::default();
       assert_eq!(
         serde_json::to_string(&policy).unwrap(),
-        r#"{"recorders":"off","max_minutes":120,"local_files":"allowed","consent":"notice_only"}"#
+        r#"{"recorders":"off","max_minutes":120,"local_files":"allowed","consent":"notice_only","video":"audio_only"}"#
       );
       assert_eq!(serde_json::from_str::<CallRecordingPolicy>("{}").unwrap(), policy);
     }
@@ -246,7 +270,7 @@ mod tests {
       let json = serde_json::to_string(&policy).unwrap();
       assert_eq!(
         json,
-        r#"{"recorders":"recorder_bot_only","max_minutes":120,"local_files":"allowed","bot":"9","consent":"notice_only"}"#
+        r#"{"recorders":"recorder_bot_only","max_minutes":120,"local_files":"allowed","bot":"9","consent":"notice_only","video":"audio_only"}"#
       );
       assert_eq!(
         serde_json::from_str::<CallRecordingPolicy>(&json).unwrap(),
@@ -281,6 +305,21 @@ mod tests {
         serde_json::from_str(r#"{"recorders":"members","consent":"two_thirds"}"#).unwrap();
       assert_eq!(policy.consent, RecordingConsentMode::Unknown("two_thirds".into()));
       assert!(policy.requires_consent());
+      assert!(!policy.is_valid());
+    }
+
+    #[test]
+    fn video_is_signed_and_a_policy_from_before_records_sound_only() {
+      let policy: CallRecordingPolicy = serde_json::from_str(r#"{"recorders":"members"}"#).unwrap();
+      assert_eq!(policy.video, RecordingVideo::AudioOnly);
+      assert!(!policy.records_video());
+      let policy: CallRecordingPolicy =
+        serde_json::from_str(r#"{"recorders":"members","video":"audio_and_video"}"#).unwrap();
+      assert!(policy.records_video());
+      assert!(policy.is_valid());
+      let policy: CallRecordingPolicy =
+        serde_json::from_str(r#"{"recorders":"members","video":"video_only"}"#).unwrap();
+      assert!(!policy.records_video());
       assert!(!policy.is_valid());
     }
 

@@ -1324,6 +1324,7 @@ under Administration → Security → Call recording. It is **off by default**.
 | `local_files` | `allowed`     | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116)                             |
 | `bot`         | none          | The recorder bot's account (#2273): records the calls of its conversations unattended; required by `recorder_bot_only` |
 | `consent`     | `notice_only` | "Ask everybody for consent" (`all_consent`, #2115): a recording records only the voices of those who allowed it        |
+| `video`       | `audio_only`  | "Record video too" (`audio_and_video`, #2250): the desktop app also records what its call screen shows                 |
 
 - **How it works:** the server can't record (calls are end-to-end encrypted), so a participant's
   app records what it plays and its own microphone, and posts the file, encrypted, into the call's
@@ -1349,11 +1350,17 @@ under Administration → Security → Call recording. It is **off by default**.
     allow it; anybody can change their answer while it runs, which takes effect from then on. Each
     answer is signed by the answering device, so neither the server nor the recorder can claim a
     consent nobody gave (e2ee.md §8.3). The recorder bot asks the same way and starts without who
-    hasn't answered after `consent_wait_secs` (operations.md). Video is not recorded in this
-    version, so "left out" means the voice.
+    hasn't answered after `consent_wait_secs` (operations.md). In a recording with video, who is
+    left out shows as a blank tile marked "Not recorded"; their picture never goes into the file.
   - The same limit as above applies: a modified app can record anybody; the setting governs
     compliant apps. An owner app from before the setting re-signs without it, which reads as
     `notice_only`; a value from a newer app reads as asking.
+- **Video:** with "Record video too" (`audio_and_video`, off by default) a recording made in the
+  desktop app is a video of what the recorder's call screen shows: screen shares first, then the
+  speaker or the gallery, about 160 MB an hour instead of about 14 MB for the sound only. Plan the
+  conversations' storage for it. The browser, the phones and the recorder bot keep recording the
+  sound only. The setting is signed like the others; an owner app from before it re-signs without
+  it, which reads as sound only.
 - **Storage and retention:** a posted recording is an encrypted attachment of the call's
   conversation, readable by its members only, and the conversation's retention applies to it.
   While a recording runs, the file is on the recorder's computer, encrypted, in the app's private

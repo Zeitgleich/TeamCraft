@@ -18,7 +18,8 @@ use crate::components::call_popover::CallPopover;
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_reactions::{FloatingReactions, ReactionPicker, reaction_name};
 use crate::components::call_recording::{
-  RecordingBanner, RecordingConsentPrompt, RecordingIndicator, is_self_left_out, use_recording_control,
+  RecordingBanner, RecordingConsentPrompt, RecordingIndicator, is_self_left_out, sync_recording_view,
+  use_recording_control,
 };
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
@@ -72,6 +73,8 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
   let (notetaker, notetaker_invite) = use_notetaker_in_call(request.conversation, others);
   let recording = use_recording_control();
+  // A recording with video shows what this screen shows (#2250).
+  sync_recording_view(state, recording, call.layout);
   let captions = use_captions_control();
   let is_notetaker_present =
     Memo::new(move |_| notetaker.get().is_some_and(|notetaker| notetaker.is_present));
