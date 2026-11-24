@@ -2,8 +2,9 @@ name: Images
 
 # Builds the service images whose Containerfile a pull request changes, so a broken one shows
 # before a release tries to publish it (release.yml builds and pushes them, amd64 and arm64). Here:
-# amd64 only, nothing pushed, the release caches read but not written. The notetaker's image is also
-# started once, to see that its binary finds every shared library it links (libasound, libcrypto).
+# amd64 only, nothing pushed, the release caches read but not written. The bots' images (notetaker,
+# recorder) are also started once, to see that their binary finds every shared library it links
+# (libasound, libcrypto).
 # Like ci.yml, pull requests need the `ci` label.
 on:
   pull_request:
@@ -78,6 +79,16 @@ jobs:
           set +e
           output="$(docker run --rm -e TEAMCRAFT_NOTETAKER_SERVER__URL=https://chat.example.com \
             teamcraft-notetaker:check healthcheck 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          [ "$status" -eq 1 ] && grep -q 'liveness file' <<< "$output"
+      - name: The recorder's binary starts
+        if: matrix.image == 'teamcraft-recorder'
+        run: |
+          set +e
+          output="$(docker run --rm -e TEAMCRAFT_RECORDER_SERVER__URL=https://chat.example.com \
+            teamcraft-recorder:check healthcheck 2>&1)"
           status=$?
           set -e
           echo "$output"

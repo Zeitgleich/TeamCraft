@@ -10999,6 +10999,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "teamcraft-bot-runtime"
+version = "1.0.43"
+dependencies = [
+ "base64 0.23.1",
+ "fluent-bundle",
+ "rand_core 0.6.4",
+ "secrecy",
+ "serde",
+ "teamcraft-core",
+ "teamcraft-crypto",
+ "teamcraft-media",
+ "teamcraft-proto",
+ "teamcraft-sfu",
+ "thiserror 2.0.21",
+ "tokio",
+ "tracing",
+ "unic-langid",
+ "wtransport",
+]
+
+[[package]]
 name = "teamcraft-bridge"
 version = "1.0.43"
 dependencies = [
@@ -11407,25 +11428,21 @@ dependencies = [
  "axum",
  "base64 0.23.1",
  "figment",
- "fluent-bundle",
- "rand_core 0.6.4",
  "reqwest",
  "secrecy",
  "serde",
  "serde_json",
+ "teamcraft-bot-runtime",
  "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-media",
  "teamcraft-ops",
  "teamcraft-proto",
- "teamcraft-sfu",
  "thiserror 2.0.21",
  "time",
  "tokio",
  "tracing",
  "tracing-subscriber",
- "unic-langid",
- "wtransport",
 ]
 
 [[package]]
@@ -11454,6 +11471,24 @@ dependencies = [
  "url",
  "utoipa",
  "zeroize",
+]
+
+[[package]]
+name = "teamcraft-recorder"
+version = "1.0.43"
+dependencies = [
+ "anyhow",
+ "figment",
+ "rustix 1.1.6",
+ "serde",
+ "teamcraft-bot-runtime",
+ "teamcraft-core",
+ "teamcraft-media",
+ "teamcraft-ops",
+ "teamcraft-proto",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

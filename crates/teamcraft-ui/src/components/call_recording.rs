@@ -7,7 +7,8 @@
 //!   policy doesn't allow the recorder, it says so.
 //! - **Button:** "Record" in the control bar, only where the app records (the desktop app, and the
 //!   browser where it has WebCodecs, #2114) and the verified policy allows the user (admin.md
-//!   §1.1).
+//!   §1.1). Where only the organization's recorder bot records (`recorder_bot_only`, #2273), it
+//!   shows disabled to members and says so.
 //! - **Take:** the finished recording waits in a card, also after the call ended, until the user
 //!   posts it into the call's conversation (an encrypted attachment) or deletes it. The desktop
 //!   shell stages its decrypted copy for the core; in the browser the call module hands over the
@@ -76,6 +77,8 @@ enum TakeStep {
 pub struct RecordingControl {
   /// The button shows: the app records, and the policy allows the user.
   pub is_offered: Memo<bool>,
+  /// The button shows disabled: the app records, but only the recorder bot may (#2273).
+  pub is_bot_only: Memo<bool>,
   pub is_recording: Memo<bool>,
   policy: Memo<CallRecordingPolicy>,
   state: AppState,
@@ -88,6 +91,9 @@ pub fn use_recording_control() -> RecordingControl {
   let is_offered = Memo::new(move |_| {
     state.read(|backend| backend.can_record_calls() && may_record(&policy.get(), &backend.my_role()))
   });
+  let is_bot_only = Memo::new(move |_| {
+    state.read(|backend| backend.can_record_calls() && is_held_back_by_bot(&policy.get(), &backend.my_role()))
+  });
   let is_recording = Memo::new(move |_| {
     state.read(|backend| {
       backend
@@ -97,6 +103,7 @@ pub fn use_recording_control() -> RecordingControl {
   });
   RecordingControl {
     is_offered,
+    is_bot_only,
     is_recording,
     policy,
     state,
@@ -396,9 +403,16 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
   }
 }
 
-/// Whether the user, of `role`, may record under `policy`.
+/// Whether the user, of `role`, may record under `policy`. People are never the recorder bot: the
+/// bot runs no call screen.
 fn may_record(policy: &CallRecordingPolicy, role: &Role) -> bool {
   policy.allows(RecorderRole::of(role))
+}
+
+/// Whether the user would see the record button but for `recorder_bot_only`: a member or admin,
+/// where the bot records instead. Guests don't see it in any mode.
+fn is_held_back_by_bot(policy: &CallRecordingPolicy, role: &Role) -> bool {
+  policy.is_recorder_bot_only() && RecorderRole::of(role) != RecorderRole::Guest
 }
 
 /// The recording state of the active call, by name. Whether a recorder is allowed uses the
@@ -415,14 +429,11 @@ fn recording_status(backend: &dyn Backend) -> RecordingStatus {
     .iter()
     .map(|recorder| {
       let maybe_user = backend.user(recorder.user);
-      let is_guest = maybe_user.as_ref().is_some_and(|user| user.is_guest);
-      let role = if is_guest {
-        RecorderRole::Guest
-      } else if owners.contains(&recorder.user) || admins.contains(&recorder.user) {
-        RecorderRole::Admin
-      } else {
-        RecorderRole::Member
-      };
+      let is_guest_or_bot = maybe_user
+        .as_ref()
+        .is_some_and(|user| user.is_guest || user.is_bot);
+      let is_admin = owners.contains(&recorder.user) || admins.contains(&recorder.user);
+      let role = policy.role_of(recorder.user, is_guest_or_bot, is_admin);
       Recorder {
         user: recorder.user,
         name: maybe_user
@@ -603,5 +614,42 @@ mod tests {
     assert!(!may_record(&policy(CallRecorders::Admins), &Role::Member));
     assert!(may_record(&policy(CallRecorders::Members), &Role::Member));
     assert!(!may_record(&policy(CallRecorders::Members), &Role::Guest));
+  }
+
+  #[test]
+  fn only_the_recorder_bot_records_and_people_see_why() {
+    let policy = CallRecordingPolicy {
+      recorders: CallRecorders::RecorderBotOnly,
+      maybe_bot: Some(user(9)),
+      ..CallRecordingPolicy::default()
+    };
+    for role in [Role::Owner, Role::Admin, Role::Member] {
+      assert!(!may_record(&policy, &role), "{role:?}");
+      assert!(is_held_back_by_bot(&policy, &role), "{role:?}");
+    }
+    assert!(!may_record(&policy, &Role::Guest));
+    assert!(!is_held_back_by_bot(&policy, &Role::Guest));
+    let members = CallRecordingPolicy {
+      recorders: CallRecorders::Members,
+      ..policy
+    };
+    assert!(!is_held_back_by_bot(&members, &Role::Member));
+  }
+
+  #[test]
+  fn the_signed_bots_recording_is_allowed_and_another_bots_is_not() {
+    let policy = CallRecordingPolicy {
+      recorders: CallRecorders::RecorderBotOnly,
+      maybe_bot: Some(user(9)),
+      ..CallRecordingPolicy::default()
+    };
+    assert!(policy.allows(policy.role_of(user(9), true, false)));
+    assert!(!policy.allows(policy.role_of(user(8), true, false)));
+    assert!(!policy.allows(policy.role_of(user(1), false, true)));
+  }
+
+  fn user(raw: i64) -> UserId {
+    use teamcraft_proto::{Id, Snowflake};
+    UserId::from_snowflake(Snowflake::new(raw).unwrap())
   }
 }

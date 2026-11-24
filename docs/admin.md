@@ -1317,11 +1317,12 @@ Administration → People:
 Whether people may record calls is part of the signed workspace policy (`call_recording`, §2.3),
 under Administration → Security → Call recording. It is **off by default**.
 
-| Field         | Default   | Meaning                                                                                    |
-|---------------|-----------|--------------------------------------------------------------------------------------------|
-| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins) or `members` (everybody but guests)    |
-| `max_minutes` | `120`     | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480       |
-| `local_files` | `allowed` | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116) |
+| Field         | Default   | Meaning                                                                                                                |
+|---------------|-----------|------------------------------------------------------------------------------------------------------------------------|
+| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins), `members` (everybody but guests) or `recorder_bot_only` (#2273)   |
+| `max_minutes` | `120`     | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480                                   |
+| `local_files` | `allowed` | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116)                             |
+| `bot`         | none      | The recorder bot's account (#2273): records the calls of its conversations unattended; required by `recorder_bot_only` |
 
 - **How it works:** the server can't record (calls are end-to-end encrypted), so a participant's
   app records what it plays and its own microphone, and posts the file, encrypted, into the call's
@@ -1364,8 +1365,34 @@ under Administration → Security → Call recording. It is **off by default**.
   were shown, and a modified app can't leave out or make up an entry for anybody but itself; a
   recording made without a notice (a screen recorder, a modified app) is in no log, as on nobody's
   screen. Metadata only: never a file name or anything of the recording.
+- **Recorder bot (#2273):** for the compliance case, where certain calls must always be recorded,
+  a bot account records them without anybody pressing a button (`teamcraft-recorder`, run as in
+  operations.md, "Recorder bot"):
+  - **Setup:** create a bot account (Administration → Integrations), pick it as "Recorder bot"
+    under Security → Call recording, and add it to the channels whose calls must be recorded. It
+    joins every call people start there (never starting one itself), records it, and posts each
+    recording, encrypted, into the call's conversation, readable by its members like any
+    attachment. A call longer than `max_minutes` is posted in parts.
+  - **Modes:** with `recorder_bot_only` only the bot records: people's record buttons show
+    disabled with "Your organization records calls with its recorder only". In `admins` and
+    `members` the named bot records too, next to the people the mode allows. With `off` nobody
+    records, the bot neither: it leaves the calls it is in. The server accepts only an active bot
+    account as the recorder; apps trust only the owners' signature, so the server can't make any
+    other account the recorder, and treat every other bot account as a guest (never a recorder).
+  - **Everybody is told,** as for a person: the bot's own signed notice shows "Recorded by
+    Recorder" (the bot's name) in every app, with the tone, the banner and the choice to leave;
+    the audit log has its entries. It never records unannounced: when the server doesn't confirm
+    its notice for 30 seconds, it stops and says so in the conversation.
+  - **It ends end-to-end encryption for the calls it records,** on the machine it runs on: it is a
+    participant with the call's keys, like the notetaker. Run it on infrastructure you trust as much
+    as the people's devices, not on the untrusted VPS of the server. Its takes are sealed on its
+    disk while it records (the key only in the process), and decrypted only for the upload.
+  - **What can go wrong, and what the conversation is told:** the bot restarting mid-call loses the
+    part being recorded (it rejoins and says so); a host removing it from a call, a call whose keys
+    it doesn't get, a nearly full disk or a failed write end the recording of that call with a
+    message in the conversation.
 - **Later steps:** consent from everybody before a recording starts, and leaving people out of it
-  (#2115); video (#2250); an unattended recorder bot (#2273).
+  (#2115); video (#2250).
 
 ### 3.14 Legal hold and compliance archive (issue #211)
 

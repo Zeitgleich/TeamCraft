@@ -62,34 +62,7 @@ pub fn NotetakerSection() -> impl IntoView {
   let select_error_of =
     move |field: &'static str| Signal::derive(move || error_of(field).get().map(|key| i18n.t(key)));
 
-  // The instance's bot list (Administration -> Integrations): a bot made for the notetaker shares no
-  // conversation yet, so the people this device knows don't include it. Known bots stay as a
-  // fallback where the list can't be read.
-  let maybe_hub = use_bots();
-  if let Some(hub) = maybe_hub {
-    hub.refresh();
-  }
-  let bots = Memo::new(move |_| {
-    let mut bots: Vec<(UserId, String)> = maybe_hub
-      .map(|hub| {
-        hub
-          .bots
-          .get()
-          .into_iter()
-          .filter(|bot| !bot.is_revoked)
-          .map(|bot| (bot.id, bot.name))
-          .collect()
-      })
-      .unwrap_or_default();
-    let known = state.read(|backend| backend.users());
-    for user in known.into_iter().filter(|user| user.is_bot) {
-      if !bots.iter().any(|(id, _)| *id == user.id) {
-        bots.push((user.id, user.display_name));
-      }
-    }
-    bots.sort_by(|a, b| a.1.cmp(&b.1));
-    bots
-  });
+  let bots = use_bot_accounts();
   let bot_options = Signal::derive(move || {
     std::iter::once((String::new(), i18n.t("notetaker-bot-none")))
       .chain(bots.get().into_iter().map(|(id, name)| (id.to_string(), name)))
@@ -315,6 +288,39 @@ fn error_key(error: &NotetakerPolicyError) -> &'static str {
       "notetaker-error-other"
     },
   }
+}
+
+/// The bot accounts an owner can pick for a policy role (the notetaker, the recorder bot), by name.
+/// From the instance's bot list (Administration -> Integrations): a bot made for the purpose shares
+/// no conversation yet, so the people this device knows don't include it. Known bots stay as a
+/// fallback where the list can't be read.
+pub fn use_bot_accounts() -> Memo<Vec<(UserId, String)>> {
+  let state = use_app_state();
+  let maybe_hub = use_bots();
+  if let Some(hub) = maybe_hub {
+    hub.refresh();
+  }
+  Memo::new(move |_| {
+    let mut bots: Vec<(UserId, String)> = maybe_hub
+      .map(|hub| {
+        hub
+          .bots
+          .get()
+          .into_iter()
+          .filter(|bot| !bot.is_revoked)
+          .map(|bot| (bot.id, bot.name))
+          .collect()
+      })
+      .unwrap_or_default();
+    let known = state.read(|backend| backend.users());
+    for user in known.into_iter().filter(|user| user.is_bot) {
+      if !bots.iter().any(|(id, _)| *id == user.id) {
+        bots.push((user.id, user.display_name));
+      }
+    }
+    bots.sort_by(|a, b| a.1.cmp(&b.1));
+    bots
+  })
 }
 
 #[cfg(test)]

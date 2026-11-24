@@ -1,0 +1,64 @@
+# teamcraft-recorder: a bot that records the calls of the conversations it is a member of and posts
+# each recording, encrypted, into the call's conversation (docs/e2ee.md §8.3, docs/admin.md §3.13,
+# docs/operations.md). Every option with its default.
+#
+# Each key can also be set in the environment: TEAMCRAFT_RECORDER_<SECTION>__<KEY>, e.g.
+# TEAMCRAFT_RECORDER_SERVER__BOT_TOKEN. The file itself: --config <path> or
+# TEAMCRAFT_RECORDER_CONFIG.
+#
+# Whether the bot may record at all, and the longest recording, are not set here: they are the
+# owner-signed workspace policy (Administration -> Security -> Call recording), so the server can't
+# change them. The bot records only while that policy names its account.
+
+[server]
+# The TeamCraft server.
+url = "https://chat.example.com"
+# Token of the recorder's bot account (Administration -> Integrations, or POST /api/v1/admin/bots).
+# Prefer the environment or a file.
+# bot_token = "tcb_..."
+# bot_token_file = "/run/secrets/recorder_bot_token"
+
+[store]
+# The encrypted local database: the bot's keys and its conversations. Keep it on a volume of its
+# own.
+path = "/var/lib/teamcraft-recorder/recorder.db"
+# 32 random bytes as base64 (openssl rand -base64 32). Prefer the environment or a file.
+# key = "..."
+# key_file = "/run/secrets/recorder_store_key"
+
+[identity]
+device_name = "teamcraft-recorder"
+# Recovery passphrase of the bot's key backup; needed on the first run (and if the database is
+# lost). Keep it somewhere safe.
+# passphrase = "..."
+# passphrase_file = "/run/secrets/recorder_passphrase"
+# argon2_memory_kib = 131072
+# argon2_iterations = 3
+
+[recordings]
+# The sealed takes while calls are recorded (unreadable without the key the process holds).
+# Default: "recordings" next to store.path.
+# folder = "/var/lib/teamcraft-recorder/recordings"
+# The decrypted copies waiting for their upload, deleted once uploaded. Default: "uploads" next to
+# store.path. Keep it on the same protected volume as the database.
+# staging = "/var/lib/teamcraft-recorder/uploads"
+# A take doesn't start with less free space than this on the recordings' disk, in MiB.
+min_free_mib = 1024
+# The language of what the bot posts: "de" or "en".
+language = "en"
+
+[limits]
+# The bot leaves a call where nobody else has been for this long, and posts what it has.
+alone_timeout_secs = 60
+# It gives up joining a call whose keys it hasn't got after this long.
+join_timeout_secs = 60
+# It stops recording when the server hasn't confirmed its recording notice for this long.
+unconfirmed_notice_secs = 30
+# At shutdown, calls in progress get this long to finish their takes and queue them for posting.
+shutdown_drain_secs = 30
+
+[health]
+# The liveness file the container health check reads (teamcraft-recorder healthcheck).
+# Default: "recorder.alive" next to store.path.
+# file = "/var/lib/teamcraft-recorder/recorder.alive"
+max_age_secs = 120

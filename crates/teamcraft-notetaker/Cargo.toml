@@ -20,6 +20,8 @@ name = "teamcraft-notetaker"
 path = "src/main.rs"
 
 [dependencies]
+# Configuration, enrollment, join tickets, the gateway and liveness, shared with the recorder bot.
+teamcraft-bot-runtime = { path = "../teamcraft-bot-runtime" }
 teamcraft-core = { path = "../teamcraft-core" }
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 # The native call driver (WebTransport, DAVE, Opus): the notetaker is an ordinary call participant.
@@ -29,10 +31,6 @@ teamcraft-proto.workspace = true
 anyhow.workspace = true
 base64.workspace = true
 figment.workspace = true
-# The posted texts in German and English, from Fluent files like the app's (already in the tree
-# through teamcraft-ui).
-fluent-bundle = "0.16"
-unic-langid = "0.9"
 # OpenRouter's API and the notetaker's credentials at the server (already in the tree through the core).
 reqwest.workspace = true
 secrecy.workspace = true
@@ -50,6 +48,4 @@ tracing-subscriber.workspace = true
 axum = { workspace = true, features = ["tokio", "http1", "json"] }
 figment = { workspace = true, features = ["test"] }
 # A session against a real SFU in the same process, with device-bound DAVE keys.
-teamcraft-sfu = { path = "../teamcraft-sfu" }
-rand_core.workspace = true
-wtransport = { version = "0.7.2", features = ["quinn", "self-signed"] }
+teamcraft-bot-runtime = { path = "../teamcraft-bot-runtime", features = ["test-support"] }

@@ -1010,14 +1010,26 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           />
         </Show>
         // Recording (e2ee.md §8.3): where this app records and the verified policy allows the user.
-        <Show when=move || recording.is_offered.get() fallback=|| ()>
+        // Where only the organization's recorder bot records (#2273), members see it disabled, and
+        // a press says why.
+        <Show when=move || recording.is_offered.get() || recording.is_bot_only.get() fallback=|| ()>
           <ControlButton
             is_active=recording.is_recording
+            is_disabled=Signal::derive(move || recording.is_bot_only.get() && !recording.is_offered.get())
             icon=Signal::derive(move || if recording.is_recording.get() { IconName::Stop } else { IconName::Record })
             label=Signal::derive(move || {
+              if recording.is_bot_only.get() && !recording.is_offered.get() {
+                return i18n.t("call-recording-bot-only");
+              }
               i18n.t(if recording.is_recording.get() { "call-recording-stop" } else { "call-recording-start" })
             })
-            on_press=move || recording.toggle()
+            on_press=move || {
+              if recording.is_bot_only.get_untracked() && !recording.is_offered.get_untracked() {
+                state.show_toast(i18n.t("call-recording-bot-only"));
+              } else {
+                recording.toggle();
+              }
+            }
           />
         </Show>
         // Live captions, recognized on this device only (#215, e2ee.md §8.6): where the app

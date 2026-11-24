@@ -7303,13 +7303,15 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 **Who may record (signed policy).** The workspace policy (§11, admin.md §2.3) has a group
 `call_recording`, off by default:
 
-| Field         | Default   | Meaning                                                                                   |
-|---------------|-----------|-------------------------------------------------------------------------------------------|
-| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins of the verified roster) or `members`   |
-| `max_minutes` | `120`     | The longest recording; it stops by itself then (1 to 480)                                 |
-| `local_files` | `allowed` | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`) |
+| Field         | Default   | Meaning                                                                                                          |
+|---------------|-----------|------------------------------------------------------------------------------------------------------------------|
+| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins of the verified roster), `members` or `recorder_bot_only`     |
+| `max_minutes` | `120`     | The longest recording; it stops by itself then (1 to 480)                                                        |
+| `local_files` | `allowed` | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`)                        |
+| `bot`         | none      | The recorder bot's account ("Recorder bot" below); `recorder_bot_only` needs it                                  |
 
-Guests never record, whatever the policy says. The recording app checks the verified policy and its
+Guests never record, whatever the policy says, and neither does any bot account but the signed
+`bot`. The recording app checks the verified policy and its
 user's role before it starts and offers the button only to those allowed (admin.md §1.1); the
 desktop shell checks again itself (the verified policy, the verified admin roster and the guest
 flag) and clamps the length to the policy, whatever the page asked (in the browser the page and its
@@ -7499,6 +7501,42 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
   step (#2250).
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
+
+**Recorder bot (issue #2273).** For the compliance case, calls are recorded centrally by a bot
+account (`teamcraft-recorder`) instead of by people, like the notetaker (§8.2) a headless
+participant with a device of its own:
+
+- **Who it is:** the account the owners sign as `call_recording.bot`; the server accepts only an
+  active bot account there. Every app derives the recorder's role from the signature first
+  (`CallRecordingPolicy::role_of`): the signed bot is the recorder bot whatever the server says
+  about the account, and every other bot account is treated as a guest, so a server can neither
+  make an account the recorder nor take the role away. It records whenever recording is on (in
+  `admins` and `members` next to the people those modes allow); under `recorder_bot_only` nobody
+  else may, and people's record buttons say so. An owner app from before the mode keeps it as an
+  unknown value, which allows nobody; one from before the field drops the bot (and the mode then
+  can't be signed without it).
+- **What it holds:** the keys of the conversations it is a member of (the owners add it where
+  calls must be recorded), and a call's DAVE keys only for a call it is allowed to record: it
+  checks `call_recording_allowance` (the same check the desktop shell makes) before it joins,
+  joins only calls people started (it never starts one), and leaves at once when the verified
+  policy stops allowing it or it leaves the conversation.
+- **The notice:** it records with the same pipeline as the apps (`teamcraft-media::call_recording`,
+  the mix of everybody, muted itself) and announces it with the same signed notice of its own DAVE
+  key, so every app shows "Recorded by" with the bot's name, verified like any recorder's, and the
+  audit log has it. It never records unannounced: when the SFU doesn't confirm its notice for
+  `unconfirmed_notice_secs` (30 s), it stops, leaves and tells the conversation.
+- **Its takes:** sealed on its disk as they are written, under a key held only in the process (no
+  kept key: there is no user to offer a crashed take to, and a key on the same disk would protect
+  nothing), at the policy's `max_minutes` per take, the next take starting at once. Each finished
+  take is decrypted into the core's upload staging folder and sent as an attachment of the call's
+  conversation (§4.5), encrypted with a fresh key for the conversation's members; the staged copy
+  is plaintext on the bot's disk until its upload finished, like a desktop app's (above). A crash
+  loses the take in progress; the bot rejoins a call still running and says a part is missing.
+- **Where it runs, and what that means:** like the notetaker, it ends end-to-end encryption for
+  the calls it records at the machine it runs on: whoever controls that machine can listen. It
+  belongs on infrastructure the organization trusts like its people's devices, not on the server's
+  untrusted host (operations.md, "Recorder bot"). This is the feature the owners sign, and visible
+  to everybody in every call it records.
 
 **What the server learns.** Who records which call, and when: the notice is signed, not encrypted,
 so the SFU reads its call, device, state and sequence number (a wall-clock timestamp in

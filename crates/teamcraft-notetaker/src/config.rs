@@ -6,12 +6,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use figment::Figment;
 use figment::providers::{Env, Format, Toml};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::Deserialize;
+use teamcraft_bot_runtime::config::secret;
+pub use teamcraft_bot_runtime::config::{
+  ConfigError, HealthSection, IdentitySection, ServerSection, StoreSection,
+};
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::secret::SymmetricKey;
 
@@ -22,6 +24,8 @@ const ENV_PREFIX: &str = "TEAMCRAFT_NOTETAKER_";
 const ENV_NESTING: &str = "__";
 /// Environment variable naming the config file; not a config key.
 pub const CONFIG_PATH_ENV: &str = "TEAMCRAFT_NOTETAKER_CONFIG";
+/// The device's name when `identity.device_name` is empty.
+pub const DEFAULT_DEVICE_NAME: &str = "teamcraft-notetaker";
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,47 +40,6 @@ pub struct NotetakerConfig {
   pub limits: LimitsSection,
   #[serde(default)]
   pub health: HealthSection,
-}
-
-/// The TeamCraft server and the bot account the notetaker acts as.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ServerSection {
-  /// Base URL, e.g. `https://chat.example.com`.
-  pub url: String,
-  /// Bot token from `POST /api/v1/admin/bots`. Prefer `TEAMCRAFT_NOTETAKER_SERVER__BOT_TOKEN` or a
-  /// file.
-  #[serde(default)]
-  pub bot_token: Option<SecretString>,
-  #[serde(default)]
-  pub bot_token_file: Option<PathBuf>,
-}
-
-/// The encrypted local database (SQLCipher): the bot's keys, its conversations' content keys and
-/// the transcripts of calls in progress.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoreSection {
-  pub path: PathBuf,
-  /// 32 random bytes, base64 (`openssl rand -base64 32`). Prefer the environment or `key_file`.
-  #[serde(default)]
-  pub key: Option<SecretString>,
-  #[serde(default)]
-  pub key_file: Option<PathBuf>,
-}
-
-/// First-run enrollment of the bot's device.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct IdentitySection {
-  pub device_name: String,
-  /// Recovery passphrase that wraps the bot's backup key on the server. Needed on the first run
-  /// (and when the local store is lost); keep it somewhere safe.
-  pub passphrase: Option<SecretString>,
-  pub passphrase_file: Option<PathBuf>,
-  /// Argon2id cost of the passphrase; lower it only for tests.
-  pub argon2_memory_kib: u32,
-  pub argon2_iterations: u32,
 }
 
 /// How OpenRouter is reached. Models, language and prompt are signed policy, not set here.
@@ -125,30 +88,6 @@ pub struct LimitsSection {
   /// At shutdown, calls in progress get this long to transcribe and post what they have; the rest
   /// is posted at the next start.
   pub shutdown_drain_secs: u64,
-}
-
-/// The liveness file the container health check reads (`teamcraft-notetaker healthcheck`): the
-/// worker touches it every few seconds while its loop runs.
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields, default)]
-pub struct HealthSection {
-  /// Default: `notetaker.alive` next to `store.path`.
-  #[serde(rename = "file")]
-  pub maybe_file: Option<PathBuf>,
-  /// The check fails when the file is older than this.
-  pub max_age_secs: u64,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum ConfigError {
-  #[error("invalid configuration: {0}")]
-  Invalid(String),
-  #[error("reading {path}: {source}")]
-  File { path: String, source: std::io::Error },
-  #[error("{0} is not set (directly, by file or in the environment)")]
-  MissingSecret(&'static str),
-  #[error("store.key must be 32 bytes as base64")]
-  BadStoreKey,
 }
 
 impl NotetakerConfig {
@@ -202,26 +141,15 @@ impl NotetakerConfig {
     if limits.summary_chunk_chars < 4_000 {
       return invalid("limits.summary_chunk_chars must be at least 4000");
     }
-    if self.health.max_age_secs < 30 {
-      return invalid("health.max_age_secs must be at least 30 (the file is rewritten every 10 s)");
-    }
-    Ok(())
+    self.health.validate()
   }
 
   pub fn bot_token(&self) -> Result<SecretString, ConfigError> {
-    secret(
-      "server.bot_token",
-      &self.server.bot_token,
-      &self.server.bot_token_file,
-    )
+    self.server.bot_token()
   }
 
   pub fn passphrase(&self) -> Result<SecretString, ConfigError> {
-    secret(
-      "identity.passphrase",
-      &self.identity.passphrase,
-      &self.identity.passphrase_file,
-    )
+    self.identity.passphrase()
   }
 
   /// The OpenRouter key of the configuration, if it has one.
@@ -239,32 +167,16 @@ impl NotetakerConfig {
 
   /// The database key.
   pub fn store_key(&self) -> Result<SymmetricKey, ConfigError> {
-    let encoded = secret("store.key", &self.store.key, &self.store.key_file)?;
-    let bytes = [&STANDARD, &URL_SAFE_NO_PAD]
-      .iter()
-      .find_map(|engine| engine.decode(encoded.expose_secret().trim()).ok())
-      .ok_or(ConfigError::BadStoreKey)?;
-    SymmetricKey::from_slice(&bytes).ok_or(ConfigError::BadStoreKey)
+    self.store.key()
   }
 
   pub fn argon2(&self) -> Argon2Settings {
-    Argon2Settings {
-      memory_kib: self.identity.argon2_memory_kib,
-      iterations: self.identity.argon2_iterations,
-      parallelism: 1,
-    }
+    self.identity.argon2()
   }
 
   /// Where the liveness file is: `health.file`, or `notetaker.alive` next to the database.
   pub fn health_file(&self) -> PathBuf {
-    self.health.maybe_file.clone().unwrap_or_else(|| {
-      self
-        .store
-        .path
-        .parent()
-        .unwrap_or_else(|| Path::new(""))
-        .join("notetaker.alive")
-    })
+    self.health.file(&self.store, "notetaker.alive")
   }
 
   pub fn retry_settings(&self) -> RetrySettings {
@@ -285,19 +197,6 @@ impl NotetakerConfig {
   }
 }
 
-impl Default for IdentitySection {
-  fn default() -> Self {
-    let argon2 = Argon2Settings::default();
-    Self {
-      device_name: "teamcraft-notetaker".to_owned(),
-      passphrase: None,
-      passphrase_file: None,
-      argon2_memory_kib: argon2.memory_kib,
-      argon2_iterations: argon2.iterations,
-    }
-  }
-}
-
 impl Default for OpenRouterSection {
   fn default() -> Self {
     Self {
@@ -309,15 +208,6 @@ impl Default for OpenRouterSection {
       retry_base_delay_ms: 1_000,
       max_concurrent_requests: 4,
       app_title: "TeamCraft notetaker".to_owned(),
-    }
-  }
-}
-
-impl Default for HealthSection {
-  fn default() -> Self {
-    Self {
-      maybe_file: None,
-      max_age_secs: 120,
     }
   }
 }
@@ -339,25 +229,6 @@ impl Default for LimitsSection {
   }
 }
 
-/// A secret given directly or as a file; the file's surrounding whitespace is dropped.
-fn secret(
-  name: &'static str,
-  maybe_value: &Option<SecretString>,
-  maybe_file: &Option<PathBuf>,
-) -> Result<SecretString, ConfigError> {
-  if let Some(value) = maybe_value {
-    return Ok(value.clone());
-  }
-  let Some(path) = maybe_file else {
-    return Err(ConfigError::MissingSecret(name));
-  };
-  let text = std::fs::read_to_string(path).map_err(|source| ConfigError::File {
-    path: path.display().to_string(),
-    source,
-  })?;
-  Ok(SecretString::from(text.trim().to_owned()))
-}
-
 fn is_loopback_url(url: &str) -> bool {
   ["http://127.0.0.1", "http://[::1]", "http://localhost"]
     .iter()
@@ -366,6 +237,8 @@ fn is_loopback_url(url: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+  use secrecy::ExposeSecret;
+
   use super::*;
 
   const MINIMAL: &str = r#"

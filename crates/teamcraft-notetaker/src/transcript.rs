@@ -215,7 +215,7 @@ mod tests {
     let mut transcript = Transcript::default();
     transcript.add(segment(1, 61_000, "Hello\nall"));
     transcript.add(segment(9, 3_723_000, "# Hi"));
-    let texts = Texts::for_language("en");
+    let texts = crate::texts::for_language("en");
     let names = Names::new(
       HashMap::from([(user(1), "Alice".to_owned())]),
       &transcript,
@@ -238,7 +238,7 @@ mod tests {
     let names = Names::new(
       HashMap::from([(user(1), "Alice".to_owned()), (user(2), "Bob".to_owned())]),
       &transcript,
-      &Texts::for_language("en"),
+      &crate::texts::for_language("en"),
     );
     let markdown = transcript.to_markdown(&names, "Transcript", "Automatic.");
     assert_eq!(

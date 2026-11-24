@@ -962,24 +962,37 @@ pub fn voice_message_policy(store: &impl LocalStore) -> Option<teamcraft_proto::
 
 /// How long `user` may record a call under the verified policy (e2ee.md §8.3), in seconds; `None`
 /// when they may not. Admins come from the verified roster while it is fresh; the server's word
-/// that someone is a guest or a bot only takes the right away. The desktop shell checks this
-/// itself before it records: the page's word isn't enough.
+/// that someone is a guest or a bot only takes the right away. The recorder bot is the account the
+/// owners signed (#2273): it may record whatever the server says about it, and in
+/// `recorder_bot_only` nobody else may. The desktop shell checks this itself before it records (the
+/// page's word isn't enough), and the recorder bot before it joins a call.
 pub fn call_recording_allowance(store: &impl LocalStore, user: UserId, now_ms: i64) -> Option<u32> {
   let workspace: WorkspaceState =
     records::get_json(store, Table::Workspace, crate::client::WORKSPACE_KEY).ok()??;
   let policy = &workspace.policy.call_recording;
+  policy
+    .allows(call_recorder_role(store, &workspace, user, now_ms))
+    .then(|| policy.max_seconds())
+}
+
+/// How `user` stands under the verified call recording policy: the signed recorder bot, a guest
+/// (also any other bot), an admin of the fresh verified roster, or a member.
+fn call_recorder_role(
+  store: &impl LocalStore,
+  workspace: &WorkspaceState,
+  user: UserId,
+  now_ms: i64,
+) -> teamcraft_proto::RecorderRole {
   let max_age_ms =
     i64::try_from(crate::ClientSettings::default().workspace_max_age.as_millis()).unwrap_or(i64::MAX);
   let is_admin =
     workspace.is_roster_fresh(now_ms, max_age_ms) && workspace.admins().any(|admin| admin == user);
   // An unreadable record counts as a guest: no right without evidence.
-  let is_guest = crate::notetaker::is_guest_or_bot(store, user).unwrap_or(true);
-  let role = match (is_guest, is_admin) {
-    (true, _) => teamcraft_proto::RecorderRole::Guest,
-    (false, true) => teamcraft_proto::RecorderRole::Admin,
-    (false, false) => teamcraft_proto::RecorderRole::Member,
-  };
-  policy.allows(role).then(|| policy.max_seconds())
+  let is_guest_or_bot = crate::notetaker::is_guest_or_bot(store, user).unwrap_or(true);
+  workspace
+    .policy
+    .call_recording
+    .role_of(user, is_guest_or_bot, is_admin)
 }
 
 /// The legal holds of the verified policy (data-export.md §4.2), one per held conversation this
@@ -1891,6 +1904,122 @@ mod tests {
       assert_eq!(status.owners, vec![(alice.user_id, None)]);
       assert_eq!(status.maybe_expires_at_ms, Some(0));
       assert!(!state.is_roster_fresh(1, 10_000), "the same as freshness says");
+    }
+  }
+
+  /// Who may record a call (e2ee.md §8.3, #2273): the one check the desktop shell, the browser's
+  /// page and the recorder bot make before recording.
+  mod call_recording {
+    use teamcraft_proto::{CallRecorders, CallRecordingPolicy};
+
+    use super::*;
+    use crate::store::MemoryStore;
+
+    const NOW: i64 = 1_000_000;
+    const MEMBER: i64 = 2;
+    const BOT: i64 = 9;
+    const OTHER_BOT: i64 = 8;
+    const GUEST: i64 = 7;
+    const UNKNOWN: i64 = 6;
+
+    #[test]
+    fn every_mode_against_every_account() {
+      // Owner (an admin of the roster), member, recorder bot, another bot, guest, unknown account.
+      // An account this device has no record of counts as a member, as before the bot: only the
+      // server's word that it is a guest or a bot takes the right away.
+      let cases = [
+        (CallRecorders::Off, [false, false, false, false, false, false]),
+        (CallRecorders::Admins, [true, false, true, false, false, false]),
+        (CallRecorders::Members, [true, true, true, false, false, true]),
+        (
+          CallRecorders::RecorderBotOnly,
+          [false, false, true, false, false, false],
+        ),
+      ];
+      for (recorders, expected) in cases {
+        let (store, owner) = store_with(CallRecordingPolicy {
+          recorders: recorders.clone(),
+          maybe_bot: Some(user(BOT)),
+          ..CallRecordingPolicy::default()
+        });
+        let allowed = [owner, MEMBER, BOT, OTHER_BOT, GUEST, UNKNOWN]
+          .map(|raw| call_recording_allowance(&store, user(raw), NOW).is_some());
+        assert_eq!(allowed, expected, "{recorders:?}");
+      }
+    }
+
+    #[test]
+    fn the_bot_gets_the_policys_length() {
+      let (store, _) = store_with(CallRecordingPolicy {
+        recorders: CallRecorders::RecorderBotOnly,
+        max_minutes: 480,
+        maybe_bot: Some(user(BOT)),
+        ..CallRecordingPolicy::default()
+      });
+      assert_eq!(call_recording_allowance(&store, user(BOT), NOW), Some(480 * 60));
+    }
+
+    #[test]
+    fn the_signed_bot_records_even_when_the_server_calls_it_a_guest() {
+      let (store, _) = store_with(CallRecordingPolicy {
+        recorders: CallRecorders::RecorderBotOnly,
+        maybe_bot: Some(user(BOT)),
+        ..CallRecordingPolicy::default()
+      });
+      put_user(&store, BOT, "guest");
+      assert!(call_recording_allowance(&store, user(BOT), NOW).is_some());
+      // And a server that calls a bot a member doesn't make it the recorder.
+      put_user(&store, OTHER_BOT, "member");
+      assert!(call_recording_allowance(&store, user(OTHER_BOT), NOW).is_none());
+    }
+
+    #[test]
+    fn without_a_verified_policy_nobody_records() {
+      let store = MemoryStore::new();
+      put_user(&store, BOT, "bot");
+      assert_eq!(call_recording_allowance(&store, user(BOT), NOW), None);
+    }
+
+    /// A store with a roster of one owner and `recording` as the signed policy, and the users the
+    /// server describes: a member, the bot, another bot and a guest (the unknown one isn't there).
+    fn store_with(recording: CallRecordingPolicy) -> (MemoryStore, i64) {
+      let owner = Owner::new(1);
+      let mut state = WorkspaceState::default();
+      let first = roster(1, &[&owner], Some(NOW), &state);
+      state
+        .apply_entries(vec![owner.sign(WorkspaceLogKind::Roster, 1, &first)])
+        .unwrap();
+      let mut document = policy(1, 1, &state);
+      document.policy.call_recording = recording;
+      state
+        .apply_entries(vec![owner.sign(WorkspaceLogKind::Policy, 1, &document)])
+        .unwrap();
+      let store = MemoryStore::new();
+      records::put_json(&store, Table::Workspace, crate::client::WORKSPACE_KEY, &state).unwrap();
+      for (raw, kind) in [
+        (1, "member"),
+        (MEMBER, "member"),
+        (BOT, "bot"),
+        (OTHER_BOT, "bot"),
+        (GUEST, "guest"),
+      ] {
+        put_user(&store, raw, kind);
+      }
+      (store, 1)
+    }
+
+    fn put_user(store: &MemoryStore, raw: i64, kind: &str) {
+      let summary: teamcraft_proto::UserSummary = serde_json::from_value(serde_json::json!({
+        "id": raw.to_string(),
+        "display_name": format!("User {raw}"),
+        "kind": kind,
+      }))
+      .unwrap();
+      records::put_json(store, Table::Users, &raw.to_string(), &summary).unwrap();
+    }
+
+    fn user(raw: i64) -> UserId {
+      UserId::from_snowflake(Snowflake::new(raw).unwrap())
     }
   }
 

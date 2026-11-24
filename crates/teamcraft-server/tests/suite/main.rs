@@ -81,6 +81,7 @@ mod push_providers;
 mod push_retry;
 mod push_sending;
 mod read_receipts;
+mod recorder_bot;
 mod rendezvous;
 mod rest;
 mod retention;

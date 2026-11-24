@@ -2,9 +2,9 @@
 # **draft** GitHub release, which a maintainer reviews and publishes by hand (the nightly release
 # starts it with `publish` and the last job publishes it, docs/release.md).
 #
-# - Server, SFU, integration bridge and notetaker images, multi-arch (amd64 + arm64, each built on a
-#   native runner), pushed to ghcr.io/<owner>/teamcraft-server, -sfu, -bridge and -notetaker: the
-#   version tag, X.Y and `latest` for releases, only the version for prereleases. Signed with cosign
+# - Server, SFU, integration bridge, notetaker and recorder images, multi-arch (amd64 + arm64, each
+#   built on a native runner), pushed to ghcr.io/<owner>/teamcraft-server, -sfu, -bridge, -notetaker
+#   and -recorder: the version tag, X.Y and `latest` for releases, only the version for prereleases. Signed with cosign
 #   (keyless) and with a build provenance attestation.
 # - Desktop packages from desktop-release.yml (called, not copied), the web client bundle, and the
 #   desktop updater manifest latest.json when the update artifacts are signed (docs/updates.md).
@@ -92,7 +92,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge, teamcraft-notetaker]
+        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge, teamcraft-notetaker, teamcraft-recorder]
         platform: [linux/amd64, linux/arm64]
         include:
           - platform: linux/amd64
@@ -155,7 +155,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge, teamcraft-notetaker]
+        image: [teamcraft-server, teamcraft-sfu, teamcraft-bridge, teamcraft-notetaker, teamcraft-recorder]
     runs-on: ubuntu-latest
     permissions:
       contents: read

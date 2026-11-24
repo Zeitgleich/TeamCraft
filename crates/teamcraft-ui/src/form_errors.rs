@@ -157,6 +157,11 @@ impl FieldErrors {
     });
   }
 
+  /// Adds `other`'s errors after these (a group of fields checked on its own, further down).
+  pub fn extend(&mut self, other: FieldErrors) {
+    self.entries.extend(other.entries);
+  }
+
   pub fn is_empty(&self) -> bool {
     self.entries.is_empty()
   }

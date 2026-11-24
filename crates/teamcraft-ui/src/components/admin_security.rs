@@ -6,12 +6,13 @@ use teamcraft_proto::{
 
 use crate::components::admin_console::SectionHeader;
 use crate::components::admin_link_previews::{LinkPreviewGroup, link_preview_errors};
+use crate::components::admin_notetaker::use_bot_accounts;
 use crate::components::admin_owners::OwnersPanel;
 use crate::components::admin_policy::{
   CheckRow, PolicyBlockerNote, PolicyDraft, PolicyFooter, SelectRow, use_policy_draft,
 };
 use crate::components::people_picker::PeoplePicker;
-use crate::form_errors::FormErrors;
+use crate::form_errors::{FieldErrors, FormErrors};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::{User, UserId};
 use crate::state::use_app_state;
@@ -52,6 +53,8 @@ const LEAVER_MAX_PER_DAY: [u32; 6] = [1, 5, 10, 25, 50, 100];
 
 /// The security form's id: a refused save focuses its first invalid field.
 const FORM_ID: &str = "policy-security-form";
+/// The recorder bot's picker (#2273).
+const RECORDER_BOT_ID: &str = "policy-call-recording-bot";
 
 /// Security policy: the signed settings that the server and every member client enforce.
 #[component]
@@ -59,8 +62,16 @@ pub fn SecuritySection() -> impl IntoView {
   let i18n = use_i18n();
   let policy = use_policy_draft();
   let draft = policy.draft;
-  // The fields this form checks before signing (forms.md); today the link preview list.
+  // The fields this form checks before signing (forms.md): the link preview list and the recorder
+  // bot. After a refused save the errors follow the input.
   let errors = FormErrors::new();
+  Effect::new(move |_| errors.follow(draft.with(|policy| security_errors(policy, i18n))));
+  let bots = use_bot_accounts();
+  let bot_options = Signal::derive(move || {
+    std::iter::once((String::new(), i18n.t("policy-call-recording-bot-none")))
+      .chain(bots.get().into_iter().map(|(id, name)| (id.to_string(), name)))
+      .collect()
+  });
 
   let leaver_grace_options = Signal::derive(move || {
     LEAVER_GRACE_MINUTES
@@ -260,7 +271,7 @@ pub fn SecuritySection() -> impl IntoView {
       on:submit=move |ev: web_sys::SubmitEvent| {
         ev.prevent_default();
         // The server checks the same rules; checked here so the error is at its field.
-        let found = draft.with_untracked(|policy| link_preview_errors(policy, i18n));
+        let found = draft.with_untracked(|policy| security_errors(policy, i18n));
         if found.is_empty() {
           errors.clear();
           policy.save();
@@ -365,12 +376,13 @@ pub fn SecuritySection() -> impl IntoView {
       <fieldset class="policy-group" prop:disabled=move || policy.is_locked()>
         <legend>{move || i18n.t("policy-call-recording")}</legend>
         <p class="muted-text small">{move || i18n.t("policy-call-recording-hint")}</p>
-        {[CallRecorders::Off, CallRecorders::Admins, CallRecorders::Members]
+        {[CallRecorders::Off, CallRecorders::Admins, CallRecorders::Members, CallRecorders::RecorderBotOnly]
           .into_iter()
           .map(|option| {
             let slug = option.as_str().to_owned();
-            let label_key = format!("policy-call-recording-{slug}");
-            let hint_key = format!("policy-call-recording-{slug}-hint");
+            let key_slug = slug.replace('_', "-");
+            let label_key = format!("policy-call-recording-{key_slug}");
+            let hint_key = format!("policy-call-recording-{key_slug}-hint");
             let checked_option = option.clone();
             view! {
               <label class="radio">
@@ -402,6 +414,20 @@ pub fn SecuritySection() -> impl IntoView {
           }
         />
         <p class="muted-text small">{move || i18n.t("policy-call-recording-limit")}</p>
+        // The recorder bot (#2273): records the calls of its conversations unattended; the only
+        // recorder under `recorder_bot_only`.
+        <SelectRow
+          id=RECORDER_BOT_ID
+          label=Signal::derive(move || i18n.t("policy-call-recording-bot"))
+          options=bot_options
+          selected=Signal::derive(move || draft.get().call_recording.maybe_bot.map(|id| id.to_string()).unwrap_or_default())
+          disabled=Signal::derive(move || {
+            matches!(draft.get().call_recording.recorders, CallRecorders::Off | CallRecorders::Unknown(_))
+          })
+          on_select=move |value: String| policy.edit(|p| p.call_recording.maybe_bot = value.parse().ok())
+          error=Signal::derive(move || errors.message(RECORDER_BOT_ID))
+        />
+        <p class="muted-text small">{move || i18n.t("policy-call-recording-bot-hint")}</p>
         // Saving as an unencrypted file on the device (#2116): allowed by default.
         <CheckRow
           name="call_recording_local_files"
@@ -866,6 +892,18 @@ pub fn parse_domains(text: &str) -> Vec<String> {
     .map(|part| part.trim().trim_start_matches('@').to_lowercase())
     .filter(|part| !part.is_empty())
     .collect()
+}
+
+/// What the security form checks before signing, in the order of its fields: the recorder bot
+/// where only it records (#2273), then the link preview list. The server checks the same.
+fn security_errors(policy: &teamcraft_proto::WorkspacePolicy, i18n: I18n) -> FieldErrors {
+  let mut found = FieldErrors::new();
+  let recording = &policy.call_recording;
+  if recording.is_recorder_bot_only() && recording.maybe_bot.is_none() {
+    found.push(RECORDER_BOT_ID, i18n.t("policy-call-recording-bot-required"));
+  }
+  found.extend(link_preview_errors(policy, i18n));
+  found
 }
 
 #[cfg(test)]
