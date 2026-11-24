@@ -105,6 +105,18 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
     // Files dropped anywhere on the conversation go to its composer.
     let zone = FileDrop::provide(can_post);
     let tab = RwSignal::new(ChannelTab::Messages);
+    // A mention in the notes opens them (issue #2361); the notes take the request on.
+    let has_notes = has_page(&conv);
+    Effect::new(move |_| {
+      let is_for_here = state.notes_request.with(|request| {
+        request
+          .as_ref()
+          .is_some_and(|request| request.conversation == conversation)
+      });
+      if is_for_here && has_notes && tab.get_untracked() != ChannelTab::Notes {
+        tab.set(ChannelTab::Notes);
+      }
+    });
     // Selection mode belongs to the conversation: leaving it ends it (issue #2070).
     on_cleanup(move || state.end_selection_in(conversation));
     Some(view! {

@@ -40,7 +40,8 @@ struct NotificationContentBuilder {
       maybeSenderName: notification.maybeSenderName.map {
         notification.isSenderSource ? strings.sourceSender($0) : $0
       },
-      maybeText: notification.maybeText,
+      // A mention in the notes says so (#2361); the page's text never shows.
+      maybeText: notification.maybeGap == .mentionedInNotes ? strings.mentionedInNotes : notification.maybeText,
       maybeFileName: notification.maybeFileName,
       maybeAttachmentKind: notification.maybeAttachmentKind,
       isDirect: notification.isDirect,
@@ -55,7 +56,8 @@ struct NotificationContentBuilder {
     // Only what the core decrypted; the server-supplied userInfo is dropped.
     content.userInfo = NotificationKeys.userInfo(
       kind: NotificationKeys.messageKind, conversationId: notification.conversationId, maybeTag: tag,
-      maybeMessageId: notification.maybeMessageId, maybeThreadId: notification.maybeThreadId)
+      maybeMessageId: notification.maybeMessageId, maybeThreadId: notification.maybeThreadId,
+      maybeNotesPage: notification.opensNotes ? (notification.maybeNotesPageId ?? "") : nil)
     // Reply and mark-read need the tag (no key yet: they would be refused) and a conversation the
     // core verified (the wake-up's conversation alone is the server's word).
     content.categoryIdentifier =
@@ -279,6 +281,8 @@ struct NotificationStrings {
   var meetingCoHostUnnamed = "You are now a co-host of a meeting"
   var meetingHandover: (String) -> String = { "\($0) was handed over to you" }
   var meetingHandoverUnnamed = "A meeting was handed over to you"
+  /// An edit of the channel's notes that mentions the user (#2361); English unless set.
+  var mentionedInNotes = "Mentioned you in the notes"
 
   static var localized: NotificationStrings {
     NotificationStrings(
@@ -307,6 +311,7 @@ struct NotificationStrings {
       meetingCoHost: { String(localized: "notification_meeting_co_host \($0)") },
       meetingCoHostUnnamed: String(localized: "notification_meeting_co_host_unnamed"),
       meetingHandover: { String(localized: "notification_meeting_handover \($0)") },
-      meetingHandoverUnnamed: String(localized: "notification_meeting_handover_unnamed"))
+      meetingHandoverUnnamed: String(localized: "notification_meeting_handover_unnamed"),
+      mentionedInNotes: String(localized: "notification_mentioned_in_notes"))
   }
 }

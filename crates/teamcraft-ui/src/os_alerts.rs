@@ -27,6 +27,7 @@ use teamcraft_client_api::os_notify::{
   NotificationPicture, NotificationSound, NotificationTag, OsNotification, OsNotificationKind, ReplyField,
   TagTarget,
 };
+use teamcraft_proto::{CanvasPageId, PushContentMode};
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -43,11 +44,12 @@ use crate::meeting_reminders::{
 };
 use crate::meetings::MeetingsHub;
 use crate::message_sounds::{MessageSounds, notification_sound};
-use crate::model::{ConversationId, TimestampMs, UserId};
+use crate::model::{ConversationId, PageMention, TimestampMs, UserId};
 use crate::notification_pictures::picture_of;
 use crate::notifier::{
-  Decision, NotificationTitle, Notifier, PictureSubject, ReadWatcher, all_conversations, group_mention_reach,
-  needs_channel_confirmation, needs_group_confirmation, notifications_for,
+  Decision, NotificationTitle, Notifier, PageMentionWatch, PictureSubject, ReadWatcher, all_conversations,
+  group_mention_reach, needs_channel_confirmation, needs_group_confirmation, notifications_for,
+  notifies_page_mention, picture_subject,
 };
 use crate::reactive::OwnerLiveness;
 use crate::settings::{load_string, store_string};
@@ -104,10 +106,24 @@ impl CallAlertsCell {
 fn watch_messages(state: AppState, i18n: I18n, sounds: MessageSounds) {
   let notifier = Notifier::default();
   let read_watcher = ReadWatcher::default();
+  let page_mentions = PageMentionWatch::default();
   let settings = state.settings;
   Effect::new(move |_| {
     // Reading through the state subscribes to every backend change.
     let found = state.read(|backend| notifier.collect(backend));
+    let mentioned = page_mentions.new_mentions(state.read(|backend| backend.page_mentions()));
+    if !mentioned.is_empty() && is_notifying_tab() {
+      let shown = page_mention_notifications(state, i18n, mentioned);
+      if !shown.is_empty() {
+        let prefs = settings.prefs.get_untracked().notifications;
+        sounds.on_notifications(&prefs, state.call.phase.get_untracked() == CallPhase::Active);
+      }
+      leptos::task::spawn_local(async move {
+        for notification in &shown {
+          tauri::show_notification(notification).await;
+        }
+      });
+    }
     let read = state.read(|backend| {
       let unread: Vec<(ConversationId, u32)> = all_conversations(backend)
         .iter()
@@ -201,6 +217,65 @@ fn watch_messages(state: AppState, i18n: I18n, sounds: MessageSounds) {
       leptos::task::spawn_local(async move { tauri::withdraw_tags(&tags).await });
     }
   });
+}
+
+/// "Anna mentioned you in the notes" for new mentions in channels' notes (issue #2361), by the
+/// policy of a message that mentions the user; a click opens the page. Where the workspace policy
+/// shows no names, only "New message".
+fn page_mention_notifications(
+  state: AppState,
+  i18n: I18n,
+  mentioned: Vec<PageMention>,
+) -> Vec<OsNotification> {
+  let prefs = state.settings.prefs.get_untracked().notifications;
+  let me = state.me();
+  let current = state.current_conversation_id();
+  let is_in_front = is_window_in_front();
+  let mode = state.read(|backend| backend.push_content_mode());
+  let sound = notification_sound(prefs.message_sound);
+  mentioned
+    .into_iter()
+    .filter_map(|mention| {
+      let conversation = state.read(|backend| backend.conversation(mention.conversation))?;
+      let is_viewing =
+        (is_in_front && current == Some(conversation.id)) || is_shown_in_other_tab(me.id, conversation.id);
+      if !notifies_page_mention(
+        &prefs,
+        &me,
+        &conversation,
+        mention.by,
+        is_viewing,
+        prefs.maybe_dnd_until,
+      ) {
+        return None;
+      }
+      let is_generic = matches!(mode, PushContentMode::Generic | PushContentMode::Unknown(_));
+      let (title, maybe_body, maybe_picture) = if is_generic {
+        (i18n.t("notify-new-message"), None, None)
+      } else {
+        let sender = state
+          .read(|backend| backend.user(mention.by))
+          .map(|user| user.display_name)
+          .unwrap_or_default();
+        let subject = picture_subject(&conversation, mention.by);
+        (
+          conversation.name.clone(),
+          Some(i18n.t_with("notify-mentioned-in-notes", &[("name", &sender)])),
+          state.read(|backend| picture_of(backend, subject)),
+        )
+      };
+      Some(OsNotification {
+        tag: NotificationTag::notes(conversation.id, mention.maybe_page.as_ref()),
+        kind: OsNotificationKind::Message,
+        title,
+        maybe_body,
+        actions: Vec::new(),
+        maybe_reply: None,
+        maybe_picture,
+        sound,
+      })
+    })
+    .collect()
 }
 
 // ---- Join requests --------------------------------------------------------------------------------
@@ -1017,6 +1092,27 @@ pub fn handle_action(state: AppState, i18n: I18n, event: NotificationActionEvent
       on_join_request_action(state, &conversation, &user, event.action);
     },
     TagTarget::Reminder => {},
+    TagTarget::Notes {
+      conversation,
+      maybe_page,
+    } => {
+      if let Ok(conversation) = conversation.parse() {
+        on_notes_action(state, conversation, maybe_page.as_deref(), event.action);
+      }
+    },
+  }
+}
+
+/// A mention in a channel's notes: a click opens the page there (issue #2361). A page ID that
+/// isn't one opens the first page.
+fn on_notes_action(
+  state: AppState,
+  conversation: ConversationId,
+  maybe_page: Option<&str>,
+  action: NotificationAction,
+) {
+  if action.brings_window_up() {
+    state.open_notes(conversation, maybe_page.and_then(CanvasPageId::parse));
   }
 }
 

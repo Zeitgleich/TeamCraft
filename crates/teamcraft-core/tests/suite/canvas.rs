@@ -26,7 +26,7 @@ async fn concurrent_edits_of_two_members_converge_on_both_devices() {
   let unread_before = bob_ui.conversation(channel).unwrap().unread_count;
   let mut alice_page = CanvasDoc::new();
   let (heading, update) = alice_page.insert_block(None, BlockKind::Heading, "Weekly");
-  alice_ui.edit_canvas(channel, None, update, false);
+  alice_ui.edit_canvas(channel, None, update, false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   let mut bob_page = page_of(&bob_ui, channel);
@@ -46,10 +46,10 @@ async fn concurrent_edits_of_two_members_converge_on_both_devices() {
       .1,
   ];
   for update in alice_edits {
-    alice_ui.edit_canvas(channel, None, update, false);
+    alice_ui.edit_canvas(channel, None, update, false, Vec::new());
   }
   for update in bob_edits {
-    bob_ui.edit_canvas(channel, None, update, false);
+    bob_ui.edit_canvas(channel, None, update, false, Vec::new());
   }
   run_commands(&mut alice, &alice_ui).await;
   run_commands(&mut bob, &bob_ui).await;
@@ -75,7 +75,7 @@ async fn the_server_holds_page_edits_only_as_ciphertext() {
   let secret = "Merger with Project A closes Friday";
   let mut page = CanvasDoc::new();
   let (_, update) = page.insert_block(None, BlockKind::Paragraph, secret);
-  alice_ui.edit_canvas(channel, None, update.clone(), false);
+  alice_ui.edit_canvas(channel, None, update.clone(), false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
 
@@ -98,7 +98,7 @@ async fn members_who_may_not_post_read_the_page_but_cannot_edit_it() {
   let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
   let mut page = CanvasDoc::new();
   let (id, update) = page.insert_block(None, BlockKind::Paragraph, "Read me");
-  alice_ui.edit_canvas(channel, None, update, false);
+  alice_ui.edit_canvas(channel, None, update, false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
 
@@ -116,7 +116,7 @@ async fn members_who_may_not_post_read_the_page_but_cannot_edit_it() {
   let before = bob_ui.canvas(channel, None);
   let mut bob_page = page_of(&bob_ui, channel);
   let edit = bob_page.set_text(&id, "Changed by Bob").unwrap();
-  bob_ui.edit_canvas(channel, None, edit, false);
+  bob_ui.edit_canvas(channel, None, edit, false, Vec::new());
   assert!(bob_ui.drain_commands().is_empty(), "nothing goes out");
   assert_eq!(bob_ui.canvas(channel, None), before, "nor is it kept");
   assert_eq!(texts(&page_of(&bob_ui, channel).blocks()), ["Read me"]);
@@ -128,8 +128,14 @@ async fn the_page_survives_a_restart() {
   let alice_ui = backend_of(&alice);
   let mut page = CanvasDoc::new();
   let (first, update) = page.insert_block(None, BlockKind::Check, "Ship it");
-  alice_ui.edit_canvas(channel, None, update, false);
-  alice_ui.edit_canvas(channel, None, page.set_checked(&first, true).unwrap(), false);
+  alice_ui.edit_canvas(channel, None, update, false, Vec::new());
+  alice_ui.edit_canvas(
+    channel,
+    None,
+    page.set_checked(&first, true).unwrap(),
+    false,
+    Vec::new(),
+  );
   // Kept at once, before it is sent.
   assert_eq!(page_of(&alice_ui, channel).blocks(), page.blocks());
   run_commands(&mut alice, &alice_ui).await;
@@ -150,9 +156,15 @@ async fn a_compaction_keeps_the_page_and_waits_for_new_updates() {
   let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
   let mut page = CanvasDoc::new();
   let (id, update) = page.insert_block(None, BlockKind::Paragraph, "a");
-  alice_ui.edit_canvas(channel, None, update, false);
+  alice_ui.edit_canvas(channel, None, update, false, Vec::new());
   for text in ["ab", "abc", "abcd"] {
-    alice_ui.edit_canvas(channel, None, page.set_text(&id, text).unwrap(), false);
+    alice_ui.edit_canvas(
+      channel,
+      None,
+      page.set_text(&id, text).unwrap(),
+      false,
+      Vec::new(),
+    );
   }
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
@@ -180,7 +192,7 @@ async fn a_compaction_keeps_the_page_and_waits_for_new_updates() {
   let whole = teamcraft_client_api::canvas::snapshot(&alice_ui.canvas(channel, None).updates)
     .unwrap()
     .unwrap();
-  alice_ui.edit_canvas(channel, None, whole, true);
+  alice_ui.edit_canvas(channel, None, whole, true, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(bob_ui.canvas(channel, None).updates_since_snapshot, 0);
@@ -192,7 +204,7 @@ async fn every_device_lists_the_versions_with_who_and_when_and_restores_one() {
   let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
   let mut alice_page = CanvasDoc::new();
   let (id, update) = alice_page.insert_block(None, BlockKind::Paragraph, "Budget: 10k");
-  alice_ui.edit_canvas(channel, None, update, false);
+  alice_ui.edit_canvas(channel, None, update, false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   // Bob overwrites Alice's line well after: a version of his own.
@@ -203,6 +215,7 @@ async fn every_device_lists_the_versions_with_who_and_when_and_restores_one() {
     None,
     bob_page.set_text(&id, "Budget: 50k").unwrap(),
     false,
+    Vec::new(),
   );
   run_commands(&mut bob, &bob_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
@@ -226,7 +239,7 @@ async fn every_device_lists_the_versions_with_who_and_when_and_restores_one() {
   let state = alice_ui.canvas(channel, None);
   let old = canvas::page_at(&state, &canvas::versions(&state).unwrap()[1]).unwrap();
   let mut page = page_of(&alice_ui, channel);
-  alice_ui.edit_canvas(channel, None, page.restore(&old).unwrap(), false);
+  alice_ui.edit_canvas(channel, None, page.restore(&old).unwrap(), false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
   assert_eq!(texts(&page_of(&bob_ui, channel).blocks()), ["Budget: 10k"]);
@@ -241,8 +254,8 @@ async fn a_further_page_travels_on_its_own_and_is_listed_on_the_first() {
   let (page, listed) = list.add_page("Minutes").unwrap();
   let mut minutes = CanvasDoc::for_page(Some(&page));
   let (_, written) = minutes.insert_block(None, BlockKind::Paragraph, "decided");
-  alice_ui.edit_canvas(channel, None, listed, false);
-  alice_ui.edit_canvas(channel, Some(&page), written, false);
+  alice_ui.edit_canvas(channel, None, listed, false, Vec::new());
+  alice_ui.edit_canvas(channel, Some(&page), written, false, Vec::new());
   run_commands(&mut alice, &alice_ui).await;
   settle(&mut [&mut alice, &mut bob]).await;
 
@@ -256,6 +269,60 @@ async fn a_further_page_travels_on_its_own_and_is_listed_on_the_first() {
 }
 
 /// The page as `ui` holds it.
+#[tokio::test]
+async fn a_mention_on_the_page_notifies_the_member_once_and_never_from_a_snapshot() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let (alice_ui, bob_ui) = (backend_of(&alice), backend_of(&bob));
+  let (alice_id, bob_id) = (alice.client.user_id(), bob.client.user_id());
+  let mut page = CanvasDoc::new();
+  let (id, first) = page.insert_block(None, BlockKind::Paragraph, "ask @b");
+  alice_ui.edit_canvas(channel, None, first, false, Vec::new());
+  let mention = page.insert_mention(&id, 4, 6, bob_id, "Bob").unwrap();
+  // Alice herself and somebody outside the channel are never named.
+  let outsider = teamcraft_client_api::model::id_from_raw(999_999);
+  alice_ui.edit_canvas(channel, None, mention, false, vec![bob_id, alice_id, outsider]);
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+
+  let named: Vec<Vec<_>> = server
+    .stored_mentions()
+    .into_iter()
+    .filter(|mentions| !mentions.is_empty())
+    .collect();
+  assert_eq!(
+    named,
+    vec![vec![bob_id]],
+    "the server learns the ID as for any mention"
+  );
+  let mentions = bob_ui.page_mentions();
+  assert_eq!(mentions.len(), 1);
+  assert_eq!((mentions[0].conversation, mentions[0].by), (channel, alice_id));
+  assert!(mentions[0].maybe_page.is_none());
+  assert!(alice_ui.page_mentions().is_empty(), "no own mention");
+  assert_eq!(
+    texts(&page_of(&bob_ui, channel).blocks()),
+    ["ask @Bob "],
+    "and the page shows it"
+  );
+
+  // A snapshot carries the mention again and names nobody.
+  let state = alice_ui.canvas(channel, None);
+  let all: Vec<&[u8]> = state.updates.iter().map(AsRef::as_ref).collect();
+  let snapshot = canvas::snapshot(&all).unwrap().unwrap();
+  alice_ui.edit_canvas(channel, None, snapshot, true, vec![bob_id]);
+  run_commands(&mut alice, &alice_ui).await;
+  settle(&mut [&mut alice, &mut bob]).await;
+  assert_eq!(
+    server
+      .stored_mentions()
+      .into_iter()
+      .filter(|mentions| !mentions.is_empty())
+      .count(),
+    1
+  );
+  assert_eq!(bob_ui.page_mentions().len(), 1);
+}
+
 fn page_of(ui: &impl ChatBackend, channel: ConversationId) -> CanvasDoc {
   CanvasDoc::from_updates(&ui.canvas(channel, None).updates).unwrap()
 }

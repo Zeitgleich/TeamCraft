@@ -188,6 +188,7 @@
   <string name="notification_mute">Mute for 8 hours</string>
   <string name="notification_new_message">New message</string>
   <string name="notification_added_you">Added you to the conversation</string>
+  <string name="notification_mentioned_in_notes">Mentioned you in the notes</string>
   <string name="notification_file">%1$s</string>
   <string name="notification_file_unnamed">File</string>
   <string name="notification_reply">Reply</string>

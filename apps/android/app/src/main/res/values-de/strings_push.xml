@@ -181,6 +181,7 @@
   <string name="notification_mute">Für 8 Stunden stummschalten</string>
   <string name="notification_new_message">Neue Nachricht</string>
   <string name="notification_added_you">Hat dich zur Unterhaltung hinzugefügt</string>
+  <string name="notification_mentioned_in_notes">Hat dich in den Notizen erwähnt</string>
   <string name="notification_file">%1$s</string>
   <string name="notification_file_unnamed">Datei</string>
   <string name="notification_reply">Antworten</string>

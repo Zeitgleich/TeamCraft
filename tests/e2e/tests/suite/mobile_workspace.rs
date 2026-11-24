@@ -343,7 +343,7 @@ async fn write_notes(alice: &mut Peer, channel: ConversationId) {
   for update in updates {
     alice
       .client
-      .send_canvas_update(channel, None, update, false)
+      .send_canvas_update(channel, None, update, false, Vec::new())
       .await
       .unwrap();
   }
@@ -351,7 +351,7 @@ async fn write_notes(alice: &mut Peer, channel: ConversationId) {
   let (_, update) = meeting_page.insert_block(None, BlockKind::Bullet, "Agenda: the release date");
   alice
     .client
-    .send_canvas_update(channel, Some(meeting), update, false)
+    .send_canvas_update(channel, Some(meeting), update, false, Vec::new())
     .await
     .unwrap();
   eprintln!("WORKSPACE: notes written in {channel}");

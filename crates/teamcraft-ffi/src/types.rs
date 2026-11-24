@@ -591,6 +591,9 @@ pub enum NotificationGap {
   /// This user was added to the conversation: the app says so ("added you") instead of "New
   /// message". Added with #1249; a client that ignores it shows "New message" as before.
   AddedYou,
+  /// An edit of the channel's notes mentions this user (issue #2361): the app says "mentioned you
+  /// in the notes" and opens the page (`opens_notes`, `maybe_notes_page_id`).
+  MentionedInNotes,
   /// The workspace policy shows less.
   WorkspacePolicy,
   /// This device's setting shows less.
@@ -706,6 +709,12 @@ pub struct PushNotification {
   /// Whole minutes left when the server sent the reminder. Defaulted, as above.
   #[uniffi(default = None)]
   pub maybe_meeting_minutes: Option<u32>,
+  /// A mention in the channel's notes (issue #2361): opening the notification opens the notes on
+  /// the page `maybe_notes_page_id` names (`None`: the channel's first page). Defaulted, as above.
+  #[uniffi(default = false)]
+  pub opens_notes: bool,
+  #[uniffi(default = None)]
+  pub maybe_notes_page_id: Option<String>,
 }
 
 /// What the newest notification showed of a conversation (issue #1065): opening it from the
@@ -897,6 +906,12 @@ impl From<PushPreview> for PushNotification {
         .map(|meeting| meeting.meeting_id.to_string()),
       maybe_meeting_starts_at_ms: wake_up.maybe_meeting.map(|meeting| meeting.starts_at.0),
       maybe_meeting_minutes: teamcraft_core::push_text::meeting_minutes_left(wake_up),
+      opens_notes: preview.maybe_notes.is_some(),
+      maybe_notes_page_id: preview
+        .maybe_notes
+        .as_ref()
+        .and_then(|notes| notes.maybe_page.as_ref())
+        .map(|page| page.as_str().to_owned()),
       conversation_id: preview.wake_up.conversation_id.to_string(),
       maybe_message_id: preview.wake_up.maybe_message_id.map(|id| id.to_string()),
       maybe_conversation_name: preview.maybe_conversation_name,
@@ -975,6 +990,7 @@ impl From<PreviewGap> for NotificationGap {
       PreviewGap::NotShowable => Self::NotShowable,
       PreviewGap::Hidden => Self::Hidden,
       PreviewGap::AddedYou => Self::AddedYou,
+      PreviewGap::MentionedInNotes => Self::MentionedInNotes,
       PreviewGap::WorkspacePolicy => Self::WorkspacePolicy,
       PreviewGap::DeviceSetting => Self::DeviceSetting,
     }

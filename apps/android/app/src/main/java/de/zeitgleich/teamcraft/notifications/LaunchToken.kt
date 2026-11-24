@@ -42,12 +42,16 @@ object LaunchToken {
  * home screen widget (#2076). Each conversation's intent differs in its data URI, so their
  * PendingIntents never collide; an open app shows it on top of what it showed.
  */
-fun openConversationIntent(context: Context, conversationId: String): Intent =
+fun openConversationIntent(context: Context, conversationId: String, maybeNotes: NotesTarget? = null): Intent =
   Intent(context, MainActivity::class.java)
     .putExtra(MainActivity.EXTRA_CONVERSATION_ID, conversationId)
     .putExtra(MainActivity.EXTRA_LAUNCH_TOKEN, LaunchToken.of(context))
     .setData(Uri.fromParts(CONVERSATION_URI_SCHEME, conversationId, null))
     .addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+    .apply {
+      // A mention in the notes (#2361): the notes open on the page, "" for the first one.
+      if (maybeNotes != null) putExtra(MainActivity.EXTRA_NOTES_PAGE, maybeNotes.maybePageId.orEmpty())
+    }
 
 /** The scheme of a conversation's intents (notification actions and opening it). */
 const val CONVERSATION_URI_SCHEME = "teamcraft-conversation"

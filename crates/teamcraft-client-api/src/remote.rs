@@ -1378,6 +1378,8 @@ pub enum ChatAction {
     update: teamcraft_proto::Base64Bytes,
     #[serde(default)]
     is_snapshot: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<UserId>,
   },
   /// [`ChatBackend::note_canvas_pages`].
   NoteCanvasPages {
@@ -1880,7 +1882,14 @@ impl ChatAction {
         maybe_page,
         update,
         is_snapshot,
-      } => backend.edit_canvas(conversation, maybe_page.as_ref(), update.into_vec(), is_snapshot),
+        mentions,
+      } => backend.edit_canvas(
+        conversation,
+        maybe_page.as_ref(),
+        update.into_vec(),
+        is_snapshot,
+        mentions,
+      ),
       Self::NoteCanvasPages {
         conversation,
         listed,
@@ -2002,6 +2011,8 @@ pub enum ChatQuery {
     #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
     maybe_page: Option<teamcraft_proto::CanvasPageId>,
   },
+  /// [`ChatBackend::page_mentions`].
+  PageMentions,
   /// [`ChatBackend::canvas_peers`].
   CanvasPeers {
     conversation: ConversationId,
@@ -2299,6 +2310,10 @@ pub enum ChatAnswer {
     #[serde(default)]
     peers: Vec<crate::model::CanvasPeer>,
   },
+  PageMentions {
+    #[serde(default)]
+    mentions: Vec<crate::model::PageMention>,
+  },
   ConversationFile {
     #[serde(rename = "file", default, skip_serializing_if = "Option::is_none")]
     // Boxed: a file is far larger than the other answers.
@@ -2514,6 +2529,9 @@ impl ChatQuery {
         maybe_page,
       } => ChatAnswer::Canvas {
         state: backend.canvas(conversation, maybe_page.as_ref()),
+      },
+      Self::PageMentions => ChatAnswer::PageMentions {
+        mentions: backend.page_mentions(),
       },
       Self::CanvasPeers {
         conversation,

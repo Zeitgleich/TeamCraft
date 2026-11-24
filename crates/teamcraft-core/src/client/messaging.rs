@@ -87,20 +87,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Sends an edit of a channel's shared notes page (e2ee.md §4.11): a Yjs update of the first page
-  /// (`None`) or a further one, kept in this device's page at once. For headless clients (the
-  /// end-to-end harness); the apps go through the UI backend's `edit_canvas`, which also checks
-  /// the right to post.
+  /// (`None`) or a further one, kept in this device's page at once, notifying `mentions` (issue
+  /// #2361). For headless clients (the end-to-end harness); the apps go through the UI backend's
+  /// `edit_canvas`, which also checks the right to post and whom a mention may name.
   pub async fn send_canvas_update(
     &mut self,
     conversation: ConversationId,
     maybe_page: Option<CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    mentions: Vec<UserId>,
   ) -> Result<ClientMessageId, CoreError> {
     let content = MessageContent::Canvas {
       update: Base64Bytes::new(update),
       is_snapshot,
       maybe_page,
+      mentions,
     };
     let id = self.enqueue(conversation, None, content.clone())?;
     apply_control(
@@ -1083,6 +1085,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       maybe_thread_id: entry.maybe_thread_id,
       mentioned_user_ids: match &stored.content {
         MessageContent::Text { mentions, .. } => self.mentions_still_here(entry.conversation_id, mentions),
+        // A page edit notifies whom it mentioned (issue #2361); a snapshot repeats the whole page
+        // and notifies nobody.
+        MessageContent::Canvas {
+          mentions,
+          is_snapshot: false,
+          ..
+        } => self.mentions_still_here(entry.conversation_id, mentions),
         _ => Vec::new(),
       },
       // The one piece of metadata the server sees: it routes urgent pushes past do-not-disturb.
@@ -1352,6 +1361,7 @@ fn apply_control_with(
     update,
     is_snapshot,
     maybe_page,
+    mentions,
   } = content
   {
     // Decrypted in the conversation's group, so `sender` is a member of it; the server let it post.
@@ -1361,7 +1371,12 @@ fn apply_control_with(
       return Ok(());
     }
     let page = crate::canvas::PageKey::new(conversation, maybe_page.as_ref());
-    return crate::canvas::take_update(store, &page, update, *is_snapshot, sender, at_ms);
+    crate::canvas::take_update(store, &page, update, *is_snapshot, sender, at_ms)?;
+    // A mention notifies once the server numbered the edit, never from a snapshot (issue #2361).
+    if let (Some(message), false, false) = (maybe_server_id, *is_snapshot, mentions.is_empty()) {
+      crate::canvas::note_mention(store, &page, sender, mentions, message, at_ms)?;
+    }
+    return Ok(());
   }
   if let MessageContent::IntegrationSource { change } = content {
     // Decrypted in the conversation's group, so `sender` is a member of it; who may do what is

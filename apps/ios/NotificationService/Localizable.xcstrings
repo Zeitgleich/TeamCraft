@@ -353,6 +353,22 @@
         }
       }
     },
+    "notification_mentioned_in_notes": {
+      "localizations": {
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Hat dich in den Notizen erwähnt"
+          }
+        },
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mentioned you in the notes"
+          }
+        }
+      }
+    },
     "notification_meeting_handover_unnamed": {
       "localizations": {
         "en": {

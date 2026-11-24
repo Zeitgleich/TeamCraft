@@ -26,6 +26,7 @@
 //! the focus) or with Ctrl or Cmd+Shift+Up and Down ([`canvas_move`]); a file of the channel shows
 //! in a block of its own ([`canvas_file`]).
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use leptos::html;
@@ -42,6 +43,7 @@ use teamcraft_client_api::model::OlderHistory;
 use teamcraft_proto::{CanvasCaret, CanvasPageId};
 use wasm_bindgen::JsCast;
 
+use crate::components::avatar::{Avatar, AvatarSize};
 use crate::components::canvas_editor::{self, Caret};
 use crate::components::canvas_file::{CanvasFile, CanvasFilePicker};
 use crate::components::canvas_move::{self, MoveTarget};
@@ -55,7 +57,7 @@ use crate::components::composer_toolbar::FormatAction;
 use crate::components::empty_state::EmptyState;
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
-use crate::model::{ConversationId, UserId};
+use crate::model::{ConversationId, User, UserId};
 use crate::state::{AppState, use_app_state};
 
 /// How long typing pauses before the edits go out.
@@ -74,6 +76,8 @@ const MAX_HISTORY_PAGES: u32 = 20;
 const EDITING_CHECK_MS: u64 = 20_000;
 /// The element IDs of the blocks' text fields.
 const BLOCK_ID_PREFIX: &str = "canvas-block-";
+/// People the mention picker lists at most.
+const MAX_MENTION_CANDIDATES: usize = 8;
 /// How far the pointer moves on a block's handle before the block follows it, in CSS pixels: a
 /// press that stays put is no drag.
 const DRAG_THRESHOLD_PX: f64 = 4.0;
@@ -85,6 +89,16 @@ struct Editor {
   unsent: Vec<Vec<u8>>,
   /// When the first of them was made (`Date.now()`).
   maybe_unsent_since: Option<f64>,
+  /// Members mentioned with the picker since the last edit went out (issue #2361): those still on
+  /// the page are notified with it. A mention undone, redone or restored is never in here.
+  picked_mentions: BTreeSet<UserId>,
+}
+
+/// What goes to the core: an update, whether it is the whole page, and whom it notifies.
+struct Outgoing {
+  update: Vec<u8>,
+  is_snapshot: bool,
+  mentions: Vec<UserId>,
 }
 
 impl Editor {
@@ -93,6 +107,7 @@ impl Editor {
       page: CanvasDoc::for_page(maybe_page),
       unsent: Vec::new(),
       maybe_unsent_since: None,
+      picked_mentions: BTreeSet::new(),
     }
   }
 
@@ -107,24 +122,43 @@ impl Editor {
   }
 
   /// What goes to the core: the edits since the last time merged, or the whole page when a
-  /// snapshot is due and this device holds the history it needs.
-  fn outgoing(&mut self, stored: &CanvasState, holds_history: bool) -> Option<(Vec<u8>, bool)> {
+  /// snapshot is due and this device holds the history it needs. An edit that mentions somebody is
+  /// never a snapshot, which would notify nobody: the snapshot waits for the next edit.
+  fn outgoing(&mut self, stored: &CanvasState, holds_history: bool) -> Option<Outgoing> {
     if self.unsent.is_empty() {
       return None;
     }
     let unsent = std::mem::take(&mut self.unsent);
     self.maybe_unsent_since = None;
-    if holds_history && stored.updates_since_snapshot.saturating_add(1) >= SNAPSHOT_EVERY {
+    let picked = std::mem::take(&mut self.picked_mentions);
+    let mentions: Vec<UserId> = if picked.is_empty() {
+      Vec::new()
+    } else {
+      picked
+        .intersection(&self.page.mentioned_users())
+        .copied()
+        .collect()
+    };
+    let is_due = stored.updates_since_snapshot.saturating_add(1) >= SNAPSHOT_EVERY;
+    if holds_history && is_due && mentions.is_empty() {
       let mut all: Vec<&[u8]> = stored.updates.iter().map(AsRef::as_ref).collect();
       all.extend(unsent.iter().map(Vec::as_slice));
       if let Ok(Some(whole)) = teamcraft_client_api::canvas::snapshot(&all)
         && whole.len() <= MAX_SNAPSHOT_BYTES
       {
-        return Some((whole, true));
+        return Some(Outgoing {
+          update: whole,
+          is_snapshot: true,
+          mentions,
+        });
       }
     }
     match merge_updates(&unsent) {
-      Ok(merged) => Some((merged, false)),
+      Ok(merged) => Some(Outgoing {
+        update: merged,
+        is_snapshot: false,
+        mentions,
+      }),
       Err(error) => {
         tracing::warn!(%error, "own page edits could not be merged");
         None
@@ -166,6 +200,21 @@ struct Canvas {
   drop_line: Memo<Option<DropLine>>,
   /// The other members' devices with this page open, with their carets ([`canvas_peers`]).
   peers: Memo<Vec<CanvasPeer>>,
+  me: UserId,
+  /// The people picker of an `@` being typed (issue #2361).
+  mention_pick: RwSignal<Option<MentionPick>>,
+}
+
+/// The people picker under a block while `@name` is typed in it: the channel's members whose name
+/// fits, the current one picked with the arrow keys.
+#[derive(Clone, Debug, PartialEq)]
+struct MentionPick {
+  block: String,
+  /// Where the `@` and the caret are, in UTF-16 units.
+  start: u32,
+  end: u32,
+  people: Vec<User>,
+  current: usize,
 }
 
 /// The block a drop line is drawn at.
@@ -233,13 +282,27 @@ pub fn CanvasView(conversation: ConversationId) -> impl IntoView {
   let info = Memo::new(move |_| state.read(|backend| backend.conversation(conversation)));
   let may_post = Memo::new(move |_| info.get().is_some_and(|conv| conv.can_post && !conv.is_archived));
   let selected = RwSignal::new(None::<CanvasPageId>);
+  // Opened from a mention (issue #2361): that page, scrolled to the mention.
+  let seeks_mention = RwSignal::new(false);
+  Effect::new(move |_| {
+    let Some(request) = state.notes_request.with(|request| {
+      request
+        .clone()
+        .filter(|request| request.conversation == conversation)
+    }) else {
+      return;
+    };
+    state.notes_request.set(None);
+    selected.set(request.maybe_page);
+    seeks_mention.set(true);
+  });
   view! {
     <div class="canvas-view">
       <CanvasPages conversation=conversation selected=selected can_edit=may_post />
       // A page of its own per pick: its edits go out when it is left.
       {move || {
         let page = selected.get();
-        view! { <PageEditor conversation=conversation maybe_page=page may_post=may_post /> }
+        view! { <PageEditor conversation=conversation maybe_page=page may_post=may_post seeks_mention=seeks_mention /> }
       }}
     </div>
   }
@@ -251,6 +314,8 @@ fn PageEditor(
   conversation: ConversationId,
   maybe_page: Option<CanvasPageId>,
   may_post: Memo<bool>,
+  /// Opened from a mention: scrolls to the user's first mention on the page once it shows.
+  seeks_mention: RwSignal<bool>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -301,6 +366,8 @@ fn PageEditor(
     drag,
     drop_line: Memo::new(move |_| drop_line_of(drag, blocks)),
     peers,
+    me: untrack(|| state.me().id),
+    mention_pick: RwSignal::new(None),
   };
 
   // Every change of the core's list: merged in, the caret kept, a long list compacted.
@@ -314,6 +381,10 @@ fn PageEditor(
       canvas.blocks.set(next);
     }
     canvas.compact_if_long(&stored);
+    // The page may still be loading older edits: looked for again with each change until found.
+    if seeks_mention.get_untracked() && canvas.scroll_to_own_mention() {
+      seeks_mention.set(false);
+    }
   });
 
   // The edits from before this device are in the channel's older history: read it while the
@@ -583,6 +654,9 @@ fn preview_run(text: String, maybe_style: Option<TextStyle>) -> AnyView {
   if style.is_bold {
     content = view! { <strong>{content}</strong> }.into_any();
   }
+  if style.maybe_mention.is_some() {
+    content = view! { <span class="mention">{content}</span> }.into_any();
+  }
   match style.maybe_link {
     Some(url) => view! {
       <a href=url.clone() title=url target="_blank" rel="noopener noreferrer" class="md-link">
@@ -728,7 +802,13 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
       return;
     };
     let is_editable = canvas.can_edit.get();
-    canvas_editor::show_block(&element, &block, is_editable, canvas.is_composing.get_value());
+    canvas_editor::show_block(
+      &element,
+      &block,
+      is_editable,
+      canvas.is_composing.get_value(),
+      canvas.me,
+    );
   });
   let with_field = move |action: &dyn Fn(&web_sys::HtmlElement)| {
     if let Some(element) = field.get_untracked() {
@@ -778,6 +858,8 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
   let file_id = id.clone();
   let text_id = id.clone();
   let caret_id = id.clone();
+  let pick_id = id.clone();
+  let active_id = id.clone();
   let block_text = Signal::derive(move || {
     row.with(|row| {
       row
@@ -856,12 +938,22 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
         aria-multiline="true"
         aria-label=move || i18n.t(kind_label(kind()))
         aria-readonly=move || read_only().then_some("true")
+        aria-activedescendant=move || canvas.mention_pick.with(|pick| {
+          pick
+            .as_ref()
+            .filter(|pick| pick.block == active_id)
+            .map(|pick| format!("{}-mentions-{}", block_element_id(&pick.block), pick.current))
+        })
         contenteditable=move || (!read_only()).to_string()
         spellcheck=move || (!kind().is_code()).to_string()
         on:input=move |_| {
           if let Some(element) = field.get_untracked() {
             canvas.on_input(&input_id, &element);
+            canvas.refresh_mention_pick(&input_id, &element);
           }
+        }
+        on:blur=move |_| {
+          let _ = canvas.mention_pick.try_set(None);
         }
         on:beforeinput=move |ev: web_sys::InputEvent| {
           if let Some(element) = field.get_untracked() {
@@ -874,7 +966,10 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
           }
         }
         on:keyup=move |_| select(&select_key)
-        on:mouseup=move |_| select(&select_up)
+        on:mouseup=move |_| {
+          canvas.mention_pick.set(None);
+          select(&select_up);
+        }
         on:focus=move |_| select(&select_focus)
         on:paste=move |ev: web_sys::ClipboardEvent| {
           ev.prevent_default();
@@ -890,13 +985,60 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
           if let Some(element) = field.get_untracked() {
             canvas.on_input(&compose_id, &element);
             if let Some((block, _)) = row.get_untracked() {
-              canvas_editor::show_block(&element, &block, true, false);
+              canvas_editor::show_block(&element, &block, true, false, canvas.me);
             }
           }
         }
       ></div>
       <PeerCarets state=canvas.state peers=canvas.peers block=caret_id field=field text=block_text />
+      <MentionPicker canvas=canvas block=pick_id />
     </div>
+  }
+}
+
+/// The channel's members to mention, under the block an `@` is typed in (issue #2361). The block
+/// keeps the focus and points at the current one (`aria-activedescendant`), as in the composer.
+#[component]
+fn MentionPicker(canvas: Canvas, block: String) -> impl IntoView {
+  let i18n = use_i18n();
+  let list_id = format!("{}-mentions", block_element_id(&block));
+  let shown = Memo::new(move |_| {
+    canvas
+      .mention_pick
+      .with(|pick| pick.as_ref().filter(|pick| pick.block == block).cloned())
+  });
+  move || {
+    let pick = shown.get()?;
+    let list_id = list_id.clone();
+    Some(view! {
+      <ul class="suggestions canvas-mentions" role="listbox" id=list_id.clone() aria-label=move || i18n.t("canvas-mention-picker")>
+        {pick
+          .people
+          .into_iter()
+          .enumerate()
+          .map(|(index, user)| {
+            let is_current = index == pick.current;
+            view! {
+              <li
+                role="option"
+                id=format!("{list_id}-{index}")
+                aria-selected=is_current.to_string()
+                on:mousedown=move |ev| {
+                  ev.prevent_default();
+                  canvas.accept_mention(index);
+                }
+              >
+                <div class="suggestion" class:current=is_current>
+                  <Avatar user=user.clone() size=AvatarSize::Small />
+                  <span translate="no">{user.display_name.clone()}</span>
+                  <span class="suggestion-detail" translate="no">{format!("@{}", user.username)}</span>
+                </div>
+              </li>
+            }
+          })
+          .collect_view()}
+      </ul>
+    })
   }
 }
 
@@ -1295,6 +1437,10 @@ impl Canvas {
     if ev.is_composing() || !self.can_edit.get_untracked() {
       return;
     }
+    if self.on_mention_pick_key(ev) {
+      ev.prevent_default();
+      return;
+    }
     if let Some(action) = canvas_action_for(ev) {
       ev.prevent_default();
       self.run_action(action);
@@ -1315,10 +1461,173 @@ impl Canvas {
           ev.prevent_default();
         }
       },
+      // A mention goes as a whole (issue #2361).
+      "Backspace" if start == end && self.remove_mention_before(id, start) => ev.prevent_default(),
       "ArrowUp" if start == 0 && end == 0 => self.focus_neighbour(id, -1),
       "ArrowDown" if start == length && end == length => self.focus_neighbour(id, 1),
       _ => {},
     }
+  }
+
+  /// Opens, narrows or closes the people picker after typing: `@` and a name's start at the caret,
+  /// outside code. The channel's members other than the user, by how well their name fits.
+  fn refresh_mention_pick(self, id: &str, element: &web_sys::HtmlElement) {
+    let found = canvas_editor::selection_in(element)
+      .filter(|caret| caret.start == caret.end && self.kind_of(id).is_some_and(|kind| !kind.is_code()))
+      .and_then(|caret| {
+        let text = canvas_editor::text_of(element);
+        crate::mention::trigger(&text, caret.end as usize)
+          .filter(|found| found.kind == crate::mention::TriggerKind::Mention)
+          .map(|found| (found, caret.end))
+      });
+    let Some((found, end)) = found else {
+      if self.mention_pick.with_untracked(Option::is_some) {
+        self.mention_pick.set(None);
+      }
+      return;
+    };
+    let people = self.state.read(|backend| {
+      let members = backend
+        .conversation(self.conversation)
+        .map(|conversation| conversation.member_ids)
+        .unwrap_or_default();
+      let candidates: Vec<User> = members
+        .into_iter()
+        .filter(|member| *member != self.me)
+        .filter_map(|member| backend.user(member))
+        .filter(|user| !user.is_bot)
+        .collect();
+      mention_candidates(&found.query, candidates)
+    });
+    if people.is_empty() {
+      self.mention_pick.set(None);
+      return;
+    }
+    let block = id.to_owned();
+    let start = u32::try_from(found.start).unwrap_or(u32::MAX);
+    let current = self.mention_pick.with_untracked(|pick| match pick {
+      Some(pick) if pick.block == block && pick.start == start => pick.current.min(people.len() - 1),
+      _ => 0,
+    });
+    self.mention_pick.set(Some(MentionPick {
+      block,
+      start,
+      end,
+      people,
+      current,
+    }));
+  }
+
+  /// The arrow keys, Enter, Tab and Escape while the picker is open; whether it took the key.
+  fn on_mention_pick_key(self, ev: &web_sys::KeyboardEvent) -> bool {
+    let Some(listed) = self
+      .mention_pick
+      .with_untracked(|pick| pick.as_ref().map(|pick| pick.people.len()))
+    else {
+      return false;
+    };
+    let step = |delta: usize| {
+      self.mention_pick.update(|pick| {
+        if let Some(pick) = pick {
+          pick.current = (pick.current + delta) % listed;
+        }
+      });
+    };
+    match ev.key().as_str() {
+      "ArrowDown" => step(1),
+      "ArrowUp" => step(listed - 1),
+      "Enter" | "Tab" => {
+        let current = self
+          .mention_pick
+          .with_untracked(|pick| pick.as_ref().map_or(0, |pick| pick.current));
+        self.accept_mention(current);
+      },
+      "Escape" => self.mention_pick.set(None),
+      // The caret leaves the name: the picker goes, the key does what it does.
+      "ArrowLeft" | "ArrowRight" | "Home" | "End" => {
+        self.mention_pick.set(None);
+        return false;
+      },
+      _ => return false,
+    }
+    true
+  }
+
+  /// Puts the picked person in place of `@name`, as a mention that notifies them with the next
+  /// edit, and the caret after it.
+  fn accept_mention(self, index: usize) {
+    let Some(pick) = self.mention_pick.get_untracked() else {
+      return;
+    };
+    self.mention_pick.set(None);
+    let Some(user) = pick.people.get(index).cloned() else {
+      return;
+    };
+    let label_units = utf16_len(&format!(
+      "@{}",
+      user.display_name.split_whitespace().collect::<Vec<_>>().join(" ")
+    ));
+    let _ = self
+      .editor
+      .try_update_value(|editor| editor.picked_mentions.insert(user.id));
+    self.edit(|page| {
+      page
+        .insert_mention(&pick.block, pick.start, pick.end, user.id, &user.display_name)
+        .into_iter()
+        .collect()
+    });
+    let after = pick.start + label_units + 1;
+    focus_block_later(
+      pick.block,
+      Caret {
+        start: after,
+        end: after,
+      },
+    );
+  }
+
+  /// Backspace right after (or inside) a mention takes all of it; whether there was one.
+  fn remove_mention_before(self, id: &str, caret: u32) -> bool {
+    let Some((start, end)) = self.blocks.with_untracked(|blocks| {
+      blocks
+        .iter()
+        .find(|block| block.id == id)
+        .and_then(|block| block.mention_before(caret))
+    }) else {
+      return false;
+    };
+    self.edit(|page| page.remove_text(id, start, end).into_iter().collect());
+    focus_block_later(id.to_owned(), Caret { start, end: start });
+    true
+  }
+
+  /// Scrolls the first block that mentions the user into the middle of the view; whether there was
+  /// one.
+  fn scroll_to_own_mention(self) -> bool {
+    let me = self.me;
+    let Some(id) = self.blocks.with_untracked(|blocks| {
+      blocks
+        .iter()
+        .find(|block| block.mentions().any(|user| user == me))
+        .map(|block| block.id.clone())
+    }) else {
+      return false;
+    };
+    request_animation_frame(move || {
+      let Some(element) = web_sys::window()
+        .and_then(|window| window.document())
+        .and_then(|document| document.get_element_by_id(&block_element_id(&id)))
+      else {
+        return;
+      };
+      let options = web_sys::ScrollIntoViewOptions::new();
+      options.set_block(web_sys::ScrollLogicalPosition::Center);
+      if !crate::motion::prefers_reduced_motion() {
+        options.set_behavior(web_sys::ScrollBehavior::Smooth);
+      }
+      element.scroll_into_view_with_scroll_into_view_options(&options);
+    });
+    true
   }
 
   /// Enter, or Shift+Enter for a line break in the block. In a code block Enter is a line break too;
@@ -1599,7 +1908,11 @@ impl Canvas {
     // Gone with the view: the edits still go out, as they are.
     let stored = self.stored.try_get_untracked().unwrap_or_default();
     let holds_history = self.older.try_get_untracked() == Some(OlderHistory::Complete);
-    let Some(Some((update, is_snapshot))) = self
+    let Some(Some(Outgoing {
+      update,
+      is_snapshot,
+      mentions,
+    })) = self
       .editor
       .try_update_value(|editor| editor.outgoing(&stored, holds_history))
     else {
@@ -1609,14 +1922,20 @@ impl Canvas {
     let Some(page) = self.page.try_get_value() else {
       return;
     };
-    let sent = self
-      .state
-      .try_write(|backend| backend.edit_canvas(conversation, page.as_ref(), update.clone(), is_snapshot));
+    let sent = self.state.try_write(|backend| {
+      backend.edit_canvas(
+        conversation,
+        page.as_ref(),
+        update.clone(),
+        is_snapshot,
+        mentions.clone(),
+      )
+    });
     if sent.is_none() {
       // The app is going away: the backend may still take it.
       let _ = self
         .state
-        .try_read(|backend| backend.edit_canvas(conversation, page.as_ref(), update, is_snapshot));
+        .try_read(|backend| backend.edit_canvas(conversation, page.as_ref(), update, is_snapshot, mentions));
     }
   }
 
@@ -1932,6 +2251,32 @@ fn focus_block(id: &str, caret: Caret) -> bool {
   true
 }
 
+/// The people whose display name or username starts with `query`, then those containing it, each
+/// by name; at most [`MAX_MENTION_CANDIDATES`].
+fn mention_candidates(query: &str, people: Vec<User>) -> Vec<User> {
+  let needle = query.to_lowercase();
+  let mut ranked: Vec<(u8, User)> = people
+    .into_iter()
+    .filter_map(|user| {
+      let names = [user.display_name.to_lowercase(), user.username.to_lowercase()];
+      let rank = if names.iter().any(|name| name.starts_with(&needle)) {
+        0
+      } else if names.iter().any(|name| name.contains(&needle)) {
+        1
+      } else {
+        return None;
+      };
+      Some((rank, user))
+    })
+    .collect();
+  ranked.sort_by_key(|(rank, user)| (*rank, user.display_name.to_lowercase()));
+  ranked
+    .into_iter()
+    .take(MAX_MENTION_CANDIDATES)
+    .map(|(_, user)| user)
+    .collect()
+}
+
 fn utf16_len(text: &str) -> u32 {
   u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
 }
@@ -2035,7 +2380,11 @@ mod tests {
     let second = editor.page.set_text(&id, "ab").unwrap();
     editor.unsent = vec![first, second];
     let stored = CanvasState::default();
-    let (merged, is_snapshot) = editor.outgoing(&stored, true).unwrap();
+    let Outgoing {
+      update: merged,
+      is_snapshot,
+      ..
+    } = editor.outgoing(&stored, true).unwrap();
     assert!(!is_snapshot);
     assert!(editor.unsent.is_empty());
     let page = CanvasDoc::from_updates(std::slice::from_ref(&merged)).unwrap();
@@ -2050,13 +2399,47 @@ mod tests {
       updates_since_snapshot: SNAPSHOT_EVERY,
       ..CanvasState::default()
     };
-    let (whole, is_snapshot) = editor.outgoing(&due, true).unwrap();
-    assert!(is_snapshot);
-    assert_eq!(CanvasDoc::from_updates(&[whole]).unwrap().blocks()[0].text, "abc");
+    let whole = editor.outgoing(&due, true).unwrap();
+    assert!(whole.is_snapshot);
+    assert_eq!(
+      CanvasDoc::from_updates(&[whole.update]).unwrap().blocks()[0].text,
+      "abc"
+    );
 
     // Without the history it needs, a device sends no snapshot.
     let fourth = editor.page.set_text(&id, "abcd").unwrap();
     editor.unsent = vec![fourth];
-    assert!(!editor.outgoing(&due, false).unwrap().1);
+    assert!(!editor.outgoing(&due, false).unwrap().is_snapshot);
+  }
+
+  #[test]
+  fn a_mention_goes_out_once_with_its_edit_never_as_a_snapshot() {
+    let user = |raw: u64| teamcraft_client_api::model::id_from_raw::<UserId>(raw);
+    let mut editor = Editor::new(None);
+    let (id, first) = editor.page.insert_block(None, BlockKind::Paragraph, "@a @b");
+    let anna = editor.page.insert_mention(&id, 0, 2, user(7), "Anna").unwrap();
+    let text = editor.page.blocks()[0].text.clone();
+    let at = utf16_len(&text) - 2;
+    let ben = editor
+      .page
+      .insert_mention(&id, at, at + 2, user(8), "Ben")
+      .unwrap();
+    editor.picked_mentions.extend([user(7), user(8)]);
+    // Ben's mention is gone again before the edit goes out: only Anna is told.
+    let (start, end) = editor.page.blocks()[0]
+      .mention_before(utf16_len(&editor.page.blocks()[0].text) - 1)
+      .unwrap();
+    let gone = editor.page.remove_text(&id, start, end).unwrap();
+    editor.unsent = vec![first, anna, ben, gone];
+    let due = CanvasState {
+      updates_since_snapshot: SNAPSHOT_EVERY,
+      ..CanvasState::default()
+    };
+    let out = editor.outgoing(&due, true).unwrap();
+    assert!(!out.is_snapshot, "the snapshot waits");
+    assert_eq!(out.mentions, vec![user(7)]);
+    // The next edit names nobody, though Anna is still on the page.
+    editor.unsent = vec![editor.page.set_text(&id, "x").unwrap()];
+    assert!(editor.outgoing(&due, true).unwrap().mentions.is_empty());
   }
 }

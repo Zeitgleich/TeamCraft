@@ -44,12 +44,22 @@ enum ChannelNotes {
   }
 
   /// A block's text with its formatting. Links are web addresses only (the core's rule), checked
-  /// once more by the shared rule before they become tappable.
-  static func attributed(_ runs: [CanvasRunItem]) -> AttributedString {
+  /// once more by the shared rule before they become tappable. A mention (#2361) is bold in the
+  /// accent colour, one of `maybeMeId` highlighted as in messages.
+  static func attributed(_ runs: [CanvasRunItem], maybeMeId: String? = nil) -> AttributedString {
     var whole = AttributedString()
     for run in runs {
       var piece = AttributedString(run.text)
       var intent: InlinePresentationIntent = []
+      if let mentioned = run.maybeMention {
+        intent.insert(.stronglyEmphasized)
+        if mentioned == maybeMeId {
+          piece.foregroundColor = Theme.mentionText
+          piece.backgroundColor = Theme.mentionBackground
+        } else {
+          piece.foregroundColor = Theme.accent
+        }
+      }
       if run.isBold { intent.insert(.stronglyEmphasized) }
       if run.isItalic { intent.insert(.emphasized) }
       if run.isStrike { intent.insert(.strikethrough) }
@@ -61,6 +71,11 @@ enum ChannelNotes {
       whole += piece
     }
     return whole
+  }
+
+  /// Where the first block that mentions `userId` is on the page, if one does (#2361).
+  static func firstMention(of userId: String, in page: CanvasPageItem) -> String? {
+    page.blocks.first { block in block.runs.contains { $0.maybeMention == userId } }?.id
   }
 
   /// The block's text without formatting (a code block, a file's name).

@@ -12,7 +12,7 @@
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{PushKind, PushWakeUp};
 
-use crate::push_preview::{AttachmentKind, PreviewContent, PushPreview};
+use crate::push_preview::{AttachmentKind, PreviewContent, PreviewGap, PushPreview};
 
 /// The product name: the title when nothing names the conversation or the sender. Not translated.
 pub const FALLBACK_TITLE: &str = "TeamCraft";
@@ -99,6 +99,20 @@ pub struct NotificationLabels {
     skip_serializing_if = "Option::is_none"
   )]
   pub maybe_meeting_handover_unnamed: Option<String>,
+  /// "{name} mentioned you in the notes", an edit of a channel's notes (issue #2361).
+  #[serde(
+    rename = "mentioned_in_notes",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_mentioned_in_notes: Option<String>,
+  /// "You were mentioned in the notes", when the sender may not show or isn't known.
+  #[serde(
+    rename = "mentioned_in_notes_unnamed",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_mentioned_in_notes_unnamed: Option<String>,
 }
 
 /// Title and body of one notification.
@@ -235,6 +249,9 @@ fn message_text(
   maybe_sender: Option<&str>,
   maybe_conversation: Option<&str>,
 ) -> NotificationText {
+  if preview.maybe_gap == Some(PreviewGap::MentionedInNotes) {
+    return mention_in_notes_text(labels, maybe_sender, maybe_conversation);
+  }
   let sender_name = maybe_sender.or(maybe_conversation).unwrap_or(FALLBACK_TITLE);
   let text = match &preview.content {
     PreviewContent::Text(text) if non_blank(Some(text)).is_some() => text.clone(),
@@ -259,6 +276,28 @@ fn message_text(
     None => NotificationText {
       title: sender_name.to_owned(),
       body: text,
+    },
+  }
+}
+
+/// An edit of the notes that mentions the user (issue #2361): titled by the channel, saying who.
+fn mention_in_notes_text(
+  labels: &NotificationLabels,
+  maybe_sender: Option<&str>,
+  maybe_conversation: Option<&str>,
+) -> NotificationText {
+  NotificationText {
+    title: maybe_conversation.unwrap_or(FALLBACK_TITLE).to_owned(),
+    body: match maybe_sender {
+      Some(sender) => with_name(
+        &labels.maybe_mentioned_in_notes,
+        "{name} mentioned you in the notes",
+        sender,
+      ),
+      None => label(
+        &labels.maybe_mentioned_in_notes_unnamed,
+        "You were mentioned in the notes",
+      ),
     },
   }
 }
@@ -441,6 +480,29 @@ mod tests {
     assert_eq!(notification_text(&of(false), &labels).title, "Hotline");
   }
 
+  #[test]
+  fn a_mention_in_the_notes_says_who_and_where() {
+    let mention = |maybe_sender: Option<&str>, maybe_conversation: Option<&str>| PushPreview {
+      maybe_gap: Some(PreviewGap::MentionedInNotes),
+      ..preview(
+        false,
+        maybe_sender,
+        maybe_conversation,
+        PreviewContent::Unavailable,
+      )
+    };
+    let mut labels = german();
+    labels.maybe_mentioned_in_notes = Some("{name} hat dich in den Notizen erwähnt".into());
+    assert_eq!(
+      notification_text(&mention(Some("Alex"), Some("Design")), &labels),
+      expected("Design", "Alex hat dich in den Notizen erwähnt")
+    );
+    assert_eq!(
+      notification_text(&mention(None, None), &NotificationLabels::default()),
+      expected(FALLBACK_TITLE, "You were mentioned in the notes")
+    );
+  }
+
   fn german() -> NotificationLabels {
     NotificationLabels {
       maybe_source_sender: Some("Bot · {name}".into()),
@@ -507,6 +569,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: true,
       maybe_gap: None,
+      maybe_notes: None,
     }
   }
 }

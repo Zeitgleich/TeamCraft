@@ -54,7 +54,7 @@ pub use history::{
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_proto::{Base64Bytes, CanvasPageId, MAX_LISTED_CANVAS_PAGES, MessageId};
+use teamcraft_proto::{Base64Bytes, CanvasPageId, MAX_LISTED_CANVAS_PAGES, MessageId, UserId};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
 use yrs::undo::{Options as UndoOptions, UndoManager};
@@ -89,6 +89,9 @@ pub const MAX_PAGE_TITLE_CHARS: usize = 100;
 const MAX_FILE_ID_LEN: usize = 20;
 /// The inline formatting attribute of a link; the marks' are in [`InlineMark::attribute`].
 const LINK: &str = "link";
+/// The inline attribute of a mention (issue #2361): the mentioned user's ID in decimal, on the
+/// text `@Name` (e2ee.md §4.11).
+const MENTION: &str = "mention";
 /// The origin of updates applied from outside: what undo leaves alone.
 const REMOTE_ORIGIN: &str = "remote";
 /// The key the undo log's watch on the document is registered under.
@@ -303,6 +306,25 @@ impl Block {
       .and_then(|style| style.maybe_link.as_deref())
   }
 
+  /// The mention that ends right before a caret at `caret` (UTF-16 units), as its range: what
+  /// Backspace takes away whole.
+  pub fn mention_before(&self, caret: u32) -> Option<(u32, u32)> {
+    let at = byte_offset(&self.text, caret);
+    let span = self
+      .spans
+      .iter()
+      .find(|span| span.style.maybe_mention.is_some() && span.start < at && at <= span.end)?;
+    Some((
+      units(self.text[..span.start].encode_utf16().count()),
+      units(self.text[..span.end].encode_utf16().count()),
+    ))
+  }
+
+  /// The users this block mentions.
+  pub fn mentions(&self) -> impl Iterator<Item = UserId> + '_ {
+    self.spans.iter().filter_map(|span| span.style.maybe_mention)
+  }
+
   fn style_at(&self, at: usize) -> Option<&TextStyle> {
     style_at(&self.spans, at)
   }
@@ -346,6 +368,9 @@ pub struct TextStyle {
   pub is_strike: bool,
   pub is_code: bool,
   pub maybe_link: Option<String>,
+  /// The user this stretch mentions (issue #2361): a chip on the page. A version that doesn't know
+  /// the attribute shows the text `@Name` plainly.
+  pub maybe_mention: Option<UserId>,
 }
 
 impl TextStyle {
@@ -374,6 +399,10 @@ impl TextStyle {
       is_code: is_on(InlineMark::Code),
       maybe_link: match attributes.get(LINK) {
         Some(Any::String(url)) if is_page_link(url) => Some(url.to_string()),
+        _ => None,
+      },
+      maybe_mention: match attributes.get(MENTION) {
+        Some(Any::String(id)) => id.parse().ok(),
         _ => None,
       },
     }
@@ -685,6 +714,59 @@ impl CanvasDoc {
     let map = find_page(&txn, &self.pages, id)?;
     map.insert(&mut txn, DELETED, true);
     Some(txn.encode_update_v1())
+  }
+
+  /// Replaces `start..end` (UTF-16 units, the `@` and what was typed after it) of a block with a
+  /// mention of `user` (issue #2361): the text `@name` carrying the user's ID, then a plain space,
+  /// so typing goes on outside the mention.
+  pub fn insert_mention(
+    &mut self,
+    id: &str,
+    start: u32,
+    end: u32,
+    user: UserId,
+    name: &str,
+  ) -> Option<Vec<u8>> {
+    let label = format!("@{}", name.split_whitespace().collect::<Vec<_>>().join(" "));
+    let mut txn = self.doc.transact_mut();
+    let (_, map) = find(&txn, &self.blocks, id)?;
+    let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+      return None;
+    };
+    let whole = text.get_string(&txn);
+    let (from, to) = (byte_offset(&whole, start), byte_offset(&whole, end));
+    if from > to {
+      return None;
+    }
+    if to > from {
+      text.remove_range(&mut txn, byte_index(from), byte_index(to - from));
+    }
+    let mention = Attrs::from([(Arc::from(MENTION), Any::from(user.to_string()))]);
+    text.insert_with_attributes(&mut txn, byte_index(from), &label, mention);
+    let plain = Attrs::from([(Arc::from(MENTION), Any::Null)]);
+    text.insert_with_attributes(&mut txn, byte_index(from + label.len()), " ", plain);
+    Some(txn.encode_update_v1())
+  }
+
+  /// Removes `start..end` (UTF-16 units) of a block's text: a whole mention on Backspace.
+  pub fn remove_text(&mut self, id: &str, start: u32, end: u32) -> Option<Vec<u8>> {
+    let mut txn = self.doc.transact_mut();
+    let (_, map) = find(&txn, &self.blocks, id)?;
+    let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+      return None;
+    };
+    let whole = text.get_string(&txn);
+    let (from, to) = (byte_offset(&whole, start), byte_offset(&whole, end));
+    if from >= to {
+      return None;
+    }
+    text.remove_range(&mut txn, byte_index(from), byte_index(to - from));
+    Some(txn.encode_update_v1())
+  }
+
+  /// The users the page mentions now.
+  pub fn mentioned_users(&self) -> std::collections::BTreeSet<UserId> {
+    self.blocks().iter().flat_map(Block::mentions).collect()
   }
 
   /// Replaces a block's text with `text`, as the change from the current one: the part both
@@ -1084,10 +1166,9 @@ fn replace(txn: &mut TransactionMut, text: &TextRef, edit: &TextEdit, new: &str)
 
 /// What new text replacing part of a formatted text gets: the formatting of what it replaces. `None`
 /// when nothing is replaced (typing takes the formatting around it) or the text has no formatting.
+/// A mention is never passed on (issue #2361): text typed over one, or right after one, is plain
+/// text with the rest of the formatting there.
 fn replaced_attributes(txn: &TransactionMut, text: &TextRef, edit: &TextEdit) -> Option<Attrs> {
-  if edit.removed == 0 {
-    return None;
-  }
   let mut offset = 0;
   let mut maybe_found = None;
   let mut has_formatting = false;
@@ -1096,12 +1177,28 @@ fn replaced_attributes(txn: &TransactionMut, text: &TextRef, edit: &TextEdit) ->
       continue;
     };
     has_formatting |= chunk.attributes.is_some();
-    if maybe_found.is_none() && offset + piece.len() > edit.start {
+    let end = offset + piece.len();
+    // Replacing: the formatting of the first character replaced. Typing: of the one before.
+    let is_here = if edit.removed == 0 {
+      offset < edit.start && edit.start <= end
+    } else {
+      end > edit.start
+    };
+    if maybe_found.is_none() && is_here {
       maybe_found = Some(chunk.attributes.map(|boxed| *boxed).unwrap_or_default());
     }
-    offset += piece.len();
+    offset = end;
   }
-  maybe_found.filter(|_| has_formatting)
+  let mut attributes = maybe_found.filter(|_| has_formatting)?;
+  let mention: Arc<str> = Arc::from(MENTION);
+  if edit.removed == 0 {
+    // Typing goes on in the formatting around it (Yjs), unless that is a mention.
+    attributes.get(&mention)?;
+  }
+  if attributes.contains_key(&mention) {
+    attributes.insert(mention, Any::Null);
+  }
+  Some(attributes)
 }
 
 /// Offsets count bytes (the document's default offset kind). A block's text never reaches 4 GiB:
@@ -1235,6 +1332,12 @@ fn attribute_changes(have: &TextStyle, want: &TextStyle) -> Attrs {
   if have.maybe_link != want.maybe_link {
     let value = want.maybe_link.as_deref().map_or(Any::Null, Any::from);
     attributes.insert(Arc::from(LINK), value);
+  }
+  if have.maybe_mention != want.maybe_mention {
+    let value = want
+      .maybe_mention
+      .map_or(Any::Null, |user| Any::from(user.to_string()));
+    attributes.insert(Arc::from(MENTION), value);
   }
   attributes
 }
@@ -1648,6 +1751,7 @@ mod tests {
     is_strike: false,
     is_code: false,
     maybe_link: None,
+    maybe_mention: None,
   };
 
   fn span(start: usize, end: usize, style: TextStyle) -> TextSpan {
@@ -1731,6 +1835,117 @@ mod tests {
       None,
       "an empty range"
     );
+  }
+
+  mod mentions {
+    use super::*;
+
+    fn user(raw: i64) -> UserId {
+      use teamcraft_proto::{Id, Snowflake};
+      UserId::from_snowflake(Snowflake::new(raw).unwrap())
+    }
+
+    #[test]
+    fn a_mention_replaces_the_query_carries_the_id_and_typing_goes_on_outside() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_block(None, BlockKind::Paragraph, "hi @an");
+      let update = page.insert_mention(&id, 3, 6, user(42), "Anna  Lee").unwrap();
+      let block = page.blocks().remove(0);
+      assert_eq!(block.text, "hi @Anna Lee ");
+      assert_eq!(block.spans.len(), 1);
+      assert_eq!(&block.text[block.spans[0].start..block.spans[0].end], "@Anna Lee");
+      assert_eq!(block.spans[0].style.maybe_mention, Some(user(42)));
+      page.set_text(&id, "hi @Anna Lee there").unwrap();
+      assert_eq!(
+        page.mentioned_users().into_iter().collect::<Vec<_>>(),
+        vec![user(42)]
+      );
+      let block = page.blocks().remove(0);
+      assert_eq!(&block.text[block.spans[0].start..block.spans[0].end], "@Anna Lee");
+      // Another member's page reads it the same.
+      let other = CanvasDoc::from_updates(&[page_update(&page), update]).unwrap();
+      assert_eq!(other.mentioned_users().len(), 1);
+    }
+
+    #[test]
+    fn backspace_after_a_mention_finds_all_of_it() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_block(None, BlockKind::Paragraph, "ü @a");
+      page.insert_mention(&id, 2, 4, user(7), "Ann").unwrap();
+      let block = page.blocks().remove(0);
+      assert_eq!(block.mention_before(6), Some((2, 6)), "right after it");
+      assert_eq!(block.mention_before(4), Some((2, 6)), "inside it");
+      assert_eq!(block.mention_before(7), None, "after the space");
+      assert_eq!(block.mention_before(2), None, "before it");
+      page.remove_text(&id, 2, 6).unwrap();
+      assert_eq!(page.blocks()[0].text, "ü  ");
+      assert!(page.mentioned_users().is_empty());
+    }
+
+    #[test]
+    fn a_mention_that_is_no_id_is_plain_text() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_block(None, BlockKind::Paragraph, "@all");
+      {
+        let mut txn = page.doc.transact_mut();
+        let (_, map) = find(&txn, &page.blocks, &id).unwrap();
+        let Some(Out::YText(text)) = map.get(&txn, TEXT) else {
+          panic!("a text");
+        };
+        text.format(
+          &mut txn,
+          0,
+          4,
+          Attrs::from([(Arc::from(MENTION), Any::from("everyone"))]),
+        );
+      }
+      assert!(page.mentioned_users().is_empty());
+      assert!(page.blocks()[0].spans.is_empty());
+    }
+
+    #[test]
+    fn text_typed_over_or_right_after_a_mention_is_no_mention() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_block(None, BlockKind::Paragraph, "@c");
+      page.insert_mention(&id, 0, 2, user(5), "Cy").unwrap();
+      page.toggle_mark(&id, 0, 3, InlineMark::Bold).unwrap();
+      // The space after it went: typing at the mention's end stays outside, still bold.
+      page.set_text(&id, "@Cy").unwrap();
+      page.set_text(&id, "@Cyx").unwrap();
+      let block = page.blocks().remove(0);
+      let tail = block
+        .spans
+        .iter()
+        .find(|span| &block.text[span.start..span.end] == "x")
+        .unwrap();
+      assert_eq!(tail.style.maybe_mention, None);
+      assert!(tail.style.is_bold);
+      // Replaced as a whole: the new text is plain.
+      page.set_text(&id, "gone").unwrap();
+      assert!(page.mentioned_users().is_empty());
+    }
+
+    #[test]
+    fn restoring_brings_a_mention_back() {
+      let mut page = CanvasDoc::new();
+      let (id, _) = page.insert_block(None, BlockKind::Paragraph, "@b");
+      page.insert_mention(&id, 0, 2, user(9), "Bo").unwrap();
+      let before = page.blocks();
+      page.set_text(&id, "gone").unwrap();
+      assert!(page.mentioned_users().is_empty());
+      page.restore(&before).unwrap();
+      assert_eq!(
+        page.mentioned_users().into_iter().collect::<Vec<_>>(),
+        vec![user(9)]
+      );
+    }
+
+    fn page_update(page: &CanvasDoc) -> Vec<u8> {
+      page
+        .doc
+        .transact()
+        .encode_state_as_update_v1(&StateVector::default())
+    }
   }
 
   #[test]

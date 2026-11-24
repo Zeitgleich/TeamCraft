@@ -203,6 +203,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: true,
       maybe_gap: None,
+      maybe_notes: None,
     }
   }
 

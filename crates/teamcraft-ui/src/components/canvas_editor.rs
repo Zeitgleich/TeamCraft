@@ -9,6 +9,7 @@
 //! from HTML.
 
 use teamcraft_client_api::canvas::{Block, TextStyle, shift_caret};
+use teamcraft_client_api::model::UserId;
 use wasm_bindgen::JsCast;
 use web_sys::{Document, Element, HtmlElement, Node};
 
@@ -20,6 +21,9 @@ const MAX_READ_DEPTH: usize = 128;
 /// every click on an anchor (`external_links`).
 const EDITABLE_LINK: &str = "canvas-link";
 const EDITABLE_LINK_ADDRESS: &str = "data-href";
+/// A mention (issue #2361): a chip naming the user by ID, in an editable block as in a read-only one.
+const MENTION_CLASS: &str = "canvas-mention";
+const MENTION_USER: &str = "data-user";
 
 /// A selection in a block, in UTF-16 units of its text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +37,8 @@ type Run = (String, TextStyle);
 
 /// Brings the element to the block; the selection stays with its text. While an input method is
 /// composing only a change of the text does, so a composition isn't interrupted over formatting.
-pub fn show_block(element: &HtmlElement, block: &Block, is_editable: bool, is_composing: bool) {
+/// Mentions of `me` stand out.
+pub fn show_block(element: &HtmlElement, block: &Block, is_editable: bool, is_composing: bool, me: UserId) {
   let shown = read_runs(element, is_editable);
   let wanted = wanted_runs(block);
   if shown == wanted {
@@ -44,7 +49,7 @@ pub fn show_block(element: &HtmlElement, block: &Block, is_editable: bool, is_co
     return;
   }
   let maybe_caret = selection_in(element);
-  render(element, &wanted, is_editable);
+  render(element, &wanted, is_editable, me);
   if let Some(caret) = maybe_caret {
     set_selection(
       element,
@@ -224,6 +229,11 @@ fn style_inside(element: &Element, tag: &str, style: &TextStyle, is_editable: bo
     "span" if is_editable && element.class_list().contains(EDITABLE_LINK) => {
       inner.maybe_link = element.get_attribute(EDITABLE_LINK_ADDRESS);
     },
+    "span" if element.class_list().contains(MENTION_CLASS) => {
+      inner.maybe_mention = element
+        .get_attribute(MENTION_USER)
+        .and_then(|user| user.parse().ok());
+    },
     _ => {},
   }
   inner
@@ -241,13 +251,13 @@ fn push_text(runs: &mut Vec<Run>, text: &str, style: &TextStyle) {
   }
 }
 
-fn render(element: &HtmlElement, runs: &[Run], is_editable: bool) {
+fn render(element: &HtmlElement, runs: &[Run], is_editable: bool, me: UserId) {
   element.set_text_content(None);
   let Some(document) = element.owner_document() else {
     return;
   };
   for (text, style) in runs {
-    if let Some(node) = styled_node(&document, text, style, is_editable) {
+    if let Some(node) = styled_node(&document, text, style, is_editable, me) {
       drop(element.append_child(&node));
     }
   }
@@ -259,8 +269,23 @@ fn render(element: &HtmlElement, runs: &[Run], is_editable: bool) {
   }
 }
 
-fn styled_node(document: &Document, text: &str, style: &TextStyle, is_editable: bool) -> Option<Node> {
+fn styled_node(
+  document: &Document,
+  text: &str,
+  style: &TextStyle,
+  is_editable: bool,
+  me: UserId,
+) -> Option<Node> {
   let mut node: Node = document.create_text_node(text).into();
+  if let Some(user) = style.maybe_mention {
+    let chip = wrap(document, "span", &node)?;
+    chip.set_attribute(MENTION_USER, &user.to_string()).ok()?;
+    drop(chip.class_list().add_2("mention", MENTION_CLASS));
+    if user == me {
+      drop(chip.class_list().add_1("mention-me"));
+    }
+    node = chip.into();
+  }
   if style.is_code {
     let code = wrap(document, "code", &node)?;
     drop(code.class_list().add_1("md-inline-code"));

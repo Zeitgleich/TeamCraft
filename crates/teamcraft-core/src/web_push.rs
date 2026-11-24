@@ -124,8 +124,8 @@ pub use service_worker::{
 #[cfg(feature = "service-worker")]
 mod service_worker {
   use teamcraft_proto::{
-    ConversationId, DismissMeetingNoticeRequest, MeetingId, MessageId, PushKind, SetReadPositionRequest,
-    UnixMillis,
+    CanvasPageId, ConversationId, DismissMeetingNoticeRequest, MeetingId, MessageId, PushKind,
+    SetReadPositionRequest, UnixMillis,
   };
   use wasm_bindgen::prelude::wasm_bindgen;
   use wasm_bindgen::{JsCast, JsValue};
@@ -155,6 +155,11 @@ mod service_worker {
   const MARK_READ_ACTION: &str = "mark-read";
   /// Key of the newest message's ID in a notification's `data`, for the "mark as read" button.
   const MESSAGE_FIELD: &str = "message_id";
+  /// Key of the notes page a mention in the notes opens (issue #2361): the page's ID, or empty for
+  /// the channel's first page. Absent on every other notification.
+  const NOTES_PAGE_FIELD: &str = "notes_page";
+  /// The tag of a mention in the notes (`NotificationTag::notes` in `teamcraft-client-api`).
+  const NOTES_TAG_PREFIX: &str = "notes:";
   /// A meeting's notice replaces what the page showed for that meeting: the page's tag
   /// (`NotificationTag::meeting` in `teamcraft-client-api`) and its Join button.
   const MEETING_TAG_PREFIX: &str = "meeting:";
@@ -232,6 +237,7 @@ mod service_worker {
     let maybe_conversation = field(CONVERSATION_FIELD);
     let maybe_tag = field(TAG_FIELD);
     let maybe_message = field(MESSAGE_FIELD);
+    let maybe_notes_page = field(NOTES_PAGE_FIELD);
     // `NotificationEvent.action` is behind web-sys' unstable APIs; read the property directly.
     let action = js_sys::Reflect::get(&event, &JsValue::from_str("action"))
       .ok()
@@ -278,8 +284,16 @@ mod service_worker {
           return Ok(());
         }
       } else if let Some(conversation) = &maybe_conversation {
-        js_sys::Reflect::set(&message, &"type".into(), &"open_conversation".into())?;
+        let kind = if maybe_notes_page.is_some() {
+          "open_notes"
+        } else {
+          "open_conversation"
+        };
+        js_sys::Reflect::set(&message, &"type".into(), &kind.into())?;
         js_sys::Reflect::set(&message, &CONVERSATION_FIELD.into(), &conversation.into())?;
+        if let Some(page) = &maybe_notes_page {
+          js_sys::Reflect::set(&message, &NOTES_PAGE_FIELD.into(), &page.into())?;
+        }
         window.post_message(&message)?;
       }
       JsFuture::from(window.focus()?).await?;
@@ -288,6 +302,12 @@ mod service_worker {
     let mut url = scope.registration().scope();
     if let Some(conversation) = maybe_conversation {
       url.push_str(&format!("?{CONVERSATION_FIELD}={conversation}"));
+      // A page ID is lowercase hex and dashes (`CanvasPageId::parse`): nothing to escape.
+      if let Some(page) =
+        maybe_notes_page.filter(|page| page.is_empty() || CanvasPageId::parse(page).is_some())
+      {
+        url.push_str(&format!("&{NOTES_PAGE_FIELD}={page}"));
+      }
     }
     JsFuture::from(clients.open_window(&url)).await?;
     Ok(())
@@ -522,12 +542,23 @@ mod service_worker {
       &CONVERSATION_FIELD.into(),
       &conversation.to_string().into(),
     );
+    // A mention in the notes opens the page (issue #2361), with the page's tag of the desktop app
+    // (`NotificationTag::notes`), so messages don't replace it; it has nothing to mark as read.
+    if let Some(notes) = &preview.maybe_notes {
+      let page = notes.maybe_page.as_ref().map_or("", CanvasPageId::as_str);
+      let _ = js_sys::Reflect::set(&data, &NOTES_PAGE_FIELD.into(), &page.into());
+      options.set_tag(&match &notes.maybe_page {
+        Some(page) => format!("{NOTES_TAG_PREFIX}{conversation}:{}", page.as_str()),
+        None => format!("{NOTES_TAG_PREFIX}{conversation}"),
+      });
+    }
     // "Mark as read" for messages of a conversation (a thread has its own read position, which the
     // wake-up does not let this button set).
-    let maybe_message = preview
-      .wake_up
-      .maybe_message_id
-      .filter(|_| preview.wake_up.maybe_thread_id.is_none() && preview.is_conversation_verified);
+    let maybe_message = preview.wake_up.maybe_message_id.filter(|_| {
+      preview.wake_up.maybe_thread_id.is_none()
+        && preview.is_conversation_verified
+        && preview.maybe_notes.is_none()
+    });
     if let (Some(label), Some(message)) = (labels.maybe_mark_read.as_deref(), maybe_message) {
       let _ = js_sys::Reflect::set(&data, &MESSAGE_FIELD.into(), &message.to_string().into());
       let button = js_sys::Object::new();

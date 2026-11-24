@@ -765,6 +765,15 @@ private fun ConversationMenu(
   var isShowingMembers by remember { mutableStateOf(false) }
   // A channel's shared notes, read-only on the phone (#1456).
   var isShowingNotes by remember { mutableStateOf(false) }
+  // Opened from a mention in them (#2361): on its page, at the mention.
+  var maybeNotesRequest by remember { mutableStateOf<NotesRequest?>(null) }
+  val maybePendingNotes by NotesToOpen.pending.collectAsState()
+  LaunchedEffect(maybePendingNotes, isChannel) {
+    val request = maybePendingNotes?.takeIf { it.conversationId == conversationId && isChannel } ?: return@LaunchedEffect
+    NotesToOpen.pending.value = null
+    maybeNotesRequest = request
+    isShowingNotes = true
+  }
   var maybeConfirming by remember { mutableStateOf<ChannelConfirmation?>(null) }
   // The deletion confirmation names who last named the channel (e2ee.md §4.6.5, D5).
   val maybeAnchorMarks = rememberChannelAnchorMarks(viewModel, conversationId, isShown = maybeConfirming == ChannelConfirmation.Delete)
@@ -867,7 +876,15 @@ private fun ConversationMenu(
     ChannelMembersSheet(viewModel, conversationId, onDismiss = { isShowingMembers = false })
   }
   if (isShowingNotes) {
-    ChannelNotesSheet(viewModel, conversationId, onDismiss = { isShowingNotes = false })
+    ChannelNotesSheet(
+      viewModel,
+      conversationId,
+      maybeRequest = maybeNotesRequest,
+      onDismiss = {
+        isShowingNotes = false
+        maybeNotesRequest = null
+      },
+    )
   }
   if (isShowingBookmarks) {
     BookmarksDialog(

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Checkbox
@@ -29,6 +30,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,6 +39,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -68,11 +71,14 @@ import de.zeitgleich.teamcraft.R
 import de.zeitgleich.teamcraft.core.ChatActions
 import de.zeitgleich.teamcraft.core.ChatQueries
 import de.zeitgleich.teamcraft.core.FileInfo
+import de.zeitgleich.teamcraft.ui.AppState
 import de.zeitgleich.teamcraft.ui.ComposerPrefs
 import de.zeitgleich.teamcraft.ui.MainViewModel
 import de.zeitgleich.teamcraft.ui.ServerHistory
+import de.zeitgleich.teamcraft.ui.theme.LocalTeamCraftColors
 import de.zeitgleich.teamcraft.ui.theme.Spacing
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.teamcraft_ffi.CanvasBlockItem
 import uniffi.teamcraft_ffi.CanvasBlockKind
 import uniffi.teamcraft_ffi.CanvasPageItem
@@ -101,9 +107,18 @@ private const val CODE_BACKGROUND_ALPHA = 0.06f
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () -> Unit) {
+fun ChannelNotesSheet(
+  viewModel: MainViewModel,
+  conversationId: String,
+  maybeRequest: NotesRequest? = null,
+  onDismiss: () -> Unit,
+) {
   val changes by viewModel.changeCount.collectAsState()
-  var maybePageId by rememberSaveable(conversationId) { mutableStateOf<String?>(null) }
+  var maybePageId by rememberSaveable(conversationId) { mutableStateOf(maybeRequest?.maybePageId) }
+  val maybeMeId = (viewModel.appState.collectAsState().value as? AppState.Ready)?.userId
+  // Opened from a mention (#2361): scrolled to the user's first mention once the page shows it.
+  var isSeekingMention by remember(conversationId) { mutableStateOf(maybeRequest != null) }
+  val listState = rememberLazyListState()
   var maybePage by remember(conversationId) { mutableStateOf<CanvasPageItem?>(null) }
   LaunchedEffect(conversationId, maybePageId, changes) {
     maybePage = viewModel.canvasPage(conversationId, maybePageId) ?: maybePage
@@ -121,11 +136,20 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
   val hasFiles = maybePage?.blocks?.any { it.maybeFile != null } == true
   val files = rememberRead(viewModel, key = conversationId, enabled = hasFiles) { query(ChatQueries.files(conversationId)).files }
   val context = LocalContext.current
+  LaunchedEffect(maybePage, isSeekingMention, maybeMeId) {
+    val page = maybePage ?: return@LaunchedEffect
+    if (!isSeekingMention || maybeMeId == null) return@LaunchedEffect
+    val index = page.blocks.indexOfFirst { block -> block.runs.any { it.maybeMention == maybeMeId } }
+    if (index < 0) return@LaunchedEffect
+    isSeekingMention = false
+    listState.animateScrollToItem(headerItems(page, presence, serverHistory) + index)
+  }
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
     val page = maybePage
     LazyColumn(
       // Full height: a page is read, and switching pages doesn't make the sheet jump.
       Modifier.fillMaxSize().padding(horizontal = Spacing.l).padding(bottom = Spacing.xxl),
+      state = listState,
       verticalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
       item {
@@ -153,10 +177,26 @@ fun ChannelNotesSheet(viewModel: MainViewModel, conversationId: String, onDismis
         return@LazyColumn
       }
       items(page.blocks, key = { it.id }) { block ->
-        NotesBlock(block, files.maybeValue.orEmpty(), onOpenFile = { file -> openOrDownload(viewModel, file, context) })
+        NotesBlock(block, files.maybeValue.orEmpty(), maybeMeId, onOpenFile = { file -> openOrDownload(viewModel, file, context) })
       }
     }
   }
+}
+
+/** The rows above the page's blocks in the sheet's list, as [ChannelNotesSheet] lays them out. */
+private fun headerItems(page: CanvasPageItem, presence: CanvasPresenceItem?, serverHistory: String): Int {
+  val hasPresence = presence?.let { it.openBy.isNotEmpty() || it.editing.isNotEmpty() } == true
+  val hasChips = page.pages.isNotEmpty()
+  val hasStatus = notesStatus(page, serverHistory) != null
+  return listOf(true, hasPresence, hasChips, true, hasStatus).count { it }
+}
+
+/** A page of a channel's notes to open, at the user's mention on it (#2361). */
+data class NotesRequest(val conversationId: String, val maybePageId: String?)
+
+/** The notes a notification's tap asked for, until the conversation's screen took them. */
+object NotesToOpen {
+  val pending = MutableStateFlow<NotesRequest?>(null)
 }
 
 /**
@@ -269,7 +309,15 @@ private fun EmptyNotes() {
 
 /** One block: its marker (bullet, number, check box, quote bar) and its formatted text. */
 @Composable
-private fun NotesBlock(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
+private fun NotesBlock(block: CanvasBlockItem, files: List<FileInfo>, maybeMeId: String?, onOpenFile: (FileInfo) -> Unit) {
+  CompositionLocalProvider(LocalNotesMeId provides maybeMeId) { NotesBlockContent(block, files, onOpenFile) }
+}
+
+/** The user's ID, so mentions of them stand out (#2361). */
+private val LocalNotesMeId = staticCompositionLocalOf<String?> { null }
+
+@Composable
+private fun NotesBlockContent(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
   val scheme = MaterialTheme.colorScheme
   val typography = MaterialTheme.typography
   when (block.kind) {
@@ -361,21 +409,47 @@ private fun BlockText(block: CanvasBlockItem, style: TextStyle, modifier: Modifi
   val context = LocalContext.current
   val linkColor = MaterialTheme.colorScheme.primary
   val codeBackground = MaterialTheme.colorScheme.onSurface.copy(alpha = CODE_BACKGROUND_ALPHA)
-  val text = remember(block.runs, linkColor, codeBackground) {
-    annotated(block.runs, linkColor, codeBackground) { url -> openLink(context, url) }
+  val extra = LocalTeamCraftColors.current
+  val mentions = MentionColors(
+    meId = LocalNotesMeId.current,
+    other = linkColor,
+    me = extra.mentionText,
+    meBackground = extra.mentionBackground,
+  )
+  val text = remember(block.runs, linkColor, codeBackground, mentions) {
+    annotated(block.runs, linkColor, codeBackground, mentions) { url -> openLink(context, url) }
   }
   Text(text, style = style, modifier = modifier)
 }
 
-private fun annotated(runs: List<CanvasRunItem>, linkColor: Color, codeBackground: Color, onOpen: (String) -> Unit): AnnotatedString =
+/** How mentions show: bold in the accent colour, the user's own highlighted as in messages. */
+private data class MentionColors(val meId: String?, val other: Color, val me: Color, val meBackground: Color)
+
+private fun annotated(
+  runs: List<CanvasRunItem>,
+  linkColor: Color,
+  codeBackground: Color,
+  mentions: MentionColors,
+  onOpen: (String) -> Unit,
+): AnnotatedString =
   buildAnnotatedString {
     for (run in runs) {
+      val maybeMention = run.maybeMention
       val span = SpanStyle(
-        fontWeight = if (run.isBold) FontWeight.SemiBold else null,
+        fontWeight = if (run.isBold || maybeMention != null) FontWeight.SemiBold else null,
         fontStyle = if (run.isItalic) FontStyle.Italic else null,
         textDecoration = if (run.isStrike) TextDecoration.LineThrough else null,
         fontFamily = if (run.isCode) FontFamily.Monospace else null,
-        background = if (run.isCode) codeBackground else Color.Unspecified,
+        color = when {
+          maybeMention == null -> Color.Unspecified
+          maybeMention == mentions.meId -> mentions.me
+          else -> mentions.other
+        },
+        background = when {
+          run.isCode -> codeBackground
+          maybeMention != null && maybeMention == mentions.meId -> mentions.meBackground
+          else -> Color.Unspecified
+        },
       )
       val maybeLink = run.maybeLink
       if (maybeLink != null) {

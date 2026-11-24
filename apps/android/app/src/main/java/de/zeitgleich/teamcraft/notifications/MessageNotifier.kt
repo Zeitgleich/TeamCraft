@@ -667,6 +667,8 @@ class MessageNotifier(
     isVerified = notification.isConversationVerified,
     isMention = notification.isMention || notification.isUrgent,
     isDirect = notification.isDirect,
+    // The newest wake-up decides: a mention in the notes opens them, a message after it the chat.
+    maybeNotes = if (notification.opensNotes) NotesTarget(notification.maybeNotesPageId) else null,
     // Pictures follow the names: a wake-up that may not name the channel keeps what was shown.
     maybeChannelImageVersion = if (title(notification) != null) {
       notification.maybeChannelImageVersion
@@ -715,6 +717,7 @@ class MessageNotifier(
       isDirect = notification.isDirect,
       labels = labels(),
       isAddedYou = notification.maybeGap == NotificationGap.ADDED_YOU,
+      isMentionedInNotes = notification.maybeGap == NotificationGap.MENTIONED_IN_NOTES,
     )
 
   private fun shown(): ShownNotifications =
@@ -827,7 +830,7 @@ class MessageNotifier(
       .setGroup(GROUP_MESSAGES)
       .setGroupAlertBehavior(NotificationCompat.GROUP_ALERT_CHILDREN)
       .addExtras(Bundle().apply { putLong(EXTRA_REVISION, revision) })
-      .setContentIntent(openIntent(spec.conversationId))
+      .setContentIntent(openIntent(spec.conversationId, spec.maybeNotes))
       .setDeleteIntent(actionIntent(NotificationActionReceiver.ACTION_DISMISSED, spec.conversationId, isMutable = false))
       // The lock screen names the sender but not the text unless the user unlocks.
       .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
@@ -989,6 +992,7 @@ class MessageNotifier(
     appName = context.getString(R.string.app_name),
     newMessage = context.getString(R.string.notification_new_message),
     addedYou = context.getString(R.string.notification_added_you),
+    mentionedInNotes = context.getString(R.string.notification_mentioned_in_notes),
     newMessageFrom = { context.getString(R.string.notification_new_message_from, it) },
     newMessagesFrom = { count, names ->
       context.resources.getQuantityString(R.plurals.notification_new_messages_from, count, count, names)
@@ -1187,11 +1191,11 @@ class MessageNotifier(
     return PendingIntent.getBroadcast(context, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT or mutability)
   }
 
-  private fun openIntent(conversationId: String): PendingIntent =
+  private fun openIntent(conversationId: String, maybeNotes: NotesTarget? = null): PendingIntent =
     PendingIntent.getActivity(
       context,
       0,
-      openConversationIntent(context, conversationId),
+      openConversationIntent(context, conversationId, maybeNotes),
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 

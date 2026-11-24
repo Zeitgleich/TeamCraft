@@ -46,6 +46,14 @@ class NotificationTextTest {
     assertEquals("Alice", text.senderName)
   }
 
+  /** A mention in the channel's notes says so; the page's text never shows (issue #2361). */
+  @Test
+  fun aMentionInTheNotesSaysSo() {
+    val text = describe(body = null, isMentionedInNotes = true)
+    assertEquals("Mentioned you in the notes", text.text)
+    assertEquals("planning", text.maybeConversationTitle)
+  }
+
   @Test
   fun senderOnlyNamesWhoWroteNotWhat() {
     assertEquals("from Alice", NotificationText.senderOnly(listOf(line("Alice", 1)), LABELS))
@@ -63,6 +71,7 @@ class NotificationTextTest {
     kind: NotificationAttachmentKind? = null,
     isDirect: Boolean = false,
     isAddedYou: Boolean = false,
+    isMentionedInNotes: Boolean = false,
   ) = NotificationText.from(
     maybeConversationName = conversation,
     maybeSenderName = sender,
@@ -72,6 +81,7 @@ class NotificationTextTest {
     isDirect = isDirect,
     labels = LABELS,
     isAddedYou = isAddedYou,
+    isMentionedInNotes = isMentionedInNotes,
   )
 
   private fun line(sender: String, sentAtMs: Long) = NotificationLine(
@@ -89,6 +99,7 @@ class NotificationTextTest {
       appName = "App",
       newMessage = "New message",
       addedYou = "Added you",
+      mentionedInNotes = "Mentioned you in the notes",
       newMessageFrom = { "from $it" },
       newMessagesFrom = { count, names -> "$count from $names" },
       newMessages = { count -> "$count new" },

@@ -4185,12 +4185,14 @@ impl ChatBackend for RemoteChat {
     maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    mentions: Vec<teamcraft_proto::UserId>,
   ) {
     self.act(ChatAction::EditCanvas {
       conversation,
       maybe_page: maybe_page.cloned(),
       update: update.into(),
       is_snapshot,
+      mentions,
     });
   }
 
@@ -4206,6 +4208,13 @@ impl ChatBackend for RemoteChat {
       maybe_page: maybe_page.cloned(),
     }) {
       Some(ChatAnswer::CanvasPeers { peers }) => peers,
+      _ => Vec::new(),
+    }
+  }
+
+  fn page_mentions(&self) -> Vec<teamcraft_client_api::model::PageMention> {
+    match self.ask(ChatQuery::PageMentions) {
+      Some(ChatAnswer::PageMentions { mentions }) => mentions,
       _ => Vec::new(),
     }
   }

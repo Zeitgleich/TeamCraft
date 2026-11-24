@@ -1022,12 +1022,15 @@ pub trait ChatBackend {
   }
   /// Sends an edit of a page of the channel (a Yjs update; `is_snapshot`: the whole page) as an
   /// encrypted, hidden message and keeps it at once. Refused where the user may not post.
+  /// `mentions`: the members the editor mentioned since its last edit and still on the page
+  /// (issue #2361), notified unless it is a snapshot.
   fn edit_canvas(
     &self,
     _conversation: ConversationId,
     _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     _update: Vec<u8>,
     _is_snapshot: bool,
+    _mentions: Vec<UserId>,
   ) {
   }
   /// The editor's reading of the first page's list of pages: the pages it names (`listed`) and
@@ -1060,6 +1063,11 @@ pub trait ChatBackend {
     _conversation: ConversationId,
     _maybe_page: Option<&teamcraft_proto::CanvasPageId>,
   ) -> Vec<crate::model::CanvasPeer> {
+    Vec::new()
+  }
+  /// The edits of a channel's notes that mentioned the user, oldest first (issue #2361); this
+  /// device keeps the newest few.
+  fn page_mentions(&self) -> Vec<crate::model::PageMention> {
     Vec::new()
   }
   /// Tells the other members connected now that this device has a page of the channel's notes

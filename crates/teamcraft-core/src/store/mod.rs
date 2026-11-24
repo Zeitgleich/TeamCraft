@@ -360,6 +360,11 @@ pub enum MessageContent {
     is_snapshot: bool,
     #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
     maybe_page: Option<teamcraft_proto::CanvasPageId>,
+    /// Members the edit mentioned (issue #2361): picked in the editor since its last edit and
+    /// still on the page. The outbox hands them to the server as `mentioned_user_ids`, which a
+    /// snapshot never carries; an undo or a restore that brings a mention back names nobody.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    mentions: Vec<UserId>,
   },
   /// A change to the conversation, announced by whoever made it (shown as a system message).
   Event { event: ConversationEvent },

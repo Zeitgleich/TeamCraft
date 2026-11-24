@@ -4697,6 +4697,8 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
     maybe_meeting_co_host_unnamed: translate("notify-meeting-co-host-unnamed"),
     maybe_meeting_handover: with_name("notify-meeting-handover"),
     maybe_meeting_handover_unnamed: translate("notify-meeting-handover-unnamed"),
+    maybe_mentioned_in_notes: with_name("notify-mentioned-in-notes"),
+    maybe_mentioned_in_notes_unnamed: translate("notify-mentioned-in-notes-unnamed"),
   }
 }
 
