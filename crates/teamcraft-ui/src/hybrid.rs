@@ -149,6 +149,20 @@ impl<C: ChatBackend> Hybrid<C> {
       .map(|user| self.with_live_presence(user, &policy, now))
       .collect()
   }
+
+  /// Integration channels are fed by bridges that write `[LEVEL] text`; their rows show as log
+  /// lines.
+  fn as_shown(&self, conversation: ConversationId, messages: Vec<Message>) -> Vec<Message> {
+    let is_log = self
+      .chat
+      .conversation(conversation)
+      .is_some_and(|conversation| conversation.kind == ConversationKind::Integration);
+    if is_log {
+      messages.into_iter().map(as_log_line).collect()
+    } else {
+      messages
+    }
+  }
 }
 
 impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
@@ -330,17 +344,11 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
-    let messages = self.chat.messages(conversation, start, len);
-    // Integration channels are fed by bridges that write `[LEVEL] text`; show them as log lines.
-    let is_log = self
-      .chat
-      .conversation(conversation)
-      .is_some_and(|conversation| conversation.kind == ConversationKind::Integration);
-    if is_log {
-      messages.into_iter().map(as_log_line).collect()
-    } else {
-      messages
-    }
+    self.as_shown(conversation, self.chat.messages(conversation, start, len))
+  }
+
+  fn newest_rows(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    self.as_shown(conversation, self.chat.newest_rows(conversation, len))
   }
 
   fn thread(&self, conversation: ConversationId, thread: ThreadId) -> Vec<Message> {

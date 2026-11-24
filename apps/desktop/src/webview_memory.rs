@@ -23,6 +23,11 @@ const CONSERVATIVE_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_CONSERVATIVE";
 const STRICT_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_STRICT";
 /// How often WebKit measures the web process, in seconds.
 const POLL_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_POLL_SECS";
+/// WebKit's own strict threshold, which a new `MemoryPressureSettings` starts with (its
+/// conservative one is 0.33). Each setter refuses a value that would break `conservative < strict`
+/// against the other's current value (a GLib assertion, the setting stays as it was), so the
+/// thresholds are set in an order that keeps it.
+const WEBKIT_STRICT_DEFAULT: f64 = 0.5;
 
 /// Sets the memory caches of the webview's process to what a single-page app uses.
 pub fn configure(webview: &webkit2gtk::WebView) {
@@ -45,13 +50,7 @@ pub fn set_memory_pressure() {
     wry::set_memory_pressure_settings(None);
     return;
   };
-  let mut settings = MemoryPressureSettings::new();
-  settings.set_memory_limit(limit_mib);
-  settings.set_conservative_threshold(pressure.conservative_fraction);
-  settings.set_strict_threshold(pressure.strict_fraction);
-  // Never killed: WebKit would end the page and the app reload it (webview_recovery.rs).
-  settings.set_kill_threshold(0.0);
-  settings.set_poll_interval(pressure.poll_interval.as_secs_f64());
+  let settings = pressure.settings(limit_mib);
   tracing::info!(
     limit_mib,
     conservative = pressure.conservative_fraction,
@@ -60,6 +59,13 @@ pub fn set_memory_pressure() {
     "webview memory pressure settings"
   );
   wry::set_memory_pressure_settings(Some(settings));
+}
+
+/// One of WebKit's two memory pressure thresholds, as a fraction of the limit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Threshold {
+  Conservative(f64),
+  Strict(f64),
 }
 
 /// When WebKit starts releasing memory in the app's web process.
@@ -74,16 +80,48 @@ struct MemoryPressure {
 
 impl MemoryPressure {
   /// The defaults, measured on the large workspace of `tests/e2e` `desktop_perf.rs`
-  /// (docs/performance.md, "Desktop on Linux: memory pressure and the allocator").
+  /// (docs/performance.md, "Desktop on Linux: memory pressure and the allocator"). The conservative
+  /// threshold is WebKit's own: until #2362 the app asked for 0.5, which WebKit refused (see
+  /// [`WEBKIT_STRICT_DEFAULT`]), so every measurement ran with a third.
   const DEFAULT: Self = Self {
     maybe_limit_mib: Some(512),
-    conservative_fraction: 0.5,
+    conservative_fraction: 0.33,
     strict_fraction: 0.7,
     poll_interval: Duration::from_secs(10),
   };
 
   fn from_env() -> Self {
     Self::parse(|name| std::env::var(name).ok())
+  }
+
+  /// WebKit's settings with these values and a limit of `limit_mib`.
+  fn settings(&self, limit_mib: u32) -> MemoryPressureSettings {
+    let mut settings = MemoryPressureSettings::new();
+    settings.set_memory_limit(limit_mib);
+    for threshold in self.thresholds_in_order() {
+      match threshold {
+        Threshold::Conservative(fraction) => settings.set_conservative_threshold(fraction),
+        Threshold::Strict(fraction) => settings.set_strict_threshold(fraction),
+      }
+    }
+    // Never killed: WebKit would end the page and the app reload it (webview_recovery.rs).
+    settings.set_kill_threshold(0.0);
+    settings.set_poll_interval(self.poll_interval.as_secs_f64());
+    settings
+  }
+
+  /// The thresholds in the order WebKit takes both: a conservative threshold at or above WebKit's
+  /// strict default only fits once the strict one is raised, a strict one at or below its
+  /// conservative default only once that one is lowered. `parse` keeps `conservative < strict`, so
+  /// one of the two orders always works.
+  fn thresholds_in_order(&self) -> [Threshold; 2] {
+    let conservative = Threshold::Conservative(self.conservative_fraction);
+    let strict = Threshold::Strict(self.strict_fraction);
+    if self.conservative_fraction >= WEBKIT_STRICT_DEFAULT {
+      [strict, conservative]
+    } else {
+      [conservative, strict]
+    }
   }
 
   /// Each variable that is set and valid replaces its default; thresholds that don't keep
@@ -142,6 +180,9 @@ mod tests {
 
   use super::*;
 
+  /// WebKit's own conservative threshold, which a new `MemoryPressureSettings` starts with.
+  const WEBKIT_CONSERVATIVE_DEFAULT: f64 = 0.33;
+
   #[test]
   fn nothing_set_gives_the_defaults() {
     assert_eq!(parse(&[]), MemoryPressure::DEFAULT);
@@ -164,6 +205,37 @@ mod tests {
         poll_interval: Duration::from_millis(2500),
       }
     );
+  }
+
+  /// #2362: WebKit refuses a threshold that breaks `conservative < strict` against the other's
+  /// value at that moment, and kept its own conservative third instead of 0.5. Replays the order
+  /// against WebKit's rule, from its defaults (the settings object itself needs GTK).
+  #[test]
+  fn webkit_takes_both_thresholds_in_their_order() {
+    let pairs = [
+      (0.33, 0.7),
+      (0.5, 0.7),
+      (0.6, 0.9),
+      (0.2, 0.3),
+      (0.1, 0.45),
+      (0.4, 0.45),
+    ];
+    for (conservative_fraction, strict_fraction) in pairs {
+      let pressure = MemoryPressure {
+        conservative_fraction,
+        strict_fraction,
+        ..MemoryPressure::DEFAULT
+      };
+      let (mut conservative, mut strict) = (WEBKIT_CONSERVATIVE_DEFAULT, WEBKIT_STRICT_DEFAULT);
+      for threshold in pressure.thresholds_in_order() {
+        match threshold {
+          Threshold::Conservative(value) if value < strict => conservative = value,
+          Threshold::Strict(value) if value > conservative => strict = value,
+          refused => panic!("WebKit refuses {refused:?} for {conservative_fraction} / {strict_fraction}"),
+        }
+      }
+      assert_eq!((conservative, strict), (conservative_fraction, strict_fraction));
+    }
   }
 
   #[test]

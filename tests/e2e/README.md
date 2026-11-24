@@ -131,6 +131,18 @@ E2E_DESKTOP_BIN=$PWD/target/debug/teamcraft-desktop xvfb-run -a \
   cargo test -p teamcraft-e2e --features desktop --test suite -- --nocapture desktop_perf::
 ```
 
+On X11 under `xvfb-run` WebKit composites and paints without the GPU's buffers. To measure the app
+on the GPU, run the tests inside a virtual KWin with its OpenGL compositor and point
+`E2E_DESKTOP_WAYLAND_DISPLAY` at its Wayland socket, as an absolute path (the app gets an
+`XDG_RUNTIME_DIR` of its own); the app then runs as a Wayland client of it, never of the user's
+session (docs/performance.md, "Desktop on Linux: the release build on a GPU"):
+
+```sh
+KWIN_COMPOSE=O2 kwin_wayland --virtual --xwayland --socket wayland-e2e --exit-with-session \
+  "env E2E_DESKTOP_WAYLAND_DISPLAY=$XDG_RUNTIME_DIR/wayland-e2e cargo test -p teamcraft-e2e \
+  --features desktop --test suite -- --nocapture desktop_perf::"
+```
+
 Without `custom-protocol` a debug build loads its page from the dev server URL instead
 (`devUrl`, port 8082, where the browser tests start their servers). `PERF_SCALE` is the one of
 `perf.rs`; `PERF_DESKTOP_HOLD_SECS` keeps the app open after the channel switches, to look at it

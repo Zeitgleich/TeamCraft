@@ -83,6 +83,9 @@ const MAX_HELD_ROW_ANSWERS: usize = 1_000;
 const MIN_HOLD: Duration = Duration::from_secs(60);
 /// Messages asked for in one `message_extras` query of a batch ([`ExtrasBatch`]).
 const MAX_EXTRAS_BATCH: usize = 200;
+/// Most rows a conversation's tail holds ([`Tail`]): the notifier looks at 10, the sidebar's
+/// preview at 8.
+const MAX_TAIL_ROWS: usize = 10;
 
 thread_local! {
   /// Orders reads of feeds and answers, so the ones read longest ago are dropped first.
@@ -615,6 +618,20 @@ struct Mirror {
   /// What pending rows show beyond their text (a reply's quote, urgency, silence) until the core
   /// answers for them ([`RemoteChat::show_pending`]), at most [`MAX_PENDING_EXTRAS`].
   pending_extras: Vec<MessageExtras>,
+  /// The newest rows of each conversation the notifier looked at, apart from the feeds (#2362).
+  tails: HashMap<ConversationId, Tail>,
+}
+
+/// The newest few rows of a conversation ([`ChatBackend::newest_rows`]), read on their own: the
+/// notifier looks at every conversation, and reading them as feeds made the page load a page of
+/// each and hold them all (#2362: about 22,000 rows of 300 conversations, the largest part of the
+/// wasm heap, which never shrinks).
+struct Tail {
+  /// The feed's length when they were read: they are the newest rows while it stays.
+  total: usize,
+  rows: Vec<Message>,
+  /// The core changed the conversation since: read again before the next look, shown until then.
+  is_stale: bool,
 }
 
 /// What a refresh reads again: only what the UI showed since its last change (issue #246).
@@ -635,6 +652,7 @@ struct RefreshPlan {
 enum LoadKey {
   Page(ConversationId, usize),
   Thread(ConversationId, ThreadId),
+  Tail(ConversationId),
 }
 
 type ChangeNotifier = Rc<dyn Fn()>;
@@ -705,6 +723,26 @@ struct ExtrasAsk {
 }
 
 impl Mirror {
+  /// Keeps a conversation's newest rows read on their own; returns whether they differ from the
+  /// ones held. A window that doesn't end at its total holds no newest rows and is left out.
+  fn take_tail(&mut self, conversation: ConversationId, window: MessageWindow) -> bool {
+    let is_newest = window.start + window.messages.len() == window.total;
+    if !is_newest || self.snapshot.message_count(conversation).is_none() {
+      return false;
+    }
+    let tail = Tail {
+      total: window.total,
+      rows: window.messages,
+      is_stale: false,
+    };
+    let is_changed = self
+      .tails
+      .get(&conversation)
+      .is_none_or(|held| held.total != tail.total || held.rows != tail.rows);
+    self.tails.insert(conversation, tail);
+    is_changed
+  }
+
   /// The feed of `conversation`, a new one counting as read now.
   fn feed_entry(&mut self, conversation: ConversationId) -> &mut Feed {
     self.feeds.entry(conversation).or_insert_with(|| Feed {
@@ -723,7 +761,9 @@ impl Mirror {
       .loading
       .iter()
       .map(|key| match key {
-        LoadKey::Page(conversation, _) | LoadKey::Thread(conversation, _) => *conversation,
+        LoadKey::Page(conversation, _) | LoadKey::Thread(conversation, _) | LoadKey::Tail(conversation) => {
+          *conversation
+        },
       })
       .collect();
     let mut idle: Vec<(u64, ConversationId)> = self
@@ -1189,6 +1229,22 @@ impl ReadStamp {
   }
 }
 
+/// The rows of `feed` that end at its newest one (`total`), at most `len`, oldest first: only rows
+/// contiguous up to the newest.
+fn newest_held(feed: &Feed, total: usize, len: usize) -> Vec<Message> {
+  let mut recent: Vec<Message> = (total.saturating_sub(len)..total)
+    .rev()
+    .map_while(|index| feed.rows.get(&index).cloned())
+    .collect();
+  recent.reverse();
+  recent
+}
+
+/// The newest `len` rows of a tail, oldest first.
+fn tail_rows(tail: &Tail, len: usize) -> Vec<Message> {
+  tail.rows[tail.rows.len().saturating_sub(len)..].to_vec()
+}
+
 /// The one conversation a query's answer depends on, when nothing outside it can change the
 /// answer: a message link's preview (#319) and whether the conversation has guests (#1708; its
 /// members are part of its entry, so a join or leave touches it). Every sidebar row asks the
@@ -1336,6 +1392,7 @@ impl RemoteChat {
         loading: HashSet::new(),
         outdated: HashSet::new(),
         pending_extras: Vec::new(),
+        tails: HashMap::new(),
       })),
       notify: Rc::new(RefCell::new(None)),
       maybe_error: Rc::new(RefCell::new(None)),
@@ -1604,6 +1661,13 @@ impl RemoteChat {
       mirror.cursor = changes.cursor;
       let applied = mirror.snapshot.apply(changes);
       plan.is_snapshot_changed = applied.is_changed;
+      let snapshot = &mirror.snapshot;
+      mirror
+        .tails
+        .retain(|conversation, _| snapshot.message_count(*conversation).is_some());
+      for (conversation, tail) in &mut mirror.tails {
+        tail.is_stale |= applied.touches(*conversation);
+      }
       // The feeds the UI opened, not every conversation's count (issue #246). A jump in an open
       // one may be older history arriving (#1132): its rows are moved before anything reads them.
       // One new row, the common case, needs no look and no extra read.
@@ -1845,6 +1909,35 @@ impl RemoteChat {
     }
     mirror.outdated.insert(key);
     false
+  }
+
+  /// Reads the newest rows of a conversation for its [`Tail`]; the UI is told when they differ.
+  fn load_tail(&self, conversation: ConversationId) {
+    let key = LoadKey::Tail(conversation);
+    // A look while it is on its way waits for it: the notifier looks again on every change.
+    if !self.mirror.borrow_mut().loading.insert(key) {
+      return;
+    }
+    let backend = self.clone();
+    spawn_local(async move {
+      let total = backend.message_count(conversation);
+      let start = total.saturating_sub(MAX_TAIL_ROWS);
+      let outcome = read_messages(conversation, start, MAX_TAIL_ROWS).await;
+      let is_changed = {
+        let mut mirror = backend.mirror.borrow_mut();
+        mirror.loading.remove(&key);
+        match outcome {
+          Ok(window) => mirror.take_tail(conversation, window),
+          Err(error) => {
+            tracing::warn!(%error, %conversation, "could not load messages");
+            false
+          },
+        }
+      };
+      if is_changed {
+        backend.changed();
+      }
+    });
   }
 
   fn load_thread(&self, conversation: ConversationId, thread: ThreadId) {
@@ -3888,18 +3981,60 @@ impl ChatBackend for RemoteChat {
   }
 
   fn held_recent_messages(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
-    // Read only: no `is_used`, no page load. Walks back from the newest row while rows are held.
+    // Read only: no `is_used`, no page load. Walks back from the newest row while rows are held,
+    // in the feed or else in the notifier's tail of the conversation.
     let total = self.message_count(conversation);
     let mirror = self.mirror.borrow();
-    let Some(feed) = mirror.feeds.get(&conversation) else {
+    let recent = mirror
+      .feeds
+      .get(&conversation)
+      .map(|feed| newest_held(feed, total, len))
+      .unwrap_or_default();
+    if !recent.is_empty() {
+      return recent;
+    }
+    mirror
+      .tails
+      .get(&conversation)
+      .filter(|tail| tail.total == total)
+      .map(|tail| tail_rows(tail, len))
+      .unwrap_or_default()
+  }
+
+  fn newest_rows(&self, conversation: ConversationId, len: usize) -> Vec<Message> {
+    let total = self.message_count(conversation);
+    if len > MAX_TAIL_ROWS {
+      return self.messages(conversation, total.saturating_sub(len), len);
+    }
+    let wanted = len.min(total);
+    if wanted == 0 {
       return Vec::new();
+    }
+    let maybe_rows = {
+      let mirror = self.mirror.borrow();
+      // A feed's rows are current unless the core changed it since they were read.
+      let from_feed = mirror
+        .feeds
+        .get(&conversation)
+        .filter(|feed| !feed.is_stale && !feed.is_moving)
+        .map(|feed| newest_held(feed, total, len))
+        .filter(|rows| rows.len() == wanted);
+      from_feed.or_else(|| {
+        mirror
+          .tails
+          .get(&conversation)
+          .filter(|tail| tail.total == total && !tail.is_stale)
+          .map(|tail| tail_rows(tail, len))
+          .filter(|rows| rows.len() == wanted)
+      })
     };
-    let mut recent: Vec<Message> = (total.saturating_sub(len)..total)
-      .rev()
-      .map_while(|index| feed.rows.get(&index).cloned())
-      .collect();
-    recent.reverse();
-    recent
+    match maybe_rows {
+      Some(rows) => rows,
+      None => {
+        self.load_tail(conversation);
+        Vec::new()
+      },
+    }
   }
 
   fn messages(&self, conversation: ConversationId, start: usize, len: usize) -> Vec<Message> {
@@ -5117,6 +5252,7 @@ mod tests {
           loading: HashSet::new(),
           outdated: HashSet::new(),
           pending_extras: Vec::new(),
+          tails: HashMap::new(),
         })),
         notify: Rc::new(RefCell::new(None)),
         maybe_error: Rc::new(RefCell::new(None)),
@@ -5651,6 +5787,181 @@ mod tests {
       let failed: Result<ChatAnswer, String> = Err("offline".to_owned());
       assert_eq!(extras_part(&failed, id_from_raw(1)), Err("offline".to_owned()));
       assert!(extras_part(&Ok(draft("x")), id_from_raw(1)).is_err());
+    }
+  }
+
+  /// #2362: the notifier's look at every conversation reads a few rows of each apart from the
+  /// feeds, instead of a page of each into them.
+  mod tails {
+    use super::refresh_plan::backend;
+    use super::*;
+
+    #[test]
+    fn the_newest_rows_come_from_the_tail_without_a_feed() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      hold_tail(&backend, conversation, count, &["a", "b", "c"]);
+
+      let rows = backend.newest_rows(conversation, 2);
+
+      assert_eq!(bodies(&rows), ["b", "c"]);
+      assert!(
+        backend.mirror.borrow().feeds.is_empty(),
+        "no feed for the notifier's look"
+      );
+    }
+
+    #[test]
+    fn a_stale_or_outgrown_tail_is_read_again_not_shown() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      hold_tail(&backend, conversation, count, &["a", "b", "c"]);
+      backend
+        .mirror
+        .borrow_mut()
+        .loading
+        .insert(LoadKey::Tail(conversation));
+      backend
+        .mirror
+        .borrow_mut()
+        .tails
+        .get_mut(&conversation)
+        .unwrap()
+        .is_stale = true;
+
+      assert!(backend.newest_rows(conversation, 2).is_empty());
+
+      hold_tail(&backend, conversation, count - 1, &["a", "b"]);
+      assert!(backend.newest_rows(conversation, 2).is_empty());
+    }
+
+    #[test]
+    fn a_current_feed_answers_before_the_tail() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      hold_tail(&backend, conversation, count, &["old a", "old b"]);
+      {
+        let mut mirror = backend.mirror.borrow_mut();
+        let feed = mirror.feed_entry(conversation);
+        feed.apply(MessageWindow {
+          conversation,
+          start: count - 2,
+          ..window(count, &["a", "b"])
+        });
+      }
+
+      assert_eq!(bodies(&backend.newest_rows(conversation, 2)), ["a", "b"]);
+
+      backend
+        .mirror
+        .borrow_mut()
+        .feeds
+        .get_mut(&conversation)
+        .unwrap()
+        .is_stale = true;
+      assert_eq!(bodies(&backend.newest_rows(conversation, 2)), ["old a", "old b"]);
+    }
+
+    /// A row that fills in (a placeholder decrypted) leaves the total as it is: the change marks
+    /// the tail, so the notifier's next look reads it again.
+    #[test]
+    fn a_change_to_its_conversation_makes_the_tail_stale() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      let (other, _) = backend
+        .mirror
+        .borrow()
+        .snapshot
+        .message_counts
+        .iter()
+        .copied()
+        .find(|(id, _)| *id != conversation)
+        .expect("the mock has two conversations");
+      hold_tail(&backend, conversation, count, &["a"]);
+      hold_tail(&backend, other, 1, &["b"]);
+
+      backend.plan_refresh(
+        SnapshotChanges {
+          feeds: vec![conversation],
+          ..SnapshotChanges::default()
+        },
+        0.0,
+      );
+
+      let mirror = backend.mirror.borrow();
+      assert!(mirror.tails[&conversation].is_stale);
+      assert!(!mirror.tails[&other].is_stale);
+    }
+
+    #[test]
+    fn the_preview_shows_the_tail_when_no_feed_holds_the_rows() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      hold_tail(&backend, conversation, count, &["a", "b", "c"]);
+      backend
+        .mirror
+        .borrow_mut()
+        .tails
+        .get_mut(&conversation)
+        .unwrap()
+        .is_stale = true;
+
+      assert_eq!(
+        bodies(&backend.held_recent_messages(conversation, 8)),
+        ["a", "b", "c"]
+      );
+    }
+
+    #[test]
+    fn only_a_window_that_ends_at_its_total_is_a_tail() {
+      let backend = backend();
+      let (conversation, count) = conversation_with_rows(&backend);
+      let mut mirror = backend.mirror.borrow_mut();
+      let newest = MessageWindow {
+        conversation,
+        start: count - 2,
+        ..window(count, &["a", "b"])
+      };
+
+      assert!(!mirror.take_tail(
+        conversation,
+        MessageWindow {
+          start: 0,
+          ..newest.clone()
+        }
+      ));
+      assert!(mirror.take_tail(conversation, newest.clone()));
+      assert!(!mirror.take_tail(conversation, newest), "the same rows again");
+      assert!(
+        !mirror.take_tail(id_from_raw(999_999), window(2, &["a", "b"])),
+        "not a conversation of the snapshot"
+      );
+    }
+
+    /// A conversation of the mock's snapshot with at least three rows, and its count.
+    fn conversation_with_rows(backend: &RemoteChat) -> (ConversationId, usize) {
+      backend
+        .mirror
+        .borrow()
+        .snapshot
+        .message_counts
+        .iter()
+        .copied()
+        .find(|(_, count)| *count >= 3)
+        .expect("the mock has a conversation with messages")
+    }
+
+    fn hold_tail(backend: &RemoteChat, conversation: ConversationId, total: usize, rows: &[&str]) {
+      let tail = Tail {
+        total,
+        rows: window(total, rows).messages,
+        is_stale: false,
+      };
+      backend.mirror.borrow_mut().tails.insert(conversation, tail);
+    }
+
+    fn bodies(rows: &[Message]) -> Vec<&str> {
+      rows.iter().map(|row| row.body.as_str()).collect()
     }
   }
 
