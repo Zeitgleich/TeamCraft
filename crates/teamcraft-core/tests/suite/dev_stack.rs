@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 use teamcraft_core::LinkOffer;
 use teamcraft_core::api::{HttpGateway, HttpServerApi, StaticToken};
 use teamcraft_core::attestation::{AttestationError, write_identity_attribute};
-use teamcraft_core::client::{NewDeviceLink, OutgoingFile};
+use teamcraft_core::client::{LinkWait, OutgoingFile};
 use teamcraft_core::clock::{Clock, SystemClock};
 use teamcraft_core::read_state;
 use teamcraft_core::store::{LocalStore, MemoryStore, MessageContent, MessageFilter};
@@ -163,10 +163,10 @@ async fn a_second_device_is_linked_through_the_relay() {
   let laptop_api = HttpServerApi::new(required_server_url(), StaticToken(alice_token.clone()));
   let offer = LinkOffer::generate();
   let code = offer.to_code();
-  let (laptop_side, phone_side) = tokio::join!(
-    NewDeviceLink::connect(&laptop_api, &offer),
-    phone.start_link_approval(&code)
-  );
+  // The scanning device must find the code's relay occupied (#1043), so the new device joins first.
+  let waiting = LinkWait::join(&laptop_api, &offer).await.unwrap();
+  let (laptop_side, phone_side) =
+    tokio::join!(waiting.new_device(&laptop_api), phone.start_link_approval(&code));
   let (laptop_side, phone_side) = (laptop_side.unwrap(), phone_side.unwrap());
   assert_eq!(laptop_side.short_code(), phone_side.short_code());
   let new_store = Arc::new(MemoryStore::new());
@@ -257,10 +257,10 @@ async fn thread_updates_and_new_devices_follow_server_events() {
   let laptop_api = HttpServerApi::new(required_server_url(), StaticToken(bob_token.clone()));
   let offer = LinkOffer::generate();
   let code = offer.to_code();
-  let (laptop_side, phone_side) = tokio::join!(
-    NewDeviceLink::connect(&laptop_api, &offer),
-    bob.start_link_approval(&code)
-  );
+  // The scanning device must find the code's relay occupied (#1043), so the new device joins first.
+  let waiting = LinkWait::join(&laptop_api, &offer).await.unwrap();
+  let (laptop_side, phone_side) =
+    tokio::join!(waiting.new_device(&laptop_api), bob.start_link_approval(&code));
   let new_store = Arc::new(MemoryStore::new());
   let (approved, received) = tokio::join!(
     bob.complete_link_approval(phone_side.unwrap()),
