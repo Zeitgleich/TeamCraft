@@ -177,10 +177,6 @@ tract-nnef = { version = "0.23.9", optional = true, default-features = false }
 tract-onnx-opl = { version = "0.23.9", optional = true }
 # The downloaded model's SHA-256 (as teamcraft-crypto computes hashes; MIT/Apache-2.0).
 sha2 = { version = "0.11.0", optional = true }
-# Live captions (#215): whisper.cpp (MIT, built with cmake like libopus) through safe bindings
-# (Unlicense). Its log is silenced, never forwarded: a debug build of whisper.cpp prints tokens.
-# Runs on the CPU; models are downloaded on demand.
-whisper-rs = { version = "0.16.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
 # The browser's voice decoder (#2140): a pure-Rust port of libopus (BSD-3-Clause), bit-exact with
@@ -244,6 +240,13 @@ anyhow = { workspace = true, optional = true }
 
 # Trusted roots for the SFU's certificate on Android, where the system store isn't readable as
 # files (MPL-2.0 data, as in teamcraft-core).
+# Live captions (#215): whisper.cpp (MIT, built with cmake like libopus) through safe bindings
+# (Unlicense). Its log is silenced, never forwarded: a debug build of whisper.cpp prints tokens.
+# Runs on the CPU; models are downloaded on demand. Not on Windows on ARM: whisper.cpp doesn't
+# build with MSVC there (`captions_whisper_unavailable`).
+[target.'cfg(not(all(windows, target_arch = "aarch64")))'.dependencies]
+whisper-rs = { version = "0.16.0", optional = true }
+
 [target.'cfg(target_os = "android")'.dependencies]
 webpki-roots = { version = "1.0.10", optional = true }
 # Hardware H.264 encoding through the NDK's MediaCodec (safe bindings, MIT/Apache-2.0; already in

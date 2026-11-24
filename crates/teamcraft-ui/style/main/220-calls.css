@@ -2117,7 +2117,7 @@
 .call-captions-line,
 .call-captions-status {
   margin: 0;
-  font-size: 1.0625rem;
+  font-size: var(--text-xl);
   line-height: 1.4;
   letter-spacing: 0.005em;
   overflow-wrap: anywhere;
@@ -2165,13 +2165,13 @@
 @media (prefers-contrast: more) {
   .call-captions,
   .call-captions-question {
-    background: #000;
-    border: 1px solid #fff;
+    background: var(--call-bg);
+    border: 1px solid var(--call-text);
   }
 
   .call-captions-line.is-partial,
   .call-captions-status,
   .call-captions-header {
-    color: #fff;
+    color: var(--call-text);
   }
 }

@@ -109,7 +109,12 @@ pub mod camera_governor;
 pub mod caption_model;
 #[cfg(feature = "captions")]
 pub mod captions;
-#[cfg(feature = "captions-whisper")]
+#[cfg(all(feature = "captions-whisper", not(all(windows, target_arch = "aarch64"))))]
+pub mod captions_whisper;
+// whisper.cpp doesn't build with MSVC for ARM (it wants clang there): Windows on ARM has no
+// captions yet, and says so through the same API.
+#[cfg(all(feature = "captions-whisper", windows, target_arch = "aarch64"))]
+#[path = "captions_whisper_unavailable.rs"]
 pub mod captions_whisper;
 // Used by the nokhwa cameras (macOS, Windows); tested on every platform.
 #[cfg(feature = "native")]

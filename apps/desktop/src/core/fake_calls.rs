@@ -144,10 +144,12 @@ impl FakeCalls {
       // No camera here, and nothing to measure.
       | CallAction::SetPreview { .. }
       | CallAction::MeasureLink { .. }
-      // The fake call records nothing.
+      // The fake call records and captions nothing.
       | CallAction::StartRecording { .. }
       | CallAction::StopRecording
       | CallAction::DiscardRecording
+      | CallAction::SetCaptions { .. }
+      | CallAction::DeleteCaptionModel
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }
