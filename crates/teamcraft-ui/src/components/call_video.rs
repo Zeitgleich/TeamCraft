@@ -42,6 +42,10 @@ pub fn VideoTile(
   /// A device of the person records the call (e2ee.md §8.3).
   #[prop(into, default = Signal::stored(false))]
   is_recording: Signal<bool>,
+  /// A recording that asked for consent runs, and the person isn't in it: they declined or
+  /// haven't allowed it (#2115).
+  #[prop(into, default = Signal::stored(false))]
+  is_left_out_of_recording: Signal<bool>,
   /// The person's connection was lost and they are rejoining.
   #[prop(into, default = Signal::stored(false))]
   is_reconnecting: Signal<bool>,
@@ -95,6 +99,9 @@ pub fn VideoTile(
         }
         if is_recording.get() {
           parts.push(i18n.t("tile-recording"));
+        }
+        if is_left_out_of_recording.get() {
+          parts.push(i18n.t("tile-not-recorded"));
         }
         if is_speaking.get() {
           parts.push(i18n.t("tile-speaking"));
@@ -158,6 +165,12 @@ pub fn VideoTile(
         <span class="tile-status tile-status-recording" aria-hidden="true">
           <span class="recording-dot"></span>
           {move || i18n.t("tile-recording")}
+        </span>
+      </Show>
+      <Show when=move || is_left_out_of_recording.get() fallback=|| ()>
+        <span class="tile-status tile-status-left-out" aria-hidden="true">
+          <Icon name=IconName::MicOff />
+          {move || i18n.t("tile-not-recorded")}
         </span>
       </Show>
       <Show when=move || has_hand_raised.get() fallback=|| ()>

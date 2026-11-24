@@ -6,6 +6,9 @@
 //! The policy may also name a **recorder bot** (#2273): a bot account with a device of its own that
 //! joins the calls of the conversations it is a member of and records them unattended, with the same
 //! signed notice as any recorder. In `recorder_bot_only` mode it is the only one that records.
+//!
+//! With `consent: all_consent` (#2115) a recording asks everybody in the call first and records
+//! only the voices of those who allowed it, each answer signed by the answering device.
 
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -20,6 +23,11 @@ pub const MAX_RECORDING_MINUTES: u16 = 480;
 /// Largest signed recording notice the SFU keeps and forwards (`set_recording`); a notice is about
 /// 100 bytes.
 pub const MAX_RECORDING_NOTICE_BYTES: usize = 256;
+/// Largest signed consent the SFU keeps and forwards (`set_recording_consent`); a consent is 106
+/// bytes.
+pub const MAX_RECORDING_CONSENT_BYTES: usize = 256;
+/// The recorders a device's consents are kept for at the SFU, at most; beyond, the oldest goes.
+pub const MAX_RECORDING_CONSENTS_PER_DEVICE: usize = 4;
 
 /// The `call_recording` group of the signed workspace policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -37,6 +45,21 @@ pub struct CallRecordingPolicy {
   /// it. Signed like the rest, so a server can't swap in another account.
   #[serde(rename = "bot", default, skip_serializing_if = "Option::is_none")]
   pub maybe_bot: Option<UserId>,
+  /// Whether a recording only tells everybody, or asks everybody first and records only who
+  /// allowed it (#2115).
+  pub consent: RecordingConsentMode,
+}
+
+wire_enum! {
+  /// What a recording needs from the others in the call (#2115).
+  pub enum RecordingConsentMode {
+    /// Everybody is told (signed notice, banner, tone); objecting means leaving: the default.
+    NoticeOnly => "notice_only",
+    /// Everybody is asked; the recording starts once everybody answered (or the recorder starts
+    /// it without those who haven't yet), and records only the voices of those who allowed it,
+    /// each answer signed by the answering device. Who joins later is asked too.
+    AllConsent => "all_consent",
+  }
 }
 
 wire_enum! {
@@ -95,6 +118,7 @@ impl Default for CallRecordingPolicy {
       max_minutes: DEFAULT_RECORDING_MINUTES,
       local_files: RecordingFiles::Allowed,
       maybe_bot: None,
+      consent: RecordingConsentMode::NoticeOnly,
     }
   }
 }
@@ -160,12 +184,19 @@ impl CallRecordingPolicy {
     matches!(self.local_files, RecordingFiles::Allowed)
   }
 
+  /// Whether a recording must ask everybody for consent (#2115). A value from a newer app
+  /// (`Unknown`) asks: the stricter reading.
+  pub fn requires_consent(&self) -> bool {
+    !matches!(self.consent, RecordingConsentMode::NoticeOnly)
+  }
+
   /// Whether owners' apps may sign it: the length in range, no unknown values, and the bot named
   /// where only the bot records.
   pub fn is_valid(&self) -> bool {
     (1..=MAX_RECORDING_MINUTES).contains(&self.max_minutes)
       && !matches!(self.recorders, CallRecorders::Unknown(_))
       && !matches!(self.local_files, RecordingFiles::Unknown(_))
+      && !matches!(self.consent, RecordingConsentMode::Unknown(_))
       && !(self.is_recorder_bot_only() && self.maybe_bot.is_none())
   }
 }
@@ -182,7 +213,7 @@ mod tests {
       let policy = CallRecordingPolicy::default();
       assert_eq!(
         serde_json::to_string(&policy).unwrap(),
-        r#"{"recorders":"off","max_minutes":120,"local_files":"allowed"}"#
+        r#"{"recorders":"off","max_minutes":120,"local_files":"allowed","consent":"notice_only"}"#
       );
       assert_eq!(serde_json::from_str::<CallRecordingPolicy>("{}").unwrap(), policy);
     }
@@ -215,7 +246,7 @@ mod tests {
       let json = serde_json::to_string(&policy).unwrap();
       assert_eq!(
         json,
-        r#"{"recorders":"recorder_bot_only","max_minutes":120,"local_files":"allowed","bot":"9"}"#
+        r#"{"recorders":"recorder_bot_only","max_minutes":120,"local_files":"allowed","bot":"9","consent":"notice_only"}"#
       );
       assert_eq!(
         serde_json::from_str::<CallRecordingPolicy>(&json).unwrap(),
@@ -231,6 +262,26 @@ mod tests {
       assert!(!policy.is_enabled());
       assert!(!policy.allows(RecorderRole::RecorderBot));
       assert!(!policy.allows(RecorderRole::Admin));
+    }
+
+    #[test]
+    fn consent_is_signed_and_a_policy_from_before_only_tells() {
+      let policy: CallRecordingPolicy = serde_json::from_str(r#"{"recorders":"members"}"#).unwrap();
+      assert_eq!(policy.consent, RecordingConsentMode::NoticeOnly);
+      assert!(!policy.requires_consent());
+      let policy: CallRecordingPolicy =
+        serde_json::from_str(r#"{"recorders":"members","consent":"all_consent"}"#).unwrap();
+      assert!(policy.requires_consent());
+      assert!(policy.is_valid());
+    }
+
+    #[test]
+    fn a_newer_consent_mode_asks_and_cant_be_signed() {
+      let policy: CallRecordingPolicy =
+        serde_json::from_str(r#"{"recorders":"members","consent":"two_thirds"}"#).unwrap();
+      assert_eq!(policy.consent, RecordingConsentMode::Unknown("two_thirds".into()));
+      assert!(policy.requires_consent());
+      assert!(!policy.is_valid());
     }
 
     #[test]

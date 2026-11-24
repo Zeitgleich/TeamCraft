@@ -31,7 +31,6 @@ use openmls::prelude::{
 };
 use openmls_basic_credential::SignatureKeyPair;
 use openmls_rust_crypto::OpenMlsRustCrypto;
-#[cfg(feature = "native")]
 use teamcraft_crypto::call_recording::RecordingNoticeSigner;
 use teamcraft_crypto::call_signal::{CALL_SIGNAL_EXPORTER_LABEL, CALL_SIGNAL_EXPORTER_LEN, CallSignalKey};
 use teamcraft_crypto::direct_path::{DIRECT_PATH_EXPORTER_LABEL, DIRECT_PATH_EXPORTER_LEN, DirectPathKey};
@@ -51,7 +50,6 @@ pub struct DaveParticipant {
   signature_public_key: Vec<u8>,
   /// Signs this device's recording notices with the same key (e2ee.md §8.3). Only in the apps
   /// that record: the browser doesn't yet (#2114), and its call module is smaller without it.
-  #[cfg(feature = "native")]
   notice_signer: RecordingNoticeSigner,
   stats: DaveFrameStats,
 }
@@ -167,13 +165,11 @@ impl DaveParticipant {
     // A fresh key for every call; never reused (e2ee.md §8).
     let key_pair = SigningKeyPair::generate();
     let session = DaveSession::new(version, participant_id.0, call_id.0, Some(&key_pair))?;
-    #[cfg(feature = "native")]
     let notice_signer =
       RecordingNoticeSigner::from_dave_private_key(&key_pair.private).map_err(|_| DaveError::NoticeKey)?;
     Ok(Self {
       session,
       signature_public_key: key_pair.public.clone(),
-      #[cfg(feature = "native")]
       notice_signer,
       stats: DaveFrameStats::default(),
     })
@@ -331,8 +327,8 @@ impl DaveParticipant {
     Ok(self.session.get_verification_code(other.0)?)
   }
 
-  /// Signs this device's recording notices with this session's key (e2ee.md §8.3).
-  #[cfg(feature = "native")]
+  /// Signs this device's recording notices and consents with this session's key (e2ee.md §8.3):
+  /// in the browser as in the native apps.
   pub fn notice_signer(&self) -> &RecordingNoticeSigner {
     &self.notice_signer
   }

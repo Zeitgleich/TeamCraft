@@ -358,6 +358,14 @@ class CallController(
     maybeSession?.setHandRaised(isRaised)
   }
 
+  /**
+   * Answers a person's recordings of the call that ask for consent (#2115): this device's voice
+   * in them, or left out. The core signs the answer with the call's key.
+   */
+  fun answerRecording(recorderUserId: String, isAllowed: Boolean) {
+    maybeSession?.answerRecording(recorderUserId, isAllowed)
+  }
+
   /** Turns the camera on or off; the call screen asks for the permission and captures. */
   fun setCameraWanted(isWanted: Boolean) {
     wantsCamera.value = isWanted

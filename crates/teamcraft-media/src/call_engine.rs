@@ -24,6 +24,7 @@ use std::time::Duration;
 
 #[cfg(feature = "call-view")]
 use teamcraft_client_api::video_stats::VideoStatsReport;
+use teamcraft_crypto::call_recording::ConsentAnswer;
 use teamcraft_crypto::call_signal::CallSignalKey;
 use teamcraft_crypto::direct_path::DirectPathKey;
 use teamcraft_proto::{
@@ -42,7 +43,8 @@ use crate::audio_frame::EncodedAudioFrame;
 use crate::audio_frame::opus_packet_samples;
 use crate::bwe::{BweConfig, FeedbackRecorder, SendSideEstimator};
 use crate::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
-use crate::call_recording_notice::{OwnRecording, Recorder, RecordingNotices};
+use crate::call_recording_consent::{OwnConsents, RecordingConsents};
+use crate::call_recording_notice::{OwnPhase, OwnRecording, Recorder, RecordingNotices};
 use crate::call_resilience::CallTransport;
 use crate::call_signals::{CallSignals, ReceivedSignal};
 use crate::call_video::{IncomingVideo, OutgoingVideo, ReceivedVideoFrame, ReleasedFrame};
@@ -331,6 +333,18 @@ pub struct CallEngine {
   recording_notices: RecordingNotices,
   /// What the app was last told about the own notice's confirmation.
   is_recording_unconfirmed_reported: bool,
+  /// The others' signed answers to recordings that ask for consent (#2115): to this device's own
+  /// recording, and to the others' (who is left out of them).
+  recording_consents: RecordingConsents,
+  /// This device's answers to the others' recordings.
+  own_consents: OwnConsents,
+  /// The devices this device's own recording that asked for consent may record: those with a
+  /// verified "allow" for its take. Kept up to date for the driver's mix, frame by frame.
+  own_admitted: Vec<DeviceId>,
+  /// What the app was last told about the own recording's consents.
+  maybe_own_consent_reported: Option<OwnConsentStatus>,
+  /// What the app was last told about the others who record.
+  recorders_reported: Vec<Recorder>,
   is_deafened: bool,
   outputs: VecDeque<EngineOutput>,
 }
@@ -466,8 +480,12 @@ pub enum CallEngineEvent {
     device_id: DeviceId,
     is_muted: bool,
   },
-  /// The other devices that record the call changed (e2ee.md §8.3): all of them, by device.
+  /// The other devices that record the call (or ask to) changed (e2ee.md §8.3): all of them, by
+  /// device, with this device's answers and who allowed which recording (#2115).
   RecordersChanged(Vec<Recorder>),
+  /// The consents to this device's own recording that asks for them changed (#2115), or it
+  /// stopped asking (`None`).
+  OwnRecordingConsent(Option<OwnConsentStatus>),
   /// This device records, and the SFU hasn't confirmed keeping its notice for a while (or has
   /// again): the others may not see the recording.
   OwnRecordingUnconfirmed(bool),
@@ -806,6 +824,37 @@ impl RetiredKeys {
   }
 }
 
+/// How this device's recording treats the others (#2115, the signed policy's `consent`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingConsentRule {
+  /// Everybody is told; it records everybody it hears.
+  TellOnly,
+  /// Everybody is asked; it records only who allowed it.
+  AskEverybody,
+}
+
+/// What this device's recording may take in right now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingAdmission<'a> {
+  /// Nothing: no recording, or one that still waits for the others' answers.
+  Nobody,
+  /// Everybody it hears (a recording that only tells).
+  Everybody,
+  /// Only these devices' voices, and its own (a recording that asked for consent).
+  Only(&'a [DeviceId]),
+}
+
+/// The answers to this device's recording that asks for consent (#2115).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OwnConsentStatus {
+  /// It waits for answers and records nothing yet.
+  pub is_waiting: bool,
+  pub allowed: Vec<DeviceId>,
+  pub declined: Vec<DeviceId>,
+  /// In the call, and no verified answer yet: left out until they allow it.
+  pub unanswered: Vec<DeviceId>,
+}
+
 impl CallEngine {
   pub fn new(config: CallEngineConfig, now: Instant) -> Self {
     let uplink = SendSideEstimator::new(config.bwe);
@@ -905,6 +954,11 @@ impl CallEngine {
       own_recording: OwnRecording::default(),
       recording_notices: RecordingNotices::default(),
       is_recording_unconfirmed_reported: false,
+      recording_consents: RecordingConsents::default(),
+      own_consents: OwnConsents::default(),
+      own_admitted: Vec::new(),
+      maybe_own_consent_reported: None,
+      recorders_reported: Vec::new(),
       is_deafened: false,
       outputs: VecDeque::new(),
     }
@@ -1170,26 +1224,93 @@ impl CallEngine {
   }
 
   /// Starts or stops this device's recording notice (e2ee.md §8.3): the others are told, signed
-  /// with this call's DAVE key, now and after every (re)join. Recording itself is the driver's.
-  pub fn set_recording(&mut self, is_recording: bool) {
-    if self.own_recording.set(is_recording) {
+  /// with this call's DAVE key, now and after every (re)join. A recording that asks for consent
+  /// (#2115) first asks, and records once everybody answered ([`Self::recording_admission`]).
+  /// Recording itself is the driver's.
+  pub fn set_recording(&mut self, maybe_rule: Option<RecordingConsentRule>) {
+    let maybe_asks = maybe_rule.map(|rule| rule == RecordingConsentRule::AskEverybody);
+    if self.own_recording.set(maybe_asks) {
       self.announce_recording();
     }
-    if !is_recording {
+    if maybe_rule.is_none() {
       self.report_recording_confirmation(false);
     }
+    self.update_own_consent();
   }
 
+  /// Recording or asking to.
   pub fn is_recording(&self) -> bool {
     self.own_recording.is_recording()
   }
 
-  /// The browser doesn't record yet (#2114): it has no notice to send.
-  #[cfg(not(feature = "native"))]
-  fn announce_recording(&mut self) {}
+  /// Starts a recording that waits for answers without those who haven't answered yet (#2115):
+  /// they are left out until they allow it.
+  pub fn start_recording_now(&mut self) {
+    if self.own_recording.begin() {
+      info!("recording started without every answer");
+      self.announce_recording();
+      self.update_own_consent();
+    }
+  }
+
+  /// What the driver may record this frame (#2115): nothing while the recording asks, everybody
+  /// where it only tells, else only who allowed it.
+  pub fn recording_admission(&self) -> RecordingAdmission<'_> {
+    match self.own_recording.phase() {
+      OwnPhase::Off | OwnPhase::Requesting => RecordingAdmission::Nobody,
+      OwnPhase::Recording { asks_consent: false } => RecordingAdmission::Everybody,
+      OwnPhase::Recording { asks_consent: true } => RecordingAdmission::Only(&self.own_admitted),
+    }
+  }
+
+  /// Answers the recordings of `recorder` (each of their devices that asks, verified) for this
+  /// device (#2115): allow its voice in them, or leave it out. A new answer replaces the last.
+  pub fn answer_recordings_of(&mut self, recorder: UserId, is_allowed: bool) {
+    let asks: Vec<(DeviceId, u64)> = self
+      .recording_notices
+      .recorders()
+      .into_iter()
+      .filter(|shown| shown.maybe_user_id == Some(recorder) && shown.device_id != self.config.device_id)
+      .filter_map(|shown| {
+        let (take, _) = self.recording_notices.verified_ask(shown.device_id)?;
+        Some((shown.device_id, take))
+      })
+      .collect();
+    let answer = if is_allowed {
+      ConsentAnswer::Allow
+    } else {
+      ConsentAnswer::Decline
+    };
+    for (device_id, take) in asks {
+      self.give_consent(device_id, take, answer);
+    }
+    self.report_recorders();
+  }
+
+  /// Signs and sends this device's answer to `recorder`'s take, once in the call with a DAVE
+  /// session (it waits for none: a recording asks only devices in it).
+  fn give_consent(&mut self, recorder: DeviceId, take: u64, answer: ConsentAnswer) {
+    let (Some(call_id), Some(dave)) = (self.call_id(), self.maybe_dave.as_ref()) else {
+      return;
+    };
+    match self.own_consents.give(
+      dave.notice_signer(),
+      call_id,
+      self.config.device_id,
+      recorder,
+      take,
+      answer,
+      wall_clock_ms(),
+      Instant::now(),
+    ) {
+      Ok(consent) => self.signal(CallClientMessage::SetRecordingConsent {
+        consent: Base64Bytes::new(consent),
+      }),
+      Err(error) => warn!(%error, "signing the recording consent failed"),
+    }
+  }
 
   /// Sends this device's signed recording notice, once in the call with a DAVE session.
-  #[cfg(feature = "native")]
   fn announce_recording(&mut self) {
     if !matches!(self.phase, Phase::Joined { .. }) {
       return;
@@ -1197,14 +1318,11 @@ impl CallEngine {
     let (Some(call_id), Some(dave)) = (self.call_id(), self.maybe_dave.as_ref()) else {
       return;
     };
-    let now_ms = web_time::SystemTime::now()
-      .duration_since(web_time::UNIX_EPOCH)
-      .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
     match self.own_recording.next_notice(
       dave.notice_signer(),
       call_id,
       self.config.device_id,
-      now_ms,
+      wall_clock_ms(),
       Instant::now(),
     ) {
       Ok(notice) => self.signal(CallClientMessage::SetRecording {
@@ -1215,10 +1333,108 @@ impl CallEngine {
   }
 
   /// After a (re)join or a new DAVE session: the others need a notice signed with this
-  /// session's key while recording, or the stop that couldn't be sent while away.
+  /// session's key while recording, or the stop that couldn't be sent while away; and this
+  /// device's answers to their recordings, signed anew (the SFU forgot them, #2115).
   fn announce_recording_if_needed(&mut self) {
     if self.own_recording.needs_announcing() {
       self.announce_recording();
+    }
+    if !matches!(self.phase, Phase::Joined { .. }) {
+      return;
+    }
+    let (Some(call_id), Some(dave)) = (self.call_id(), self.maybe_dave.as_ref()) else {
+      return;
+    };
+    let consents = self.own_consents.resign_all(
+      dave.notice_signer(),
+      call_id,
+      self.config.device_id,
+      wall_clock_ms(),
+      Instant::now(),
+    );
+    for consent in consents {
+      self.signal(CallClientMessage::SetRecordingConsent {
+        consent: Base64Bytes::new(consent),
+      });
+    }
+  }
+
+  /// Follows the answers to this device's recording that asks for consent (#2115): who may be in
+  /// it, and, while it asks, whether everybody in the call answered, which starts it. Tells the
+  /// app when that changed.
+  fn update_own_consent(&mut self) {
+    let maybe_status = match (self.own_recording.phase(), self.own_recording.take()) {
+      (OwnPhase::Requesting | OwnPhase::Recording { asks_consent: true }, Some(take)) => {
+        let me = self.config.device_id;
+        let mut status = OwnConsentStatus {
+          is_waiting: self.own_recording.phase() == OwnPhase::Requesting,
+          ..OwnConsentStatus::default()
+        };
+        let mut others: Vec<DeviceId> = self
+          .participants
+          .keys()
+          .copied()
+          .filter(|device| *device != me)
+          .collect();
+        others.sort();
+        for device in others {
+          match self.recording_consents.answer(device, me, take) {
+            Some(ConsentAnswer::Allow) => status.allowed.push(device),
+            Some(ConsentAnswer::Decline) => status.declined.push(device),
+            None => status.unanswered.push(device),
+          }
+        }
+        Some(status)
+      },
+      (OwnPhase::Requesting, None) => Some(OwnConsentStatus {
+        is_waiting: true,
+        ..OwnConsentStatus::default()
+      }),
+      _ => None,
+    };
+    // Everybody answered: it starts, without those who declined.
+    if let Some(status) = maybe_status.as_ref()
+      && status.is_waiting
+      && status.unanswered.is_empty()
+      && self.own_recording.take().is_some()
+      && self.own_recording.begin()
+    {
+      info!(
+        allowed = status.allowed.len(),
+        declined = status.declined.len(),
+        "recording started after every answer"
+      );
+      self.announce_recording();
+      return self.update_own_consent();
+    }
+    self.own_admitted = maybe_status
+      .as_ref()
+      .map(|status| status.allowed.clone())
+      .unwrap_or_default();
+    if self.maybe_own_consent_reported != maybe_status {
+      self.maybe_own_consent_reported = maybe_status.clone();
+      self.event(CallEngineEvent::OwnRecordingConsent(maybe_status));
+    }
+  }
+
+  /// The others who record, with this device's answers and who allowed their recordings.
+  fn recorders(&self) -> Vec<Recorder> {
+    let mut recorders = self.recording_notices.recorders();
+    for recorder in &mut recorders {
+      if recorder.asks_consent {
+        recorder.maybe_own_answer = self.own_consents.answer(recorder.device_id, recorder.take);
+        recorder.allowed = self.recording_consents.allowed(recorder.device_id, recorder.take);
+      }
+    }
+    recorders
+  }
+
+  /// Tells the app who records, when that changed.
+  fn report_recorders(&mut self) {
+    let recorders = self.recorders();
+    if recorders != self.recorders_reported {
+      self.recorders_reported = recorders.clone();
+      self.event(CallEngineEvent::RecordersChanged(recorders));
     }
   }
 
@@ -1254,6 +1470,13 @@ impl CallEngine {
     let mut has_changed = self
       .recording_notices
       .recheck(call_id, |device| keys.get(&device).cloned());
+    if self
+      .recording_consents
+      .recheck(call_id, |device| keys.get(&device).cloned())
+    {
+      has_changed = true;
+      self.update_own_consent();
+    }
     // Only the members' own commits take a device out of the group: the SFU alone can't hide a
     // recording by calling its device gone (e2ee.md §8.3).
     let members: HashSet<DeviceId> = self
@@ -1273,9 +1496,7 @@ impl CallEngine {
         .prune_left(|device| members.contains(&device));
     }
     if has_changed {
-      self.event(CallEngineEvent::RecordersChanged(
-        self.recording_notices.recorders(),
-      ));
+      self.report_recorders();
     }
   }
 
@@ -1288,6 +1509,11 @@ impl CallEngine {
     if let Some(notice) = self.own_recording.due_resend(now) {
       self.signal(CallClientMessage::SetRecording {
         notice: Base64Bytes::new(notice),
+      });
+    }
+    for consent in self.own_consents.due_resends(now) {
+      self.signal(CallClientMessage::SetRecordingConsent {
+        consent: Base64Bytes::new(consent),
       });
     }
     let is_unconfirmed = self.own_recording.is_unconfirmed(now);
@@ -2314,9 +2540,7 @@ impl CallEngine {
             notice.as_slice(),
             maybe_key.as_deref(),
           ) {
-            self.event(CallEngineEvent::RecordersChanged(
-              self.recording_notices.recorders(),
-            ));
+            self.report_recorders();
           }
         }
         Ok(())
@@ -2325,6 +2549,25 @@ impl CallEngine {
         if self.own_recording.confirm(notice.as_slice()) {
           self.report_recording_confirmation(false);
         }
+        Ok(())
+      },
+      CallEvent::RecordingConsent { device_id, consent } => {
+        if let Some(call_id) = self.call_id()
+          && device_id != self.config.device_id
+        {
+          let maybe_key = self.recording_key(device_id);
+          if self
+            .recording_consents
+            .receive(call_id, device_id, consent.as_slice(), maybe_key.as_deref())
+          {
+            self.update_own_consent();
+            self.report_recorders();
+          }
+        }
+        Ok(())
+      },
+      CallEvent::RecordingConsentKept { consent } => {
+        self.own_consents.confirm(consent.as_slice());
         Ok(())
       },
       CallEvent::ActiveSpeakers { device_ids } => {
@@ -2797,10 +3040,12 @@ impl CallEngine {
     self.audio_streams.retain(|_, (owner, _)| *owner != device_id);
     // The SFU's word alone: a verified recording stays, marked, until the device is out of the
     // DAVE group (e2ee.md §8.3).
-    if self.recording_notices.mark_left(device_id) {
-      self.event(CallEngineEvent::RecordersChanged(
-        self.recording_notices.recorders(),
-      ));
+    let has_left_recording = self.recording_notices.mark_left(device_id);
+    // Its answers go with it: leaving only ever takes a voice out of a recording (#2115).
+    let had_answers = self.recording_consents.forget(device_id);
+    self.update_own_consent();
+    if has_left_recording || had_answers {
+      self.report_recorders();
     }
     let streams: Vec<StreamId> = self
       .remote_video
@@ -4790,10 +5035,10 @@ impl CallEngine {
       .recording_notices
       .mark_present(participant.device_id, participant.user_id)
     {
-      self.event(CallEngineEvent::RecordersChanged(
-        self.recording_notices.recorders(),
-      ));
+      self.report_recorders();
     }
+    // A late joiner is asked: until it answers, the own recording leaves it out (#2115).
+    self.update_own_consent();
   }
 
   fn report_secured(&mut self) {
@@ -4943,6 +5188,13 @@ fn frame_codec(codec: &VideoCodec) -> FrameCodec {
     // Unknown codecs are never negotiated (choose_video_codec skips them); encrypt the whole frame.
     VideoCodec::Unknown(_) => FrameCodec::Vp9,
   }
+}
+
+/// Wall-clock milliseconds: where the numbering of an app that restarted mid-call goes on.
+fn wall_clock_ms() -> u64 {
+  web_time::SystemTime::now()
+    .duration_since(web_time::UNIX_EPOCH)
+    .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
 }
 
 #[cfg(test)]
@@ -10047,17 +10299,18 @@ mod tests {
   #[cfg(feature = "native")]
   mod recording {
     use super::*;
+    use crate::call_auth::{crypto_call_id, crypto_device_id};
     use teamcraft_crypto::call_recording::{RecordingState, SignedRecordingNotice};
 
     #[test]
     fn a_secured_peer_sees_a_verified_recording_until_its_signed_stop() {
       let now = Instant::now();
       let (mut alice, mut bob) = secured_pair(now);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       let start = sent_notices(&mut alice).pop().unwrap();
       bob.handle_signal(event(4, notice_from(1, &start)), now).unwrap();
       assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), true, false)]));
-      alice.set_recording(false);
+      alice.set_recording(None);
       let stop = sent_notices(&mut alice).pop().unwrap();
       assert_eq!(state_of(&stop), RecordingState::Stopped);
       bob.handle_signal(event(5, notice_from(1, &stop)), now).unwrap();
@@ -10070,7 +10323,7 @@ mod tests {
     fn the_sfus_word_that_the_recorder_left_doesnt_hide_the_recording() {
       let now = Instant::now();
       let (mut alice, mut bob) = secured_pair(now);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       let start = sent_notices(&mut alice).pop().unwrap();
       bob.handle_signal(event(4, notice_from(1, &start)), now).unwrap();
       drain(&mut bob);
@@ -10079,7 +10332,7 @@ mod tests {
         .unwrap();
       assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), true, true)]));
       // Its signed stop still ends it, although the engine dropped its key with the leave.
-      alice.set_recording(false);
+      alice.set_recording(None);
       let stop = sent_notices(&mut alice).pop().unwrap();
       bob.handle_signal(event(6, notice_from(1, &stop)), now).unwrap();
       assert_eq!(recorders_of(&mut bob), Some(Vec::new()));
@@ -10096,7 +10349,7 @@ mod tests {
       let mut bob = joined_engine(2, &[1], &gateway, Some(&authenticators[&2]), now);
       let (_, alice_binding) = key_package_of(&mut alice);
       let (key_package, bob_binding) = key_package_of(&mut bob);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       let start = sent_notices(&mut alice).pop().unwrap();
       bob.handle_signal(event(3, notice_from(1, &start)), now).unwrap();
       assert_eq!(recorders_of(&mut bob), Some(vec![(device(1), false, false)]));
@@ -10149,11 +10402,11 @@ mod tests {
     fn a_rejoin_says_the_recording_again_and_a_stop_from_while_away() {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       assert_eq!(sent_notices(&mut alice).len(), 1);
 
       alice.connection_lost(now);
-      alice.set_recording(false);
+      alice.set_recording(None);
       assert!(sent_notices(&mut alice).is_empty(), "nothing is sent while away");
       alice.rejoin("fresh".into(), now);
       alice.handle_signal(event(1, joined(1, &[2])), now).unwrap();
@@ -10166,7 +10419,7 @@ mod tests {
     fn a_rejoin_or_a_new_dave_session_signs_the_recording_again() {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       let first = sent_notices(&mut alice).pop().unwrap();
 
       // An SFU that lost the slot (a restart): a fresh join, DAVE starts over.
@@ -10196,7 +10449,7 @@ mod tests {
     fn an_unconfirmed_notice_is_sent_again_and_then_warned_about() {
       let now = Instant::now();
       let (mut alice, _bob) = secured_pair(now);
-      alice.set_recording(true);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
       let start = sent_notices(&mut alice).pop().unwrap();
       alice.on_timer(now + Duration::from_secs(3));
       assert_eq!(sent_notices(&mut alice), vec![start.clone()], "sent again");
@@ -10222,6 +10475,135 @@ mod tests {
       )));
       alice.on_timer(now + Duration::from_secs(20));
       assert!(sent_notices(&mut alice).is_empty(), "confirmed: no more resends");
+    }
+
+    /// #2115: a recording that asks records nobody until a verified "allow" for its take came,
+    /// then only who allowed it; a withdrawal or a consent the recorder forged changes that.
+    #[test]
+    fn a_recording_that_asks_admits_only_who_allowed_it() {
+      let now = Instant::now();
+      let (mut alice, mut bob) = secured_pair(now);
+      alice.set_recording(Some(RecordingConsentRule::AskEverybody));
+      let (notices, _) = sent_signals(&mut alice);
+      let ask = notices.last().unwrap().clone();
+      assert_eq!(state_of(&ask), RecordingState::Requesting);
+      assert_eq!(
+        alice.recording_admission(),
+        RecordingAdmission::Nobody,
+        "nothing while it asks"
+      );
+
+      bob.handle_signal(event(4, notice_from(1, &ask)), now).unwrap();
+      let recorder = last_recorders(&mut bob).pop().unwrap();
+      assert!(recorder.is_requesting && recorder.asks_consent && recorder.maybe_own_answer.is_none());
+      bob.answer_recordings_of(recorder.maybe_user_id.unwrap(), true);
+      let (_, consents) = sent_signals(&mut bob);
+      let allow = consents.last().unwrap().clone();
+
+      alice
+        .handle_signal(event(6, consent_from(2, &allow)), now)
+        .unwrap();
+      let (notices, _) = sent_signals(&mut alice);
+      assert_eq!(
+        notices.last().map(|notice| state_of(notice)),
+        Some(RecordingState::Recording),
+        "everybody answered: it records"
+      );
+      assert_eq!(
+        alice.recording_admission(),
+        RecordingAdmission::Only(&[device(2)])
+      );
+
+      bob.answer_recordings_of(recorder.maybe_user_id.unwrap(), false);
+      let (_, consents) = sent_signals(&mut bob);
+      alice
+        .handle_signal(event(7, consent_from(2, consents.last().unwrap())), now)
+        .unwrap();
+      assert_eq!(
+        alice.recording_admission(),
+        RecordingAdmission::Only(&[]),
+        "withdrawn"
+      );
+      // The old "allow" replayed by the server changes nothing.
+      alice
+        .handle_signal(event(8, consent_from(2, &allow)), now)
+        .unwrap();
+      assert_eq!(alice.recording_admission(), RecordingAdmission::Only(&[]));
+    }
+
+    #[test]
+    fn a_consent_the_recorder_signs_for_somebody_else_admits_nobody() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_recording(Some(RecordingConsentRule::AskEverybody));
+      drain(&mut alice);
+      alice.start_recording_now();
+      assert_eq!(alice.recording_admission(), RecordingAdmission::Only(&[]));
+      let take = alice.own_recording.take().unwrap();
+      let call_id = alice.call_id().unwrap();
+      let forged = alice
+        .maybe_dave
+        .as_ref()
+        .unwrap()
+        .notice_signer()
+        .sign_consent(
+          crypto_call_id(call_id),
+          crypto_device_id(device(2)),
+          crypto_device_id(device(1)),
+          take,
+          1,
+          ConsentAnswer::Allow,
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap();
+      alice
+        .handle_signal(event(6, consent_from(2, &forged)), now)
+        .unwrap();
+      assert_eq!(alice.recording_admission(), RecordingAdmission::Only(&[]));
+    }
+
+    #[test]
+    fn a_recording_that_only_tells_takes_everybody() {
+      let now = Instant::now();
+      let (mut alice, _bob) = secured_pair(now);
+      alice.set_recording(Some(RecordingConsentRule::TellOnly));
+      assert_eq!(alice.recording_admission(), RecordingAdmission::Everybody);
+      alice.set_recording(None);
+      assert_eq!(alice.recording_admission(), RecordingAdmission::Nobody);
+    }
+
+    /// The recording notices and consents the engine sent.
+    fn sent_signals(engine: &mut CallEngine) -> (Vec<Vec<u8>>, Vec<Vec<u8>>) {
+      let (mut notices, mut consents) = (Vec::new(), Vec::new());
+      for output in drain(engine) {
+        match output {
+          EngineOutput::Signal(CallClientMessage::SetRecording { notice }) => notices.push(notice.into_vec()),
+          EngineOutput::Signal(CallClientMessage::SetRecordingConsent { consent }) => {
+            consents.push(consent.into_vec())
+          },
+          _ => {},
+        }
+      }
+      (notices, consents)
+    }
+
+    fn last_recorders(engine: &mut CallEngine) -> Vec<Recorder> {
+      drain(engine)
+        .into_iter()
+        .rev()
+        .find_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::RecordersChanged(recorders)) => Some(recorders),
+          _ => None,
+        })
+        .unwrap_or_default()
+    }
+
+    fn consent_from(id: i64, consent: &[u8]) -> CallEvent {
+      CallEvent::RecordingConsent {
+        device_id: device(id),
+        consent: Base64Bytes::new(consent.to_vec()),
+      }
     }
 
     fn sent_notices(engine: &mut CallEngine) -> Vec<Vec<u8>> {

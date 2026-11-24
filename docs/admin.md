@@ -1317,12 +1317,13 @@ Administration → People:
 Whether people may record calls is part of the signed workspace policy (`call_recording`, §2.3),
 under Administration → Security → Call recording. It is **off by default**.
 
-| Field         | Default   | Meaning                                                                                                                |
-|---------------|-----------|------------------------------------------------------------------------------------------------------------------------|
-| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins), `members` (everybody but guests) or `recorder_bot_only` (#2273)   |
-| `max_minutes` | `120`     | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480                                   |
-| `local_files` | `allowed` | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116)                             |
-| `bot`         | none      | The recorder bot's account (#2273): records the calls of its conversations unattended; required by `recorder_bot_only` |
+| Field         | Default       | Meaning                                                                                                                |
+|---------------|---------------|------------------------------------------------------------------------------------------------------------------------|
+| `recorders`   | `off`         | Who may record: `off`, `admins` (owners and admins), `members` (everybody but guests) or `recorder_bot_only` (#2273)   |
+| `max_minutes` | `120`         | The longest recording, 1 to 480 minutes; the console offers 30, 60, 120, 240 and 480                                   |
+| `local_files` | `allowed`     | "Allow saving recordings as files": the recorder may save a recording, unencrypted (#2116)                             |
+| `bot`         | none          | The recorder bot's account (#2273): records the calls of its conversations unattended; required by `recorder_bot_only` |
+| `consent`     | `notice_only` | "Ask everybody for consent" (`all_consent`, #2115): a recording records only the voices of those who allowed it        |
 
 - **How it works:** the server can't record (calls are end-to-end encrypted), so a participant's
   app records what it plays and its own microphone, and posts the file, encrypted, into the call's
@@ -1336,10 +1337,23 @@ under Administration → Security → Call recording. It is **off by default**.
   another device or a modified app that tells nobody. The policy and the notices make compliant
   recording visible and governed; they are not a technical barrier. Tell people so.
 - **Consent:** whether a recording needs the consent of everybody recorded depends on the
-  jurisdiction (in some, every participant must agree; in others, informing them suffices). This
-  version informs everybody and lets them leave; asking everybody's consent before a recording may
-  start, and leaving people out of a recording, are later steps. Check with your data protection
-  officer before allowing it, and say in your internal rules when recording is acceptable.
+  jurisdiction (in some, every participant must agree; in others, informing them suffices). Check
+  with your data protection officer before allowing recording, and say in your internal rules when
+  it is acceptable. The `consent` setting picks between the two:
+  - `notice_only` (the default): everybody is told, and objecting means leaving the call.
+  - `all_consent` ("Ask everybody for consent", #2115): a recording first asks everybody in the
+    call ("Allow" / "Don't allow"). It starts once everybody answered; the recorder can also start
+    it without those who haven't answered yet. Only the voices of those who allowed it are in the
+    recording: who declines (or hasn't answered) stays in the call, marked "Not recorded" on their
+    tile, and is left out of the file. Who joins later is asked too and is left out until they
+    allow it; anybody can change their answer while it runs, which takes effect from then on. Each
+    answer is signed by the answering device, so neither the server nor the recorder can claim a
+    consent nobody gave (e2ee.md §8.3). The recorder bot asks the same way and starts without who
+    hasn't answered after `consent_wait_secs` (operations.md). Video is not recorded in this
+    version, so "left out" means the voice.
+  - The same limit as above applies: a modified app can record anybody; the setting governs
+    compliant apps. An owner app from before the setting re-signs without it, which reads as
+    `notice_only`; a value from a newer app reads as asking.
 - **Storage and retention:** a posted recording is an encrypted attachment of the call's
   conversation, readable by its members only, and the conversation's retention applies to it.
   While a recording runs, the file is on the recorder's computer, encrypted, in the app's private

@@ -239,6 +239,7 @@ impl RecordingFolder {
         started_at: now_ms,
         max_secs,
         is_unconfirmed: false,
+        maybe_consent: None,
       });
     }
     Ok(sink)

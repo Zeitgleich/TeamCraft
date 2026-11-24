@@ -1406,8 +1406,15 @@ pub trait CallBackend {
   }
   /// Starts recording the active call on this device, for at most `max_secs`; everybody in the
   /// call is told by a signed notice. Offer it only where the verified policy allows the user.
-  fn start_call_recording(&self, _max_secs: u32) {}
+  /// `requires_consent` (the policy's `all_consent`, #2115) asks everybody first and records only
+  /// who allowed it; the desktop shell reads the policy itself.
+  fn start_call_recording(&self, _max_secs: u32, _requires_consent: bool) {}
   fn stop_call_recording(&self) {}
+  /// Starts the own recording that waits for consent without those who haven't answered (#2115).
+  fn start_call_recording_now(&self) {}
+  /// This device's answer to `recorder`'s recordings of the active call that ask for consent
+  /// (#2115): its voice in them, or left out.
+  fn answer_call_recording(&self, _recorder: UserId, _is_allowed: bool) {}
   /// Deletes the finished recording.
   fn discard_call_recording(&self) {}
   /// The speech model of live captions (#215), where this app captions calls (the desktop app);

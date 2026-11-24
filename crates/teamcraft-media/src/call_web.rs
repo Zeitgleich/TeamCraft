@@ -121,7 +121,7 @@ use crate::call_auth::CallKeyAuthenticator;
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
-  OwnVideoEnd,
+  OwnVideoEnd, RecordingAdmission, RecordingConsentRule,
 };
 use crate::call_resilience::{
   CallTransport, Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, RejoinPacer, ResilienceConfig,
@@ -544,8 +544,16 @@ enum Command {
   },
   SetStatusCues(StatusCues),
   /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
-  /// the signed notice that tells the others.
-  Recording(Option<recording::WebRecordingSink>),
+  /// the signed notice that tells the others, and asks for consent first where the rule says so
+  /// (#2115).
+  Recording(Option<(recording::WebRecordingSink, RecordingConsentRule)>),
+  /// A recording that waits for consent starts without those who haven't answered (#2115).
+  StartRecordingNow,
+  /// This device's answer to a person's recordings that ask for consent (#2115).
+  AnswerRecording {
+    recorder: teamcraft_proto::UserId,
+    is_allowed: bool,
+  },
   /// Reads what the call's video does (stats for nerds, #938).
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
@@ -1006,9 +1014,21 @@ impl WebCall {
 
   /// Hands the call's audio to a recording, or stops (`None`); the call tells everybody in it with
   /// a signed notice (e2ee.md §8.3), and again after every rejoin.
-  pub fn set_recording(&self, maybe_sink: Option<recording::WebRecordingSink>) {
+  pub fn set_recording(&self, maybe_recording: Option<(recording::WebRecordingSink, RecordingConsentRule)>) {
     // The call already ended if this fails.
-    let _ = self.command(Command::Recording(maybe_sink));
+    let _ = self.command(Command::Recording(maybe_recording));
+  }
+
+  /// Starts a recording that waits for answers without those who haven't answered yet (#2115).
+  pub fn start_recording_now(&self) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::StartRecordingNow);
+  }
+
+  /// Answers `recorder`'s recordings that ask for consent (#2115).
+  pub fn answer_recording(&self, recorder: teamcraft_proto::UserId, is_allowed: bool) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::AnswerRecording { recorder, is_allowed });
   }
 
   fn command(&self, command: Command) -> Result<(), WebCallError> {
@@ -1564,8 +1584,13 @@ impl CallState<'_> {
         if !self.is_muted {
           self.encoder.push(&samples)?;
           self.push_thin_voice(&samples);
-          // The own voice as it is sent; a muted microphone isn't recorded.
-          if let Some(recording) = &self.maybe_recording {
+          // The own voice as it is sent; a muted microphone isn't recorded, nor anything while
+          // the recording asks for consent (#2115).
+          if let Some(recording) = self
+            .maybe_recording
+            .as_ref()
+            .filter(|_| engine.recording_admission() != RecordingAdmission::Nobody)
+          {
             recording.push_own(&samples);
           }
         }
@@ -1807,7 +1832,8 @@ impl CallState<'_> {
     }
     self.meter.tick(now);
     for _ in 0..self.frame_cadence.due(now) {
-      self.on_frame_tick(audio)?;
+      let admission = engine.recording_admission();
+      self.on_frame_tick(audio, admission)?;
       // At its maximum length (or after a failed write) the recording takes nothing more: the
       // others are told it stopped; the app finishes the file.
       if self
@@ -1816,7 +1842,7 @@ impl CallState<'_> {
         .is_some_and(recording::WebRecordingSink::is_ended)
       {
         self.maybe_recording = None;
-        engine.set_recording(false);
+        engine.set_recording(None);
       }
       if self.is_ending_lost && !self.cues.is_playing(CallCue::ConnectionLost) {
         return Err(WebCallError::ConnectionLost);
@@ -2547,7 +2573,12 @@ impl CallState<'_> {
   }
 
   /// Every 20 ms: the tone source's next frame, decoding due packets and playing the mix.
-  fn on_frame_tick(&mut self, audio: &WebAudio) -> Result<(), WebCallError> {
+  /// `admission` is what the recording, if any, may take in this frame (#2115).
+  fn on_frame_tick(
+    &mut self,
+    audio: &WebAudio,
+    admission: RecordingAdmission<'_>,
+  ) -> Result<(), WebCallError> {
     if let AudioSource::Tone {
       frequency_hz,
       amplitude,
@@ -2572,28 +2603,52 @@ impl CallState<'_> {
       }
     }
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
-    for remote in self.remotes.values_mut() {
+    // Where the recording asked for consent, the mix of only who allowed it (#2115).
+    let mut maybe_admitted_mix = match admission {
+      RecordingAdmission::Only(_) if self.maybe_recording.is_some() => {
+        Some(vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL])
+      },
+      _ => None,
+    };
+    for ((sender, _), remote) in self.remotes.iter_mut() {
       remote.decode_due(&mut self.voice, now, self.inputs)?;
       let available = remote.decoded.len().min(FRAME_SAMPLES_PER_CHANNEL);
-      for (slot, sample) in mix.iter_mut().zip(remote.decoded.drain(..available)) {
+      let frame: Vec<f32> = remote.decoded.drain(..available).collect();
+      if let (Some(admitted_mix), RecordingAdmission::Only(admitted)) =
+        (maybe_admitted_mix.as_mut(), admission)
+        && admitted.contains(sender)
+      {
+        for (slot, sample) in admitted_mix.iter_mut().zip(&frame) {
+          *slot += sample;
+        }
+      }
+      for (slot, sample) in mix.iter_mut().zip(frame) {
         *slot += sample;
       }
     }
     if self.is_deafened {
       mix.fill(0.0);
+      if let Some(admitted_mix) = maybe_admitted_mix.as_mut() {
+        admitted_mix.fill(0.0);
+      }
     } else if mix.iter().any(|sample| sample.abs() > AUDIBLE_AMPLITUDE) {
       self.stats.audible_frames_played += 1;
     }
     // Status sounds play even when deafened: they are status, not call audio.
-    for (sample, cue) in mix
-      .iter_mut()
-      .zip(self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL))
-    {
-      *sample = (*sample + cue).clamp(-1.0, 1.0);
+    let cue = self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL);
+    for frame in std::iter::once(&mut mix).chain(maybe_admitted_mix.as_mut()) {
+      for (sample, cue) in frame.iter_mut().zip(&cue) {
+        *sample = (*sample + cue).clamp(-1.0, 1.0);
+      }
     }
-    // What this device plays, as the desktop records it (the status sounds included).
+    // What this device plays, as the desktop records it (the status sounds included); nothing
+    // while the recording asks, and only who allowed it where it asked.
     if let Some(recording) = &self.maybe_recording {
-      recording.push_playback(&mix);
+      match (admission, maybe_admitted_mix.as_ref()) {
+        (RecordingAdmission::Everybody, _) => recording.push_playback(&mix),
+        (RecordingAdmission::Only(_), Some(admitted_mix)) => recording.push_playback(admitted_mix),
+        _ => {},
+      }
     }
     audio.play(&mix)
   }
@@ -2683,10 +2738,12 @@ impl CallState<'_> {
         engine.subscribe_video(stream_id, Some(max_layer));
       },
       Command::SetStatusCues(status_cues) => self.cues.set_setting(status_cues),
-      Command::Recording(maybe_sink) => {
-        engine.set_recording(maybe_sink.is_some());
-        self.maybe_recording = maybe_sink;
+      Command::Recording(maybe_new) => {
+        engine.set_recording(maybe_new.as_ref().map(|(_, rule)| *rule));
+        self.maybe_recording = maybe_new.map(|(sink, _)| sink);
       },
+      Command::StartRecordingNow => engine.start_recording_now(),
+      Command::AnswerRecording { recorder, is_allowed } => engine.answer_recordings_of(recorder, is_allowed),
       #[cfg(feature = "call-view")]
       Command::VideoStats(done) => {
         // The caller may have given up waiting.

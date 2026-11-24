@@ -17,13 +17,18 @@
 //! [`OwnRecording`] numbers and signs this device's own notices and waits for the SFU to confirm
 //! it keeps each one: a notice it doesn't confirm is sent again, and the app warns that the others
 //! may not see the recording.
+//!
+//! A recording that asks for consent (#2115) first announces itself as `requesting` (it records
+//! nothing yet), then as `recording` once everybody answered; every notice names its take (the
+//! number of its first notice), which the others' signed answers name in turn
+//! (`crate::call_recording_consent`).
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
-#[cfg(any(test, feature = "native"))]
-use teamcraft_crypto::call_recording::RecordingNoticeSigner;
-use teamcraft_crypto::call_recording::{RecordingNoticeError, RecordingState, SignedRecordingNotice};
+use teamcraft_crypto::call_recording::{
+  RecordingAnnouncement, RecordingNoticeError, RecordingNoticeSigner, RecordingState, SignedRecordingNotice,
+};
 use teamcraft_proto::{CallId, DeviceId, UserId};
 use tracing::warn;
 use web_time::Instant;
@@ -37,8 +42,8 @@ const RESEND_AFTER: Duration = Duration::from_secs(2);
 /// Without a confirmation for this long, the app warns that the others may not see the recording.
 const UNCONFIRMED_AFTER: Duration = Duration::from_secs(6);
 
-/// A device that records, as this app shows it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// A device that records (or asks to), as this app shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorder {
   pub device_id: DeviceId,
   /// Whose device it is, as the call's roster said while the device was in it.
@@ -48,6 +53,17 @@ pub struct Recorder {
   /// The SFU says it left the call, but it is still in the call's DAVE group: it may still hear
   /// the call.
   pub has_left: bool,
+  /// The recording (the number of its first notice), as its notice says.
+  pub take: u64,
+  /// It asks everybody for consent and records only who allowed it (#2115).
+  pub asks_consent: bool,
+  /// It asks and records nothing yet.
+  pub is_requesting: bool,
+  /// This device's answer to it, where it asks (filled in by the engine).
+  pub maybe_own_answer: Option<teamcraft_crypto::call_recording::ConsentAnswer>,
+  /// The other devices whose verified "allow" for this take this device has seen: where it asks
+  /// for consent, everybody else is left out of it (filled in by the engine).
+  pub allowed: Vec<DeviceId>,
 }
 
 /// The other devices' recording notices in one call. A list, not a map: a call has few devices,
@@ -63,29 +79,39 @@ struct DeviceNotices {
   /// The key its last notice verified with: a stop it sends after the SFU called it gone still
   /// verifies.
   maybe_key: Option<Vec<u8>>,
-  /// The highest verified notice: its number and state.
-  maybe_verified: Option<(u64, RecordingState)>,
+  /// The highest verified notice: its number and what it says.
+  maybe_verified: Option<(u64, RecordingAnnouncement)>,
   /// Notices that couldn't be checked yet, newer than the verified one, oldest first.
   pending: VecDeque<SignedRecordingNotice>,
   has_left: bool,
 }
 
-/// This device's recording, as its notices say it. Only the native apps sign notices (the
-/// browser doesn't record yet, #2114): there, the parts that sign stay unused.
+/// This device's recording, as its notices say it.
 #[derive(Debug, Default)]
-#[cfg_attr(not(any(test, feature = "native")), allow(dead_code))]
 pub struct OwnRecording {
-  is_recording: bool,
-  /// The state of the last notice sent, if any.
-  maybe_announced: Option<RecordingState>,
+  phase: OwnPhase,
+  /// The take of the running recording: the number of its first notice, once one was signed.
+  maybe_take: Option<u64>,
+  /// What the last notice sent said, if any.
+  maybe_announced: Option<RecordingAnnouncement>,
   /// The number of the last notice signed.
   last_sequence: u64,
   /// The last notice sent that the SFU hasn't confirmed yet.
   maybe_unconfirmed: Option<Unconfirmed>,
 }
 
+/// Where this device's recording is.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum OwnPhase {
+  #[default]
+  Off,
+  /// It asks the others for consent and records nothing yet (#2115).
+  Requesting,
+  /// It records; `asks_consent` when only who allowed it is in it.
+  Recording { asks_consent: bool },
+}
+
 #[derive(Debug)]
-#[cfg_attr(not(any(test, feature = "native")), allow(dead_code))]
 struct Unconfirmed {
   notice: Vec<u8>,
   first_sent: Instant,
@@ -195,19 +221,41 @@ impl RecordingNotices {
     self.recorders() != before
   }
 
-  /// The devices that record now, in the order they first sent a notice.
+  /// The devices that record or ask to now, in the order they first sent a notice.
   pub fn recorders(&self) -> Vec<Recorder> {
     self
       .devices
       .iter()
-      .filter(|(_, entry)| entry.is_recording())
-      .map(|(device_id, entry)| Recorder {
-        device_id: *device_id,
-        maybe_user_id: entry.maybe_user_id,
-        is_verified: entry.is_verified_recording(),
-        has_left: entry.has_left,
+      .filter_map(|(device_id, entry)| {
+        let (announcement, is_verified) = entry.shown()?;
+        Some(Recorder {
+          device_id: *device_id,
+          maybe_user_id: entry.maybe_user_id,
+          is_verified,
+          has_left: entry.has_left,
+          take: announcement.take,
+          asks_consent: announcement.asks_consent,
+          is_requesting: announcement.state == RecordingState::Requesting,
+          maybe_own_answer: None,
+          allowed: Vec::new(),
+        })
       })
       .collect()
+  }
+
+  /// The verified recording of `device_id` that asks for consent, as `(take, is_requesting)`:
+  /// what this device may answer. Never an unchecked claim: nobody is asked on the server's word.
+  pub fn verified_ask(&self, device_id: DeviceId) -> Option<(u64, bool)> {
+    let (_, entry) = self.devices.iter().find(|(device, _)| *device == device_id)?;
+    let (_, announcement) = entry.maybe_verified?;
+    let is_requesting = match announcement.state {
+      RecordingState::Requesting => true,
+      RecordingState::Recording => false,
+      RecordingState::Stopped => return None,
+    };
+    announcement
+      .asks_consent
+      .then_some((announcement.take, is_requesting))
   }
 
   fn entry(&mut self, device_id: DeviceId) -> &mut DeviceNotices {
@@ -237,7 +285,7 @@ impl DeviceNotices {
       .maybe_verified
       .is_none_or(|(verified, _)| sequence > verified)
     {
-      self.maybe_verified = Some((sequence, notice.state()));
+      self.maybe_verified = Some((sequence, notice.announcement()));
     }
     self
       .pending
@@ -265,41 +313,89 @@ impl DeviceNotices {
   }
 
   fn is_verified_recording(&self) -> bool {
-    matches!(self.maybe_verified, Some((_, RecordingState::Recording)))
+    matches!(
+      self.maybe_verified,
+      Some((
+        _,
+        RecordingAnnouncement {
+          state: RecordingState::Recording,
+          ..
+        }
+      ))
+    )
   }
 
-  /// A verified recording, or an unchecked claim of one: an unchecked stop changes nothing.
-  fn is_recording(&self) -> bool {
-    self.is_verified_recording()
-      || self
-        .pending
-        .iter()
-        .any(|pending| pending.unverified().state() == RecordingState::Recording)
+  /// What shows: a verified recording (or ask), else the newest unchecked claim of one (an
+  /// unchecked stop changes nothing), with whether it verified.
+  fn shown(&self) -> Option<(RecordingAnnouncement, bool)> {
+    if let Some((_, announcement)) = self.maybe_verified
+      && announcement.state != RecordingState::Stopped
+    {
+      return Some((announcement, true));
+    }
+    self
+      .pending
+      .iter()
+      .filter(|pending| pending.unverified().state() != RecordingState::Stopped)
+      .max_by_key(|pending| pending.unverified().sequence())
+      .map(|pending| (pending.unverified().announcement(), false))
   }
 }
 
 impl OwnRecording {
+  /// Recording or asking to.
   pub fn is_recording(&self) -> bool {
-    self.is_recording
+    self.phase != OwnPhase::Off
   }
 
-  /// Starts or stops; returns whether that changed anything.
-  pub fn set(&mut self, is_recording: bool) -> bool {
-    let has_changed = self.is_recording != is_recording;
-    self.is_recording = is_recording;
+  pub fn phase(&self) -> OwnPhase {
+    self.phase
+  }
+
+  /// The running recording's take, once its first notice was signed.
+  pub fn take(&self) -> Option<u64> {
+    self.maybe_take.filter(|_| self.is_recording())
+  }
+
+  /// Starts (asking for consent first, or recording at once) or stops; returns whether that
+  /// changed anything. A new start is a new take.
+  pub fn set(&mut self, maybe_asks_consent: Option<bool>) -> bool {
+    let phase = match maybe_asks_consent {
+      None => OwnPhase::Off,
+      Some(true) if self.phase == (OwnPhase::Recording { asks_consent: true }) => self.phase,
+      Some(true) => OwnPhase::Requesting,
+      Some(false) => OwnPhase::Recording { asks_consent: false },
+    };
+    let has_changed = self.phase != phase;
+    if has_changed && (phase == OwnPhase::Off || self.phase == OwnPhase::Off) {
+      self.maybe_take = None;
+    }
+    self.phase = phase;
     has_changed
+  }
+
+  /// A recording that asked for consent starts recording (everybody answered, or the recorder
+  /// starts it without those who haven't); returns whether it was asking.
+  pub fn begin(&mut self) -> bool {
+    if self.phase != OwnPhase::Requesting {
+      return false;
+    }
+    self.phase = OwnPhase::Recording { asks_consent: true };
+    true
   }
 
   /// Whether a (re)join must say the state: while recording (the others need a notice signed
   /// with this session's key), or when the last notice sent isn't the state any more.
   pub fn needs_announcing(&self) -> bool {
-    self.is_recording || self.maybe_announced.is_some_and(|state| state != self.state())
+    self.is_recording()
+      || self
+        .maybe_announced
+        .is_some_and(|announced| announced.state != self.state())
   }
 
   /// Signs the next notice of the current state and waits for the SFU to confirm it. `now_ms`
   /// (any wall clock in milliseconds) starts the numbering where an app that restarted mid-call
-  /// left off, give or take its clock.
-  #[cfg(any(test, feature = "native"))]
+  /// left off, give or take its clock. The first notice of a recording numbers its take.
   pub fn next_notice(
     &mut self,
     signer: &RecordingNoticeSigner,
@@ -310,23 +406,40 @@ impl OwnRecording {
   ) -> Result<Vec<u8>, RecordingNoticeError> {
     let sequence = now_ms.max(self.last_sequence.saturating_add(1));
     let state = self.state();
+    let take = match self.maybe_take {
+      Some(take) => take,
+      None if self.is_recording() => *self.maybe_take.insert(sequence),
+      // A stop names the take it ends, or none (0) when it never had one.
+      None => self.maybe_announced.map_or(0, |announced| announced.take),
+    };
+    let announcement = RecordingAnnouncement {
+      take,
+      asks_consent: matches!(
+        self.phase,
+        OwnPhase::Requesting | OwnPhase::Recording { asks_consent: true }
+      ) || (self.phase == OwnPhase::Off
+        && self
+          .maybe_announced
+          .is_some_and(|announced| announced.asks_consent)),
+      state,
+    };
     let bytes = signer
       .sign(
         crypto_call_id(call_id),
         crypto_device_id(device_id),
         sequence,
-        state,
+        announcement,
       )?
       .to_bytes()?;
     self.last_sequence = sequence;
-    self.maybe_announced = Some(state);
+    self.maybe_announced = Some(announcement);
     // A stop that nobody confirms leaves the others with a recording on screen: harmless, and
-    // the next join says it again. Only a recording waits for its confirmation.
+    // the next join says it again. Only a recording (or an ask) waits for its confirmation.
     let first_sent = self
       .maybe_unconfirmed
       .as_ref()
       .map_or(now, |unconfirmed| unconfirmed.first_sent);
-    self.maybe_unconfirmed = (state == RecordingState::Recording).then(|| Unconfirmed {
+    self.maybe_unconfirmed = (state != RecordingState::Stopped).then(|| Unconfirmed {
       notice: bytes.clone(),
       first_sent,
       last_sent: now,
@@ -359,7 +472,7 @@ impl OwnRecording {
   /// Whether the recording runs without the SFU confirming its notice for a while: the others
   /// may not see it, and the recorder is told so.
   pub fn is_unconfirmed(&self, now: Instant) -> bool {
-    self.is_recording
+    self.is_recording()
       && self
         .maybe_unconfirmed
         .as_ref()
@@ -372,10 +485,10 @@ impl OwnRecording {
   }
 
   fn state(&self) -> RecordingState {
-    if self.is_recording {
-      RecordingState::Recording
-    } else {
-      RecordingState::Stopped
+    match self.phase {
+      OwnPhase::Off => RecordingState::Stopped,
+      OwnPhase::Requesting => RecordingState::Requesting,
+      OwnPhase::Recording { .. } => RecordingState::Recording,
     }
   }
 }
@@ -404,7 +517,7 @@ mod tests {
       let (signer, key) = signer();
       let mut notices = RecordingNotices::default();
       assert!(receive(&mut notices, &notice(&signer, true, 1), Some(&key)));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
       assert!(receive(&mut notices, &notice(&signer, false, 2), Some(&key)));
       assert!(notices.recorders().is_empty());
     }
@@ -414,9 +527,9 @@ mod tests {
       let (signer, key) = signer();
       let mut notices = RecordingNotices::default();
       assert!(receive(&mut notices, &notice(&signer, true, 5), None));
-      assert_eq!(notices.recorders(), vec![recorder(false, false)]);
+      assert_eq!(shown(&notices), vec![recorder(false, false)]);
       assert!(notices.recheck(call(), |_| Some(key.clone())));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
     }
 
     #[test]
@@ -427,7 +540,7 @@ mod tests {
       // A new session of the recorder: its key isn't known here yet.
       let (new_signer, new_key) = self::signer();
       assert!(!receive(&mut notices, &notice(&new_signer, false, 2), None));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
       // Once the key is there, the stop verifies and ends it.
       assert!(notices.recheck(call(), |_| Some(new_key.clone())));
       assert!(notices.recorders().is_empty());
@@ -440,7 +553,7 @@ mod tests {
       let old_stop = notice(&signer, false, 1);
       receive(&mut notices, &notice(&signer, true, 2), Some(&key));
       assert!(!receive(&mut notices, &old_stop, Some(&key)));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
     }
 
     #[test]
@@ -464,10 +577,10 @@ mod tests {
       let mut notices = RecordingNotices::default();
       receive(&mut notices, &notice(&signer, true, 1), Some(&key));
       assert!(notices.mark_left(device()));
-      assert_eq!(notices.recorders(), vec![recorder(true, true)]);
+      assert_eq!(shown(&notices), vec![recorder(true, true)]);
       // Still a member of the DAVE group: it may still hear the call.
       assert!(!notices.prune_left(|_| true));
-      assert_eq!(notices.recorders(), vec![recorder(true, true)]);
+      assert_eq!(shown(&notices), vec![recorder(true, true)]);
       assert!(notices.prune_left(|_| false));
       assert!(notices.recorders().is_empty());
     }
@@ -479,7 +592,7 @@ mod tests {
       receive(&mut notices, &notice(&signer, true, 1), Some(&key));
       notices.mark_left(device());
       assert!(notices.mark_present(device(), id(ALICE)));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
       // Members that never left aren't pruned.
       assert!(!notices.prune_left(|_| false));
     }
@@ -505,7 +618,7 @@ mod tests {
       let mut notices = RecordingNotices::default();
       receive(&mut notices, &notice(&signer, true, 1), Some(&key));
       assert!(!receive(&mut notices, &notice(&forger, false, 2), Some(&key)));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
     }
 
     #[test]
@@ -514,11 +627,7 @@ mod tests {
       let (forger, _) = signer();
       let mut notices = RecordingNotices::default();
       receive(&mut notices, &notice(&forger, true, 1), None);
-      assert_eq!(
-        notices.recorders(),
-        vec![recorder(false, false)],
-        "fail-safe: shown"
-      );
+      assert_eq!(shown(&notices), vec![recorder(false, false)], "fail-safe: shown");
       assert!(notices.recheck(call(), |_| Some(key.clone())));
       assert!(notices.recorders().is_empty(), "the check drops it");
     }
@@ -531,7 +640,7 @@ mod tests {
       receive(&mut notices, &notice(&signer, true, 5), None);
       receive(&mut notices, &notice(&forger, false, u64::MAX), None);
       assert!(notices.recheck(call(), |_| Some(key.clone())));
-      assert_eq!(notices.recorders(), vec![recorder(true, false)]);
+      assert_eq!(shown(&notices), vec![recorder(true, false)]);
     }
 
     #[test]
@@ -560,13 +669,95 @@ mod tests {
     fn a_notice_of_another_call_is_dropped() {
       let (signer, key) = signer();
       let mut own = OwnRecording::default();
-      own.set(true);
+      own.set(Some(false));
       let elsewhere = own
         .next_notice(&signer, id(501), device(), 1, Instant::now())
         .unwrap();
       let mut notices = RecordingNotices::default();
       assert!(!receive(&mut notices, &elsewhere, Some(&key)));
       assert!(notices.recorders().is_empty());
+    }
+  }
+
+  /// #2115: a recording that asks for consent, from the ask to the recording.
+  mod asking {
+    use super::*;
+
+    #[test]
+    fn an_ask_shows_as_requesting_then_recording_with_one_take() {
+      let (signer, key) = signer();
+      let mut own = OwnRecording::default();
+      let mut notices = RecordingNotices::default();
+      own.set(Some(true));
+      assert_eq!(own.phase(), OwnPhase::Requesting);
+      let ask = own
+        .next_notice(&signer, call(), device(), 100, Instant::now())
+        .unwrap();
+      assert_eq!(own.take(), Some(100), "the first notice numbers the take");
+      receive(&mut notices, &ask, Some(&key));
+      let recorder = notices.recorders().pop().unwrap();
+      assert!(recorder.is_requesting && recorder.asks_consent);
+      assert_eq!(notices.verified_ask(device()), Some((100, true)));
+
+      assert!(own.begin());
+      let start = own
+        .next_notice(&signer, call(), device(), 200, Instant::now())
+        .unwrap();
+      receive(&mut notices, &start, Some(&key));
+      let recorder = notices.recorders().pop().unwrap();
+      assert!(!recorder.is_requesting && recorder.asks_consent);
+      assert_eq!(recorder.take, 100, "the same take");
+      assert_eq!(notices.verified_ask(device()), Some((100, false)));
+
+      own.set(None);
+      let stop = own
+        .next_notice(&signer, call(), device(), 300, Instant::now())
+        .unwrap();
+      receive(&mut notices, &stop, Some(&key));
+      assert!(notices.recorders().is_empty());
+      assert_eq!(notices.verified_ask(device()), None);
+    }
+
+    #[test]
+    fn a_new_recording_is_a_new_take() {
+      let (signer, _) = signer();
+      let mut own = OwnRecording::default();
+      own.set(Some(true));
+      own
+        .next_notice(&signer, call(), device(), 100, Instant::now())
+        .unwrap();
+      own.set(None);
+      own
+        .next_notice(&signer, call(), device(), 101, Instant::now())
+        .unwrap();
+      own.set(Some(true));
+      own
+        .next_notice(&signer, call(), device(), 102, Instant::now())
+        .unwrap();
+      assert_eq!(own.take(), Some(102));
+    }
+
+    #[test]
+    fn nobody_is_asked_on_an_unchecked_claim() {
+      let (signer, _) = signer();
+      let mut own = OwnRecording::default();
+      own.set(Some(true));
+      let ask = own
+        .next_notice(&signer, call(), device(), 100, Instant::now())
+        .unwrap();
+      let mut notices = RecordingNotices::default();
+      receive(&mut notices, &ask, None);
+      assert_eq!(notices.recorders().len(), 1, "shown at once");
+      assert_eq!(notices.verified_ask(device()), None, "but not answered yet");
+    }
+
+    #[test]
+    fn a_recording_that_only_tells_asks_nobody() {
+      let (signer, key) = signer();
+      let mut notices = RecordingNotices::default();
+      receive(&mut notices, &notice(&signer, true, 1), Some(&key));
+      assert_eq!(notices.verified_ask(device()), None);
+      assert!(!notices.recorders()[0].asks_consent);
     }
   }
 
@@ -578,12 +769,12 @@ mod tests {
       let (signer, key) = signer();
       let mut own = OwnRecording::default();
       let mut notices = RecordingNotices::default();
-      own.set(true);
+      own.set(Some(false));
       let start = own
         .next_notice(&signer, call(), device(), 1_000, Instant::now())
         .unwrap();
       receive(&mut notices, &start, Some(&key));
-      own.set(false);
+      own.set(None);
       // The clock jumped back an hour: the stop still counts.
       let stop = own
         .next_notice(&signer, call(), device(), 10, Instant::now())
@@ -597,13 +788,13 @@ mod tests {
       let (signer, _) = signer();
       let mut own = OwnRecording::default();
       assert!(!own.needs_announcing(), "never recorded: nothing to say");
-      own.set(true);
+      own.set(Some(false));
       assert!(own.needs_announcing());
       own
         .next_notice(&signer, call(), device(), 1, Instant::now())
         .unwrap();
       assert!(own.needs_announcing(), "re-signed with the new session's key");
-      own.set(false);
+      own.set(None);
       assert!(own.needs_announcing(), "the stop wasn't sent while away");
       own
         .next_notice(&signer, call(), device(), 2, Instant::now())
@@ -616,7 +807,7 @@ mod tests {
       let (signer, _) = signer();
       let start = Instant::now();
       let mut own = OwnRecording::default();
-      own.set(true);
+      own.set(Some(false));
       let sent = own.next_notice(&signer, call(), device(), 1, start).unwrap();
       assert_eq!(own.due_resend(start + Duration::from_secs(1)), None);
       assert_eq!(own.due_resend(start + RESEND_AFTER), Some(sent.clone()));
@@ -634,9 +825,9 @@ mod tests {
       let (signer, _) = signer();
       let start = Instant::now();
       let mut own = OwnRecording::default();
-      own.set(true);
+      own.set(Some(false));
       own.next_notice(&signer, call(), device(), 1, start).unwrap();
-      own.set(false);
+      own.set(None);
       own.next_notice(&signer, call(), device(), 2, start).unwrap();
       assert_eq!(own.due_resend(start + Duration::from_secs(60)), None);
       assert!(!own.is_unconfirmed(start + Duration::from_secs(60)));
@@ -658,7 +849,7 @@ mod tests {
       last_sequence: sequence.saturating_sub(1),
       ..OwnRecording::default()
     };
-    own.set(is_recording);
+    own.set(is_recording.then_some(false));
     own
       .next_notice(signer, call(), device(), sequence, Instant::now())
       .unwrap()
@@ -670,13 +861,24 @@ mod tests {
     (signer, public)
   }
 
-  fn recorder(is_verified: bool, has_left: bool) -> Recorder {
-    Recorder {
-      device_id: device(),
-      maybe_user_id: Some(id(ALICE)),
-      is_verified,
-      has_left,
-    }
+  /// What shows of the one recorder: whether verified, whether gone.
+  fn recorder(is_verified: bool, has_left: bool) -> (DeviceId, Option<UserId>, bool, bool) {
+    (device(), Some(id(ALICE)), is_verified, has_left)
+  }
+
+  fn shown(notices: &RecordingNotices) -> Vec<(DeviceId, Option<UserId>, bool, bool)> {
+    notices
+      .recorders()
+      .into_iter()
+      .map(|recorder| {
+        (
+          recorder.device_id,
+          recorder.maybe_user_id,
+          recorder.is_verified,
+          recorder.has_left,
+        )
+      })
+      .collect()
   }
 
   fn call() -> CallId {

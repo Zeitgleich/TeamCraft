@@ -150,6 +150,7 @@ impl CallBackend for MockBackend {
         has_hand_raised: index == 3,
         is_sharing_screen: index == 0 && conversation == id_from_raw::<ConversationId>(13),
         is_recording: false,
+        is_left_out_of_recording: false,
       })
       .collect()
   }

@@ -40,8 +40,8 @@ use teamcraft_net::traffic::TrafficClass;
 use teamcraft_net::{ATTEMPT_DELAY, RaceError, interleave, race};
 use teamcraft_proto::{
   Base64Bytes, CallClientMessage, CallReaction, CallServerMessage, DeviceId, ErrorCode, MediaStreamId,
-  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrackKind, fallback_protocols,
+  SFU_GOING_AWAY_CLOSE_CODE, SFU_SWITCHED_CLOSE_CODE, ScreenShareTakeover, UserId, VideoCodec,
+  VideoLayerInfo, VideoPublicationId, VideoTrackKind, fallback_protocols,
 };
 use thiserror::Error;
 use tokio::sync::{mpsc, oneshot};
@@ -65,7 +65,7 @@ use crate::call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
-  OwnPublication, OwnVideoEnd, VideoSendOutcome, VideoStats,
+  OwnPublication, OwnVideoEnd, RecordingAdmission, RecordingConsentRule, VideoSendOutcome, VideoStats,
 };
 use crate::call_recording::RecordingSink;
 use crate::call_resilience::{
@@ -276,8 +276,15 @@ enum Command {
   /// The user's "Connect directly in calls" changed during the call (#127).
   DirectConnections(bool),
   /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
-  /// the signed notice.
-  Recording(Option<RecordingSink>),
+  /// the signed notice, and asks for consent first where the rule says so (#2115).
+  Recording(Option<(RecordingSink, RecordingConsentRule)>),
+  /// A recording that waits for consent starts without those who haven't answered (#2115).
+  StartRecordingNow,
+  /// This device's answer to a person's recordings that ask for consent (#2115).
+  AnswerRecording {
+    recorder: UserId,
+    is_allowed: bool,
+  },
   /// Hands the others' voices to live captions on this device, or stops (#215). Nothing is sent
   /// to anybody: captions are this device's own.
   #[cfg(feature = "captions")]
@@ -546,9 +553,27 @@ impl NativeCall {
   /// Hands the call's audio to `sink` (a [`crate::call_recording::CallRecorder`] the app owns), or
   /// stops with `None`; everybody in the call is told by a signed notice (e2ee.md §8.3). A
   /// recording that reaches its maximum stops itself here too.
-  pub fn set_recording(&self, maybe_sink: Option<RecordingSink>) {
+  ///
+  /// With [`RecordingConsentRule::AskEverybody`] (#2115) the recording first asks everybody and
+  /// records nothing until they answered; then it takes in only who allowed it.
+  pub fn set_recording(&self, maybe_recording: Option<(RecordingSink, RecordingConsentRule)>) {
     // A closed channel means the call already ended; nothing records any more.
-    let _ = self.commands.send(Command::Recording(maybe_sink));
+    let _ = self.commands.send(Command::Recording(maybe_recording));
+  }
+
+  /// Starts a recording that waits for answers without those who haven't answered yet (#2115).
+  pub fn start_recording_now(&self) {
+    // A closed channel means the call already ended.
+    let _ = self.commands.send(Command::StartRecordingNow);
+  }
+
+  /// Answers `recorder`'s recordings that ask for consent (#2115): this device's voice in them,
+  /// or not.
+  pub fn answer_recording(&self, recorder: UserId, is_allowed: bool) {
+    // A closed channel means the call already ended; there is nothing to answer.
+    let _ = self
+      .commands
+      .send(Command::AnswerRecording { recorder, is_allowed });
   }
 
   /// Hands the others' voices to live captions on this device (`tap`), or stops with `None`
@@ -981,7 +1006,11 @@ async fn run_call(
           for frame in capture.push(&samples)? {
             engine.send_audio(&frame, Instant::now());
             sinks.stats.frames_sent += 1;
-            if let Some(recording) = &maybe_recording {
+            // The own voice is in every recording this device makes, once it records.
+            if let Some(recording) = maybe_recording
+              .as_ref()
+              .filter(|_| engine.recording_admission() != RecordingAdmission::Nobody)
+            {
               recording.push_own(&frame.opus);
             }
           }
@@ -1002,17 +1031,26 @@ async fn run_call(
             engine.send_thin_audio(&frame, Instant::now());
           }
         }
-        let mix = sinks.next_playback_frame()?;
+        let admission = if maybe_recording.is_some() {
+          engine.recording_admission()
+        } else {
+          RecordingAdmission::Nobody
+        };
+        let is_recording_all = admission == RecordingAdmission::Everybody;
+        let (mix, maybe_admitted) = sinks.next_playback_frame(admission)?;
         if let Some(buffer) = &devices.maybe_playback {
           buffer.push(&mix);
         }
-        if let Some(recording) = &maybe_recording {
-          recording.push_playback(&mix);
+        // While the recording asks for consent nothing is taken in; then, where it asked, only
+        // who allowed it (#2115).
+        let maybe_recorded = if is_recording_all { Some(&mix) } else { maybe_admitted.as_ref() };
+        if let (Some(recording), Some(recorded)) = (&maybe_recording, maybe_recorded) {
+          recording.push_playback(recorded);
           // At its maximum length (or after a failed write) the recording takes nothing more:
           // the others are told it stopped; the app finishes the file.
           if recording.is_ended() {
             maybe_recording = None;
-            engine.set_recording(false);
+            engine.set_recording(None);
           }
         }
       },
@@ -1140,9 +1178,13 @@ async fn run_call(
           },
           #[cfg(feature = "captions")]
           Some(Command::Captions(maybe_tap)) => sinks.mixer.set_caption_tap(maybe_tap),
-          Some(Command::Recording(maybe_sink)) => {
-            engine.set_recording(maybe_sink.is_some());
-            maybe_recording = maybe_sink;
+          Some(Command::Recording(maybe_new)) => {
+            engine.set_recording(maybe_new.as_ref().map(|(_, rule)| *rule));
+            maybe_recording = maybe_new.map(|(sink, _)| sink);
+          },
+          Some(Command::StartRecordingNow) => engine.start_recording_now(),
+          Some(Command::AnswerRecording { recorder, is_allowed }) => {
+            engine.answer_recordings_of(recorder, is_allowed);
           },
           #[cfg(feature = "call-view")]
           Some(Command::VideoStats(done)) => {
@@ -2602,22 +2644,33 @@ impl Sinks {
   /// The next 20 ms for the speakers: the call's mix with the status sounds on top. The sounds
   /// play even when deafened (they are status, not call audio) and reach the echo canceller as
   /// far-end signal, so the microphone doesn't send them.
-  fn next_playback_frame(&mut self) -> Result<Vec<f32>, NativeCallError> {
+  /// The next frame to play, and where a recording takes in only some devices (#2115), its mix
+  /// of them. The status sounds are in both, as a recording that takes everybody has them too.
+  fn next_playback_frame(
+    &mut self,
+    admission: RecordingAdmission<'_>,
+  ) -> Result<(Vec<f32>, Option<Vec<f32>>), NativeCallError> {
     let cue = self.cues.next_samples(FRAME_SAMPLES_PER_CHANNEL);
     let has_cue = cue.iter().any(|sample| *sample != 0.0);
     if has_cue {
       self.mixer.push_echo_reference(&cue);
     }
-    let mut mix = self.mixer.next_frame()?;
+    let maybe_admitted = match admission {
+      RecordingAdmission::Only(devices) => Some(devices),
+      RecordingAdmission::Nobody | RecordingAdmission::Everybody => None,
+    };
+    let (mut mix, mut maybe_recorded) = self.mixer.next_frames(maybe_admitted)?;
     if mix.iter().any(|sample| sample.abs() > 0.01) {
       self.stats.audible_frames_played += 1;
     }
     if has_cue {
-      for (sample, cue_sample) in mix.iter_mut().zip(cue) {
-        *sample = (*sample + cue_sample).clamp(-1.0, 1.0);
+      for frame in std::iter::once(&mut mix).chain(maybe_recorded.as_mut()) {
+        for (sample, cue_sample) in frame.iter_mut().zip(&cue) {
+          *sample = (*sample + cue_sample).clamp(-1.0, 1.0);
+        }
       }
     }
-    Ok(mix)
+    Ok((mix, maybe_recorded))
   }
 
   /// Plays `cue` out (in real time) before the devices close.

@@ -90,6 +90,8 @@ pub mod call_native;
 #[cfg(feature = "native")]
 pub mod call_recording;
 #[cfg(feature = "dave")]
+pub mod call_recording_consent;
+#[cfg(feature = "dave")]
 pub mod call_recording_notice;
 pub mod call_recording_parts;
 #[cfg(feature = "dave")]

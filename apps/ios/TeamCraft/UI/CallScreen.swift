@@ -341,7 +341,8 @@ struct CallScreen: View {
         isRejoining: call.reconnectingUserIds.contains(id),
         isMuted: call.mutedUserIds.contains(id),
         isUnverified: call.unverifiedUserIds.contains(id),
-        hasHandRaised: call.raisedHandUserIds.contains(id))
+        hasHandRaised: call.raisedHandUserIds.contains(id),
+        isNotRecorded: call.leftOutOfRecordingUserIds.contains(id))
     }
     var tiles = people.map { person -> StageTile in
       if let stream = cameras.first(where: { call.userIdByDevice[$0.deviceId] == person.id }) {
@@ -384,7 +385,9 @@ struct CallScreen: View {
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
         CallTileLabel(
-          name: handName(person.name, hasHandRaised: person.hasHandRaised), isMuted: person.isMuted,
+          name: notRecordedName(
+            handName(person.name, hasHandRaised: person.hasHandRaised), isNotRecorded: person.isNotRecorded),
+          isMuted: person.isMuted,
           isUnverified: person.isUnverified
         ).text
       )
@@ -403,6 +406,7 @@ struct CallScreen: View {
         if person.isMuted { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(person.name).lineLimit(1)
         hostBadge(of: person.id)
+        if person.isNotRecorded { notRecordedMark }
       }
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
@@ -481,6 +485,20 @@ struct CallScreen: View {
     call.userIdByDevice[stream.deviceId].map { call.raisedHandUserIds.contains($0) } ?? false
   }
 
+  private func isNotRecorded(_ stream: RemoteVideoStream) -> Bool {
+    call.userIdByDevice[stream.deviceId].map { call.leftOutOfRecordingUserIds.contains($0) } ?? false
+  }
+
+  /// "Not recorded" after a tile's name (#2115): a recording that asked for consent runs without them.
+  private var notRecordedMark: some View {
+    Text("call_tile_not_recorded").font(.app(.caption2)).foregroundStyle(.white.opacity(0.8))
+  }
+
+  /// "Ada, not recorded" for VoiceOver (#2115).
+  private func notRecordedName(_ name: String, isNotRecorded: Bool) -> String {
+    isNotRecorded ? String(localized: "call_person_not_recorded \(name)") : name
+  }
+
   /// The raised hand on a tile's name (#2324).
   private var handMark: some View {
     Image(systemName: "hand.raised.fill").font(.app(.caption2)).foregroundStyle(.yellow)
@@ -540,13 +558,15 @@ struct CallScreen: View {
         if isMuted(stream) { Image(systemName: "mic.slash.fill").font(.app(.caption2)) }
         Text(name).lineLimit(1)
         if let userId = call.userIdByDevice[stream.deviceId] { hostBadge(of: userId) }
+        if isNotRecorded(stream) { notRecordedMark }
       }
       .font(.app(.caption).weight(.medium))
       .foregroundStyle(.white)
       .accessibilityElement(children: .ignore)
       .accessibilityLabel(
         CallTileLabel(
-          name: handName(name, hasHandRaised: hasHandRaised(stream)), isMuted: isMuted(stream),
+          name: notRecordedName(handName(name, hasHandRaised: hasHandRaised(stream)), isNotRecorded: isNotRecorded(stream)),
+          isMuted: isMuted(stream),
           isUnverified: isUnverified(stream)
         ).text)
       .accessibilityValue(isSpeaking(stream) ? Text("call_tile_speaking") : Text(verbatim: ""))
@@ -587,6 +607,7 @@ struct CallScreen: View {
       Spacer(minLength: 0)
       VStack(spacing: 12) {
         recordingNotice
+        recordingConsentPrompt
         statusHint
         if let lobby = shownLobby, !lobby.people.isEmpty {
           LobbyBanner(waiting: lobby.people.count) { interact { isLobbyShown = true } }
@@ -698,6 +719,55 @@ struct CallScreen: View {
       .padding(.vertical, 8)
       .background(.black.opacity(0.55), in: Capsule())
       .accessibilityElement(children: .combine)
+    }
+  }
+
+  /// The others' recordings that ask this device for consent (#2115): an unanswered one asks
+  /// ("Allow" / "Don't allow"); an answered one says where this device stands and offers the other
+  /// answer. Only verified asks reach here (the core).
+  @ViewBuilder
+  private var recordingConsentPrompt: some View {
+    ForEach(call.recordingConsents, id: \.recorderUserId) { consent in
+      let name = model.calls.names[consent.recorderUserId].flatMap { $0.isEmpty ? nil : $0 }
+        ?? String(localized: "call_recording_someone")
+      switch consent.answer {
+      case .unanswered:
+        VStack(alignment: .leading, spacing: 8) {
+          Text(consent.isAsking ? "call_recording_consent_ask \(name)" : "call_recording_consent_ask_running \(name)")
+            .font(.app(.subheadline).weight(.medium))
+          Text("call_recording_consent_explain").font(.app(.footnote))
+          HStack(spacing: 8) {
+            Spacer(minLength: 0)
+            Button("call_recording_consent_decline") {
+              interact { model.calls.answerRecording(consent.recorderUserId, isAllowed: false) }
+            }
+            .buttonStyle(.bordered)
+            Button("call_recording_consent_allow") {
+              interact { model.calls.answerRecording(consent.recorderUserId, isAllowed: true) }
+            }
+            .buttonStyle(.borderedProminent)
+          }
+        }
+        .foregroundStyle(.white)
+        .padding(16)
+        .background(.black.opacity(0.7), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .contain)
+      case .allowed, .declined:
+        let isAllowed = consent.answer == .allowed
+        HStack(spacing: 8) {
+          Text(isAllowed ? "call_recording_consent_allowed \(name)" : "call_recording_consent_declined \(name)")
+          Button(isAllowed ? "call_recording_consent_withdraw" : "call_recording_consent_allow") {
+            interact { model.calls.answerRecording(consent.recorderUserId, isAllowed: !isAllowed) }
+          }
+          .buttonStyle(.bordered)
+        }
+        .font(.app(.subheadline).weight(.medium))
+        .foregroundStyle(.white)
+        .padding(.leading, 16)
+        .padding(.trailing, 8)
+        .padding(.vertical, 4)
+        .background(.black.opacity(0.55), in: Capsule())
+      }
     }
   }
 
@@ -1178,6 +1248,7 @@ private struct StagePerson: Identifiable {
   let isMuted: Bool
   let isUnverified: Bool
   var hasHandRaised = false
+  var isNotRecorded = false
 }
 
 /// Reads the notetaker again for another call or other people in it.

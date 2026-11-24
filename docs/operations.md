@@ -778,6 +778,10 @@ own devices**, not next to the server on an untrusted VPS. One instance per bot 
   Security → Call recording ("Recorder bot") with a mode that lets it record, and add it to the
   channels whose calls must be recorded. It records only while the owners' signed policy names it;
   without that it runs idle and joins nothing.
+- **Consent (#2115):** where the policy asks everybody for consent (`all_consent`), the bot asks
+  too and records only the voices of those who allowed it; after `limits.consent_wait_secs`
+  (120 s) it starts without those who haven't answered, who stay out until they allow it. A next
+  part of a long call keeps the answers.
 - **Restarts and shutdown:** on SIGTERM it stops recording (everybody is told), finishes the takes
   and queues them, within `shutdown_drain_secs`; their uploads go on at the next start. A crash or
   a kill loses the take being recorded (its key was only in memory; what is left on the disk can't

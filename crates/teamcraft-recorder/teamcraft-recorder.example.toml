@@ -54,6 +54,9 @@ alone_timeout_secs = 60
 join_timeout_secs = 60
 # It stops recording when the server hasn't confirmed its recording notice for this long.
 unconfirmed_notice_secs = 30
+# Where the policy asks everybody for consent: it waits this long for every answer, then records
+# without those who haven't answered (they stay out until they allow it).
+consent_wait_secs = 120
 # At shutdown, calls in progress get this long to finish their takes and queue them for posting.
 shutdown_drain_secs = 30
 

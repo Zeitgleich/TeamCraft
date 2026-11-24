@@ -22,7 +22,7 @@ use teamcraft_media::{
   audio_io::{AudioSink, AudioSource},
   bwe::BweConfig,
   call_auth::{CallKeyAuthenticator, DeviceCallKeyAuthenticator},
-  call_engine::{CallEngineConfig, CallEngineEvent},
+  call_engine::{CallEngineConfig, CallEngineEvent, RecordingConsentRule},
   call_native::{NativeCall, NativeCallConfig},
   call_recording::CallRecorder,
 };
@@ -206,7 +206,7 @@ async fn a_signed_recording_notice_is_reported_as_a_start_and_a_stop() {
   let recorder = CallRecorder::start(&folder.join("take"), Duration::from_secs(60), None).unwrap();
   let recording = &calls[&RECORDER];
   // The notice goes out once the call has its DAVE session; until then the engine holds it.
-  recording.set_recording(Some(recorder.sink()));
+  recording.set_recording(Some((recorder.sink(), RecordingConsentRule::TellOnly)));
   let started = next_recording(&mut reports).await;
   assert_eq!(started.state, SfuRecordingState::Recording);
   assert_eq!(started.call_id, CALL.to_string().parse().unwrap());
@@ -217,6 +217,93 @@ async fn a_signed_recording_notice_is_reported_as_a_start_and_a_stop() {
   let stopped = next_recording(&mut reports).await;
   assert_eq!(stopped.state, SfuRecordingState::Stopped);
   assert_eq!(stopped.device_id, started.device_id);
+  recorder.cancel();
+  let _ = std::fs::remove_dir_all(&folder);
+  for (_, call) in calls {
+    call.leave().await.unwrap();
+  }
+}
+
+/// Issue #2115: a recording that asks for consent records (and is logged) only once the other
+/// device's signed "allow" reached the recorder through the SFU.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_recording_that_asks_starts_once_everybody_allowed_it() {
+  const CALL: u64 = 42;
+  const RECORDER: u64 = 3;
+  const LISTENER: u64 = 4;
+  let (server_url, mut reports) = start_fake_server().await;
+  let (port, certificate_hash) = start_sfu(&server_url).await;
+  let mut authenticators = authenticators(&[RECORDER, LISTENER]);
+  let mut calls = HashMap::new();
+  for (device, other) in [(RECORDER, LISTENER), (LISTENER, RECORDER)] {
+    let engine = CallEngineConfig {
+      user_id: device.to_string().parse().unwrap(),
+      device_id: device.to_string().parse().unwrap(),
+      capabilities: MediaCapabilities::default(),
+      bwe: BweConfig::default(),
+    };
+    let sfu_url = format!(
+      "https://{}{CALL_PATH}",
+      SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
+    );
+    let mut config = NativeCallConfig::new(sfu_url, format!("dev:{CALL}:{device}:{device}"), engine);
+    config.maybe_certificate_hash = Some(certificate_hash);
+    config.source = AudioSource::Silence;
+    config.sink = AudioSink::Discard;
+    config.maybe_trusted_roster = Some(vec![other.to_string().parse::<DeviceId>().unwrap()]);
+    config.maybe_authenticator = authenticators.remove(&device);
+    calls.insert(device, NativeCall::join(config).await.unwrap());
+  }
+  let mut joined = 0;
+  while joined < 2 {
+    let (kind, _, _) = next(&mut reports).await;
+    joined += usize::from(kind == "joined");
+  }
+
+  let folder = std::env::temp_dir().join(format!("teamcraft-sfu-consent-{}", std::process::id()));
+  std::fs::create_dir_all(&folder).unwrap();
+  let recorder = CallRecorder::start(&folder.join("take"), Duration::from_secs(60), None).unwrap();
+  // Both in the recorder's DAVE group: the recorder knows whom to ask. (Alone, a recording that
+  // asks has nobody to wait for and records at once, its own voice only.)
+  let recording = calls.get_mut(&RECORDER).unwrap();
+  tokio::time::timeout(Duration::from_secs(30), async {
+    while let Some(event) = recording.next_event().await {
+      if matches!(event, CallEngineEvent::Secured { .. }) {
+        return;
+      }
+    }
+  })
+  .await
+  .expect("the recorder's call never secured");
+  calls[&RECORDER].set_recording(Some((recorder.sink(), RecordingConsentRule::AskEverybody)));
+  // The listener sees the verified ask, then allows it.
+  let listener = calls.get_mut(&LISTENER).unwrap();
+  tokio::time::timeout(Duration::from_secs(30), async {
+    while let Some(event) = listener.next_event().await {
+      if let CallEngineEvent::RecordersChanged(recorders) = event
+        && recorders
+          .iter()
+          .any(|recorder| recorder.is_verified && recorder.is_requesting)
+      {
+        return;
+      }
+    }
+  })
+  .await
+  .expect("the ask never arrived verified");
+  while let Ok((kind, _, body)) = reports.try_recv() {
+    assert_ne!(kind, "recording", "asking isn't recording: {body}");
+  }
+  calls[&LISTENER].answer_recording(RECORDER.to_string().parse().unwrap(), true);
+  let started = next_recording(&mut reports).await;
+  assert_eq!(started.state, SfuRecordingState::Recording);
+  assert_eq!(started.device_id, RECORDER.to_string().parse().unwrap());
+
+  calls[&RECORDER].set_recording(None);
+  assert_eq!(
+    next_recording(&mut reports).await.state,
+    SfuRecordingState::Stopped
+  );
   recorder.cancel();
   let _ = std::fs::remove_dir_all(&folder);
   for (_, call) in calls {

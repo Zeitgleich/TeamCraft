@@ -34,10 +34,11 @@ use teamcraft_media::{
 use teamcraft_proto::{
   AudioFeature, Base64Bytes, CallClientMessage, CallEvent, CallId, CallParticipant, CallRosterEntry,
   ConversationId, DaveTransitionId, DaveTransitionMode, DeviceId, DirectPathMedia, ErrorBody, ErrorCode,
-  MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_NOTICE_BYTES, MAX_SEALED_SIGNAL_BYTES, MAX_SIMULCAST_LAYERS,
-  MediaCapabilities, MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents,
-  SfuCallRoster, SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo,
-  VideoPublicationId, VideoTrackKind,
+  MAX_DIRECT_OFFER_BYTES, MAX_RECORDING_CONSENT_BYTES, MAX_RECORDING_CONSENTS_PER_DEVICE,
+  MAX_RECORDING_NOTICE_BYTES, MAX_SEALED_SIGNAL_BYTES, MAX_SIMULCAST_LAYERS, MediaCapabilities,
+  MediaStreamId, SFU_GOING_AWAY_CLOSE_CODE, ScreenShareTakeover, SfuCallIncidents, SfuCallRoster,
+  SfuControlAction, TransportFeedback, UnixMillis, UserId, VideoCodec, VideoLayerInfo, VideoPublicationId,
+  VideoTrackKind,
 };
 use thiserror::Error;
 use tokio::sync::Notify;
@@ -52,7 +53,7 @@ use crate::{
   forwarding::{DecodableCodecs, Effect, ForwardError, Forwarder},
   quality::CallQuality,
   rate_limit::TokenBucket,
-  recording::RecordingClaim,
+  recording::{RecordingClaim, consent_recorder},
   signaling::Outgoing,
 };
 
@@ -269,6 +270,9 @@ struct Participant {
   /// The device's latest signed recording notice (e2ee.md §8.3), as it sent it: the SFU can't
   /// read it, it hands it to devices that join later.
   maybe_recording_notice: Option<Base64Bytes>,
+  /// The device's latest signed answer to each recording that asked it for consent (#2115), at
+  /// most [`MAX_RECORDING_CONSENTS_PER_DEVICE`], oldest first: handed to devices that join later.
+  recording_consents: Vec<Base64Bytes>,
   audio_stream_id: StreamId,
   session: SessionId,
   presence: Presence,
@@ -801,6 +805,10 @@ impl Room {
         self.set_recording_notice(participant_id, notice, now);
         Ok(())
       },
+      CallClientMessage::SetRecordingConsent { consent } => {
+        self.set_recording_consent(participant_id, consent, now);
+        Ok(())
+      },
       CallClientMessage::UplinkHurt { is_hurt } => {
         self.set_uplink_hurt(participant_id, is_hurt, now);
         Ok(())
@@ -1152,6 +1160,7 @@ impl Room {
               now,
             ),
             maybe_recording_notice: None,
+            recording_consents: Vec::new(),
             direct_offer_limit: TokenBucket::new(self.direct_offer_burst, self.direct_offers_per_second, now),
             sealed_signal_limit: TokenBucket::new(
               self.sealed_signal_burst,
@@ -1487,6 +1496,47 @@ impl Room {
     state.follow_recording(device_id, user_id, maybe_claim?.is_recording)
   }
 
+  /// Keeps the device's signed answer to a recording that asks for consent (#2115), forwards it
+  /// to the others and confirms it to the sender. Like a notice, the SFU can't check the
+  /// signature: it keeps one answer per recorder the consent names (unverified; a device that lies
+  /// there only loses its own answer), bounds the size, and shares the notices' rate limit. One it
+  /// drops goes unconfirmed, and the sender sends it again.
+  pub(crate) fn set_recording_consent(&self, device_id: DeviceId, consent: Base64Bytes, now: Instant) {
+    if consent.len() > MAX_RECORDING_CONSENT_BYTES {
+      debug!(call_id = %self.call_id, device_id = %device_id, bytes = consent.len(), "recording consent refused: size");
+      return;
+    }
+    let Some(recorder) = consent_recorder(consent.as_slice()) else {
+      debug!(call_id = %self.call_id, device_id = %device_id, "recording consent refused: not a consent");
+      return;
+    };
+    let mut state = lock(&self.state);
+    let Some(participant) = state.participants.get_mut(&device_id) else {
+      return;
+    };
+    if !participant.recording_notice_limit.allow(now) {
+      debug!(call_id = %self.call_id, device_id = %device_id, "recording consent over the limit");
+      return;
+    }
+    let consents = &mut participant.recording_consents;
+    // The same answer again: its confirmation got lost. The others have it already.
+    if !consents.contains(&consent) {
+      consents.retain(|kept| consent_recorder(kept.as_slice()) != Some(recorder));
+      if consents.len() >= MAX_RECORDING_CONSENTS_PER_DEVICE {
+        consents.remove(0);
+      }
+      consents.push(consent.clone());
+      state.broadcast_except(
+        device_id,
+        CallEvent::RecordingConsent {
+          device_id,
+          consent: consent.clone(),
+        },
+      );
+    }
+    state.send_to(device_id, CallEvent::RecordingConsentKept { consent });
+  }
+
   /// The account's other devices leave for `device_id` (the call moves there). Reconnecting
   /// ones lose their slot at once; the DAVE group removes them like any leaver.
   fn close_other_devices_of(&self, device_id: DeviceId) {
@@ -1641,6 +1691,22 @@ impl RoomState {
           CallEvent::RecordingNotice {
             device_id: *device_id,
             notice: notice.clone(),
+          },
+        );
+      }
+    }
+    // And who allowed or declined which recording (#2115): the recorder that rejoins needs them,
+    // and every app shows who is left out.
+    for (device_id, other) in &self.participants {
+      if *device_id == participant_id {
+        continue;
+      }
+      for consent in &other.recording_consents {
+        self.send_to(
+          participant_id,
+          CallEvent::RecordingConsent {
+            device_id: *device_id,
+            consent: consent.clone(),
           },
         );
       }
@@ -2618,25 +2684,25 @@ mod tests {
       drain(&mut bob_rx);
       drain(&mut alice_rx);
 
-      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), Instant::now());
-      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![1; 90])]);
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 99]), Instant::now());
+      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![1; 99])]);
       assert_eq!(
         kept(&drain(&mut alice_rx)),
-        vec![vec![1; 90]],
+        vec![vec![1; 99]],
         "confirmed to the sender"
       );
       // The same notice again (its confirmation got lost) is no news to the others, and is
       // confirmed again.
-      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), Instant::now());
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 99]), Instant::now());
       assert!(drain(&mut bob_rx).is_empty());
-      assert_eq!(kept(&drain(&mut alice_rx)), vec![vec![1; 90]]);
-      room.set_recording_notice(id(10), Base64Bytes::new(vec![2; 90]), Instant::now());
-      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![2; 90])]);
+      assert_eq!(kept(&drain(&mut alice_rx)), vec![vec![1; 99]]);
+      room.set_recording_notice(id(10), Base64Bytes::new(vec![2; 99]), Instant::now());
+      assert_eq!(notices(&drain(&mut bob_rx)), vec![(id(10), vec![2; 99])]);
 
       let (mut carol_rx, _) = join(&rooms, 3, 30);
       assert_eq!(
         notices(&drain(&mut carol_rx)),
-        vec![(id(10), vec![2; 90])],
+        vec![(id(10), vec![2; 99])],
         "a late joiner learns of the recording"
       );
 
@@ -2645,16 +2711,114 @@ mod tests {
       assert!(notices(&drain(&mut dave_rx)).is_empty(), "gone with its device");
     }
 
-    /// A notice as the crypto crate encodes it (version 1), with a blank signature: the SFU
+    /// A notice as the crypto crate encodes it (version 2), with a blank signature: the SFU
     /// doesn't check it (`crate::recording`).
     fn claim(call: CallId, device: i64, sequence: u64, is_recording: bool) -> Base64Bytes {
-      let mut bytes = vec![1];
+      let mut bytes = vec![2];
       bytes.extend(u64::try_from(call.snowflake().get()).unwrap().to_be_bytes());
       bytes.extend(u64::try_from(device).unwrap().to_be_bytes());
       bytes.extend(sequence.to_be_bytes());
+      bytes.extend(1u64.to_be_bytes());
+      bytes.push(0);
       bytes.push(u8::from(is_recording));
       bytes.extend([0; 64]);
       Base64Bytes::new(bytes)
+    }
+
+    /// A consent as the crypto crate encodes it (version 1), with a blank signature: device
+    /// `device` answers recorder `recorder`; `marker` tells answers apart.
+    fn consent(device: i64, recorder: i64, marker: u8) -> Base64Bytes {
+      let mut bytes = vec![1];
+      bytes.extend(7u64.to_be_bytes());
+      bytes.extend(u64::try_from(device).unwrap().to_be_bytes());
+      bytes.extend(u64::try_from(recorder).unwrap().to_be_bytes());
+      bytes.extend(1u64.to_be_bytes());
+      bytes.extend(u64::from(marker).to_be_bytes());
+      bytes.push(1);
+      bytes.extend([0; 64]);
+      Base64Bytes::new(bytes)
+    }
+
+    fn consents(events: &[CallEvent]) -> Vec<(DeviceId, Vec<u8>)> {
+      events
+        .iter()
+        .filter_map(|event| match event {
+          CallEvent::RecordingConsent { device_id, consent } => {
+            Some((*device_id, consent.as_slice().to_vec()))
+          },
+          _ => None,
+        })
+        .collect()
+    }
+
+    /// #2115: the SFU forwards a device's answer, keeps the latest one per recorder for whoever
+    /// joins later (the recorder rejoining among them), and forgets them with the device.
+    #[test]
+    fn a_consent_reaches_the_others_and_late_joiners_one_per_recorder() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (mut alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, bob_session) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      drain(&mut alice_rx);
+      let now = Instant::now();
+
+      room.set_recording_consent(id(20), consent(20, 10, 1), now);
+      assert_eq!(
+        consents(&drain(&mut alice_rx)),
+        vec![(id(20), consent(20, 10, 1).into_vec())]
+      );
+      assert!(
+        drain(&mut bob_rx)
+          .iter()
+          .any(|event| matches!(event, CallEvent::RecordingConsentKept { .. })),
+        "confirmed to the sender"
+      );
+      // A newer answer to the same recorder replaces the kept one.
+      room.set_recording_consent(id(20), consent(20, 10, 2), now + Duration::from_secs(2));
+      drain(&mut alice_rx);
+      let (mut carol_rx, _) = join(&rooms, 3, 30);
+      assert_eq!(
+        consents(&drain(&mut carol_rx)),
+        vec![(id(20), consent(20, 10, 2).into_vec())]
+      );
+
+      assert!(rooms.leave(&room, id(20), bob_session));
+      let (mut dave_rx, _) = join(&rooms, 4, 40);
+      assert!(consents(&drain(&mut dave_rx)).is_empty(), "gone with its device");
+    }
+
+    #[test]
+    fn consents_stay_bounded_and_garbage_is_dropped() {
+      let rooms = Rooms::new(SfuConfig::default());
+      let (_alice_rx, room, _) = join_capable(&rooms, 1, 10, MediaCapabilities::default());
+      let (mut bob_rx, _) = join(&rooms, 2, 20);
+      drain(&mut bob_rx);
+      let start = Instant::now();
+      for recorder in 0..10 {
+        room.set_recording_consent(
+          id(20),
+          consent(20, 100 + recorder, 1),
+          start + Duration::from_secs(recorder as u64 * 2),
+        );
+      }
+      room.set_recording_consent(
+        id(20),
+        Base64Bytes::new(vec![1; 99]),
+        start + Duration::from_secs(60),
+      );
+      room.set_recording_consent(
+        id(20),
+        Base64Bytes::new(vec![1; MAX_RECORDING_CONSENT_BYTES + 1]),
+        start + Duration::from_secs(62),
+      );
+      let (mut carol_rx, _) = join(&rooms, 3, 30);
+      let kept = consents(&drain(&mut carol_rx));
+      assert_eq!(kept.len(), MAX_RECORDING_CONSENTS_PER_DEVICE);
+      assert_eq!(
+        kept.last().unwrap().1,
+        consent(20, 109, 1).into_vec(),
+        "the newest stay"
+      );
     }
 
     /// Issue #2117: the audit hears when a device's own notice starts or stops its recording,
@@ -2717,7 +2881,7 @@ mod tests {
         None
       );
       assert_eq!(
-        room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 90]), now),
+        room.set_recording_notice(id(10), Base64Bytes::new(vec![1; 99]), now),
         None
       );
       assert_eq!(notices(&drain(&mut bob_rx)).len(), 3, "forwarded all the same");
@@ -2750,7 +2914,7 @@ mod tests {
       drain(&mut alice_rx);
       let now = Instant::now();
       for index in 0..20u8 {
-        room.set_recording_notice(id(10), Base64Bytes::new(vec![index; 90]), now);
+        room.set_recording_notice(id(10), Base64Bytes::new(vec![index; 99]), now);
       }
       let burst = SfuConfig::default().recording_notice_burst as usize;
       assert_eq!(notices(&drain(&mut bob_rx)).len(), burst);

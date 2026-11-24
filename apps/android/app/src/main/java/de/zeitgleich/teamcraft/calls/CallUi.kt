@@ -154,6 +154,8 @@ import kotlinx.coroutines.launch
 import uniffi.teamcraft_ffi.CallEndReason
 import uniffi.teamcraft_ffi.CallPhase
 import uniffi.teamcraft_ffi.CallStateInfo
+import uniffi.teamcraft_ffi.RecordingConsentAnswer
+import uniffi.teamcraft_ffi.RecordingConsentInfo
 import uniffi.teamcraft_ffi.VideoTrackInfo
 
 /** The call's dark stage, behind everything on the call screens. */
@@ -283,6 +285,8 @@ private class Person(
   val maybeHostLabel: Int? = null,
   /** Their hand is raised (#2324): the tile's name carries the hand. */
   val hasHandRaised: Boolean = false,
+  /** A recording that asked for consent runs without them (#2115): the tile says "Not recorded". */
+  val isNotRecorded: Boolean = false,
 )
 
 private fun CallUiState.people(): List<Person> {
@@ -300,6 +304,7 @@ private fun CallUiState.people(): List<Person> {
         id in state.unverifiedUserIds,
         hostLabels[id],
         hasHandRaised = id in state.raisedHandUserIds,
+        isNotRecorded = id in state.leftOutOfRecordingUserIds,
       )
     }
     .sortedWith(compareBy({ speaking.indexOf(it.userId).let { index -> if (index < 0) Int.MAX_VALUE else index } }, { it.name.lowercase() }))
@@ -412,6 +417,8 @@ internal class CallUiActions(
   val maybeOnReaction: ((String) -> Unit)? = null,
   /** Raises or lowers the own hand (#2324). */
   val maybeOnHand: ((Boolean) -> Unit)? = null,
+  /** Answers a person's recordings that ask for consent (#2115): their user ID, and whether allowed. */
+  val maybeOnRecordingAnswer: ((String, Boolean) -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -488,6 +495,7 @@ internal fun InCallContent(
             onStop = actions.onStopScreenShare,
           )
           RecordingNotice(ui)
+          actions.maybeOnRecordingAnswer?.let { onAnswer -> RecordingConsentPrompt(ui, onAnswer) }
           StatusHint(ui.maybeState)
           EncryptionFailureBanner(ui.maybeState, actions.onRetryEncryption, actions.onHangUp)
           banner()
@@ -678,7 +686,15 @@ private fun AvatarTile(person: Person, modifier: Modifier) {
     // As large as the tile allows, within reason: a lone tile's avatar isn't a poster.
     val size = (minOf(maxWidth, maxHeight) * 0.45f).coerceIn(48.dp, 128.dp)
     AvatarImage(person.userId, person.name, size)
-    NameLabel(person.name, person.isMuted, person.isUnverified, Modifier.align(Alignment.BottomStart), person.maybeHostLabel, person.hasHandRaised)
+    NameLabel(
+      person.name,
+      person.isMuted,
+      person.isUnverified,
+      Modifier.align(Alignment.BottomStart),
+      person.maybeHostLabel,
+      person.hasHandRaised,
+      person.isNotRecorded,
+    )
   }
 }
 
@@ -778,15 +794,17 @@ private fun NameLabel(
   modifier: Modifier,
   maybeHostLabel: Int? = null,
   hasHandRaised: Boolean = false,
+  isNotRecorded: Boolean = false,
 ) {
   if (name.isEmpty()) return
   // Said as one: who, whether their hand is up, and what is wrong or switched off.
-  val shownName = if (hasHandRaised) stringResource(R.string.call_person_hand_raised, name) else name
+  val handName = if (hasHandRaised) stringResource(R.string.call_person_hand_raised, name) else name
+  val shownName = if (isNotRecorded) stringResource(R.string.call_person_not_recorded, handName) else handName
   val description = when {
     isUnverified && isMuted -> stringResource(R.string.call_person_unverified_muted, shownName)
     isUnverified -> stringResource(R.string.call_person_unverified, shownName)
     isMuted -> stringResource(R.string.call_person_muted, shownName)
-    hasHandRaised -> shownName
+    hasHandRaised || isNotRecorded -> shownName
     else -> null
   }
   Row(
@@ -811,6 +829,9 @@ private fun NameLabel(
     )
     if (maybeHostLabel != null) {
       Text(stringResource(maybeHostLabel), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
+    }
+    if (isNotRecorded) {
+      Text(stringResource(R.string.call_tile_not_recorded), color = Color.White.copy(alpha = 0.8f), style = MaterialTheme.typography.labelSmall, maxLines = 1)
     }
   }
 }
@@ -892,6 +913,7 @@ private fun VideoTile(
         Modifier.align(Alignment.BottomStart),
         maybeOwner.maybeHostLabel,
         maybeOwner.hasHandRaised,
+        maybeOwner.isNotRecorded,
       )
     }
   }
@@ -1196,6 +1218,83 @@ private fun RecordingNotice(ui: CallUiState) {
         style = MaterialTheme.typography.labelLarge,
         textAlign = TextAlign.Center,
       )
+    }
+  }
+}
+
+/**
+ * The others' recordings that ask this device for consent (#2115): an unanswered one asks
+ * ("Allow" / "Don't allow"); an answered one says where this device stands and offers the other
+ * answer. Only verified asks reach here (the core): nobody is asked on the server's word.
+ */
+@Composable
+private fun RecordingConsentPrompt(ui: CallUiState, onAnswer: (String, Boolean) -> Unit) {
+  val consents = ui.maybeState?.recordingConsents.orEmpty()
+  if (consents.isEmpty()) return
+  val someone = stringResource(R.string.call_recording_someone)
+  Column(Modifier.padding(bottom = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    for (consent in consents) {
+      val name = ui.names[consent.recorderUserId]?.takeIf { it.isNotEmpty() } ?: someone
+      when (consent.answer) {
+        RecordingConsentAnswer.UNANSWERED -> ConsentQuestion(name, consent, onAnswer)
+        RecordingConsentAnswer.ALLOWED, RecordingConsentAnswer.DECLINED -> ConsentAnswerLine(name, consent, onAnswer)
+      }
+    }
+  }
+}
+
+@Composable
+private fun ConsentQuestion(name: String, consent: RecordingConsentInfo, onAnswer: (String, Boolean) -> Unit) {
+  val question =
+    stringResource(
+      if (consent.isAsking) R.string.call_recording_consent_ask else R.string.call_recording_consent_ask_running,
+      name,
+    )
+  Surface(
+    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    contentColor = MaterialTheme.colorScheme.onSurface,
+    shape = MaterialTheme.shapes.large,
+    modifier = Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Assertive },
+  ) {
+    Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+      Text(question, style = MaterialTheme.typography.bodyMedium)
+      Text(stringResource(R.string.call_recording_consent_explain), style = MaterialTheme.typography.bodySmall)
+      Row(Modifier.align(Alignment.End), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        TextButton(onClick = { onAnswer(consent.recorderUserId, false) }) {
+          Text(stringResource(R.string.call_recording_consent_decline))
+        }
+        Button(onClick = { onAnswer(consent.recorderUserId, true) }) {
+          Text(stringResource(R.string.call_recording_consent_allow))
+        }
+      }
+    }
+  }
+}
+
+@Composable
+private fun ConsentAnswerLine(name: String, consent: RecordingConsentInfo, onAnswer: (String, Boolean) -> Unit) {
+  val isAllowed = consent.answer == RecordingConsentAnswer.ALLOWED
+  Surface(
+    color = MaterialTheme.colorScheme.inverseSurface,
+    contentColor = MaterialTheme.colorScheme.inverseOnSurface,
+    shape = CircleShape,
+    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+  ) {
+    Row(
+      Modifier.padding(start = 16.dp, end = 4.dp),
+      horizontalArrangement = Arrangement.spacedBy(4.dp),
+      verticalAlignment = Alignment.CenterVertically,
+    ) {
+      Text(
+        stringResource(if (isAllowed) R.string.call_recording_consent_allowed else R.string.call_recording_consent_declined, name),
+        style = MaterialTheme.typography.labelLarge,
+      )
+      TextButton(onClick = { onAnswer(consent.recorderUserId, !isAllowed) }) {
+        Text(
+          stringResource(if (isAllowed) R.string.call_recording_consent_withdraw else R.string.call_recording_consent_allow),
+          color = MaterialTheme.colorScheme.inversePrimary,
+        )
+      }
     }
   }
 }

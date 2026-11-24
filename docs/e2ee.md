@@ -7326,12 +7326,13 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 **Who may record (signed policy).** The workspace policy (§11, admin.md §2.3) has a group
 `call_recording`, off by default:
 
-| Field         | Default   | Meaning                                                                                                          |
-|---------------|-----------|------------------------------------------------------------------------------------------------------------------|
-| `recorders`   | `off`     | Who may record: `off`, `admins` (owners and admins of the verified roster), `members` or `recorder_bot_only`     |
-| `max_minutes` | `120`     | The longest recording; it stops by itself then (1 to 480)                                                        |
-| `local_files` | `allowed` | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`)                        |
-| `bot`         | none      | The recorder bot's account ("Recorder bot" below); `recorder_bot_only` needs it                                  |
+| Field         | Default       | Meaning                                                                                                          |
+|---------------|---------------|------------------------------------------------------------------------------------------------------------------|
+| `recorders`   | `off`         | Who may record: `off`, `admins` (owners and admins of the verified roster), `members` or `recorder_bot_only`     |
+| `max_minutes` | `120`         | The longest recording; it stops by itself then (1 to 480)                                                        |
+| `local_files` | `allowed`     | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`)                        |
+| `bot`         | none          | The recorder bot's account ("Recorder bot" below); `recorder_bot_only` needs it                                  |
+| `consent`     | `notice_only` | `notice_only` (everybody is told) or `all_consent` (everybody is asked, "Consent" below, #2115)                  |
 
 Guests never record, whatever the policy says, and neither does any bot account but the signed
 `bot`. The recording app checks the verified policy and its
@@ -7349,9 +7350,12 @@ an owner app from before the group re-signs without it, which reads as `off`.
 **The notice: signed call state, not a client-only flag.** A recording is announced over the call's
 signaling, and the announcement is signed end to end:
 
-- The recording device signs a `RecordingNotice` (`teamcraft-crypto::call_recording`): call id,
-  device id, a sequence number and the state (`recording` or `stopped`), TLS-encoded and signed with
-  ECDSA P-256 over `len(label) || label || body` with the label `TeamCraft-v1 call recording notice`.
+- The recording device signs a `RecordingNotice` (`teamcraft-crypto::call_recording`, version 2):
+  call id, device id, a sequence number, the **take** (the sequence number of the recording's first
+  notice: which recording this is), whether it **asks for consent**, and the state (`recording`,
+  `stopped`, or `requesting`: it asks for consent and records nothing yet, #2115), TLS-encoded (99
+  bytes) and signed with ECDSA P-256 over `len(label) || label || body` with the label
+  `TeamCraft-v1 call recording notice`.
   The key is the device's **DAVE signature key of this call**: the key its call key binding (§8)
   ties to the device certificate, and the one the other members verified before admitting it to the
   DAVE group. No new key and no new trust path: a member that accepts the device's media also knows
@@ -7404,8 +7408,61 @@ group can't be recorded any more by anybody, because they send nothing.
 - Who joins while a recording runs gets the SFU's stored notices with the join and sees a banner
   "This call is being recorded by Alice" with "Leave call" next to "Continue". Objecting means
   leaving: whoever leaves is no longer in the DAVE group and can't be recorded from then on.
-- Consent from everybody before a recording may start (`all_consent`), and leaving the objecting
-  person's audio out of a recording, are a later step (#2115).
+- Where the policy says `all_consent`, nobody has to leave to stay out of a recording: they are
+  asked, and the recording leaves out who doesn't allow it ("Consent" below).
+
+**Consent (`all_consent`, issue #2115).** A recording that must ask records nobody without a
+signed "yes", and nobody can claim a "yes" that wasn't given:
+
+- **The ask:** the recording app starts with a `requesting` notice that asks for consent and
+  records nothing (no frame of anybody, its own voice included, goes into the file while it asks).
+  Every other app that verified the notice against the recorder's DAVE key asks its user: "Alice
+  wants to record this call" with "Allow", "Don't allow" and "Leave call". An unchecked claim (the
+  recorder's key isn't known here yet) shows, but asks nothing: nobody is asked on the server's
+  word.
+- **The answer:** a `RecordingConsent` (`teamcraft-crypto::call_recording`): call id, the answering
+  device, the recorder's device, the take, a sequence number and the answer (`allow` or
+  `decline`), TLS-encoded (106 bytes) and signed with the **answering device's own DAVE key of the
+  call**, over `len(label) || label || body` with the label `TeamCraft-v1 call recording consent`.
+  It goes to the SFU (`set_recording_consent`), which keeps the latest answer of each device per
+  recorder (at most 256 bytes, 4 recorders, sharing the notices' rate limit), forwards it to the
+  others (`recording_consent`), confirms it to the sender (`recording_consent_kept`; unconfirmed
+  answers are sent again every 2 seconds), hands it to devices that join later, and forgets a
+  device's answers when it leaves. The SFU reads the recorder's id in it to keep one per recorder,
+  nothing else; it can't forge or change one. After its own rejoin or a new DAVE session an app
+  signs its answers again with its new key.
+- **Bound to the take:** an answer names the call, the recorder's device and the take. It verifies
+  only with the key of the device that gave it, so a recorder can't sign a consent "from" Bob, and
+  the server can't move Bob's "yes" to another recording, another recorder or another call. A later
+  answer (a higher number) replaces an earlier one: a withdrawn consent can't be replayed back in.
+- **What is recorded:** the recording app mixes in only the devices whose verified `allow` for its
+  very take it holds, from a separate mix of just their streams (`audio_pipeline::next_frames`;
+  in the browser the call module's own mix): who declined, hasn't answered, or whose answer doesn't
+  verify (yet) is not in the file, played or not. Its own voice is in it (the recorder consents by
+  recording). Video isn't recorded in this version (#2250), so "left out" is the voice.
+- **Starting:** once every other device in the call has answered (allowed or declined), the
+  recording starts by itself and announces `recording`. The recorder can start it earlier ("Start
+  now"), without those who haven't answered: they stay out until they allow it. A recorder alone
+  in the call (as far as its app knows) has nobody to wait for and records its own voice at once;
+  whoever it learns of later is asked like a late joiner. The recorder bot
+  does that after `consent_wait_secs`. A recording that reaches its length limit and goes on in a
+  next part (the bot) keeps its take and its answers.
+- **Late joiners and changes:** who joins while it runs is asked as above and is left out until
+  they allow it; anybody can change their answer while it runs ("Leave me out" / "Allow"), which
+  takes effect from that moment. A device that leaves the call loses its answers (the SFU's word
+  only ever takes a voice out); it is asked to answer again only if its app forgot its answer.
+- **Shown as such:** every app shows who isn't in a running recording that asked, from the same
+  signed answers: "Not recorded" on their tile, "You're not in Alice's recording" for oneself, and
+  for the recorder "Not recording Bob". Each app computes it from what it verified; a server that
+  withholds answers from a viewer makes that viewer show people as left out, never as recorded
+  when they aren't.
+- **Policy:** the recording app takes the rule from the verified policy (the desktop shell reads it
+  itself; in the browser the page's check is the check, as for recording at all). Every other app
+  checks it too: a recording whose notice doesn't ask while the policy says `all_consent` gets the
+  note that the policy doesn't allow it. A value from a newer owner app reads as asking.
+- **The honest limit stays:** a modified app can ask nobody and record everybody, as it can record
+  without any notice. The consents bind compliant apps and make what they record provable; they
+  can't stop covert capture.
 
 **What is recorded, and where it goes.** In this version the desktop app (Windows, macOS, Linux)
 and the browser (#2114) record; the Android and the iOS app show the notices but don't record yet.
@@ -7547,7 +7604,9 @@ participant with a device of its own:
   the mix of everybody, muted itself) and announces it with the same signed notice of its own DAVE
   key, so every app shows "Recorded by" with the bot's name, verified like any recorder's, and the
   audit log has it. It never records unannounced: when the SFU doesn't confirm its notice for
-  `unconfirmed_notice_secs` (30 s), it stops, leaves and tells the conversation.
+  `unconfirmed_notice_secs` (30 s), it stops, leaves and tells the conversation. Under
+  `all_consent` it asks like any recorder and mixes in only who allowed it, starting without
+  those who haven't answered after `consent_wait_secs` (120 s).
 - **Its takes:** sealed on its disk as they are written, under a key held only in the process (no
   kept key: there is no user to offer a crashed take to, and a key on the same disk would protect
   nothing), at the policy's `max_minutes` per take, the next take starting at once. Each finished
@@ -7562,14 +7621,16 @@ participant with a device of its own:
   to everybody in every call it records.
 
 **What the server learns.** Who records which call, and when: the notice is signed, not encrypted,
-so the SFU reads its call, device, state and sequence number (a wall-clock timestamp in
-milliseconds). It never sees the recording; a posted recording is an attachment like any other,
+so the SFU reads its call, device, take, state and sequence number (a wall-clock timestamp in
+milliseconds). Where recordings ask for consent, it also reads who allowed or declined which
+recording, and when (the answers are signed, not encrypted). It never sees the recording; a posted recording is an attachment like any other,
 whose size it sees.
 
 **Audit log (issue #2117).** The server writes "call recording started" and "call recording
 stopped" into the audit log (admin.md §4), from what the SFU reads in the notices it passes on:
 
-- The SFU reports when a device's latest notice turns its recording on or off
+- The SFU reports when a device's latest notice turns its recording on or off (a `requesting`
+  notice counts as off: the log has a recording from the moment it records)
   (`POST /api/internal/v1/calls/recording`, in the same ordered queue as joins and leaves), with the
   number of devices in the call (at a start; at a stop the most at once while it ran), and a stop
   when a device leaves while its notice says it records. It counts a notice only when it names this

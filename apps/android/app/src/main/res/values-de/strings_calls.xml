@@ -145,6 +145,17 @@
   <!-- Call recording (#216, e2ee.md §8.3) -->
   <string name="call_recording_by">Aufnahme durch %1$s. Verlasse den Anruf, wenn du nicht aufgenommen werden möchtest.</string>
   <string name="call_recording_someone">Jemand</string>
+  <!-- Zustimmung zu einer Aufnahme (#2115) -->
+  <string name="call_recording_consent_ask">%1$s möchte diesen Anruf aufnehmen.</string>
+  <string name="call_recording_consent_ask_running">%1$s nimmt diesen Anruf auf.</string>
+  <string name="call_recording_consent_explain">Deine Stimme wird nur aufgenommen, wenn du zustimmst. Du kannst deine Antwort jederzeit ändern.</string>
+  <string name="call_recording_consent_allow">Zustimmen</string>
+  <string name="call_recording_consent_decline">Nicht zustimmen</string>
+  <string name="call_recording_consent_allowed">Deine Stimme ist in der Aufnahme von %1$s.</string>
+  <string name="call_recording_consent_declined">Deine Stimme ist nicht in der Aufnahme von %1$s.</string>
+  <string name="call_recording_consent_withdraw">Mich herausnehmen</string>
+  <string name="call_tile_not_recorded">Nicht aufgenommen</string>
+  <string name="call_person_not_recorded">%1$s, nicht aufgenommen</string>
   <string name="call_tile_speaking">spricht</string>
   <string name="call_self_view">Deine Kamera</string>
   <string name="call_self_view_top_start">Nach oben links verschieben</string>

@@ -17,7 +17,9 @@ use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, 
 use crate::components::call_popover::CallPopover;
 use crate::components::call_prejoin::call_heading;
 use crate::components::call_reactions::{FloatingReactions, ReactionPicker, reaction_name};
-use crate::components::call_recording::{RecordingBanner, RecordingIndicator, use_recording_control};
+use crate::components::call_recording::{
+  RecordingBanner, RecordingConsentPrompt, RecordingIndicator, is_self_left_out, use_recording_control,
+};
 use crate::components::call_video::{
   BackgroundPicker, LiveVideo, PickerSize, VideoSource, VideoTile, can_share_screen, can_show_video,
 };
@@ -510,6 +512,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         is_muted=Signal::derive(move || !call.is_mic_on.get())
         is_camera_on=call.is_camera_on
         has_hand_raised=call.has_hand_raised
+        is_left_out_of_recording=Signal::derive(move || is_self_left_out(state))
         effect=call.effect
         is_mirrored=is_self_mirrored
         video=own_video
@@ -551,6 +554,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
           is_camera_on=participant_flag(id, |participant| participant.is_camera_on, true)
           has_hand_raised=participant_flag(id, |participant| participant.has_hand_raised, false)
           is_recording=participant_flag(id, |participant| participant.is_recording, false)
+          is_left_out_of_recording=participant_flag(id, |participant| participant.is_left_out_of_recording, false)
           is_speaking=Signal::derive(move || speaking.get() == Some(id))
           is_reconnecting=Signal::derive(move || reconnecting.get().contains(&id))
           is_unverified=Signal::derive(move || unverified.get().contains(&id))
@@ -835,6 +839,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
       <crate::components::call_encryption::EncryptionFailureBanner request=request />
       <NotetakerBanner conversation=request.conversation notetaker=notetaker is_asked=notetaker_invite.is_asked />
       <RecordingBanner />
+      <RecordingConsentPrompt />
       <div class="call-body">
         <div class="call-stage-wrap" node_ref=stage_wrap>
           {stage}

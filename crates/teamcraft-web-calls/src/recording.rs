@@ -108,6 +108,7 @@ impl Recordings {
       started_at: crate::unix_ms(),
       max_secs,
       is_unconfirmed: false,
+      maybe_consent: None,
     };
     Ok((sink, own))
   }

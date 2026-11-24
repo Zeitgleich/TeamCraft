@@ -145,6 +145,17 @@
   <!-- Call recording (#216, e2ee.md §8.3) -->
   <string name="call_recording_by">Recorded by %1$s. Leave the call if you don\'t want to be recorded.</string>
   <string name="call_recording_someone">Someone</string>
+  <!-- Consent to a recording (#2115) -->
+  <string name="call_recording_consent_ask">%1$s wants to record this call.</string>
+  <string name="call_recording_consent_ask_running">%1$s is recording this call.</string>
+  <string name="call_recording_consent_explain">Your voice is only recorded if you allow it. You can change your answer at any time.</string>
+  <string name="call_recording_consent_allow">Allow</string>
+  <string name="call_recording_consent_decline">Don\'t allow</string>
+  <string name="call_recording_consent_allowed">Your voice is in %1$s\'s recording.</string>
+  <string name="call_recording_consent_declined">Your voice is not in %1$s\'s recording.</string>
+  <string name="call_recording_consent_withdraw">Leave me out</string>
+  <string name="call_tile_not_recorded">Not recorded</string>
+  <string name="call_person_not_recorded">%1$s, not recorded</string>
   <string name="call_tile_speaking">speaking</string>
   <string name="call_self_view">Your camera</string>
   <string name="call_self_view_top_start">Move to top left</string>

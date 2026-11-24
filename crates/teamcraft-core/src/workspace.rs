@@ -960,19 +960,35 @@ pub fn voice_message_policy(store: &impl LocalStore) -> Option<teamcraft_proto::
     .map(|state| state.policy.voice_messages)
 }
 
-/// How long `user` may record a call under the verified policy (e2ee.md §8.3), in seconds; `None`
-/// when they may not. Admins come from the verified roster while it is fresh; the server's word
+/// What the verified policy allows `user` when they record a call (e2ee.md §8.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecordingAllowance {
+  /// The longest recording, in seconds.
+  pub max_secs: u32,
+  /// The recording must ask everybody in the call and record only who allowed it (#2115).
+  pub requires_consent: bool,
+}
+
+/// How long `user` may record a call under the verified policy (e2ee.md §8.3), in seconds, and
+/// whether they must ask for consent; `None` when they may not. Admins come from the verified roster while it is fresh; the server's word
 /// that someone is a guest or a bot only takes the right away. The recorder bot is the account the
 /// owners signed (#2273): it may record whatever the server says about it, and in
 /// `recorder_bot_only` nobody else may. The desktop shell checks this itself before it records (the
 /// page's word isn't enough), and the recorder bot before it joins a call.
-pub fn call_recording_allowance(store: &impl LocalStore, user: UserId, now_ms: i64) -> Option<u32> {
+pub fn call_recording_allowance(
+  store: &impl LocalStore,
+  user: UserId,
+  now_ms: i64,
+) -> Option<RecordingAllowance> {
   let workspace: WorkspaceState =
     records::get_json(store, Table::Workspace, crate::client::WORKSPACE_KEY).ok()??;
   let policy = &workspace.policy.call_recording;
   policy
     .allows(call_recorder_role(store, &workspace, user, now_ms))
-    .then(|| policy.max_seconds())
+    .then(|| RecordingAllowance {
+      max_secs: policy.max_seconds(),
+      requires_consent: policy.requires_consent(),
+    })
 }
 
 /// How `user` stands under the verified call recording policy: the signed recorder bot, a guest
@@ -1910,7 +1926,7 @@ mod tests {
   /// Who may record a call (e2ee.md §8.3, #2273): the one check the desktop shell, the browser's
   /// page and the recorder bot make before recording.
   mod call_recording {
-    use teamcraft_proto::{CallRecorders, CallRecordingPolicy};
+    use teamcraft_proto::{CallRecorders, CallRecordingPolicy, RecordingConsentMode};
 
     use super::*;
     use crate::store::MemoryStore;
@@ -1956,7 +1972,27 @@ mod tests {
         maybe_bot: Some(user(BOT)),
         ..CallRecordingPolicy::default()
       });
-      assert_eq!(call_recording_allowance(&store, user(BOT), NOW), Some(480 * 60));
+      assert_eq!(
+        call_recording_allowance(&store, user(BOT), NOW).map(|allowance| allowance.max_secs),
+        Some(480 * 60)
+      );
+    }
+
+    /// #2115: the signed consent rule comes with the allowance, for the desktop shell and the bot.
+    #[test]
+    fn the_allowance_says_whether_to_ask_for_consent() {
+      for (consent, requires_consent) in [
+        (RecordingConsentMode::NoticeOnly, false),
+        (RecordingConsentMode::AllConsent, true),
+      ] {
+        let (store, owner) = store_with(CallRecordingPolicy {
+          recorders: CallRecorders::Members,
+          consent,
+          ..CallRecordingPolicy::default()
+        });
+        let allowance = call_recording_allowance(&store, user(owner), NOW).unwrap();
+        assert_eq!(allowance.requires_consent, requires_consent);
+      }
     }
 
     #[test]

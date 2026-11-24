@@ -45,6 +45,7 @@ use teamcraft_core::typing::TypingAnnouncer;
 use teamcraft_core::ui_backend::{CoreChatBackend, CoreCommand};
 use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
+use teamcraft_core::workspace::RecordingAllowance;
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
   PendingEnrollment, UnreadableStore, parse_recovery_key, passkey_wire,
@@ -380,7 +381,7 @@ enum Request {
     oneshot::Sender<Result<Vec<teamcraft_crypto::identity::VerifiedDevice>, String>>,
   ),
   /// How long the user may record a call under the verified policy (`None`: not at all).
-  CallRecordingAllowance(oneshot::Sender<Result<Option<u32>, String>>),
+  CallRecordingAllowance(oneshot::Sender<Result<Option<RecordingAllowance>, String>>),
   /// Whether the verified policy lets a recording be saved as a file (#2116).
   CallRecordingAllowsFiles(oneshot::Sender<Result<bool, String>>),
   CallJoinToken(
@@ -803,9 +804,10 @@ impl CoreRuntime {
       .unwrap_or_else(|| Err(stopped()))
   }
 
-  /// How long the user may record a call under the verified policy, in seconds; `None` when not
-  /// at all (e2ee.md §8.3). The shell checks it before recording, whatever the page asked.
-  pub async fn call_recording_allowance(&self) -> Result<Option<u32>, String> {
+  /// How long the user may record a call under the verified policy, and whether the recording
+  /// must ask for consent (#2115); `None` when not at all (e2ee.md §8.3). The shell checks it
+  /// before recording, whatever the page asked.
+  pub async fn call_recording_allowance(&self) -> Result<Option<RecordingAllowance>, String> {
     self
       .ask(Request::CallRecordingAllowance)
       .await
@@ -1939,7 +1941,7 @@ impl Core {
     client.refresh_call_devices(conversation).await.map_err(describe)
   }
 
-  fn call_recording_allowance(&self) -> Result<Option<u32>, String> {
+  fn call_recording_allowance(&self) -> Result<Option<RecordingAllowance>, String> {
     let client = self.client.as_ref().ok_or("this device is not set up yet")?;
     Ok(teamcraft_core::workspace::call_recording_allowance(
       client.store(),

@@ -37,7 +37,7 @@ use teamcraft_core::api::{ApiError, ServerApi};
 use teamcraft_core::client::files::{BlobUpload, StagedFile, sweep_staged_copies};
 use teamcraft_core::records;
 use teamcraft_core::store::{LocalStore, Table};
-use teamcraft_core::workspace::call_recording_allowance;
+use teamcraft_core::workspace::{RecordingAllowance, call_recording_allowance};
 use teamcraft_media::call_recording::{CallRecordingTake, delete_recording};
 use teamcraft_media::call_resilience::JoinTicket;
 use teamcraft_proto::{CallId, ConversationId, GatewayEvent};
@@ -209,7 +209,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
     let me = self.client.user_id();
     let now_ms = unix_ms();
-    let maybe_max_secs = call_recording_allowance(self.client.store(), me, now_ms);
+    let maybe_allowance = call_recording_allowance(self.client.store(), me, now_ms);
     // Unreadable now: no session is stopped or started for it, the next tick reads again.
     let groups: HashSet<ConversationId> = match self.client.group_conversations() {
       Ok(conversations) => conversations.into_iter().collect(),
@@ -218,9 +218,9 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         return;
       },
     };
-    self.check_sessions(maybe_max_secs.is_some(), &groups);
-    if let Some(max_secs) = maybe_max_secs {
-      self.start_sessions(max_secs, &groups).await;
+    self.check_sessions(maybe_allowance.is_some(), &groups);
+    if let Some(allowance) = maybe_allowance {
+      self.start_sessions(allowance, &groups).await;
     }
     if now.saturating_duration_since(self.last_flush) >= FLUSH_INTERVAL {
       self.last_flush = now;
@@ -272,7 +272,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
   }
 
   /// Joins the calls running in the bot's conversations.
-  async fn start_sessions(&mut self, max_secs: u32, groups: &HashSet<ConversationId>) {
+  async fn start_sessions(&mut self, allowance: RecordingAllowance, groups: &HashSet<ConversationId>) {
     for conversation in groups.iter().copied() {
       if self.sessions.contains_key(&conversation) {
         continue;
@@ -283,7 +283,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       if self.skipped(conversation) == Some(call_id) {
         continue;
       }
-      self.start_session(conversation, call_id, max_secs, false).await;
+      self.start_session(conversation, call_id, allowance, false).await;
     }
   }
 
@@ -315,7 +315,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     &mut self,
     conversation: ConversationId,
     call_id: CallId,
-    max_secs: u32,
+    allowance: RecordingAllowance,
     has_lost_earlier: bool,
   ) {
     let me = self.client.user_id();
@@ -357,7 +357,8 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       call_id,
       user_id: preparation.user_id,
       device_id: preparation.device_id,
-      max_take: Duration::from_secs(u64::from(max_secs)),
+      max_take: Duration::from_secs(u64::from(allowance.max_secs)),
+      requires_consent: allowance.requires_consent,
       folder: self.settings.folder.clone(),
       limits: self.settings.limits,
     };
@@ -487,11 +488,11 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
         Ok(Some(call)) if call.call_id == record.call_id
       );
       match (may_record, is_running) {
-        (Some(max_secs), true) => {
+        (Some(allowance), true) => {
           info!(conversation_id = %conversation, "joining the call again after a restart");
           self.delete(&session_key(conversation));
           self
-            .start_session(conversation, record.call_id, max_secs, true)
+            .start_session(conversation, record.call_id, allowance, true)
             .await;
         },
         _ => {

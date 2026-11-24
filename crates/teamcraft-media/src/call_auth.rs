@@ -185,7 +185,7 @@ pub fn crypto_device_id(device_id: DeviceId) -> CryptoDeviceId {
   CryptoDeviceId::new(snowflake_u64(device_id.snowflake().get()))
 }
 
-fn proto_device_id(device_id: CryptoDeviceId) -> Result<DeviceId, CallKeyError> {
+pub(crate) fn proto_device_id(device_id: CryptoDeviceId) -> Result<DeviceId, CallKeyError> {
   let raw = device_id.get();
   i64::try_from(raw)
     .ok()

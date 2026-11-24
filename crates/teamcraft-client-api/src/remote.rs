@@ -195,9 +195,23 @@ pub enum CallAction {
   /// policy's longest recording. Refused where the module doesn't record (`can_record`).
   StartRecording {
     max_secs: u32,
+    /// The verified policy says `all_consent` (#2115): ask everybody first and record only who
+    /// allowed it. The desktop shell reads the policy itself and ignores this; in the browser the
+    /// page's check is the check.
+    #[serde(default)]
+    requires_consent: bool,
   },
   /// Stops this device's recording; the take waits for the user ([`CallSnapshot::maybe_recording_take`]).
   StopRecording,
+  /// A recording that asks for consent and waits for answers starts without those who haven't
+  /// answered (#2115): they stay out of it until they allow it.
+  StartRecordingNow,
+  /// This device's answer to `recorder`'s recordings of the call that ask for consent (#2115):
+  /// its voice in them, or left out. A new answer replaces the last (withdrawing consent).
+  AnswerRecording {
+    recorder: UserId,
+    is_allowed: bool,
+  },
   /// Deletes the finished take.
   DiscardRecording,
   /// Turns live captions on this device on or off (#215, e2ee.md §8.6), or changes their
