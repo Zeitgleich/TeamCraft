@@ -967,6 +967,8 @@ pub struct RecordingAllowance {
   pub max_secs: u32,
   /// The recording must ask everybody in the call and record only who allowed it (#2115).
   pub requires_consent: bool,
+  /// The recording keeps a picture of the call too (#2250), where the app records video.
+  pub records_video: bool,
 }
 
 /// How long `user` may record a call under the verified policy (e2ee.md §8.3), in seconds, and
@@ -988,6 +990,7 @@ pub fn call_recording_allowance(
     .then(|| RecordingAllowance {
       max_secs: policy.max_seconds(),
       requires_consent: policy.requires_consent(),
+      records_video: policy.records_video(),
     })
 }
 
@@ -1926,7 +1929,7 @@ mod tests {
   /// Who may record a call (e2ee.md §8.3, #2273): the one check the desktop shell, the browser's
   /// page and the recorder bot make before recording.
   mod call_recording {
-    use teamcraft_proto::{CallRecorders, CallRecordingPolicy, RecordingConsentMode};
+    use teamcraft_proto::{CallRecorders, CallRecordingPolicy, RecordingConsentMode, RecordingVideo};
 
     use super::*;
     use crate::store::MemoryStore;
@@ -1992,6 +1995,23 @@ mod tests {
         });
         let allowance = call_recording_allowance(&store, user(owner), NOW).unwrap();
         assert_eq!(allowance.requires_consent, requires_consent);
+      }
+    }
+
+    /// #2250: whether to keep a picture of the call comes with the allowance, from the signature.
+    #[test]
+    fn the_allowance_says_whether_to_record_video() {
+      for (video, records_video) in [
+        (RecordingVideo::AudioOnly, false),
+        (RecordingVideo::AudioAndVideo, true),
+      ] {
+        let (store, owner) = store_with(CallRecordingPolicy {
+          recorders: CallRecorders::Members,
+          video,
+          ..CallRecordingPolicy::default()
+        });
+        let allowance = call_recording_allowance(&store, user(owner), NOW).unwrap();
+        assert_eq!(allowance.records_video, records_video);
       }
     }
 

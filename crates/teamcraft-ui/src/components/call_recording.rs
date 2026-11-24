@@ -24,6 +24,10 @@
 //!   else is asked ("Allow" / "Don't allow", or leave the call), and can change their answer while
 //!   it runs. Who isn't in the recording carries "Not recorded" on their tile. The answers are
 //!   signed by each device (the media layer); this module only shows them and passes them on.
+//! - **Video (#2250):** where the signed policy says `audio_and_video`, the desktop shell also
+//!   records a picture of the call screen. The screen tells it its layout and draws the label of a
+//!   tile left out of the recording in the user's language and font ([`sync_recording_view`]),
+//!   while this device records; the take card says it is a video.
 
 use std::collections::BTreeSet;
 
@@ -33,7 +37,9 @@ use serde_json::json;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::backend::Backend;
-use teamcraft_client_api::calls::{CallRecordingTake, OwnRecordingConsent, RecordingConsentState};
+use teamcraft_client_api::calls::{
+  CallLayout, CallRecordingTake, OwnRecordingConsent, RecordingConsentState, RecordingLabel,
+};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{CallRecordingPolicy, RecorderRole, Role, UserId};
 
@@ -136,6 +142,80 @@ impl RecordingControl {
       state.write(|backend| backend.start_call_recording(max_secs, requires_consent));
     }
   }
+}
+
+/// Tells the desktop shell what the call screen shows while this device records (#2250): its
+/// layout, and the label of a tile left out of the recording, drawn here so that it reads in the
+/// user's language and the app's font. The browser records the sound only; nothing is sent there.
+pub fn sync_recording_view(state: AppState, recording: RecordingControl, layout: RwSignal<CallLayout>) {
+  if !tauri::is_available() {
+    return;
+  }
+  let i18n = use_i18n();
+  Effect::new(move |_| {
+    if !recording.is_recording.get() {
+      return;
+    }
+    let layout = layout.get();
+    let maybe_label = draw_label(&i18n.t("call-recording-tile-label"));
+    state.write(|backend| backend.set_call_recording_view(layout, maybe_label));
+  });
+}
+
+/// A line of text as one coverage byte per pixel, white text drawn twice the size of the call
+/// screen's tile marks (the recording scales it to the tile).
+#[cfg(target_arch = "wasm32")]
+fn draw_label(text: &str) -> Option<RecordingLabel> {
+  use base64::Engine as _;
+  use wasm_bindgen::JsCast;
+  const FONT_PX: f64 = 40.0;
+  const PADDING_PX: f64 = 8.0;
+  let canvas = web_sys::window()?
+    .document()?
+    .create_element("canvas")
+    .ok()?
+    .dyn_into::<web_sys::HtmlCanvasElement>()
+    .ok()?;
+  let context = canvas
+    .get_context("2d")
+    .ok()??
+    .dyn_into::<web_sys::CanvasRenderingContext2d>()
+    .ok()?;
+  let font = format!("600 {FONT_PX}px system-ui, sans-serif");
+  context.set_font(&font);
+  let text_width = context.measure_text(text).ok()?.width();
+  let width = (text_width + 2.0 * PADDING_PX).ceil().clamp(1.0, 1024.0) as u32;
+  let height = (FONT_PX * 1.4).ceil() as u32;
+  canvas.set_width(width);
+  canvas.set_height(height);
+  // A new size resets the context's state.
+  context.set_font(&font);
+  context.set_text_baseline("middle");
+  context.set_fill_style_str("#fff");
+  context
+    .fill_text(text, PADDING_PX, f64::from(height) / 2.0)
+    .ok()?;
+  let image = context
+    .get_image_data(0.0, 0.0, f64::from(width), f64::from(height))
+    .ok()?;
+  let coverage: Vec<u8> = image
+    .data()
+    .as_chunks::<4>()
+    .0
+    .iter()
+    .map(|pixel| pixel[3])
+    .collect();
+  let label = RecordingLabel {
+    width: u16::try_from(width).ok()?,
+    height: u16::try_from(height).ok()?,
+    coverage_base64: base64::engine::general_purpose::STANDARD.encode(coverage),
+  };
+  label.coverage().is_some().then_some(label)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn draw_label(_text: &str) -> Option<RecordingLabel> {
+  None
 }
 
 /// Whether this device is left out of a running recording that asked for consent (#2115): its
@@ -507,8 +587,14 @@ pub fn CallRecordingTakeCard() -> impl IntoView {
   };
   move || {
     let take = take.get()?;
+    // A recording with video (#2250) says so: it is a video file, and much larger.
+    let meta_key = if take.has_video {
+      "call-recording-take-meta-video"
+    } else {
+      "call-recording-take-meta"
+    };
     let meta = i18n.t_with(
-      "call-recording-take-meta",
+      meta_key,
       &[
         ("time", &format_duration(take.duration_ms)),
         ("size", &format_bytes(take.size_bytes)),
@@ -805,12 +891,13 @@ fn recording_file_name(take: &CallRecordingTake) -> String {
     None => js_sys::Date::new_0(),
   };
   format!(
-    "call-recording-{:04}{:02}{:02}-{:02}{:02}.ogg",
+    "call-recording-{:04}{:02}{:02}-{:02}{:02}.{}",
     date.get_full_year(),
     date.get_month() + 1,
     date.get_date(),
     date.get_hours(),
     date.get_minutes(),
+    if take.has_video { "mp4" } else { "ogg" },
   )
 }
 

@@ -7333,6 +7333,7 @@ apps record at all. The admin guide (admin.md §3.13) says the same to whoever t
 | `local_files` | `allowed`     | Whether the recorder may save a recording as an unencrypted file (`allowed`, `forbidden`)                        |
 | `bot`         | none          | The recorder bot's account ("Recorder bot" below); `recorder_bot_only` needs it                                  |
 | `consent`     | `notice_only` | `notice_only` (everybody is told) or `all_consent` (everybody is asked, "Consent" below, #2115)                  |
+| `video`       | `audio_only`  | `audio_only` or `audio_and_video`: the desktop app also records a picture of the call ("Video" below, #2250)     |
 
 Guests never record, whatever the policy says, and neither does any bot account but the signed
 `bot`. The recording app checks the verified policy and its
@@ -7439,7 +7440,9 @@ signed "yes", and nobody can claim a "yes" that wasn't given:
   very take it holds, from a separate mix of just their streams (`audio_pipeline::next_frames`;
   in the browser the call module's own mix): who declined, hasn't answered, or whose answer doesn't
   verify (yet) is not in the file, played or not. Its own voice is in it (the recorder consents by
-  recording). Video isn't recorded in this version (#2250), so "left out" is the voice.
+  recording). In a recording with video (#2250) their tiles are blanked by the same rule: the
+  recording app never samples the picture of a device it doesn't take in, and the cell carries
+  "Not recorded" instead.
 - **Starting:** once every other device in the call has answered (allowed or declined), the
   recording starts by itself and announces `recording`. The recorder can start it earlier ("Start
   now"), without those who haven't answered: they stay out until they allow it. A recorder alone
@@ -7467,9 +7470,29 @@ signed "yes", and nobody can claim a "yes" that wasn't given:
 **What is recorded, and where it goes.** In this version the desktop app (Windows, macOS, Linux)
 and the browser (#2114) record; the Android and the iOS app show the notices but don't record yet.
 
-- **Content:** audio only: the mix this device plays (everybody it hears) and its own microphone
+- **Content:** the sound: the mix this device plays (everybody it hears) and its own microphone
   while unmuted, at 48 kHz mono, Opus at 32 kbit/s in an Ogg file (`teamcraft-media::call_recording`,
-  about 14 MB per hour). No video, no screen share, no chat.
+  about 14 MB per hour). No chat. Where the policy says `audio_and_video`, the desktop app keeps a
+  picture of the call too ("Video" below).
+- **Video (#2250):** the desktop app composites the tiles its call screen shows into one frame
+  (`teamcraft-media::recording_composite`, `call_recording_video`): screen shares first and large,
+  then the active speaker large in the speaker layout or a grid in the gallery (the first page, at
+  most 16 tiles), its own camera and share as its self views see them, others' tracks decoded from
+  the frames the screen watches. 1280x720 at 15 frames a second, H.264 at about 350 kbit/s from the
+  hardware encoder where the app has one (VA-API, VideoToolbox), OpenH264 otherwise; with the Opus
+  sound in a fragmented MP4 (`fmp4`), about 160 MB per hour. The file is sealed as it is written,
+  exactly like the Ogg file (below). A crash keeps it up to its last whole fragment (about two
+  seconds, each starting at a keyframe) within the last whole chunk: recovery copies the header and
+  every fragment whose `moof` and `mdat` are whole (`fmp4::copy_whole_fragments`). Memory stays
+  bounded: received frames wait in a queue of 256, encoded pictures in one of 30, beyond which they
+  are dropped and counted (a dropped received frame makes its track wait for its next keyframe, a
+  dropped picture makes the next one a keyframe), and each track keeps one decoded picture. Nothing
+  is composited while the recording waits for consent. The page draws the "Not recorded" label in
+  the user's language and hands the shell its coverage (one byte per pixel); the shell never
+  renders text itself. The browser, the phones and the recorder bot record the sound only, whatever
+  the policy says; a desktop app without the H.264 codec (not downloaded yet, and the download
+  failed) records the sound only too. QuickTime Player doesn't play Opus in MP4 (VLC, mpv,
+  browsers and the Windows media player do).
 - **While recording, and until it is posted:** the file grows in a private folder of the app
   (`call-recordings` in its cache folder), chunk by chunk, never held in memory whole, and
   **encrypted as it is written** (issue #2129, `teamcraft-crypto::sealed_stream`):
@@ -7577,8 +7600,8 @@ and the browser (#2114) record; the Android and the iOS app show the notices but
   conversation's members through MLS like every message; retention applies to it like to any
   message. The local file is deleted once it is posted or discarded (above). A file saved with
   "Save as file…" is plaintext wherever the user put it: the app warns before it writes it, and an
-  organization that doesn't want such copies sets `local_files` to `forbidden`. Video is a later
-  step (#2250).
+  organization that doesn't want such copies sets `local_files` to `forbidden`. A recording with
+  video is posted and saved the same way, as an MP4 file.
 - **Limits:** `max_minutes` stops it; the call ending, the recorder leaving, or the app's page
   loading anew stop it too.
 

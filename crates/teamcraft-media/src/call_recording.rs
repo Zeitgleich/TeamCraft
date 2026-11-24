@@ -21,6 +21,11 @@
 //!   or whose key doesn't open, can't be read by anybody and is deleted.
 //! - The recording stops by itself at its maximum length, or when writing fails (a full disk):
 //!   [`RecordingSink::is_ended`] tells the call's loop, which tells the others it stopped.
+//! - **With video (#2250):** [`CallRecorder::start_with_video`] adds a picture of the call
+//!   (`call_recording_video`: the tiles the call screen shows, composited and encoded as H.264),
+//!   and the file is a fragmented MP4 (`fmp4`) of the picture and the same Opus sound instead of
+//!   Ogg. The sound is still the clock; pictures are placed by when they were composited. A crash
+//!   keeps the file up to its last whole fragment (about two seconds) within the last whole chunk.
 //! - The file is the app's to place in a private folder and to delete; nothing here uploads.
 //!   Nothing is logged about what was said or about the file, only that a recording started and
 //!   ended and how long it was.
@@ -32,13 +37,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use rand_core::OsRng;
 use teamcraft_crypto::sealed_stream::{
   MAX_WRAP_NOTE_LEN, SealedStreamKey, SealedStreamReader, SealedStreamWriter,
 };
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
+use teamcraft_proto::DeviceId;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
@@ -46,8 +52,15 @@ use crate::audio_codec::{
   AudioChannels, AudioContent, OpusDecoder, OpusEncoder, OpusEncoderConfig, OpusError,
 };
 use crate::audio_frame::{FRAME_SAMPLES_PER_CHANNEL, SAMPLE_RATE_HZ};
+use crate::call_engine::RecordingAdmission;
 use crate::call_recording_parts::{RECORDING_BITRATE_BPS, RecordingMixer, max_frames};
-use crate::ogg_opus::{KeptOgg, OggOpusWriter, copy_whole_pages};
+use crate::call_recording_video::{
+  FIRST_PICTURE_WAIT, RecordedPicture, VideoRecording, VideoRecordingConfig, VideoRecordingSink, VideoShared,
+};
+use crate::fmp4::{
+  FragmentedMp4Writer, Mp4Tracks, Mp4Video, VIDEO_TIMESCALE, copy_whole_fragments, parameter_sets,
+};
+use crate::ogg_opus::{OggOpusWriter, copy_whole_pages};
 
 /// Frames queued for the recording thread (about ten seconds); beyond this, frames are dropped.
 const MAX_QUEUED_FRAMES: usize = 512;
@@ -57,8 +70,10 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 const KEY_EXTENSION: &str = "key";
 /// The extension of a kept key being written.
 const KEY_TEMPORARY_EXTENSION: &str = "key.tmp";
-/// The extension of a recording.
-const RECORDING_EXTENSION: &str = "ogg";
+/// The extension of a recording of the sound only.
+const OGG_EXTENSION: &str = "ogg";
+/// The extension of a recording with video (#2250).
+const MP4_EXTENSION: &str = "mp4";
 /// The largest kept key read back: the wrapped key and the longest note.
 const MAX_KEPT_KEY_BYTES: u64 = 1 + 24 + 32 + MAX_WRAP_NOTE_LEN as u64 + 16;
 
@@ -66,6 +81,8 @@ const MAX_KEPT_KEY_BYTES: u64 = 1 + 24 + 32 + MAX_WRAP_NOTE_LEN as u64 + 16;
 pub struct CallRecorder {
   sink: RecordingSink,
   maybe_thread: Option<JoinHandle<Result<Written, CallRecordingError>>>,
+  /// The picture's thread, for a recording with video.
+  maybe_video: Option<VideoRecording>,
   path: PathBuf,
   /// The file's key, for the take; only in memory, zeroized on drop.
   maybe_key: Option<SealedStreamKey>,
@@ -85,11 +102,21 @@ pub struct RecordingSink {
 pub struct CallRecordingTake {
   pub path: PathBuf,
   pub duration_ms: u64,
-  /// The size of the Ogg file once decrypted: what the posted attachment shows.
+  /// The size of the file once decrypted: what the posted attachment shows.
   pub size_bytes: u64,
+  pub format: RecordingFormat,
   key: SealedStreamKey,
   /// The file has its final chunk: the recording was finished, not cut by a crash.
   is_complete: bool,
+}
+
+/// What a recording's file is: its container, by its extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingFormat {
+  /// The sound only: Ogg Opus.
+  OggOpus,
+  /// The picture and the sound (#2250): H.264 and Opus in a fragmented MP4.
+  Mp4,
 }
 
 /// Keeps a recording readable after a crash (#2116): its key is sealed under `device_key`, a key
@@ -142,6 +169,8 @@ enum Frame {
   Playback(Vec<f32>),
   /// One Opus frame this device sent: its own voice as the others hear it.
   Own(Vec<u8>),
+  /// One encoded picture of the call (#2250).
+  Video(RecordedPicture),
 }
 
 #[derive(Default)]
@@ -151,6 +180,8 @@ struct Shared {
   is_ended: AtomicBool,
   is_at_limit: AtomicBool,
   recorded_ms: AtomicU64,
+  /// What the picture's thread shares, for a recording with video.
+  maybe_video: Option<Arc<VideoShared>>,
 }
 
 impl CallRecorder {
@@ -158,6 +189,17 @@ impl CallRecorder {
   /// `maybe_kept`, the recording's key is kept next to it, sealed (see [`KeptKey`]); a key that
   /// can't be written (a full disk) is logged and the recording runs without it.
   pub fn start(path: &Path, max: Duration, maybe_kept: Option<KeptKey>) -> Result<Self, CallRecordingError> {
+    Self::start_with_video(path, max, maybe_kept, None)
+  }
+
+  /// [`Self::start`], with a picture of the call where `maybe_video` gives its size and this
+  /// device (#2250): `path` is then an MP4 file. Hand the pictures to [`Self::video_sink`].
+  pub fn start_with_video(
+    path: &Path,
+    max: Duration,
+    maybe_kept: Option<KeptKey>,
+    maybe_video: Option<(VideoRecordingConfig, DeviceId)>,
+  ) -> Result<Self, CallRecordingError> {
     let mut encoder = OpusEncoder::new(OpusEncoderConfig {
       content: AudioContent::Voice,
       bitrate_bps: RECORDING_BITRATE_BPS as i32,
@@ -182,8 +224,15 @@ impl CallRecorder {
         return Err(CallRecordingError::File(error));
       },
     };
-    let opened =
-      SealedStreamWriter::new(&key, file, &mut OsRng).and_then(|sealed| OggOpusWriter::new(sealed, pre_skip));
+    let opened = SealedStreamWriter::new(&key, file, &mut OsRng).and_then(|sealed| match &maybe_video {
+      Some((config, _)) => Ok(Container::Mp4(Mp4State::Waiting {
+        sealed: Box::new(sealed),
+        pre_skip,
+        config: *config,
+        audio: Vec::new(),
+      })),
+      None => OggOpusWriter::new(sealed, pre_skip).map(Container::Ogg),
+    });
     let writer = match opened {
       Ok(writer) => writer,
       Err(error) => {
@@ -192,7 +241,11 @@ impl CallRecorder {
       },
     };
     let (frames, frame_rx) = mpsc::sync_channel(MAX_QUEUED_FRAMES);
-    let shared = Arc::new(Shared::default());
+    let maybe_video_shared = maybe_video.as_ref().map(|_| Arc::new(VideoShared::default()));
+    let shared = Arc::new(Shared {
+      maybe_video: maybe_video_shared.clone(),
+      ..Shared::default()
+    });
     let thread_shared = Arc::clone(&shared);
     let max_frames = max_frames(max);
     let spawned = std::thread::Builder::new()
@@ -209,13 +262,41 @@ impl CallRecorder {
         return Err(CallRecordingError::File(error));
       },
     };
-    info!(max_secs = max.as_secs(), "call recording started");
+    let sink = RecordingSink { frames, shared };
+    let maybe_video = match (maybe_video, maybe_video_shared) {
+      (Some((config, own_device)), Some(video_shared)) => {
+        let pictures = sink.frames.clone();
+        let started = VideoRecording::start(config, own_device, video_shared, move |picture| {
+          pictures.try_send(Frame::Video(picture)).is_ok()
+        });
+        match started {
+          Ok(video) => Some(video),
+          Err(error) => {
+            // The writer waits for pictures that don't come, and then records the sound only.
+            warn!(%error, "no thread for the call recording's video; it records the sound only");
+            None
+          },
+        }
+      },
+      _ => None,
+    };
+    info!(
+      max_secs = max.as_secs(),
+      has_video = maybe_video.is_some(),
+      "call recording started"
+    );
     Ok(Self {
-      sink: RecordingSink { frames, shared },
+      sink,
       maybe_thread: Some(thread),
+      maybe_video,
       path: path.to_path_buf(),
       maybe_key: Some(key),
     })
+  }
+
+  /// Where the call hands the recording its pictures, for a recording with video.
+  pub fn video_sink(&self) -> Option<VideoRecordingSink> {
+    self.maybe_video.as_ref().map(VideoRecording::sink)
   }
 
   /// What the call's loop hands its audio to.
@@ -260,10 +341,12 @@ impl CallRecorder {
     };
     let duration_ms = duration_ms_of(written.samples);
     info!(duration_secs = duration_ms / 1000, "call recording finished");
+    let format = RecordingFormat::of(&path).unwrap_or(RecordingFormat::OggOpus);
     Ok(CallRecordingTake {
       path,
       duration_ms,
       size_bytes: written.plaintext_bytes,
+      format,
       key,
       is_complete: true,
     })
@@ -278,6 +361,10 @@ impl CallRecorder {
 
   /// Ends the thread once it wrote what is queued, and finishes the file.
   fn join(&mut self) -> Result<Written, CallRecordingError> {
+    // The pictures stop first: what the writer then takes is the end of the file.
+    if let Some(video) = self.maybe_video.as_mut() {
+      video.stop();
+    }
     self.sink.shared.is_stopping.store(true, Ordering::Relaxed);
     let thread = self.maybe_thread.take().ok_or(CallRecordingError::Thread)?;
     thread.join().map_err(|_| CallRecordingError::Thread)?
@@ -296,7 +383,7 @@ impl Drop for CallRecorder {
 }
 
 impl CallRecordingTake {
-  /// Writes the decrypted Ogg file to `output` (a new file in the core's upload staging folder, or
+  /// Writes the decrypted file to `output` (a new file in the core's upload staging folder, or
   /// where the user saves it), streaming, never the whole file in memory; returns the bytes
   /// written. A finished take that doesn't decrypt (the file was changed on disk) fails partway:
   /// the caller removes what `output` got. An unfinished one ([`Self::is_unfinished`]) gives what
@@ -309,17 +396,67 @@ impl CallRecordingTake {
       return Ok(io::copy(&mut reader, output)?);
     }
     let mut reader = SealedStreamReader::recovering(&self.key, file)?;
-    Ok(
-      copy_whole_pages(&mut reader, output)
-        .map_err(empty_if_invalid)?
-        .bytes,
-    )
+    let kept = self
+      .format
+      .copy_whole(&mut reader, output)
+      .map_err(empty_if_invalid)?;
+    Ok(kept.bytes)
   }
 
   /// A crash cut it: the file has no end, and decrypting keeps what was written before.
   pub fn is_unfinished(&self) -> bool {
     !self.is_complete
   }
+}
+
+impl RecordingFormat {
+  /// The format of a recording's file, by its extension; `None` for any other file.
+  pub fn of(path: &Path) -> Option<Self> {
+    if has_extension(path, OGG_EXTENSION) {
+      Some(Self::OggOpus)
+    } else if has_extension(path, MP4_EXTENSION) {
+      Some(Self::Mp4)
+    } else {
+      None
+    }
+  }
+
+  /// The file name extension, without the dot.
+  pub fn extension(self) -> &'static str {
+    match self {
+      Self::OggOpus => OGG_EXTENSION,
+      Self::Mp4 => MP4_EXTENSION,
+    }
+  }
+
+  /// The media type of the decrypted file, for the attachment.
+  pub fn media_type(self) -> &'static str {
+    match self {
+      Self::OggOpus => "audio/ogg",
+      Self::Mp4 => "video/mp4",
+    }
+  }
+
+  /// Copies what is whole of a stream that may be cut short; the end marked where the container
+  /// has one.
+  fn copy_whole(self, input: &mut impl Read, output: &mut impl Write) -> io::Result<Kept> {
+    match self {
+      Self::OggOpus => copy_whole_pages(input, output).map(|kept| Kept {
+        bytes: kept.bytes,
+        samples: kept.samples,
+      }),
+      Self::Mp4 => copy_whole_fragments(input, output).map(|kept| Kept {
+        bytes: kept.bytes,
+        samples: kept.audio_samples,
+      }),
+    }
+  }
+}
+
+/// What a copy of a recording cut short kept: its bytes, and its sound's samples (48 kHz).
+struct Kept {
+  bytes: u64,
+  samples: u64,
 }
 
 impl FolderAtStart {
@@ -358,16 +495,18 @@ impl FolderAtStart {
   pub fn recover(self, device_key: &SymmetricKey) -> Vec<LeftoverRecording> {
     let mut found = Vec::new();
     for file in &self.files {
-      if !has_extension(file, RECORDING_EXTENSION) {
+      let Some(format) = RecordingFormat::of(file) else {
         // A kept key is read with its recording; anything else in the private folder goes.
-        let is_kept_key =
-          has_extension(file, KEY_EXTENSION) && file.with_extension(RECORDING_EXTENSION).exists();
+        let is_kept_key = has_extension(file, KEY_EXTENSION)
+          && [OGG_EXTENSION, MP4_EXTENSION]
+            .iter()
+            .any(|extension| file.with_extension(extension).exists());
         if !is_kept_key {
           remove(file);
         }
         continue;
-      }
-      match recover_one(file, device_key) {
+      };
+      match recover_one(file, format, device_key) {
         Ok(Some(leftover)) => found.push(leftover),
         Ok(None) => delete_recording(file),
         Err(error) => warn!(%error, "a call recording left at the last run could not be read now"),
@@ -388,6 +527,14 @@ impl RecordingSink {
   /// 20 ms (960 samples) of what this device plays.
   pub fn push_playback(&self, mix: &[f32]) {
     self.send(Frame::Playback(mix.to_vec()));
+  }
+
+  /// Who the recording takes in (#2115), for its picture: a tile of anybody else is blanked. The
+  /// call sets it with every played frame; it changes only when the answers do.
+  pub fn set_admission(&self, admission: &RecordingAdmission<'_>) {
+    if let Some(video) = &self.shared.maybe_video {
+      video.set_admission(admission);
+    }
   }
 
   /// One Opus frame this device sent. A muted microphone sends none, so it isn't recorded.
@@ -436,7 +583,7 @@ fn record(
   frames: &Receiver<Frame>,
   mut encoder: OpusEncoder,
   mut decoder: OpusDecoder,
-  mut writer: OggOpusWriter<SealedStreamWriter<File>>,
+  mut writer: Container,
   max_frames: u64,
   shared: &Shared,
 ) -> Result<Written, CallRecordingError> {
@@ -462,10 +609,16 @@ fn record(
         Ok(samples) => mixer.push_own_i16(&samples),
         Err(error) => debug!(%error, "own voice frame not decoded for the recording"),
       },
+      Frame::Video(picture) => {
+        if let Some(video) = &shared.maybe_video {
+          video.queued_pictures.fetch_sub(1, Ordering::Relaxed);
+          writer.push_video(picture, video)?;
+        }
+      },
       Frame::Playback(playback) if playback.len() == FRAME_SAMPLES_PER_CHANNEL => {
         let pcm = mixer.mix_i16(&playback);
         let packet = encoder.encode(&pcm)?;
-        writer.push(packet, FRAME_SAMPLES_PER_CHANNEL as u32)?;
+        writer.push_audio(packet, shared.maybe_video.as_deref())?;
         written_frames += 1;
         shared.recorded_ms.store(written_frames * 20, Ordering::Relaxed);
         if written_frames >= max_frames {
@@ -485,6 +638,155 @@ fn record(
     samples,
     plaintext_bytes,
   })
+}
+
+/// The file a recording writes into, sealed as it goes.
+enum Container {
+  Ogg(OggOpusWriter<SealedStreamWriter<File>>),
+  Mp4(Mp4State),
+}
+
+/// An MP4 file waits for the first keyframe before its header (which carries the parameter sets
+/// of the picture), at most [`FIRST_PICTURE_WAIT`]; the sound meanwhile waits in memory (a few
+/// kilobytes). Without a keyframe by then it is written with the sound only.
+enum Mp4State {
+  Waiting {
+    sealed: Box<SealedStreamWriter<File>>,
+    pre_skip: u16,
+    config: VideoRecordingConfig,
+    /// The sound so far, and when its first frame came.
+    audio: Vec<(Vec<u8>, Instant)>,
+  },
+  Writing {
+    writer: Box<FragmentedMp4Writer<SealedStreamWriter<File>>>,
+    /// When the first sound came: the file's zero, which pictures are placed from.
+    started: Instant,
+  },
+  /// Only while switching between the two.
+  Switching,
+}
+
+impl Container {
+  fn push_audio(&mut self, packet: Vec<u8>, maybe_video: Option<&VideoShared>) -> io::Result<()> {
+    let samples = FRAME_SAMPLES_PER_CHANNEL as u32;
+    let state = match self {
+      Self::Ogg(writer) => return writer.push(packet, samples),
+      Self::Mp4(state) => state,
+    };
+    match state {
+      Mp4State::Writing { writer, .. } => writer.push_audio(&packet, samples),
+      Mp4State::Waiting { audio, .. } => {
+        if audio.is_empty()
+          && let Some(video) = maybe_video
+        {
+          // The sound starts: so do the pictures, with a keyframe for the header.
+          video.is_keyframe_needed.store(true, Ordering::Relaxed);
+          video.is_audio_started.store(true, Ordering::Relaxed);
+        }
+        let now = Instant::now();
+        audio.push((packet, now));
+        let started = audio[0].1;
+        if now.duration_since(started) >= FIRST_PICTURE_WAIT {
+          info!("no picture for the call recording in time; it records the sound only");
+          state.open(None)?;
+        }
+        Ok(())
+      },
+      Mp4State::Switching => Ok(()),
+    }
+  }
+
+  fn push_video(&mut self, picture: RecordedPicture, video: &VideoShared) -> io::Result<()> {
+    let Self::Mp4(state) = self else {
+      return Ok(());
+    };
+    if let Mp4State::Waiting { audio, .. } = state {
+      let maybe_sets = picture
+        .is_keyframe
+        .then(|| parameter_sets(&picture.data))
+        .flatten();
+      match maybe_sets {
+        Some(sets) if !audio.is_empty() => state.open(Some(sets))?,
+        // Before the sound, or no keyframe yet: the file starts with one, after the sound.
+        _ => {
+          video.is_keyframe_needed.store(true, Ordering::Relaxed);
+          return Ok(());
+        },
+      }
+    }
+    if let Mp4State::Writing { writer, started } = state {
+      let Some(since) = picture.at.checked_duration_since(*started) else {
+        return Ok(());
+      };
+      let time =
+        u64::try_from(since.as_micros()).unwrap_or(u64::MAX) * u64::from(VIDEO_TIMESCALE) / 1_000_000;
+      writer.push_video(&picture.data, time, picture.is_keyframe)?;
+    }
+    Ok(())
+  }
+
+  fn samples(&self) -> u64 {
+    match self {
+      Self::Ogg(writer) => writer.samples(),
+      Self::Mp4(Mp4State::Writing { writer, .. }) => writer.audio_samples(),
+      Self::Mp4(Mp4State::Waiting { audio, .. }) => audio.len() as u64 * FRAME_SAMPLES_PER_CHANNEL as u64,
+      Self::Mp4(Mp4State::Switching) => 0,
+    }
+  }
+
+  /// Ends the file; returns the sealed writer to finish.
+  fn finish(self) -> io::Result<SealedStreamWriter<File>> {
+    match self {
+      Self::Ogg(writer) => writer.finish(),
+      Self::Mp4(mut state) => {
+        if matches!(state, Mp4State::Waiting { .. }) {
+          state.open(None)?;
+        }
+        match state {
+          Mp4State::Writing { writer, .. } => writer.finish().map(|(sealed, _)| sealed),
+          Mp4State::Waiting { .. } | Mp4State::Switching => {
+            Err(io::Error::other("the recording's file was not opened"))
+          },
+        }
+      },
+    }
+  }
+}
+
+impl Mp4State {
+  /// Writes the header (with the picture where `maybe_sets` has its parameter sets) and the sound
+  /// that waited.
+  fn open(&mut self, maybe_sets: Option<(Vec<u8>, Vec<u8>)>) -> io::Result<()> {
+    let Self::Waiting {
+      sealed,
+      pre_skip,
+      config,
+      audio,
+    } = std::mem::replace(self, Self::Switching)
+    else {
+      return Ok(());
+    };
+    let tracks = Mp4Tracks {
+      maybe_video: maybe_sets.map(|(sps, pps)| Mp4Video {
+        width: config.size.width,
+        height: config.size.height,
+        framerate: config.framerate,
+        sps,
+        pps,
+      }),
+      pre_skip,
+    };
+    let started = audio.first().map_or_else(Instant::now, |(_, at)| *at);
+    let mut writer = FragmentedMp4Writer::new(*sealed, &tracks)?;
+    for (packet, _) in &audio {
+      writer.push_audio(packet, FRAME_SAMPLES_PER_CHANNEL as u32)?;
+    }
+    *self = Self::Writing {
+      writer: Box::new(writer),
+      started,
+    };
+    Ok(())
+  }
 }
 
 /// Where a recording's key is kept.
@@ -528,7 +830,11 @@ fn keep_key(recording: &Path, key: &SealedStreamKey, kept: &KeptKey) -> io::Resu
 
 /// One recording a crash or a quit left: `None` when it can't be read (no key, a key that doesn't
 /// open, no audio), an error when the disk failed reading it.
-fn recover_one(path: &Path, device_key: &SymmetricKey) -> io::Result<Option<LeftoverRecording>> {
+fn recover_one(
+  path: &Path,
+  format: RecordingFormat,
+  device_key: &SymmetricKey,
+) -> io::Result<Option<LeftoverRecording>> {
   let mut wrapped = Vec::new();
   match File::open(key_path(path)) {
     Ok(file) => file.take(MAX_KEPT_KEY_BYTES + 1).read_to_end(&mut wrapped)?,
@@ -553,7 +859,7 @@ fn recover_one(path: &Path, device_key: &SymmetricKey) -> io::Result<Option<Left
     },
     Err(error) => return Err(error),
   };
-  let kept: KeptOgg = match copy_whole_pages(&mut reader, &mut io::sink()) {
+  let kept = match format.copy_whole(&mut reader, &mut io::sink()) {
     Ok(kept) if kept.samples > 0 => kept,
     Ok(_) => return Ok(None),
     Err(error) if error.kind() == io::ErrorKind::InvalidData => return Ok(None),
@@ -565,6 +871,7 @@ fn recover_one(path: &Path, device_key: &SymmetricKey) -> io::Result<Option<Left
       path: path.to_path_buf(),
       duration_ms: duration_ms_of(kept.samples),
       size_bytes: kept.bytes,
+      format,
       key,
       is_complete,
     },
@@ -795,6 +1102,188 @@ mod tests {
     assert!(CallRecorder::start(&path, Duration::from_secs(60), None).is_err());
     assert_eq!(fs::read(&path).unwrap(), b"left over");
     fs::remove_dir_all(folder).unwrap();
+  }
+
+  mod with_video {
+    use super::*;
+
+    const SPS: [u8; 8] = [0x67, 0x42, 0xc0, 0x1f, 0xda, 0x01, 0x40, 0x16];
+    const PPS: [u8; 4] = [0x68, 0xce, 0x3c, 0x80];
+
+    #[test]
+    fn sound_and_pictures_make_one_mp4_file() {
+      let folder = folder("mp4");
+      let path = folder.join("recording-1.mp4");
+      let (written, _) = mp4_recording(&path, 6, true);
+      assert!(
+        matches!(written, Container::Mp4(Mp4State::Writing { .. })),
+        "opened at the first keyframe"
+      );
+      written.finish().unwrap().finish().unwrap();
+      let take = CallRecordingTake {
+        path: path.clone(),
+        duration_ms: 6000,
+        size_bytes: 0,
+        format: RecordingFormat::of(&path).unwrap(),
+        key: test_key(),
+        is_complete: true,
+      };
+      let mut file = Vec::new();
+      take.decrypt_to(&mut file).unwrap();
+      assert_eq!(&file[4..8], b"ftyp");
+      assert!(file.windows(4).any(|window| window == b"avcC"));
+      let kept = crate::fmp4::copy_whole_fragments(&mut file.as_slice(), &mut io::sink()).unwrap();
+      assert_eq!(kept.audio_samples, 6 * 48_000);
+      assert_eq!(take.format.media_type(), "video/mp4");
+      fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn without_a_keyframe_in_time_it_records_the_sound_only() {
+      let folder = folder("mp4-no-picture");
+      let path = folder.join("recording-1.mp4");
+      let (written, shared) = mp4_recording(&path, 1, false);
+      assert!(shared.is_audio_started.load(Ordering::Relaxed));
+      assert!(
+        shared.is_keyframe_needed.load(Ordering::Relaxed),
+        "a keyframe is asked for"
+      );
+      written.finish().unwrap().finish().unwrap();
+      let take = CallRecordingTake {
+        path: path.clone(),
+        duration_ms: 1000,
+        size_bytes: 0,
+        format: RecordingFormat::Mp4,
+        key: test_key(),
+        is_complete: true,
+      };
+      let mut file = Vec::new();
+      take.decrypt_to(&mut file).unwrap();
+      assert!(!file.windows(4).any(|window| window == b"avcC"));
+      assert!(file.windows(4).any(|window| window == b"dOps"));
+      fs::remove_dir_all(folder).unwrap();
+    }
+
+    #[test]
+    fn a_crash_leaves_an_mp4_recording_that_is_recovered_up_to_its_last_whole_fragment() {
+      let folder = folder("mp4-crash");
+      let device_key = SymmetricKey::generate(&mut OsRng);
+      let path = folder.join("recording-1.mp4");
+      keep_key(
+        &path,
+        &test_key(),
+        &KeptKey {
+          device_key: device_key.duplicate(),
+          note: b"note".to_vec(),
+        },
+      )
+      .unwrap();
+      // Large pictures, so that whole sealed chunks reach the disk; then the process dies.
+      let (written, _) = mp4_recording_sized(&path, 20, true, 4000);
+      drop(written);
+      let mut leftovers = FolderAtStart::list(&folder).recover(&device_key);
+      assert_eq!(leftovers.len(), 1);
+      let take = leftovers.remove(0).take;
+      assert!(take.is_unfinished());
+      assert_eq!(take.format, RecordingFormat::Mp4);
+      assert!(
+        take.duration_ms >= 2000 && take.duration_ms < 18_000,
+        "whole fragments of about two seconds: {}",
+        take.duration_ms
+      );
+      let mut recovered = Vec::new();
+      assert_eq!(take.decrypt_to(&mut recovered).unwrap(), take.size_bytes);
+      let kept = crate::fmp4::copy_whole_fragments(&mut recovered.as_slice(), &mut io::sink()).unwrap();
+      assert_eq!(duration_ms_of(kept.audio_samples), take.duration_ms);
+      fs::remove_dir_all(folder).unwrap();
+    }
+
+    /// The key every test file here is sealed with (a fixed one: the tests read their files back).
+    fn test_key() -> SealedStreamKey {
+      SealedStreamKey::generate(&mut FixedRng)
+    }
+
+    /// Always the same bytes: the same key every time.
+    struct FixedRng;
+
+    impl rand_core::RngCore for FixedRng {
+      fn next_u32(&mut self) -> u32 {
+        7
+      }
+
+      fn next_u64(&mut self) -> u64 {
+        7
+      }
+
+      fn fill_bytes(&mut self, bytes: &mut [u8]) {
+        bytes.fill(7);
+      }
+
+      fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), rand_core::Error> {
+        bytes.fill(7);
+        Ok(())
+      }
+    }
+
+    impl rand_core::CryptoRng for FixedRng {}
+
+    fn mp4_recording(path: &Path, seconds: u64, has_pictures: bool) -> (Container, Arc<VideoShared>) {
+      mp4_recording_sized(path, seconds, has_pictures, 40)
+    }
+
+    /// `seconds` of sound (20 ms packets) and, with `has_pictures`, pictures at 15 fps with a
+    /// keyframe every two seconds, placed from the first sound; not finished.
+    fn mp4_recording_sized(
+      path: &Path,
+      seconds: u64,
+      has_pictures: bool,
+      picture_bytes: usize,
+    ) -> (Container, Arc<VideoShared>) {
+      let sealed = SealedStreamWriter::new(&test_key(), File::create(path).unwrap(), &mut OsRng).unwrap();
+      let mut container = Container::Mp4(Mp4State::Waiting {
+        sealed: Box::new(sealed),
+        pre_skip: 312,
+        config: VideoRecordingConfig::default(),
+        audio: Vec::new(),
+      });
+      let shared = Arc::new(VideoShared::default());
+      container.push_audio(vec![0xfc, 0, 0], Some(&shared)).unwrap();
+      let started = match &container {
+        Container::Mp4(Mp4State::Waiting { audio, .. }) => audio[0].1,
+        _ => unreachable!(),
+      };
+      let mut next_picture = 0u64;
+      for packet in 1..seconds * 50 {
+        let now = Duration::from_millis(packet * 20);
+        while has_pictures && Duration::from_micros(next_picture * 66_667) <= now {
+          let is_keyframe = next_picture.is_multiple_of(30);
+          let picture = RecordedPicture {
+            at: started + Duration::from_micros(next_picture * 66_667 + 1),
+            is_keyframe,
+            data: picture(is_keyframe, picture_bytes),
+          };
+          container.push_video(picture, &shared).unwrap();
+          next_picture += 1;
+        }
+        container
+          .push_audio(vec![0xfc, packet as u8, 0], Some(&shared))
+          .unwrap();
+      }
+      (container, shared)
+    }
+
+    fn picture(is_keyframe: bool, bytes: usize) -> Vec<u8> {
+      let mut data = Vec::new();
+      if is_keyframe {
+        for set in [&SPS[..], &PPS[..]] {
+          data.extend_from_slice(&[0, 0, 0, 1]);
+          data.extend_from_slice(set);
+        }
+      }
+      data.extend_from_slice(&[0, 0, 1, if is_keyframe { 0x65 } else { 0x41 }]);
+      data.extend((0..bytes).map(|index| (index % 200 + 1) as u8));
+      data
+    }
   }
 
   /// What a crash leaves: the kept key, and a sealed Ogg stream of `packets` 20 ms packets whose

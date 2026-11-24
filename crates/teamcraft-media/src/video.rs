@@ -313,7 +313,8 @@ impl EncodedVideoFrame {
 }
 
 impl VideoResolution {
-  fn i420_bytes(self) -> Result<usize, VideoError> {
+  /// The bytes of an I420 frame of this size; only even, non-zero sizes have one.
+  pub fn i420_bytes(self) -> Result<usize, VideoError> {
     if self.width == 0 || self.height == 0 || !self.width.is_multiple_of(2) || !self.height.is_multiple_of(2)
     {
       return Err(VideoError::InvalidDimensions {

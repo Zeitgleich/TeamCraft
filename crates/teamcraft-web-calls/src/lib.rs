@@ -893,6 +893,8 @@ impl Host {
         self.recordings.discard().await;
         self.changed();
       },
+      // The browser records the sound only (#2250): what the screen shows doesn't matter to it.
+      CallAction::SetRecordingView { .. } => {},
       // Captions are recognized on the device by the desktop app only so far (#215); the page
       // offers no button here (`maybe_captions_model` is absent).
       CallAction::SetCaptions { .. } | CallAction::DeleteCaptionModel => {

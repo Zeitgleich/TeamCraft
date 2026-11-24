@@ -1409,6 +1409,14 @@ pub trait CallBackend {
   /// `requires_consent` (the policy's `all_consent`, #2115) asks everybody first and records only
   /// who allowed it; the desktop shell reads the policy itself.
   fn start_call_recording(&self, _max_secs: u32, _requires_consent: bool) {}
+  /// What the call screen shows, for a recording with video (#2250): its layout, and the label of
+  /// a tile left out of the recording as the page drew it. Only the desktop shell records video.
+  fn set_call_recording_view(
+    &self,
+    _layout: crate::calls::CallLayout,
+    _maybe_label: Option<crate::calls::RecordingLabel>,
+  ) {
+  }
   fn stop_call_recording(&self) {}
   /// Starts the own recording that waits for consent without those who haven't answered (#2115).
   fn start_call_recording_now(&self) {}

@@ -1037,6 +1037,10 @@ async fn run_call(
           RecordingAdmission::Nobody
         };
         let is_recording_all = admission == RecordingAdmission::Everybody;
+        // The picture follows the sound's rule (#2250): a tile of anybody left out is blanked.
+        if let Some(recording) = &maybe_recording {
+          recording.set_admission(&admission);
+        }
         let (mix, maybe_admitted) = sinks.next_playback_frame(admission)?;
         if let Some(buffer) = &devices.maybe_playback {
           buffer.push(&mix);

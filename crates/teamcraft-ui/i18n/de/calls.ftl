@@ -474,6 +474,7 @@ call-recording-not-allowed = Die Richtlinie deiner Organisation erlaubt diese Au
 call-recording-continue = Weiter
 call-recording-take-title = Anrufaufnahme
 call-recording-take-meta = { $time } · { $size }
+call-recording-take-meta-video = Video · { $time } · { $size }
 call-recording-take-limit = Die Aufnahme hat bei der längsten Dauer gestoppt, die deine Organisation erlaubt.
 call-recording-take-hint = Stelle sie in die Unterhaltung, um sie verschlüsselt mit ihr zu teilen. Bis dahin ist sie nur auf diesem Computer.
 call-recording-take-memory-limit = Die Aufnahme hat bei der längsten Dauer gestoppt, die dieser Browser halten kann: Er kann Aufnahmen hier nicht auf dem Datenträger speichern und hält sie deshalb im Arbeitsspeicher.
@@ -510,6 +511,7 @@ call-recording-consent-decline = Nicht zustimmen
 call-recording-consent-allowed = Deine Stimme ist in der Aufnahme von { $name }.
 call-recording-consent-declined = Deine Stimme ist nicht in der Aufnahme von { $name }.
 call-recording-consent-withdraw = Mich herausnehmen
+call-recording-tile-label = Nicht aufgenommen
 tile-not-recorded = nicht aufgenommen
 
 ## Ansagen im Anruf (#2281): einmal vom Live-Bereich des Anrufs gesagt

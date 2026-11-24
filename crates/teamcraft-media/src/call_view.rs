@@ -55,6 +55,11 @@ impl CallRoster {
     }
   }
 
+  /// What another device's video track shows, while it is published.
+  pub fn video_kind(&self, stream: MediaStreamId) -> Option<&VideoTrackKind> {
+    self.video_devices.get(&stream).map(|(_, kind)| kind)
+  }
+
   /// The video codecs this device decodes (`MediaCapabilities::video_decoders`): others' tracks in
   /// another codec are marked [`RemoteVideoTrack::is_undecodable`] (#1793).
   pub fn set_video_decoders(&mut self, decoders: Vec<VideoCodec>) {

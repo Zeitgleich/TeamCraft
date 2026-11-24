@@ -23,6 +23,7 @@ pub mod fallback_pacer;
 pub mod fallback_queue;
 #[cfg(feature = "fallback-socket")]
 pub mod fallback_socket;
+pub mod fmp4;
 pub mod fragment;
 pub mod jitter;
 pub mod join_probe;
@@ -42,6 +43,7 @@ pub mod playback_gstreamer;
 pub mod quic_send;
 pub mod rate_probe;
 pub mod receive_load;
+pub mod recording_composite;
 pub mod resample;
 pub mod retransmit;
 pub mod ringtone;
@@ -94,6 +96,8 @@ pub mod call_recording_consent;
 #[cfg(feature = "dave")]
 pub mod call_recording_notice;
 pub mod call_recording_parts;
+#[cfg(feature = "native")]
+pub mod call_recording_video;
 #[cfg(feature = "dave")]
 pub mod call_signals;
 #[cfg(feature = "call-view")]

@@ -474,6 +474,7 @@ call-recording-not-allowed = Your organization's policy doesn't allow this recor
 call-recording-continue = Continue
 call-recording-take-title = Call recording
 call-recording-take-meta = { $time } · { $size }
+call-recording-take-meta-video = Video · { $time } · { $size }
 call-recording-take-limit = The recording stopped at the longest length your organization allows.
 call-recording-take-hint = Post it to share it, encrypted, with the call's conversation. Until then it is only on this computer.
 call-recording-take-memory-limit = The recording stopped at the longest length this browser can keep: it can't store recordings on disk here, so it keeps them in memory.
@@ -510,6 +511,7 @@ call-recording-consent-decline = Don't allow
 call-recording-consent-allowed = Your voice is in { $name }'s recording.
 call-recording-consent-declined = Your voice is not in { $name }'s recording.
 call-recording-consent-withdraw = Leave me out
+call-recording-tile-label = Not recorded
 tile-not-recorded = not recorded
 
 ## Call announcements (#2281): said once by the call's live region

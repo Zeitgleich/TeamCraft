@@ -1674,6 +1674,16 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn set_call_recording_view(
+    &self,
+    layout: teamcraft_client_api::calls::CallLayout,
+    maybe_label: Option<teamcraft_client_api::calls::RecordingLabel>,
+  ) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetRecordingView { layout, maybe_label });
+    }
+  }
+
   fn start_call_recording_now(&self) {
     if let Some(calls) = &self.maybe_calls {
       calls.act(CallAction::StartRecordingNow);

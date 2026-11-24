@@ -337,6 +337,11 @@ required-features = ["web", "effects"]
 name = "segmentation_model_nnef"
 required-features = ["segmentation"]
 
+# CPU time and file size of a call recording with video against one of the sound only (#2250).
+[[example]]
+name = "recording_video_bench"
+required-features = ["openh264-source"]
+
 # CPU time and latency of shrinking 4K and 1080p cameras to the 720p send size (issue #537).
 [[example]]
 name = "camera_scaling_bench"

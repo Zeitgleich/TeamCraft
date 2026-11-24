@@ -201,6 +201,14 @@ pub enum CallAction {
     #[serde(default)]
     requires_consent: bool,
   },
+  /// What the call screen shows, for a recording with a picture of the call (#2250): its layout
+  /// and the label of a tile left out of it, drawn by the page. The desktop shell keeps it for its
+  /// recordings; the browser's call module records no video and ignores it.
+  SetRecordingView {
+    layout: crate::calls::CallLayout,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    maybe_label: Option<crate::calls::RecordingLabel>,
+  },
   /// Stops this device's recording; the take waits for the user ([`CallSnapshot::maybe_recording_take`]).
   StopRecording,
   /// A recording that asks for consent and waits for answers starts without those who haven't

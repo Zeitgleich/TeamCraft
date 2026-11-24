@@ -58,7 +58,7 @@ pub use call_media::{
 pub use call_recording::{
   CallRecorders, CallRecordingPolicy, DEFAULT_RECORDING_MINUTES, MAX_RECORDING_CONSENT_BYTES,
   MAX_RECORDING_CONSENTS_PER_DEVICE, MAX_RECORDING_MINUTES, MAX_RECORDING_NOTICE_BYTES, RecorderRole,
-  RecordingConsentMode, RecordingFiles,
+  RecordingConsentMode, RecordingFiles, RecordingVideo,
 };
 pub use call_signal::{CallReaction, InCallSignal, MAX_SEALED_SIGNAL_BYTES, SealedSignalBody};
 pub use calls::{
