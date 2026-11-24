@@ -381,6 +381,28 @@ impl ReadQueue {
     Ok(value)
   }
 
+  /// Hands a command that touches nothing in the store (a read marker) to the engine, in the order
+  /// of the actions, and answers once it is queued there: the caller never waits for the engine,
+  /// which may be busy with the network for as long as a dead connection takes to notice, nor for
+  /// the store's write lock. The engine sends it when it can, and handles a failure there as it
+  /// does every queued command's; it is not this call's error.
+  pub(crate) async fn command<F>(&self, job: F) -> Result<(), TeamCraftError>
+  where
+    F: FnOnce(&mut Reads) -> Result<(), TeamCraftError> + Send + 'static,
+  {
+    let answer = self.queue_job(
+      Lane::Act,
+      WhenCallerGone::Run,
+      std::any::type_name::<F>(),
+      move |reads| {
+        job(reads)?;
+        // Queued with the engine; what it makes of it is not waited for (see above).
+        reads.dispatch().map(drop)
+      },
+    )?;
+    answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
   /// Runs a local write that leaves nothing for the client (a setting the store keeps) on the
   /// actions' thread, in one group, and answers once it committed. Unlike [`Self::act`] it doesn't
   /// wait for the engine, which may be busy for seconds with the client's opening or a catch-up
@@ -498,12 +520,29 @@ impl ReadQueue {
     F: FnOnce(&mut Reads) -> Result<T, TeamCraftError> + Send + 'static,
     A: FnOnce(&mut Reads, T) -> Result<R, TeamCraftError> + Send + 'static,
   {
+    self.queue_job(lane, when_gone, std::any::type_name::<F>(), move |reads| {
+      reads.together(job).and_then(|value| after(reads, value))
+    })
+  }
+
+  /// Queues `run` on `lane` as the job `name`, timed and logged like every job, and answers where
+  /// its result will arrive.
+  fn queue_job<R>(
+    &self,
+    lane: Lane,
+    when_gone: WhenCallerGone,
+    name: &'static str,
+    run: impl FnOnce(&mut Reads) -> Result<R, TeamCraftError> + Send + 'static,
+  ) -> Result<oneshot::Receiver<Result<R, TeamCraftError>>, TeamCraftError>
+  where
+    R: Send + 'static,
+  {
     let (reply, answer) = oneshot::channel();
     let queued = Instant::now();
     let timing = match lane {
-      Lane::Query => perf_jobs::queued_for_query(std::any::type_name::<F>()),
-      Lane::Act => perf_jobs::queued_for_action(std::any::type_name::<F>()),
-      Lane::Main => perf_jobs::queued(PerfJobKind::ReadQueue, std::any::type_name::<F>()),
+      Lane::Query => perf_jobs::queued_for_query(name),
+      Lane::Act => perf_jobs::queued_for_action(name),
+      Lane::Main => perf_jobs::queued(PerfJobKind::ReadQueue, name),
     };
     let boxed: ReadJob = Box::new(move |reads| {
       if when_gone == WhenCallerGone::Skip && reply.is_closed() {
@@ -513,8 +552,8 @@ impl ReadQueue {
       let span = timing.span();
       let running = timing.start();
       let clock = JobClock::start();
-      let result = span.in_scope(|| reads.together(job).and_then(|value| after(reads, value)));
-      logging::slow_read(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
+      let result = span.in_scope(|| run(reads));
+      logging::slow_read(name, clock.started() - queued, clock.ran());
       running.done();
       // The caller may have given up waiting meanwhile (cancelled coroutine); nothing to tell it.
       let _ = reply.send(result);

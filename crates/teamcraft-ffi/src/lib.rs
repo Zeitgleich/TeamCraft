@@ -910,9 +910,13 @@ impl TeamCraft {
       .await
   }
 
+  /// Marks the conversation read. Answers once the marker is queued with the engine, never after
+  /// the network: a read marker waiting for a dead connection held every action behind it
+  /// (Android, opened from a notification).
   pub async fn mark_read(&self, conversation_id: String) -> Result<(), TeamCraftError> {
     self
-      .act_locally(move |reads| reads.mark_read(conversation_id))
+      .read_queue()?
+      .command(move |reads| reads.mark_read(conversation_id))
       .await
   }
 
@@ -926,7 +930,8 @@ impl TeamCraft {
     message_id: String,
   ) -> Result<(), TeamCraftError> {
     self
-      .act_locally(move |reads| reads.mark_read_notified(conversation_id, message_id))
+      .read_queue()?
+      .command(move |reads| reads.mark_read_notified(conversation_id, message_id))
       .await
   }
 
@@ -3017,6 +3022,28 @@ mod tests {
       assert!(!core.snapshot().await.unwrap().is_empty());
       assert!(tail_bodies(&core).await.is_empty());
       assert!(core.join_requests().await.unwrap().is_empty());
+
+      held.release().await;
+    }
+
+    /// Issue #2354: the engine held by a sync loop that waits on a dead connection; a read marker
+    /// answers anyway.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_read_marker_answers_while_the_engine_thread_is_held() {
+      let directory = TestDir::new("held-mark-read");
+      enroll(&directory).await;
+      let core = open_with(&directory, Arc::new(NoTokens), Arc::new(Quiet));
+      let held = hold_engine(&core);
+
+      let answered = tokio::time::timeout(Duration::from_secs(10), async {
+        core.mark_read(CONVERSATION.into()).await.unwrap();
+        core
+          .mark_read_notified(CONVERSATION.into(), "42".into())
+          .await
+          .unwrap();
+      })
+      .await;
+      assert!(answered.is_ok(), "the actions waited for the engine");
 
       held.release().await;
     }

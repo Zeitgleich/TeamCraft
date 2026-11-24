@@ -18,7 +18,10 @@ use serde::{Deserialize, Serialize};
 use teamcraft_proto::{GatewayClientMessage, GatewayServerMessage};
 
 use crate::api::{ApiError, GatewayConnection, Interception, ServerApi};
-use crate::client::{Client, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive};
+use crate::client::{
+  Client, GATEWAY_SEND_TIMEOUT, GatewayOutcome, GatewayTiming, HeldFrames, HeldLimits, keep_alive,
+  send_within,
+};
 use crate::error::CoreError;
 use crate::retry::{Jitter, RetryPolicy, core_retry_after};
 use crate::store::LocalStore;
@@ -546,7 +549,7 @@ impl<G: GatewayConnection> ConnectionSupervisor<G> {
     let Some(connection) = self.maybe_gateway.as_mut() else {
       return false;
     };
-    match connection.send(message).await {
+    match send_within(connection, message, GATEWAY_SEND_TIMEOUT).await {
       Ok(()) => true,
       Err(error) => {
         self.lose(now_ms, &error);

@@ -330,7 +330,9 @@ fun ConversationScreen(
       // The messages, their reactions, files and receipts, and the names are read first and shown
       // together (issue #1425): one of them alone draws bubbles that change height, and the feed jumps.
       val maybeTail = feed.reread()
-      val tail = maybeTail?.messages ?: emptyList()
+      // A read that failed keeps what is shown (#2354): an empty feed would drop every row, the
+      // notified one too, until a later read succeeds.
+      val tail = maybeTail?.messages ?: messages
       val maybeExtras = viewModel.readChat { extras(conversationId, tail.map { it.id }) }
       // The snapshot is read on the main read thread, behind the chat list and the actions: while
       // the store was slow it came 20 s after the messages, and the chat stayed empty (1.0.29). The
@@ -351,8 +353,8 @@ fun ConversationScreen(
       if (Perf.isRunning(PerfMeasure.MESSAGE_SEND, conversationId) && tail.none { it.isPending }) {
         Perf.end(PerfMeasure.MESSAGE_SEND, conversationId)
       }
-      hasOlder = maybeTail?.hasOlder ?: false
-      gaps = maybeTail?.gaps.orEmpty()
+      hasOlder = maybeTail?.hasOlder ?: hasOlder
+      gaps = maybeTail?.gaps ?: gaps
       extras = maybeExtras ?: extras
       snapshot = maybeSnapshot ?: snapshot
       // Read now: opened again, it starts at the end without an unread line.
@@ -364,8 +366,9 @@ fun ConversationScreen(
       }
       isAskingServer = false
       maybeKeyCatchUp = viewModel.keyCatchUp()
-      // After the messages: once the store has the notified one, the core no longer names it.
-      maybeNotified = viewModel.notifiedConversation(conversationId)
+      // After the messages: once the store has the notified one, the core no longer names it. A
+      // read that failed keeps the row shown, until one says the store has it (#2354).
+      viewModel.notifiedConversation(conversationId).onSuccess { maybeNotified = it }
       catchUp.observe(
         isBehind = maybeNotified != null || snapshot?.conversation(conversationId)?.isCatchingUp == true,
         isFromPush = maybeNotified != null,

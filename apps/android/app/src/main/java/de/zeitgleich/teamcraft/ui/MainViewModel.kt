@@ -908,9 +908,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   /**
    * What the newest notification showed of a conversation, while the store hasn't caught it up yet
    * (issue #1065): its name and the notified message, so opening it never shows an empty screen.
+   * A failure is no answer, not "nothing notified": the screen keeps the row it shows until a read
+   * says the store has it (#2354, the engine stuck behind a dead connection).
    */
-  suspend fun notifiedConversation(conversationId: String): NotifiedConversation? =
-    read { notifiedConversation(conversationId) }
+  suspend fun notifiedConversation(conversationId: String): Result<NotifiedConversation?> =
+    try {
+      Result.success(graph.core.core().notifiedConversation(conversationId))
+    } catch (failure: CancellationException) {
+      throw failure
+    } catch (failure: Exception) {
+      Result.failure(failure)
+    }
 
   /** How far the first sync of a newly set up device is; `null` when none runs. */
   suspend fun firstSync(): FirstSyncItem? = read { firstSync() }
