@@ -12,6 +12,10 @@
 //! Small files are read into memory as before: the composer needs them for its thumbnails, and a
 //! single request is all they take.
 
+use std::collections::HashMap;
+
+use futures_util::FutureExt;
+use futures_util::future::{LocalBoxFuture, Shared};
 use teamcraft_client_api::actions::FileSource;
 use wasm_bindgen_futures::JsFuture;
 
@@ -30,6 +34,75 @@ pub enum LargeFile {
   Picked(web_sys::File),
   /// A file the desktop shell knows by path.
   InShell(ShellFile),
+}
+
+/// A file's handover to the core, running or done: one per attached file, shared by the draft and
+/// the send.
+pub type Handover = Shared<LocalBoxFuture<'static, Result<FileSource, String>>>;
+
+/// The handovers of a composer's attached files, by draft file ID (#2364). The draft starts one as
+/// a file is attached; a send right after joins it instead of copying the file a second time, so
+/// the message waits for one copy, behind its row, never for two.
+pub type Handovers = Running<Result<FileSource, String>>;
+
+/// Shared work by key: started once, joined by whoever asks for the same key.
+pub struct Running<T: Clone + 'static> {
+  by_key: HashMap<String, Shared<LocalBoxFuture<'static, T>>>,
+}
+
+impl<T: Clone + 'static> Default for Running<T> {
+  fn default() -> Self {
+    Self {
+      by_key: HashMap::new(),
+    }
+  }
+}
+
+impl<T: Clone + 'static> Running<T> {
+  /// The work for `key`: the running (or finished) one, else `start`ed now and kept.
+  pub fn join(
+    &mut self,
+    key: &str,
+    start: impl FnOnce() -> LocalBoxFuture<'static, T>,
+  ) -> Shared<LocalBoxFuture<'static, T>> {
+    self
+      .by_key
+      .entry(key.to_owned())
+      .or_insert_with(|| start().shared())
+      .clone()
+  }
+
+  /// Like [`Self::join`], and forgets `key`: its user is the last one.
+  pub fn take(
+    &mut self,
+    key: &str,
+    start: impl FnOnce() -> LocalBoxFuture<'static, T>,
+  ) -> Shared<LocalBoxFuture<'static, T>> {
+    self.by_key.remove(key).unwrap_or_else(|| start().shared())
+  }
+
+  /// Forgets `key` (its file was removed); a task still waiting for it gets its result.
+  pub fn forget(&mut self, key: &str) {
+    self.by_key.remove(key);
+  }
+}
+
+/// Starts the handover of `file` ([`source_of`]) as a future that can be shared.
+pub fn hand_over(file: LargeFile) -> LocalBoxFuture<'static, Result<FileSource, String>> {
+  async move { source_of(&file).await }.boxed_local()
+}
+
+/// What the row of a message shows of a file still handed over ([`hand_over`]): its size. Never
+/// sent; the send replaces it with the handover's source.
+pub fn stand_in(file: &LargeFile) -> FileSource {
+  let size_bytes = match file {
+    LargeFile::Picked(file) => file.size() as u64,
+    LargeFile::InShell(file) => file.size_bytes,
+  };
+  FileSource::Picked {
+    handle: String::new(),
+    size_bytes,
+  }
 }
 
 /// Where the core reads `file` from. Fails (with a reason for the log) when the file can't be read
@@ -96,4 +169,63 @@ fn stage_id() -> String {
     bytes = (js_sys::Date::now() as u128).to_le_bytes();
   }
   bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use std::cell::Cell;
+  use std::rc::Rc;
+
+  use super::*;
+
+  #[test]
+  fn a_send_joins_the_handover_the_draft_started() {
+    let started = Rc::new(Cell::new(0));
+    let mut running = Running::<u32>::default();
+    let draft = running.join("file-1", counting(&started, 7));
+    let send = running.take("file-1", counting(&started, 8));
+    assert_eq!(started.get(), 1, "the file was handed over once");
+    assert_eq!(draft.now_or_never(), Some(7));
+    assert_eq!(send.now_or_never(), Some(7));
+  }
+
+  #[test]
+  fn a_send_without_a_running_handover_starts_one() {
+    let started = Rc::new(Cell::new(0));
+    let mut running = Running::<u32>::default();
+    assert_eq!(
+      running.take("file-1", counting(&started, 3)).now_or_never(),
+      Some(3)
+    );
+    // Taken: the next ask is a new file under the same key.
+    assert_eq!(
+      running.take("file-1", counting(&started, 4)).now_or_never(),
+      Some(4)
+    );
+    assert_eq!(started.get(), 2);
+  }
+
+  #[test]
+  fn joins_share_one_handover_and_forget_ends_it() {
+    let started = Rc::new(Cell::new(0));
+    let mut running = Running::<u32>::default();
+    drop(running.join("file-1", counting(&started, 1)));
+    drop(running.join("file-1", counting(&started, 2)));
+    drop(running.join("file-2", counting(&started, 3)));
+    assert_eq!(started.get(), 2);
+    running.forget("file-1");
+    assert_eq!(
+      running.join("file-1", counting(&started, 5)).now_or_never(),
+      Some(5)
+    );
+    assert_eq!(started.get(), 3);
+  }
+
+  fn counting(started: &Rc<Cell<u32>>, value: u32) -> impl FnOnce() -> LocalBoxFuture<'static, u32> {
+    let started = Rc::clone(started);
+    move || {
+      started.set(started.get() + 1);
+      async move { value }.boxed_local()
+    }
+  }
 }

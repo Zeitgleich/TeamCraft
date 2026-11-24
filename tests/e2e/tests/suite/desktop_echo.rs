@@ -121,11 +121,13 @@ async fn send_and_measure(app: &mut DesktopApp, text: &str, is_photo: bool) -> f
     }
     assert!(Instant::now() < deadline, "the composer never showed {text:?}");
   }
+  // Photos go with the keypad's Enter, which must send the same way (#2387).
+  let code = if is_photo { "NumpadEnter" } else { "Enter" };
   app
-    .evaluate(
+    .evaluate(&format!(
       "document.querySelector('[data-composer]').dispatchEvent(new KeyboardEvent('keydown', \
-       { key: 'Enter', code: 'Enter', bubbles: true, cancelable: true })); 1",
-    )
+       {{ key: 'Enter', code: '{code}', bubbles: true, cancelable: true }})); 1"
+    ))
     .await
     .unwrap();
   let deadline = Instant::now() + Duration::from_secs(10);

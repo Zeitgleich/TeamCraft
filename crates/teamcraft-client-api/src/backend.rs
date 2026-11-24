@@ -383,6 +383,13 @@ pub trait ChatBackend {
   fn send_message(&self, message: OutgoingMessage) {
     self.post_message(message.conversation, message.maybe_thread, &message.body);
   }
+  /// Shows `message` as sent while its files are still being handed over (#2364): the composer
+  /// calls this in the frame of the send and [`Self::send_message`] with the same message (its
+  /// client ID set here) once the files are ready, or [`Self::withdraw_before_send`] if it can't
+  /// go out. Its files' sources may still be stand-ins here. The default shows nothing early.
+  fn show_before_send(&self, _message: &mut OutgoingMessage) {}
+  /// Takes back a message [`Self::show_before_send`] showed that doesn't go out after all.
+  fn withdraw_before_send(&self, _message: &OutgoingMessage) {}
   /// Replies, pins, files, previews, edits and the rest for messages on screen.
   fn message_extras(&self, _conversation: ConversationId, _messages: &[MessageId]) -> Vec<MessageExtras> {
     Vec::new()

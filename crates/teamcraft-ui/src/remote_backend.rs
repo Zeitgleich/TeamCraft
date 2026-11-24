@@ -718,6 +718,9 @@ pub struct RemoteChat {
   requery_queued: Rc<Cell<bool>>,
   answers: Rc<RefCell<HashMap<String, Slot>>>,
   extras_batch: ExtrasBatch,
+  /// Messages shown before their send ([`ChatBackend::show_before_send`]) by client ID, with
+  /// their row if one is shown, until [`ChatBackend::send_message`] or the withdrawal comes.
+  shown_before_send: Rc<RefCell<HashMap<ClientMessageId, Option<PendingRow>>>>,
 }
 
 /// Message rows ask for their extras one each, and a change asks every row shown again: one IPC
@@ -1414,6 +1417,7 @@ impl RemoteChat {
       requery_queued: Rc::new(Cell::new(false)),
       answers: Rc::new(RefCell::new(HashMap::new())),
       extras_batch: ExtrasBatch::default(),
+      shown_before_send: Rc::default(),
     };
     // async-ok: a thread-local, not a signal.
     let must_subscribe = CORE_EVENTS.with(|route| route.borrow_mut().route_to(backend.clone()));
@@ -2131,6 +2135,22 @@ impl RemoteChat {
     }
   }
 
+  /// Gives `message` the UI's client ID and shows its row, with the pictures the composer handed
+  /// over: the ID is the UI's, so the row shows before the core has answered (#778, #2269).
+  fn show_sent(&self, message: &mut OutgoingMessage) -> Option<PendingRow> {
+    let id = *message
+      .maybe_client_message_id
+      .get_or_insert_with(ClientMessageId::random);
+    let files: Vec<(Option<&str>, &str)> = message.files.iter().map(local_preview_key).collect();
+    crate::local_previews::bind(pending_message_id(id), &files);
+    let maybe_pending = self.show_pending(message, id);
+    // Performance data: until the server's answer replaces the pending row (`Feed::store`).
+    if let Some(pending) = maybe_pending.as_ref().filter(|pending| pending.is_in_feed) {
+      crate::perf::begin_pending(crate::perf::PerfOperation::MessageSend, &pending.id.to_string());
+    }
+    maybe_pending
+  }
+
   fn withdraw_pending(&self, pending: PendingRow) {
     crate::perf::end_pending(
       crate::perf::PerfOperation::MessageSend,
@@ -2186,19 +2206,31 @@ impl ChatBackend for RemoteChat {
   }
 
   fn send_message(&self, mut message: OutgoingMessage) {
-    // The ID is the UI's, so the row can be shown before the core has answered (issue #778).
-    let id = *message
+    let maybe_shown = message
       .maybe_client_message_id
-      .get_or_insert_with(ClientMessageId::random);
-    // The pictures the composer handed over show in the row from its first frame (#2269).
-    let files: Vec<(Option<&str>, &str)> = message.files.iter().map(local_preview_key).collect();
-    crate::local_previews::bind(pending_message_id(id), &files);
-    let maybe_pending = self.show_pending(&message, id);
-    // Performance data: until the server's answer replaces the pending row (`Feed::store`).
-    if let Some(pending) = maybe_pending.as_ref().filter(|pending| pending.is_in_feed) {
-      crate::perf::begin_pending(crate::perf::PerfOperation::MessageSend, &pending.id.to_string());
-    }
+      .and_then(|id| self.shown_before_send.borrow_mut().remove(&id));
+    let maybe_pending = match maybe_shown {
+      Some(maybe_pending) => maybe_pending,
+      None => self.show_sent(&mut message),
+    };
     self.act_showing(ChatAction::SendMessage { message }, maybe_pending);
+  }
+
+  fn show_before_send(&self, message: &mut OutgoingMessage) {
+    let maybe_pending = self.show_sent(message);
+    if let Some(id) = message.maybe_client_message_id {
+      self.shown_before_send.borrow_mut().insert(id, maybe_pending);
+    }
+  }
+
+  fn withdraw_before_send(&self, message: &OutgoingMessage) {
+    let maybe_shown = message
+      .maybe_client_message_id
+      .and_then(|id| self.shown_before_send.borrow_mut().remove(&id));
+    if let Some(Some(pending)) = maybe_shown {
+      self.withdraw_pending(pending);
+      self.changed();
+    }
   }
 
   fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
@@ -5290,6 +5322,7 @@ mod tests {
         requery_queued: Rc::new(Cell::new(false)),
         answers: Rc::new(RefCell::new(HashMap::new())),
         extras_batch: ExtrasBatch::default(),
+        shown_before_send: Rc::default(),
       }
     }
   }
