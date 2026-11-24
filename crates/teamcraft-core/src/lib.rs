@@ -129,8 +129,8 @@ pub use client::{
   AttestationSettings, CallEventSink, CallKeySigner, CallPreparation, Client, ClientSettings,
   DirectMediaInputs, EnrollmentOptions, EnrollmentSecret, FlushReport, GatewayOutcome, GroupAccess,
   HistoryReading, HistoryScan, JwksSource, LinkAnnouncement, LinkCodeKind, LinkOffer, LinkRequestInfo,
-  LinkRequestList, MAX_VIEWER_BYTES, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment, SyncPhase,
-  parse_recovery_key,
+  LinkRequestList, MAX_PASSKEYS, MAX_VIEWER_BYTES, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment,
+  SyncPhase, parse_recovery_key, passkey_credentials,
 };
 pub use error::{CoreError, JoinRequestRefusal, UnreadableStore};
 pub use typing::TypingState;

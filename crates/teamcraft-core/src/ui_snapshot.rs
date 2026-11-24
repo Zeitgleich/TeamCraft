@@ -563,8 +563,9 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
       WrapMethod::RecoveryKey => Some(RecoveryMethod::RecoveryKey),
       WrapMethod::PasskeyPrf => Some(RecoveryMethod::Passkey),
       WrapMethod::OrgRecovery => Some(RecoveryMethod::Organization),
-      // The device's own wrap restores nothing on another device.
-      WrapMethod::DeviceKeystore => None,
+      // The device's own wrap restores nothing on another device, nor does a rotation's
+      // hand-off to one of the user's devices (e2ee.md §6.6).
+      WrapMethod::DeviceKeystore | WrapMethod::DeviceHandoff => None,
     };
     if let Some(method) = maybe_method
       && !recovery.contains(&method)

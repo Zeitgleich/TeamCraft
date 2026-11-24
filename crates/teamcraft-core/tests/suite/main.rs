@@ -12,6 +12,7 @@ mod admin_add_policy;
 mod admin_joins;
 mod background_work;
 mod backgrounds;
+mod backup_rotation;
 mod bug_reports;
 mod call_lines;
 mod calls;

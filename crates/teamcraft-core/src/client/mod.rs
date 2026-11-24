@@ -11,6 +11,7 @@ mod admin_joins;
 mod attachments;
 mod attested;
 mod backgrounds;
+mod backup_rotation;
 mod ballots;
 pub mod bug_reports;
 mod call_lines;
@@ -63,6 +64,7 @@ pub(crate) mod older_history;
 mod org_backgrounds;
 mod org_recovery;
 mod org_recovery_attempt;
+mod passkeys;
 mod pending_actions;
 mod pending_add;
 pub mod people;
@@ -165,7 +167,7 @@ pub use channel_roles::RoleSigning;
 pub(crate) use channel_roles::{channel_roles_alarmed_key, channel_roles_key, role_key_standings_key};
 pub use enroll::{
   EnrollmentOptions, EnrollmentSecret, NewBackupSecret, OrgRecoveryUnlock, PendingEnrollment,
-  parse_recovery_key,
+  parse_recovery_key, passkey_credentials,
 };
 pub use first_sync::{FirstSyncProgress, FirstSyncStage, HistoryBackfill, first_sync_progress};
 pub(crate) use gateway::send_within;
@@ -207,6 +209,7 @@ pub use org_recovery_attempt::OrgRecoveryFlow;
 pub use org_recovery_attempt::{
   OrgRecoveryAttempt, OrgRecoveryProgress, OrgRecoveryRequestApi, OrgRecoveryStart,
 };
+pub use passkeys::MAX_PASSKEYS;
 pub use pending_actions::{PendingAction, PendingActionSettings, StatusChange, pending_action_count};
 pub use pending_add::{UserAddWait, pending_user_additions};
 pub use role_signing::{RoleSigningProblem, RoleSigningRecord, provider_account_names, role_signing_record};

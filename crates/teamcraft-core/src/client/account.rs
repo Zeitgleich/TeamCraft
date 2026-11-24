@@ -99,6 +99,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// from the server, and uploads local changes.
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
     let _step = crate::timing::step("account_data_sync");
+    self.resume_backup_key_rotation().await?;
     let remote = match self.read_ahead.key_bag.take() {
       Some(remote) => remote?,
       None => self.api.key_bag().await?,
@@ -203,13 +204,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         offered: encrypted.sequence(),
       });
     }
-    let decrypted = encrypted.decrypt(
-      convert::user(self.account.user_id),
-      &self.account.backup_key(),
-      wrapped_keys,
-    )?;
+    let (decrypted, is_rotated) = self.open_key_bag(&encrypted, wrapped_keys)?;
     self.sync.key_bag_sequence = encrypted.sequence();
-    if wraps == WrapsOnMerge::Adopt {
+    // After another device rotated the backup key, this device's own wraps wrap the old one: it
+    // takes the server's in any case (e2ee.md §6.6).
+    if wraps == WrapsOnMerge::Adopt || is_rotated {
       self.store_wrapped_keys_blob(wrapped_keys)?;
     }
     let mut gained = Vec::new();
@@ -259,6 +258,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     records::save_key_bag(&self.store, &self.account)?;
     self.persist_sync()?;
     self.retry_with_new_keys(&gained);
+    if is_rotated && wraps == WrapsOnMerge::KeepOwn {
+      // The caller's new wraps were made for the old key and are gone; it asks the user again.
+      return Err(CoreError::BackupKeyRotated);
+    }
     Ok(())
   }
 

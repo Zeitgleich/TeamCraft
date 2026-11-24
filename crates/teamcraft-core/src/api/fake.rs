@@ -389,6 +389,8 @@ struct State {
   custom_statuses: HashMap<UserId, teamcraft_proto::CustomStatus>,
   /// Key bag uploads above this size answer 413 ([`FakeServer::limit_key_bags`]).
   maybe_max_key_bag_bytes: Option<usize>,
+  /// How the next key bag upload fails ([`FakeServer::fail_next_key_bag_upload`]).
+  maybe_key_bag_upload_failure: Option<KeyBagUploadFailure>,
   /// The workspace allows only presets: `PUT /me/status` answers 403 ([`FakeServer::refuse_custom_statuses`]).
   refuses_custom_statuses: bool,
   /// How far the server's clock runs ahead of the system clock ([`FakeServer::advance_clock`]).
@@ -531,6 +533,15 @@ struct Device {
 struct KeyPackages {
   regular: VecDeque<StoredKeyPackage>,
   maybe_last_resort: Option<StoredKeyPackage>,
+}
+
+/// How the next key bag upload fails ([`FakeServer::fail_next_key_bag_upload`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyBagUploadFailure {
+  /// The connection drops before the request reaches the server: nothing is stored.
+  BeforeStoring,
+  /// The server stores the bag, but the response is lost.
+  ResponseLost,
 }
 
 /// Which reads of the workspace logs fail ([`FakeServer::fail_workspace_log`]).
@@ -1371,6 +1382,11 @@ impl FakeServer {
   /// Key bags above this size are refused from now on, like `limits.max_key_bag_bytes`.
   pub fn limit_key_bags(&self, maybe_max_bytes: Option<usize>) {
     self.lock().maybe_max_key_bag_bytes = maybe_max_bytes;
+  }
+
+  /// The next key bag upload fails as `failure` says (an interrupted upload).
+  pub fn fail_next_key_bag_upload(&self, failure: KeyBagUploadFailure) {
+    self.lock().maybe_key_bag_upload_failure = Some(failure);
   }
 
   pub fn refuse_custom_statuses(&self, is_refused: bool) {
@@ -5388,6 +5404,10 @@ impl ServerApi for FakeServerApi {
 
   async fn put_key_bag(&self, request: &PutKeyBagRequest) -> Result<KeyBagResponse, ApiError> {
     self.with(|state, me| {
+      let maybe_failure = state.maybe_key_bag_upload_failure.take();
+      if maybe_failure == Some(KeyBagUploadFailure::BeforeStoring) {
+        return Err(ApiError::Network("connection reset".into()));
+      }
       let current = state.key_bags.get(&me).map_or(0, |bag| bag.version);
       if request.expected_version != current {
         return Err(ApiError::status(
@@ -5420,6 +5440,9 @@ impl ServerApi for FakeServerApi {
           version: stored.version,
         },
       );
+      if maybe_failure == Some(KeyBagUploadFailure::ResponseLost) {
+        return Err(ApiError::Network("connection reset".into()));
+      }
       Ok(stored)
     })
   }
