@@ -1343,6 +1343,7 @@ async fn close_in_worker() {
     Err(error) => tracing::debug!(%error, "no core to save before closing"),
   }
   stop();
+  // async-ok: a thread-local, not a signal.
   if let Some(ended) = WORKER_CORE_ENDED.with(|current| current.borrow_mut().take()) {
     // A dropped sender also means the core is gone.
     let _ = ended.await;
@@ -1694,11 +1695,12 @@ fn keep_token_fresh(
             Some(Some(link)) => {
               let is_bound = tokens.maybe_prover.borrow().is_some();
               link.send_token(token.clone(), tokens.maybe_id_token.borrow().clone(), is_bound);
+              // async-ok: the page's mirror of the core's token copy, not a signal.
               tokens.set(token);
             },
             Some(None) => return,
-            // async-ok: the core's copy of the token, not a signal.
             None => {
+              // async-ok: the core's copy of the token, not a signal.
               if tokens.set(token)
                 && let Err(error) = send(Request::NetworkChanged)
               {
