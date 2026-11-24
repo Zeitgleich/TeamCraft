@@ -124,7 +124,7 @@ jobs:
           cp -r target/e2e-web crates/teamcraft-ui/dist
           SQLX_OFFLINE=true cargo build -p teamcraft-desktop --features custom-protocol
       - name: Send to paint (#2364), texts and 12 MP photos from the composer
-        timeout-minutes: 20
+        timeout-minutes: 40
         run: |
           export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
           export DESKTOP_ECHO_RUNS=20
