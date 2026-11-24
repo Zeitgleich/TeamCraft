@@ -952,7 +952,9 @@ fn BlockRow(canvas: Canvas, id: String) -> impl IntoView {
             canvas.refresh_mention_pick(&input_id, &element);
           }
         }
-        on:blur=move |_| canvas.mention_pick.set(None)
+        on:blur=move |_| {
+          let _ = canvas.mention_pick.try_set(None);
+        }
         on:beforeinput=move |ev: web_sys::InputEvent| {
           if let Some(element) = field.get_untracked() {
             canvas.on_before_input(&before_id, &element, &ev);
