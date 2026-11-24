@@ -51,6 +51,8 @@ pub mod motion_photo;
 pub mod notetaker;
 pub mod notified;
 pub mod notify_rules;
+#[cfg(feature = "ui")]
+pub mod passkey_wire;
 pub mod pending_work;
 pub mod people_names;
 pub mod picked_files;

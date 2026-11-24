@@ -98,6 +98,7 @@ pub mod notify_sync;
 pub mod object_url;
 pub mod os_alerts;
 pub mod panic_overlay;
+pub mod passkey;
 pub mod paste;
 pub mod perf;
 pub mod persisted_media;

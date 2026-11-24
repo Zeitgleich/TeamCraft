@@ -557,7 +557,12 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
   };
   let sync = records::load_sync_state(store)?;
   let mut recovery = Vec::new();
-  for wrapped in decode_wrapped_keys(blob.as_slice())? {
+  let wraps = decode_wrapped_keys(blob.as_slice())?;
+  let passkeys = teamcraft_crypto::backup::passkey_credentials(&wraps)
+    .iter()
+    .map(crate::passkey_wire::to_wire)
+    .collect();
+  for wrapped in wraps {
     let maybe_method = match wrapped.method() {
       WrapMethod::Passphrase => Some(RecoveryMethod::Passphrase),
       WrapMethod::RecoveryKey => Some(RecoveryMethod::RecoveryKey),
@@ -587,6 +592,7 @@ pub fn key_backup_state(store: &impl LocalStore) -> Result<Option<KeyBackupState
     maybe_passphrase_set_at,
     maybe_recovery_key_set_at,
     is_passphrase_allowed: crate::workspace::is_passphrase_allowed(store),
+    passkeys,
   }))
 }
 

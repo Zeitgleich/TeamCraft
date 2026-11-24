@@ -47,7 +47,7 @@ use teamcraft_core::ui_snapshot::SnapshotCache;
 use teamcraft_core::upkeep::{self, Upkeep, UploadMode};
 use teamcraft_core::{
   CallPreparation, Client, ClientSettings, CoreError, EnrollmentOptions, EnrollmentSecret, LinkOffer,
-  PendingEnrollment, UnreadableStore, parse_recovery_key,
+  PendingEnrollment, UnreadableStore, parse_recovery_key, passkey_wire,
 };
 use teamcraft_crypto::backup::Argon2Settings;
 use teamcraft_crypto::identity::IdentityPublicKey;
@@ -1570,6 +1570,10 @@ impl Core {
       },
       EnrollSecret::Guest => Err("meeting guests join in the browser".to_owned()),
       EnrollSecret::OrgRecovery { .. } => Err("organization recovery finishes in enroll".to_owned()),
+      EnrollSecret::Passkey { passkey, prf_output } => Ok(EnrollmentSecret::Passkey {
+        credential: passkey_wire::from_wire(&passkey).map_err(describe_failure)?,
+        prf_output: passkey_wire::prf_output(&prf_output.0).map_err(describe_failure)?,
+      }),
     }
   }
 
@@ -2303,6 +2307,28 @@ impl Core {
           .await
           .map_err(describe_failure);
       },
+      ChatAction::RotateBackupKey { recovery_key } => {
+        let recovery_key = parse_recovery_key(&recovery_key.0).map_err(describe_failure)?;
+        return client
+          .rotate_backup_key_with_kit(&recovery_key)
+          .await
+          .map_err(describe_failure);
+      },
+      ChatAction::AddPasskey { passkey, prf_output } => {
+        let credential = passkey_wire::from_wire(passkey).map_err(describe_failure)?;
+        let prf_output = passkey_wire::prf_output(&prf_output.0).map_err(describe_failure)?;
+        return client
+          .add_passkey(credential, &prf_output)
+          .await
+          .map_err(describe_failure);
+      },
+      ChatAction::RemovePasskey { credential_id } => {
+        let credential_id = passkey_wire::credential_id(credential_id).map_err(describe_failure)?;
+        return client
+          .remove_passkey(&credential_id)
+          .await
+          .map_err(describe_failure);
+      },
       ChatAction::SetActivity { is_idle } => {
         self.send_activity(*is_idle).await;
         return Ok(());
@@ -2377,6 +2403,9 @@ impl Core {
       | ChatAction::AddMember { .. }
       | ChatAction::ChangePassphrase { .. }
       | ChatAction::SetRecoveryKey { .. }
+      | ChatAction::RotateBackupKey { .. }
+      | ChatAction::AddPasskey { .. }
+      | ChatAction::RemovePasskey { .. }
       | ChatAction::SetActivity { .. }
       | ChatAction::SetAttention { .. }
       | ChatAction::AcceptKeyChange { .. }

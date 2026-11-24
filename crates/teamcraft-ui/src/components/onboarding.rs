@@ -15,7 +15,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 use teamcraft_client_api::failure::{ActionFailure, FailureKind};
-use teamcraft_client_api::remote::{CoreStatus, EnrollSecret, LinkStatus};
+use teamcraft_client_api::remote::{CoreStatus, EnrollSecret, LinkStatus, PasskeyWire};
 use teamcraft_crypto::recovery_key::{RecoveryKey, RecoveryKeyError};
 use wasm_bindgen::JsCast;
 
@@ -306,6 +306,36 @@ fn ExistingAccountFlow(
       device_name.get_untracked().trim().to_owned(),
     );
   };
+  // A passkey (e2ee.md §6.2.1), in browsers, when the account has one.
+  let passkeys = RwSignal::new(Vec::<PasskeyWire>::new());
+  let is_asking_passkey = RwSignal::new(false);
+  let maybe_passkey_note = RwSignal::new(None::<&'static str>);
+  if crate::passkey::is_supported() {
+    spawn_local(async move {
+      match remote_backend::passkey_credentials().await {
+        Ok(found) => passkeys.set_if_alive(found),
+        Err(error) => tracing::info!(%error, "the account's passkeys could not be listed"),
+      }
+    });
+  }
+  let use_passkey = move || {
+    maybe_passkey_note.set(None);
+    is_asking_passkey.set(true);
+    let listed = passkeys.get_untracked();
+    let name = device_name.get_untracked().trim().to_owned();
+    spawn_local(async move {
+      let result = crate::passkey::evaluate(&listed).await;
+      // The screen went away while the browser asked (signed out, another way finished).
+      if is_asking_passkey.try_set(false).is_some() {
+        return;
+      }
+      match result {
+        Ok((passkey, prf_output)) => control.enroll(EnrollSecret::Passkey { passkey, prf_output }, name),
+        Err(crate::passkey::PasskeyFailure::Cancelled) => {},
+        Err(_) => maybe_passkey_note.set_if_alive(Some("onboarding-way-passkey-failed")),
+      }
+    });
+  };
 
   view! {
     {move || {
@@ -339,6 +369,16 @@ fn ExistingAccountFlow(
               is_busy=Signal::derive(|| false)
               on_click=Callback::new(move |()| choose(Way::Link))
             />
+            <Show when=move || !passkeys.with(Vec::is_empty) fallback=|| ()>
+              <ChoiceRow
+                icon=IconName::Key
+                title="onboarding-way-passkey"
+                text="onboarding-way-passkey-text"
+                is_recommended=false
+                is_busy=Signal::derive(move || is_asking_passkey.get() || control.is_enrolling.get())
+                on_click=Callback::new(move |()| use_passkey())
+              />
+            </Show>
             <ChoiceRow
               icon=IconName::Key
               title="onboarding-way-kit"
@@ -356,6 +396,7 @@ fn ExistingAccountFlow(
               on_click=Callback::new(move |()| choose(Way::It))
             />
           </div>
+          {move || maybe_passkey_note.get().map(|key| view! { <p class="field-error" role="alert">{move || i18n.t(key)}</p> })}
           <EnrollError message_key="enroll-recover-failed" control=control />
         }
         .into_any(),

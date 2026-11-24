@@ -74,6 +74,9 @@ pub struct KeyBackupState {
   /// §6.5.8); otherwise only a recovery kit is offered.
   #[serde(default = "allowed")]
   pub is_passphrase_allowed: bool,
+  /// The passkeys that open the backup (e2ee.md §6.2.1), in the order they were added.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub passkeys: Vec<crate::remote::PasskeyWire>,
 }
 
 impl Default for KeyBackupState {
@@ -85,6 +88,7 @@ impl Default for KeyBackupState {
       maybe_passphrase_set_at: None,
       maybe_recovery_key_set_at: None,
       is_passphrase_allowed: true,
+      passkeys: Vec::new(),
     }
   }
 }
