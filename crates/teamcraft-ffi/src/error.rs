@@ -148,14 +148,20 @@ impl From<BackupError> for TeamCraftError {
   fn from(error: BackupError) -> Self {
     let message = error.to_string();
     match error {
-      BackupError::UnwrapFailed | BackupError::WrongMethod { .. } => Self::WrongPassphrase(message),
+      BackupError::UnwrapFailed | BackupError::WrongMethod { .. } | BackupError::OtherPasskey => {
+        Self::WrongPassphrase(message)
+      },
+      // A hand-off the server sealed or tampered with (e2ee.md §6.6): damage, not a wrong secret.
+      BackupError::HandoffNotTrusted => Self::BackupDamaged(message),
       BackupError::OutOfMemory { .. } => Self::BackupOutOfMemory(message),
       BackupError::UnsupportedVersion(_) | BackupError::UnsupportedKdf(_) => Self::BackupTooNew(message),
       BackupError::InvalidArgon2Settings(_)
       | BackupError::MalformedList
       | BackupError::TooManyWraps
       | BackupError::Encoding(_) => Self::BackupDamaged(message),
-      BackupError::PassphraseTooShort | BackupError::PrfOutputTooShort => Self::InvalidInput(message),
+      BackupError::PassphraseTooShort | BackupError::PrfOutputTooShort | BackupError::InvalidCredentialId => {
+        Self::InvalidInput(message)
+      },
       BackupError::KeyDerivation | BackupError::EncryptionFailed | BackupError::MissingPrivateKey => {
         Self::Core(message)
       },
