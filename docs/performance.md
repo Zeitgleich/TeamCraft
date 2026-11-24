@@ -1972,7 +1972,19 @@ On the web the core in the page answers in the same task, and the photo went up 
 already, so "before" was quick there; the gain is the picture itself. The desktop app's core answers
 through the shell, two round trips more (see above): there the row no longer waits for them. The
 desktop app is measured by `desktop_echo.rs` (`DESKTOP_ECHO_RUNS`, feature `desktop`, same page probe as the web
-test); it needs the app's debug build and a display, so its numbers are filled in where one is available.
+test) in the e2e workflow's `desktop` job (debug build, Xvfb, 20 sends of each kind, CI runner, November 2026):
+
+| What                                                          | Before the photo fix | After           | Budget    |
+|---------------------------------------------------------------|----------------------|-----------------|-----------|
+| Text, Enter until the pending row is in the DOM, median / p95 | 9.0 / 79.0 ms        | 12.0 / 123.0 ms | one frame |
+| 12 MP photo, median                                           | 47.0 ms              | 15.0 ms         | one frame |
+| 12 MP photo, p95 (the slowest of 20)                          | 3,291 ms             | 3,771 ms        | one frame |
+
+The photo's row waited for the shell call: the files' bytes were serialized for it in the task that
+also had to put the row into the DOM. The call now follows in the next task (`next_task` in
+`act_showing`), which took the median from 47 to 15 ms. **Open:** one or two photos in 20 still come
+3 to 4 s after Enter (the first sends and one more): a file whose staging for the draft hasn't
+finished is staged again by the send (`composer.rs`, `send_checked`). Issue #2364 stays open for that.
 
 Reactions and edits (#2269) read no conversation: the target is one keyed read (`find_stored`,
 `message_by_server_id`; a pending one is looked for among the outbox's rows only) and a reaction's
