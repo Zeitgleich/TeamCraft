@@ -268,6 +268,10 @@ fn contains(haystack: &[u8], needle: &[u8]) -> bool {
   haystack.windows(needle.len()).any(|window| window == needle)
 }
 
+/// A block ID long enough that random ciphertext never contains it by chance (a two-byte ID like
+/// "b1" turns up in a sealed frame now and then).
+const CARET_BLOCK: &str = "caret-block-which-the-server-must-never-see";
+
 #[tokio::test]
 async fn who_has_the_page_open_arrives_sealed_and_only_from_its_device() {
   let (server, mut alice, mut bob, channel) = channel_with_two().await;
@@ -277,7 +281,7 @@ async fn who_has_the_page_open_arrives_sealed_and_only_from_its_device() {
     maybe_page: None,
     state: CanvasPageState::Open,
     maybe_caret: Some(CanvasCaret {
-      block: "b1".to_owned(),
+      block: CARET_BLOCK.to_owned(),
       start: 3,
       end: 3,
     }),
@@ -288,7 +292,7 @@ async fn who_has_the_page_open_arrives_sealed_and_only_from_its_device() {
     panic!("not a canvas presence frame");
   };
   assert!(
-    !String::from_utf8_lossy(sealed.as_slice()).contains("b1"),
+    !contains(sealed.as_slice(), CARET_BLOCK.as_bytes()),
     "the server sees no caret"
   );
 
