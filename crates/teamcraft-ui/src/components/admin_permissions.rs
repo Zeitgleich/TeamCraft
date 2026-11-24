@@ -13,6 +13,7 @@ use crate::components::admin_console::SectionHeader;
 use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::i18n::{I18n, use_i18n};
 use crate::model::SpaceId;
+use crate::motion::prefers_reduced_motion;
 use crate::state::use_app_state;
 
 const ROLES: [SchemeRole; 6] = [
@@ -59,6 +60,22 @@ pub fn PermissionsSection() -> impl IntoView {
     }
   });
   let is_dirty = Signal::derive(move || pending.with(|changes| !changes.is_empty()));
+  let changes_list = NodeRef::<leptos::html::Section>::new();
+  // The list is below a long table: the save bar's button brings it into view.
+  let review = move |_| {
+    if let Some(section) = changes_list.get_untracked() {
+      let options = web_sys::ScrollIntoViewOptions::new();
+      options.set_block(web_sys::ScrollLogicalPosition::Center);
+      if !prefers_reduced_motion() {
+        options.set_behavior(web_sys::ScrollBehavior::Smooth);
+      }
+      section.scroll_into_view_with_scroll_into_view_options(&options);
+      let focus = web_sys::FocusOptions::new();
+      focus.set_prevent_scroll(true);
+      // Ignored on failure: the list is in view either way.
+      drop(section.focus_with_options(&focus));
+    }
+  };
   let space_name = move || {
     scope.get().and_then(|id| {
       spaces.with(|spaces| {
@@ -154,7 +171,12 @@ pub fn PermissionsSection() -> impl IntoView {
         </table>
       </div>
       <Show when=move || is_dirty.get() fallback=|| ()>
-        <section class="permission-changes" aria-labelledby="permission-changes-title">
+        <section
+          class="permission-changes"
+          node_ref=changes_list
+          tabindex="-1"
+          aria-labelledby="permission-changes-title"
+        >
           <h3 id="permission-changes-title" class="permission-changes-title">
             {move || match space_name() {
               Some(space) => i18n.t_with("permissions-changes-space", &[("space", &space)]),
@@ -178,7 +200,13 @@ pub fn PermissionsSection() -> impl IntoView {
         is_dirty=is_dirty
         on_discard=Callback::new(move |()| pending.set(Vec::new()))
         save_label=Signal::derive(move || i18n.t("permissions-apply"))
-      />
+      >
+        <Show when=move || is_dirty.get() fallback=|| ()>
+          <button type="button" class="btn" on:click=review>
+            {move || i18n.t_count("permissions-review", pending.with(Vec::len))}
+          </button>
+        </Show>
+      </SaveBar>
     </form>
   }
 }

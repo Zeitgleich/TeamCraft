@@ -502,6 +502,10 @@ permissions-group-instance = Instanzweit
 permissions-scope-locked = Vor dem Wechsel die Änderungen anwenden oder verwerfen.
 permissions-cell = { $permission }: { $role }
 permissions-default = Standard
+permissions-review = { $count ->
+    [one] Änderung ansehen
+   *[other] { $count } Änderungen ansehen
+  }
 permissions-apply = Änderungen anwenden
 permissions-changes-instance = Beim Anwenden, überall, sofern ein Bereich nichts anderes festlegt:
 permissions-changes-space = Beim Anwenden, nur in { $space }:

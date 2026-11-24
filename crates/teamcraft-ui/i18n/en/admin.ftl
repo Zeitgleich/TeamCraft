@@ -502,6 +502,10 @@ permissions-group-instance = Across the instance
 permissions-scope-locked = Apply or discard your changes before you switch.
 permissions-cell = { $permission }: { $role }
 permissions-default = default
+permissions-review = { $count ->
+    [one] Review the change
+   *[other] Review { $count } changes
+  }
 permissions-apply = Apply changes
 permissions-changes-instance = When you apply, everywhere unless a space says otherwise:
 permissions-changes-space = When you apply, in { $space } only:

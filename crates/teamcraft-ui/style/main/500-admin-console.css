@@ -10,7 +10,7 @@
   background: var(--surface);
 }
 @media (max-width: 640px) {
-  .permission-matrix th[scope="row"] { min-width: 9.5rem; }
+  .permission-matrix th[scope="row"] { min-width: 9.5rem; width: 9.5rem; max-width: 9.5rem; white-space: normal; overflow-wrap: break-word; }
 }
 .permission-matrix td.num { text-align: center; white-space: nowrap; }
 .permission-matrix td.num input { vertical-align: middle; }
