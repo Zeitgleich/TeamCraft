@@ -237,7 +237,7 @@ struct TextPreviewView: View {
       maybeInfo = preview.info()
       phase = .ready
       await parse()
-    } catch TextPreviewError.notText {
+    } catch TextPreviewError.NotText {
       phase = .failed(String(localized: "text_preview_not_text"))
     } catch {
       phase = .failed(String(localized: "text_preview_unreadable"))
@@ -254,7 +254,7 @@ struct TextPreviewView: View {
     table = .parsing
     do {
       table = .ready(try await preview.parseTable(maybeDelimiter: maybeChoice))
-    } catch TextPreviewError.unterminatedQuote(let line) {
+    } catch TextPreviewError.UnterminatedQuote(let line) {
       table = .refused(.unterminatedQuote(line))
     } catch {
       table = .refused(.notATable)
