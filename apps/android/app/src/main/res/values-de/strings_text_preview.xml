@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="text_preview_view_table">Tabelle</string>
+  <string name="text_preview_view_text">Text</string>
+  <string name="text_preview_separator">Trennzeichen</string>
+  <string name="text_preview_separator_auto">Automatisch</string>
+  <string name="text_preview_separator_comma">Komma</string>
+  <string name="text_preview_separator_semicolon">Semikolon</string>
+  <string name="text_preview_separator_tab">Tabulator</string>
+  <string name="text_preview_separator_pipe">Senkrechter Strich</string>
+  <string name="text_preview_separator_colon">Doppelpunkt</string>
+  <string name="text_preview_separator_custom">Anderes …</string>
+  <string name="text_preview_separator_custom_label">Trennzeichen (bis zu 8 Zeichen)</string>
+  <string name="text_preview_separator_custom_invalid">1 bis 8 Zeichen, ohne Zeilenumbrüche und Anführungszeichen.</string>
+  <string name="text_preview_apply">Übernehmen</string>
+  <string name="text_preview_cancel">Abbrechen</string>
+  <string name="text_preview_first_row_header">Erste Zeile ist Kopfzeile</string>
+  <string name="text_preview_wrap">Lange Zeilen umbrechen</string>
+  <string name="text_preview_find">Suchen</string>
+  <string name="text_preview_find_hint">In der Datei suchen</string>
+  <string name="text_preview_find_none">Keine Treffer</string>
+  <string name="text_preview_find_count">%1$d von %2$d</string>
+  <string name="text_preview_find_count_capped">%1$d von %2$d+</string>
+  <string name="text_preview_find_next">Nächster Treffer</string>
+  <string name="text_preview_find_previous">Vorheriger Treffer</string>
+  <string name="text_preview_copy_cell">Zelle kopieren</string>
+  <string name="text_preview_copy_row">Zeile kopieren</string>
+  <string name="text_preview_copied">Kopiert</string>
+  <string name="text_preview_header_cell">Spalte %1$d</string>
+  <string name="text_preview_truncated">Nur der Anfang der Datei wird gezeigt. Öffne sie in einer anderen App, um den Rest zu sehen.</string>
+  <string name="text_preview_columns_dropped">Zeilen mit mehr als 256 Spalten sind abgeschnitten.</string>
+  <string name="text_preview_not_a_table">Diese Datei lässt sich mit diesem Trennzeichen nicht als Tabelle lesen. Sie wird als Text gezeigt.</string>
+  <string name="text_preview_unterminated_quote">Ein Feld in Anführungszeichen ab Zeile %1$d wird nie geschlossen. Die Datei wird als Text gezeigt.</string>
+  <string name="text_preview_not_text">Diese Datei ist kein Text.</string>
+  <string name="text_preview_unreadable">Die Datei konnte nicht gelesen werden.</string>
+  <string name="text_preview_encoding_repaired">Einige Bytes waren kein gültiger Text und werden als Ersatzzeichen gezeigt.</string>
+  <string name="text_preview_open_elsewhere">Mit anderer App öffnen</string>
+</resources>

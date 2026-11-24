@@ -123,7 +123,7 @@ internal fun FilesGrid(viewModel: MainViewModel, files: List<FileInfo>, modifier
           } else if (file.opensInVideoPlayer) {
             maybeVideo = PictureTarget.of(file).toList()
           } else if (file.transfer.state == "local" && path != null) {
-            openFile(context, File(path), file.mediaType)
+            openFile(context, File(path), file.mediaType, file.fileName)
           } else {
             viewModel.act(ChatActions.download(file.conversation, file.message))
           }

@@ -883,7 +883,7 @@ private suspend fun showAtTop(listState: LazyListState, index: Int) {
 internal fun openOrDownload(viewModel: MainViewModel, file: FileInfo, context: Context) {
   val path = file.transfer.path
   when {
-    file.transfer.state == "local" && path != null -> openFile(context, File(path), file.mediaType)
+    file.transfer.state == "local" && path != null -> openFile(context, File(path), file.mediaType, file.fileName)
     file.transfer.state == "downloading" -> {}
     else -> viewModel.act(ChatActions.download(file.conversation, file.message))
   }

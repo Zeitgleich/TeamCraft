@@ -1361,13 +1361,23 @@ are in the page, at most a million lines are indexed, and finding is capped (10,
 file can't exhaust the page.
 
 **Table.** Delimited text (`.csv`, `.tsv`, `.tab`, `.psv`, `text/csv`, `text/tab-separated-values`, and a
-text file whose lines clearly are one) can be shown as a table (#2341, `text_preview/table.rs`). The separator
+text file whose lines clearly are one) can be shown as a table (#2341, `teamcraft-core`'s `text_preview/table.rs`). The separator
 (`,` `;` tab `|` `:`) and quote character are sniffed from the first 100 records, or picked or typed by the
 user; fields follow RFC 4180 leniently. Cells are byte ranges of the decoded text and drawn as text nodes
 only, like the text view. The table is parsed in steps, capped at a million rows, two million cells and 256
 columns (the view says what it left out), and only the rows in view are in the page. A file that turns out
 to be no table (rows of different lengths, a quote never closed) is shown as text with a note. The view's
 choices are kept per file extension in local storage; nothing about the file's content is stored.
+
+**Text and tables on Android and iOS** (#2342). A downloaded text or delimited file opens in the app instead of
+another app. The decoding, separator sniffing, table parser and find are the code of the desktop and web
+viewer, moved to `teamcraft-core` (`text_preview`) and exposed by `teamcraft-ffi` as one `TextPreview` object
+per open file. Opening, parsing and finding are `async` exports (the UI thread never waits, #2184); the apps
+ask for the few rows on screen, so a large file takes no memory of the apps' own (the text lives once in
+the core), and they read at most the first 10 MiB, cut at a line break. A binary file is refused and offered
+to another app. The file is shown as text nodes only; nothing in it is read as markup, no link is made.
+Match ranges are UTF-16 offsets within a line or cell. The choices (view, separator, header, wrapping) are
+kept per file extension in the app's preferences.
 
 **HTML.** An `<iframe sandbox="" srcdoc="…">` with the strictest sandbox (no `allow-scripts`, no
 `allow-same-origin`: an opaque origin that reaches nothing of the app, its storage or its tokens; no forms,

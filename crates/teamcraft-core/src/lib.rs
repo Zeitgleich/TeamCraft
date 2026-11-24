@@ -37,6 +37,7 @@ pub mod meeting_lobby;
 pub mod meeting_standing;
 pub mod signed_deletion;
 pub mod space_dms;
+pub mod text_preview;
 // The keys come from the UI contract (client-api), which the hosts of a UI build in; the service
 // worker reads pictures for its notifications.
 /// Anonymous polls' ballots and boxes (issue #2121).

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+  <string name="text_preview_view_table">Table</string>
+  <string name="text_preview_view_text">Text</string>
+  <string name="text_preview_separator">Separator</string>
+  <string name="text_preview_separator_auto">Automatic</string>
+  <string name="text_preview_separator_comma">Comma</string>
+  <string name="text_preview_separator_semicolon">Semicolon</string>
+  <string name="text_preview_separator_tab">Tab</string>
+  <string name="text_preview_separator_pipe">Pipe</string>
+  <string name="text_preview_separator_colon">Colon</string>
+  <string name="text_preview_separator_custom">Other…</string>
+  <string name="text_preview_separator_custom_label">Separator (up to 8 characters)</string>
+  <string name="text_preview_separator_custom_invalid">Use 1 to 8 characters without line breaks or quotes.</string>
+  <string name="text_preview_apply">Apply</string>
+  <string name="text_preview_cancel">Cancel</string>
+  <string name="text_preview_first_row_header">First row is header</string>
+  <string name="text_preview_wrap">Wrap long lines</string>
+  <string name="text_preview_find">Find</string>
+  <string name="text_preview_find_hint">Find in file</string>
+  <string name="text_preview_find_none">No match</string>
+  <string name="text_preview_find_count">%1$d of %2$d</string>
+  <string name="text_preview_find_count_capped">%1$d of %2$d+</string>
+  <string name="text_preview_find_next">Next match</string>
+  <string name="text_preview_find_previous">Previous match</string>
+  <string name="text_preview_copy_cell">Copy cell</string>
+  <string name="text_preview_copy_row">Copy row</string>
+  <string name="text_preview_copied">Copied</string>
+  <string name="text_preview_header_cell">Column %1$d</string>
+  <string name="text_preview_truncated">Only the first part of the file is shown. Open it in another app to see the rest.</string>
+  <string name="text_preview_columns_dropped">Rows with more than 256 columns are cut off.</string>
+  <string name="text_preview_not_a_table">This file doesn\'t read as a table with this separator. It is shown as text.</string>
+  <string name="text_preview_unterminated_quote">A quoted field starting on line %1$d is never closed. The file is shown as text.</string>
+  <string name="text_preview_not_text">This file isn\'t text.</string>
+  <string name="text_preview_unreadable">The file couldn\'t be read.</string>
+  <string name="text_preview_encoding_repaired">Some bytes weren\'t valid text and are shown as replacement characters.</string>
+  <string name="text_preview_open_elsewhere">Open with another app</string>
+</resources>

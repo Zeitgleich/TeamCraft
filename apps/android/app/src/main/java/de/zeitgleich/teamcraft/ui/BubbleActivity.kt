@@ -37,6 +37,7 @@ import de.zeitgleich.teamcraft.security.AppLockPrefs
 import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.ui.screens.ConversationScreen
 import de.zeitgleich.teamcraft.ui.screens.MessageScreen
+import de.zeitgleich.teamcraft.ui.screens.TextPreviewHost
 import de.zeitgleich.teamcraft.ui.screens.ThreadScreen
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 
@@ -76,6 +77,7 @@ class BubbleActivity : FragmentActivity() {
       TeamCraftTheme {
         Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
           BubbleContent(viewModel, maybeConversationId, onClose = ::finish)
+          TextPreviewHost()
         }
       }
     }
