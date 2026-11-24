@@ -578,6 +578,10 @@ async function instantiatePart(src, imports) {
 const INIT_TEMPLATE: &str = r#"import init from '__MAIN_JS__';
 import initializer from '__INITIALIZER__';
 
+// The app's bindings, for the worker that runs a member's core with the same module
+// (teamcraft-ui core_worker.rs, #2363).
+globalThis.teamcraftMainJs = new URL('__MAIN_JS__', location.href).href;
+
 // Local timing of the start (#1465, teamcraft-ui start_timing.rs): marks only when asked for with
 // `localStorage` `teamcraft.startTiming`; the app reads them at its first view. Nothing is sent.
 let isTiming = false;

@@ -29,5 +29,11 @@ fn main() {
     // off until the crash report settings turn it on.
     .with(teamcraft_client_api::crash_reporting::trace::layer())
     .init();
+  // The same module runs the core in a dedicated worker of the page (core_worker.rs, #2363).
+  #[cfg(target_arch = "wasm32")]
+  if wasm_bindgen::JsCast::is_instance_of::<web_sys::DedicatedWorkerGlobalScope>(&js_sys::global()) {
+    teamcraft_ui::core_worker::run();
+    return;
+  }
   teamcraft_ui::mount();
 }

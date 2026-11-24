@@ -11,6 +11,10 @@
 //!
 //! Only one tab per account runs the core (`web_tabs`, e2ee.md §9.4) and shows the app; the others
 //! show a notice and take over only when the user asks (#744, `tab_handover`).
+//!
+//! A member's core may run in a dedicated worker of that tab instead, on the OPFS store
+//! (`core_worker`, issue #2363): this module runs there too, as an owner without a lock, and the
+//! page reaches it like a follower tab reaches the owner.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -57,7 +61,7 @@ use teamcraft_core::push_preview::{PushSession, save_push_session};
 use teamcraft_core::push_text::{MINUTES_PLACEHOLDER, NAME_PLACEHOLDER, NotificationLabels};
 use teamcraft_core::records;
 use teamcraft_core::store::{
-  DEFAULT_MESSAGE_CACHE_BYTES, IndexedDbStore, OpfsStore, StoreError, TrackedStore, browser_database_key,
+  BrowserStore, DEFAULT_MESSAGE_CACHE_BYTES, OpfsStore, StoreError, TrackedStore, browser_database_key,
 };
 use teamcraft_core::transfers::Transfers;
 use teamcraft_core::typing::TypingAnnouncer;
@@ -79,6 +83,7 @@ use teamcraft_proto::{
 use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
+use crate::core_worker::{self, StartFailure, WorkerEvent, WorkerLink, WorkerStart};
 use crate::remote_backend::{CoreRead, CoreReadAnswer};
 use crate::settings::{load_string, store_string};
 use crate::start_timing::{self, Part};
@@ -147,14 +152,18 @@ const RELOAD_GRACE: Duration = Duration::from_secs(3);
 const TAKEOVER_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long the active tab waits for IndexedDB before it hands over anyway.
 const HANDOVER_FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+/// How often the core's worker tries to open a store whose files another worker still holds: the
+/// worker of the tab that handed over closes them first (`WorkerLink::close`), this covers a crash.
+const OPFS_OPEN_ATTEMPTS: u32 = 10;
+const OPFS_OPEN_RETRY: Duration = Duration::from_millis(300);
 
 type Api = HttpServerApi<WebTokens>;
 /// Notes what each write changes, so the UI's snapshot is rebuilt per conversation (issue #246).
-type Store = TrackedStore<Rc<IndexedDbStore>>;
+type Store = TrackedStore<Rc<BrowserStore>>;
 /// The page's client, for the split modules that run parts of it (`areas.rs`, #1413).
 pub(crate) type WebClient = Client<Api, Store>;
 type Listener = Rc<RefCell<dyn FnMut()>>;
-/// A wait for IndexedDB to have written everything ([`IndexedDbStore::flush`]).
+/// A wait for the store to have written everything ([`BrowserStore::flush`]).
 type Flush = Pin<Box<dyn Future<Output = Result<(), StoreError>>>>;
 
 thread_local! {
@@ -171,9 +180,18 @@ thread_local! {
   /// How far the store's first catalog build is, while it runs and shows.
   static STORE_BUILD: Cell<Option<u8>> = const { Cell::new(None) };
   static STORE_BUILD_LISTENERS: RefCell<Vec<Listener>> = const { RefCell::new(Vec::new()) };
-  /// The store whose queued writes the page lifecycle listener issues.
-  static LIFECYCLE_STORE: RefCell<std::rc::Weak<IndexedDbStore>> =
-    const { RefCell::new(std::rc::Weak::new()) };
+  /// In the core's worker: resolves when its core's loop ended and let go of the store.
+  static WORKER_CORE_ENDED: RefCell<Option<oneshot::Receiver<()>>> = const { RefCell::new(None) };
+  /// What the page lifecycle listener saves: the store opened last, or the core's worker.
+  static LIFECYCLE: RefCell<Lifecycle> = const { RefCell::new(Lifecycle::Store(std::rc::Weak::new())) };
+}
+
+/// What the page lifecycle listener saves when the page is hidden, frozen or closed.
+enum Lifecycle {
+  /// The store of the core in this page (or, in the worker, of the worker's core).
+  Store(std::rc::Weak<BrowserStore>),
+  /// The worker running this tab's core: it is told to save.
+  Worker(std::rc::Weak<WorkerLink>),
 }
 
 /// What the page tells the core once: who signs the requests and where the server is.
@@ -204,12 +222,37 @@ enum Running {
     user: UserId,
     follower: Rc<Follower>,
   },
+  /// This tab owns the store and runs the core in its worker (`core_worker`).
+  Worker {
+    user: UserId,
+    link: Rc<WorkerLink>,
+    maybe_channel: Option<OwnerChannel>,
+    /// Held while the worker runs; other tabs of the account follow this one (e2ee.md §9.4).
+    _lock: OwnerLock,
+  },
 }
 
 impl Running {
   fn user(&self) -> UserId {
     match self {
-      Self::Owner { user, .. } | Self::Follower { user, .. } => *user,
+      Self::Owner { user, .. } | Self::Follower { user, .. } | Self::Worker { user, .. } => *user,
+    }
+  }
+}
+
+/// Where a command goes when the core doesn't run in this page: the owner tab or this tab's worker.
+#[derive(Clone)]
+pub(crate) enum CoreLink {
+  Tab(Rc<Follower>),
+  Worker(Rc<WorkerLink>),
+}
+
+impl CoreLink {
+  /// Runs a `core_*` command there, in JSON.
+  pub(crate) async fn call(&self, command: &str, args: Value) -> Result<Value, String> {
+    match self {
+      Self::Tab(follower) => follower.call(command, args).await,
+      Self::Worker(link) => link.call(command, args).await,
     }
   }
 }
@@ -252,7 +295,15 @@ impl WebTokens {
     matches!(*self.slot.borrow(), TokenSlot::Waiting)
   }
 
-  fn set_prover(&self, maybe_prover: Option<Arc<DpopProver>>) {
+  /// The token, unless none came yet.
+  fn current(&self) -> Option<String> {
+    match &*self.slot.borrow() {
+      TokenSlot::Waiting => None,
+      TokenSlot::Ready(token) => Some(token.clone()),
+    }
+  }
+
+  pub(crate) fn set_prover(&self, maybe_prover: Option<Arc<DpopProver>>) {
     *self.maybe_prover.borrow_mut() = maybe_prover;
   }
 
@@ -296,6 +347,9 @@ impl AccessTokenSource for WebTokens {
 
   fn ask_for_new_id_token(&self) {
     self.wants_new_id_token.set(true);
+    if core_worker::is_worker() {
+      core_worker::ask_for_id_token();
+    }
   }
 }
 
@@ -355,6 +409,12 @@ pub fn listen_store_build(callback: impl FnMut() + 'static) {
 }
 
 fn set_store_build(maybe_percent: Option<u8>) {
+  if core_worker::is_worker() {
+    if STORE_BUILD.with(|current| current.replace(maybe_percent)) != maybe_percent {
+      core_worker::report_store_build(maybe_percent);
+    }
+    return;
+  }
   if STORE_BUILD.with(|current| current.replace(maybe_percent)) == maybe_percent {
     return;
   }
@@ -519,27 +579,62 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
     },
     "core_stop" => {
       // Signing out of a tab that isn't set up yet leaves no keys of the attempt behind (#168).
-      if current_follower().is_none() {
-        // An error means the core isn't running here: nothing to forget.
-        let _ = ask(Request::ForgetUnfinishedSetup).await;
+      match current_link() {
+        Some(CoreLink::Worker(link)) => {
+          // An error means the worker's core isn't running: nothing to forget.
+          let _ = link.call("core_forget_setup", Value::Null).await;
+        },
+        Some(CoreLink::Tab(_)) => {},
+        None => {
+          // An error means the core isn't running here: nothing to forget.
+          let _ = ask(Request::ForgetUnfinishedSetup).await;
+        },
       }
       stop();
       Ok(Value::Null)
     },
-    _ => match current_follower() {
-      Some(follower) => follower.call(command, args).await,
+    _ => match current_link() {
+      Some(link) => link.call(command, args).await,
       None => serve(command, args).await,
     },
   }
 }
 
 /// A call from a follower tab. Starting and stopping stay with the tab that asks: a follower's
-/// start only asks where the core stands, its stop only ends its own link.
+/// start only asks where the core stands, its stop only ends its own link. A core in this tab's
+/// worker answers the rest.
 async fn serve_follower(command: String, args: Value) -> Result<Value, String> {
-  match command.as_str() {
+  match (command.as_str(), worker_link()) {
+    ("core_stop", _) => Ok(Value::Null),
+    (_, Some(link)) => link.call(&command, args).await,
+    ("core_start", None) => to_value(ask(Request::Status).await?),
+    (_, None) => serve(&command, args).await,
+  }
+}
+
+/// A call from the page, in the core's worker (`core_worker`): what a follower tab may ask, and
+/// what only the page that started the worker asks of it.
+pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<Value, String> {
+  match command {
     "core_start" => to_value(ask(Request::Status).await?),
     "core_stop" => Ok(Value::Null),
-    _ => serve(&command, args).await,
+    "core_forget_setup" => {
+      ask(Request::ForgetUnfinishedSetup).await?;
+      Ok(Value::Null)
+    },
+    "core_flush" => {
+      ask(Request::Flush).await??;
+      Ok(Value::Null)
+    },
+    "core_check_push" => {
+      send(Request::CheckPush)?;
+      Ok(Value::Null)
+    },
+    "core_close" => {
+      close_in_worker().await;
+      Ok(Value::Null)
+    },
+    _ => serve(command, args).await,
   }
 }
 
@@ -549,8 +644,10 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
     "core_status" => to_value(ask(Request::Status).await?),
     "core_connection" => to_value(connection_state()?),
     "core_network_changed" => {
-      // Calls run in this tab too and hear the same signal (as on desktop).
-      crate::web_calls::network_changed();
+      // Calls run in this tab too and hear the same signal (as on desktop); never in the worker.
+      if !core_worker::is_worker() {
+        crate::web_calls::network_changed();
+      }
       send(Request::NetworkChanged)?;
       Ok(Value::Null)
     },
@@ -695,9 +792,9 @@ async fn serve(command: &str, args: Value) -> Result<Value, String> {
 /// loads (0.29 MB before wasm-opt); it is in the `tabs` chunk now, which only a second tab of the
 /// account loads ([`serve_chat_json`]).
 pub async fn act(action: ChatAction) -> Result<(), String> {
-  match current_follower() {
-    Some(follower) => {
-      crate::areas::act_in_owner_tab(follower, action)
+  match current_link() {
+    Some(link) => {
+      crate::areas::act_in_owner_tab(link, action)
         .await
         .map_err(|error| error.to_string())?
         .await
@@ -708,9 +805,9 @@ pub async fn act(action: ChatAction) -> Result<(), String> {
 
 /// Asks the core a chat query (`core_query`), typed like [`act`].
 pub async fn query(query: ChatQuery) -> Result<ChatAnswer, String> {
-  match current_follower() {
-    Some(follower) => {
-      crate::areas::query_owner_tab(follower, query)
+  match current_link() {
+    Some(link) => {
+      crate::areas::query_owner_tab(link, query)
         .await
         .map_err(|error| error.to_string())?
         .await
@@ -721,9 +818,9 @@ pub async fn query(query: ChatQuery) -> Result<ChatAnswer, String> {
 
 /// Reads the core's snapshot or a feed (`core_snapshot`, … as [`CoreRead`]), typed like [`act`].
 pub(crate) async fn read(read: CoreRead) -> Result<CoreReadAnswer, String> {
-  match current_follower() {
-    Some(follower) => {
-      crate::areas::read_in_owner_tab(follower, read)
+  match current_link() {
+    Some(link) => {
+      crate::areas::read_in_owner_tab(link, read)
         .await
         .map_err(|error| error.to_string())?
         .await
@@ -797,26 +894,23 @@ pub(crate) async fn serve_chat_json(command: String, args: Value) -> Result<Valu
 }
 
 /// A follower tab's read, for the tab that runs the core (in the `tabs` chunk).
-pub(crate) async fn read_in_owner_tab(
-  follower: Rc<Follower>,
-  read: CoreRead,
-) -> Result<CoreReadAnswer, String> {
+pub(crate) async fn read_in_owner_tab(link: CoreLink, read: CoreRead) -> Result<CoreReadAnswer, String> {
   let (command, args) = read.to_json();
-  let answer = follower.call(command, args).await?;
+  let answer = link.call(command, args).await?;
   read.answer_from_json(answer)
 }
 
 /// A follower tab's chat action, for the tab that runs the core (in the `tabs` chunk).
-pub(crate) async fn act_in_owner_tab(follower: Rc<Follower>, action: ChatAction) -> Result<(), String> {
-  let answer = follower
+pub(crate) async fn act_in_owner_tab(link: CoreLink, action: ChatAction) -> Result<(), String> {
+  let answer = link
     .call("core_action", serde_json::json!({ "action": action }))
     .await?;
   serde_json::from_value(answer).map_err(|error| format!("unreadable answer of core_action: {error}"))
 }
 
 /// A follower tab's chat query, for the tab that runs the core (in the `tabs` chunk).
-pub(crate) async fn query_owner_tab(follower: Rc<Follower>, query: ChatQuery) -> Result<ChatAnswer, String> {
-  let answer = follower
+pub(crate) async fn query_owner_tab(link: CoreLink, query: ChatQuery) -> Result<ChatAnswer, String> {
+  let answer = link
     .call("core_query", serde_json::json!({ "query": query }))
     .await?;
   serde_json::from_value(answer).map_err(|error| format!("unreadable answer of core_query: {error}"))
@@ -830,7 +924,7 @@ pub async fn attachment(
   file_id: String,
   priority: AttachmentPriority,
 ) -> Result<SecretBytes, String> {
-  let Some(follower) = current_follower() else {
+  let Some(link) = current_link() else {
     return ask_attachment(conversation, message, file_id, priority).await;
   };
   let args = serde_json::json!({
@@ -839,7 +933,7 @@ pub async fn attachment(
     "file_id": file_id,
     "priority": priority,
   });
-  let answer = follower.call("core_attachment", args).await?;
+  let answer = link.call("core_attachment", args).await?;
   let encoded = answer.as_str().ok_or("unreadable answer of core_attachment")?;
   BASE64
     .decode(encoded)
@@ -871,7 +965,7 @@ pub async fn open_media_stream(
   message: MessageId,
   file_id: String,
 ) -> Result<OpenedStream, String> {
-  if current_follower().is_some() {
+  if current_link().is_some() {
     return Err("only the tab that runs the core streams".to_owned());
   }
   if !does_worker_stream().await {
@@ -1034,48 +1128,243 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
   if !reuse {
     match web_tabs::try_own(user).await {
       Ownership::Owned(lock) => {
-        start_owner(user, Some(lock)).await?;
+        start_owning(user, lock).await?;
         became_active(user);
+      },
+      // No Web Locks, so no worker either (it needs the lock's holder): a store that moved can't
+      // be opened here, and IndexedDB's emptied copy must never be taken for it.
+      Ownership::Unsupported if has_moved(user).await => {
+        return Err("the local data is in a store this browser can't open without Web Locks".to_owned());
       },
       Ownership::Unsupported => start_owner(user, None).await?,
       Ownership::Taken => start_where_taken(user).await?,
     }
   }
-  match current_follower() {
-    Some(follower) => {
-      let status = follower.call("core_start", Value::Null).await?;
+  match current_link() {
+    Some(link) => {
+      let status = link.call("core_start", Value::Null).await?;
       serde_json::from_value(status).map_err(|error| error.to_string())
     },
     None => ask(Request::Status).await,
   }
 }
 
+/// Runs the core of the tab that holds the store's lock: in a worker on OPFS (`core_worker`) when
+/// the store moved there or the user turned it on, else in this page on IndexedDB. A store that
+/// moved is never opened from IndexedDB again (its records there were emptied): if its worker
+/// can't start, the start fails and the user tries again.
+async fn start_owning(user: UserId, lock: OwnerLock) -> Result<(), String> {
+  let has_moved = has_moved(user).await;
+  if !has_moved && !(is_member_page() && core_worker::is_opted_in()) {
+    return start_owner(user, Some(lock)).await;
+  }
+  match start_worker(user, lock).await {
+    Ok(()) => Ok(()),
+    Err((lock, failure)) if !has_moved => {
+      tracing::warn!(%failure, "running the core in this page instead");
+      start_owner(user, Some(lock)).await
+    },
+    Err((_, failure)) => Err(failure.to_string()),
+  }
+}
+
+/// Whether a member's store moved to OPFS (`core_worker`): then only a worker opens it.
+async fn has_moved(user: UserId) -> bool {
+  if !is_member_page() {
+    return false;
+  }
+  match OpfsStore::has_log(&store_name(user)).await {
+    Ok(has_moved) => has_moved,
+    Err(error) => {
+      // Nothing says it didn't move: only the worker may open it.
+      tracing::warn!(%error, "could not tell where the local store is; opening it in a worker");
+      true
+    },
+  }
+}
+
+/// Starts the core in a worker of this tab (`core_worker`), which holds the store's lock for it.
+/// Gives the lock back when the worker didn't start.
+async fn start_worker(user: UserId, lock: OwnerLock) -> Result<(), (OwnerLock, StartFailure)> {
+  let (auth, server_url) = match setup() {
+    Ok(setup) => setup,
+    Err(error) => return Err((lock, StartFailure::Failed(error))),
+  };
+  let tokens = match first_tokens(&auth).await {
+    Ok(tokens) => tokens,
+    Err(error) => return Err((lock, StartFailure::Failed(error))),
+  };
+  let name = store_name(user);
+  // What the core in the page does when it opens the store; the worker has no window for it.
+  announce_database(&name);
+  request_persistent_storage();
+  let start = WorkerStart {
+    user,
+    server_url,
+    maybe_token: tokens.current(),
+    maybe_id_token: tokens.maybe_id_token.borrow().clone(),
+    is_bound: tokens.maybe_prover.borrow().is_some(),
+    is_visible: is_page_visible(),
+    was_store_ready: load_string(&store_ready_key(user)).is_some(),
+  };
+  let events_tokens = tokens.clone();
+  let on_event = move |event| on_worker_event(user, &events_tokens, event);
+  let link = match WorkerLink::start(start, on_event).await {
+    Ok(link) => link,
+    Err(failure) => return Err((lock, failure)),
+  };
+  let maybe_channel = match OwnerChannel::open(user, serve_follower, on_takeover_request) {
+    Ok(channel) => Some(channel),
+    Err(error) => return Err((lock, StartFailure::Failed(error))),
+  };
+  tracing::info!("TeamCraft runs its local data in a worker");
+  watch_worker();
+  watch_page_lifecycle(Lifecycle::Worker(Rc::downgrade(&link)));
+  keep_token_fresh(auth, tokens, link.alive(), Some(Rc::downgrade(&link)));
+  // Replacing a running core (another account signed in) drops it, which ends it.
+  // async-ok: a thread-local, not a signal.
+  RUNNING.with(|running| {
+    *running.borrow_mut() = Some(Running::Worker {
+      user,
+      link,
+      maybe_channel,
+      _lock: lock,
+    })
+  });
+  Ok(())
+}
+
+/// A notice of the core's worker, in its page.
+fn on_worker_event(user: UserId, tokens: &WebTokens, event: WorkerEvent) {
+  match event {
+    WorkerEvent::Changed { is_local: true } => notify_local(),
+    WorkerEvent::Changed { is_local: false } => notify_changed(),
+    WorkerEvent::StoreBuild(maybe_percent) => set_store_build(maybe_percent),
+    WorkerEvent::Failure(failure) => crate::feedback::report_background_failure(failure),
+    WorkerEvent::StoreReady => store_string(&store_ready_key(user), "1"),
+    WorkerEvent::WantsIdToken => {
+      tokens.wants_new_id_token.set(true);
+      tokens.wake();
+    },
+  }
+}
+
+/// The server's address and who signs the requests, as the page configured them.
+fn setup() -> Result<(Rc<dyn Authenticator>, String), String> {
+  SETUP
+    .with(|setup| {
+      setup
+        .borrow()
+        .as_ref()
+        .map(|setup| (setup.auth.clone(), setup.server_url.clone()))
+    })
+    .ok_or_else(|| "the web client is not configured".to_owned())
+}
+
+/// The first token must be there before the core makes its first request, unless the app started
+/// from the cached account: then the core opens the local data at once and connects when the
+/// server confirmed the account (issue #778, auth/account_gate.rs).
+async fn first_tokens(auth: &Rc<dyn Authenticator>) -> Result<WebTokens, String> {
+  if auth.is_account_unconfirmed() {
+    return Ok(WebTokens::new(TokenSlot::Waiting));
+  }
+  let first = auth
+    .access_token()
+    .await
+    .map_err(|error: AuthError| error.to_string())?;
+  let tokens = WebTokens::new(TokenSlot::Ready(first));
+  tokens.set_prover(auth.dpop_prover().await);
+  *tokens.maybe_id_token.borrow_mut() = auth.id_token();
+  Ok(tokens)
+}
+
+/// The name of the account's store (IndexedDB database and OPFS directory).
+fn store_name(user: UserId) -> String {
+  format!("teamcraft-{user}")
+}
+
+/// Where the page notes that the account's store was set up on this device.
+fn store_ready_key(user: UserId) -> String {
+  format!("{STORE_READY_PREFIX}{user}")
+}
+
+/// Runs the core in the worker (`core_worker`): an owner without a lock, its page holds it. Returns
+/// the core's token copy, which the page keeps fresh through the worker.
+pub(crate) fn start_in_worker(
+  user: UserId,
+  server_url: String,
+  maybe_token: Option<String>,
+  maybe_id_token: Option<String>,
+  maybe_prover: Option<Arc<DpopProver>>,
+) -> WebTokens {
+  let tokens = match maybe_token {
+    Some(token) => WebTokens::new(TokenSlot::Ready(token)),
+    None => WebTokens::new(TokenSlot::Waiting),
+  };
+  tokens.set_prover(maybe_prover);
+  *tokens.maybe_id_token.borrow_mut() = maybe_id_token;
+  let (sender, receiver) = mpsc::unbounded();
+  let connection = ConnectionStatus::new();
+  let core = Core::new(server_url, user, tokens.clone(), connection.clone(), None);
+  let (ended, is_ended) = oneshot::channel();
+  WORKER_CORE_ENDED.with(|current| *current.borrow_mut() = Some(is_ended));
+  wasm_bindgen_futures::spawn_local(async move {
+    core.run(receiver).await;
+    // The page may have stopped waiting.
+    let _ = ended.send(());
+  });
+  RUNNING.with(|running| {
+    *running.borrow_mut() = Some(Running::Owner {
+      user,
+      requests: sender,
+      connection,
+      maybe_channel: None,
+    })
+  });
+  tokens
+}
+
+/// In the worker: a token from the page for the core's copy.
+pub(crate) fn take_worker_token(tokens: &WebTokens, token: String, maybe_id_token: Option<String>) {
+  *tokens.maybe_id_token.borrow_mut() = maybe_id_token;
+  if tokens.set(token)
+    && let Err(error) = send(Request::NetworkChanged)
+  {
+    tracing::debug!(%error, "the core is gone before its first token");
+  }
+}
+
+/// In the worker: saves what the core wrote, stops it and waits until it let go of the store, whose
+/// files the next owner opens (a handover, e2ee.md §9.4).
+async fn close_in_worker() {
+  match ask(Request::Flush).await {
+    Ok(Ok(())) => {},
+    Ok(Err(error)) => tracing::warn!(%error, "local data not saved before closing"),
+    Err(error) => tracing::debug!(%error, "no core to save before closing"),
+  }
+  stop();
+  if let Some(ended) = WORKER_CORE_ENDED.with(|current| current.borrow_mut().take()) {
+    // A dropped sender also means the core is gone.
+    let _ = ended.await;
+  }
+}
+
+/// In the worker: the page is hidden, frozen or closing; the store saves its index and flushes.
+pub(crate) fn write_store_now() {
+  let maybe_store = LIFECYCLE.with(|lifecycle| match &*lifecycle.borrow() {
+    Lifecycle::Store(store) => store.upgrade(),
+    Lifecycle::Worker(_) => None,
+  });
+  if let Some(store) = maybe_store {
+    store.write_now();
+  }
+}
+
 /// Runs the core in this tab. With a lock, other tabs of the account can reach it.
 async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), String> {
   {
-    let (auth, server_url) = SETUP
-      .with(|setup| {
-        setup
-          .borrow()
-          .as_ref()
-          .map(|setup| (setup.auth.clone(), setup.server_url.clone()))
-      })
-      .ok_or("the web client is not configured")?;
-    // The first token must be there before the core makes its first request, unless the app started
-    // from the cached account: then the core opens the local data at once and connects when the
-    // server confirmed the account (issue #778, auth/account_gate.rs).
-    let tokens = if auth.is_account_unconfirmed() {
-      WebTokens::new(TokenSlot::Waiting)
-    } else {
-      let first = auth
-        .access_token()
-        .await
-        .map_err(|error: AuthError| error.to_string())?;
-      let tokens = WebTokens::new(TokenSlot::Ready(first));
-      tokens.set_prover(auth.dpop_prover().await);
-      *tokens.maybe_id_token.borrow_mut() = auth.id_token();
-      tokens
-    };
+    let (auth, server_url) = setup()?;
+    let tokens = first_tokens(&auth).await?;
     let (sender, receiver) = mpsc::unbounded();
     let maybe_channel = match maybe_lock.is_some() {
       true => Some(OwnerChannel::open(user, serve_follower, on_takeover_request)?),
@@ -1085,7 +1374,7 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
     let core = Core::new(server_url, user, tokens.clone(), connection.clone(), maybe_lock);
     watch_worker();
     let generation = std::rc::Rc::new(());
-    keep_token_fresh(auth, tokens, Rc::downgrade(&generation));
+    keep_token_fresh(auth, tokens, Rc::downgrade(&generation), None);
     wasm_bindgen_futures::spawn_local(async move {
       core.run(receiver).await;
       drop(generation);
@@ -1165,7 +1454,7 @@ async fn take_over_when_free(user: UserId) {
       platform::sleep(Duration::from_millis(jitter_ms as u64)).await;
       continue;
     }
-    match start_owner(user, Some(lock)).await {
+    match start_owning(user, lock).await {
       Ok(()) => {
         tracing::info!("TeamCraft runs in this tab now");
         became_active(user);
@@ -1235,8 +1524,9 @@ fn on_takeover_request(ends_call: bool) -> Option<Blocker> {
 /// drafts and waits for IndexedDB to have the outbox, then stops the core, whose lock goes to the
 /// waiting tab. This tab then follows it and says so.
 async fn hand_over() {
-  let Some(user) = RUNNING.with(|running| match &*running.borrow() {
-    Some(Running::Owner { user, .. }) => Some(*user),
+  let Some((user, maybe_link)) = RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Owner { user, .. }) => Some((*user, None)),
+    Some(Running::Worker { user, link, .. }) => Some((*user, Some(link.clone()))),
     _ => None,
   }) else {
     return;
@@ -1246,12 +1536,13 @@ async fn hand_over() {
   // only when this tab is the active one again (#440).
   crate::web_calls::stop_calls().await;
   persist_drafts().await;
-  let flushed = Box::pin(ask(Request::Flush));
-  match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {
-    Either::Left((Ok(Ok(())), _)) => {},
-    Either::Left((Ok(Err(error)), _)) => tracing::warn!(%error, "local data not saved before handing over"),
-    Either::Left((Err(error), _)) => tracing::debug!(%error, "no core to save before handing over"),
-    Either::Right(_) => tracing::warn!("local data still being saved; handing over anyway"),
+  match maybe_link {
+    // The worker saves and lets go of the store's files before the lock goes (`WorkerLink::close`).
+    Some(link) => {
+      flush_before("handing over").await;
+      link.close().await;
+    },
+    None => flush_before("handing over").await,
   }
   if !is_owner_of(user) {
     return;
@@ -1269,8 +1560,12 @@ async fn hand_over() {
 
 /// Whether this tab still runs the core of `user`.
 fn is_owner_of(user: UserId) -> bool {
-  RUNNING
-    .with(|running| matches!(&*running.borrow(), Some(Running::Owner { user: owner, .. }) if *owner == user))
+  RUNNING.with(|running| {
+    matches!(
+      &*running.borrow(),
+      Some(Running::Owner { user: owner, .. } | Running::Worker { user: owner, .. }) if *owner == user
+    )
+  })
 }
 
 /// The page is about to go to the identity provider: what the user just typed is saved first, like at
@@ -1280,15 +1575,22 @@ pub async fn save_before_leaving() {
     return;
   }
   persist_drafts().await;
-  if !runs_here() {
-    return;
+  if runs_here() || worker_link().is_some() {
+    flush_before("leaving").await;
   }
-  let flushed = Box::pin(ask(Request::Flush));
+}
+
+/// Waits until the store has what the core wrote, in this page or its worker, but no longer than
+/// [`HANDOVER_FLUSH_TIMEOUT`]: `moment` names what comes next, for the log.
+async fn flush_before(moment: &str) {
+  let flushed: Pin<Box<dyn Future<Output = Result<(), String>>>> = match worker_link() {
+    Some(link) => Box::pin(async move { link.call("core_flush", Value::Null).await.map(drop) }),
+    None => Box::pin(async { ask(Request::Flush).await? }),
+  };
   match select(flushed, Box::pin(platform::sleep(HANDOVER_FLUSH_TIMEOUT))).await {
-    Either::Left((Ok(Ok(())), _)) => {},
-    Either::Left((Ok(Err(error)), _)) => tracing::warn!(%error, "local data not saved before leaving"),
-    Either::Left((Err(error), _)) => tracing::debug!(%error, "no core to save before leaving"),
-    Either::Right(_) => tracing::warn!("local data still being saved; leaving anyway"),
+    Either::Left((Ok(()), _)) => {},
+    Either::Left((Err(error), _)) => tracing::warn!(%error, moment, "local data not saved"),
+    Either::Right(_) => tracing::warn!(moment, "local data still being saved; going on anyway"),
   }
 }
 
@@ -1304,6 +1606,24 @@ async fn persist_drafts() {
   platform::sleep(Duration::from_millis(100)).await;
 }
 
+/// Where this tab's commands go when the core doesn't run in the page: the owner tab, or the core's
+/// worker.
+fn current_link() -> Option<CoreLink> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Follower { follower, .. }) => Some(CoreLink::Tab(follower.clone())),
+    Some(Running::Worker { link, .. }) => Some(CoreLink::Worker(link.clone())),
+    _ => None,
+  })
+}
+
+/// The worker running this tab's core, while it does.
+fn worker_link() -> Option<Rc<WorkerLink>> {
+  RUNNING.with(|running| match &*running.borrow() {
+    Some(Running::Worker { link, .. }) => Some(link.clone()),
+    _ => None,
+  })
+}
+
 fn current_follower() -> Option<Rc<Follower>> {
   RUNNING.with(|running| match &*running.borrow() {
     Some(Running::Follower { follower, .. }) => Some(follower.clone()),
@@ -1316,6 +1636,7 @@ fn connection_state() -> Result<CoreConnection, String> {
   RUNNING.with(|running| match &*running.borrow() {
     Some(Running::Owner { connection, .. }) => Ok(connection.get().into()),
     Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    Some(Running::Worker { .. }) => Err("the core runs in this tab's worker".to_owned()),
     None => Err("the core has not been started".to_owned()),
   })
 }
@@ -1328,6 +1649,7 @@ fn send(request: Request) -> Result<(), String> {
   RUNNING.with(|running| match &*running.borrow() {
     Some(Running::Owner { requests, .. }) => requests.unbounded_send(request).map_err(|_| stopped()),
     Some(Running::Follower { .. }) => Err("the core runs in another tab".to_owned()),
+    Some(Running::Worker { .. }) => Err("the core runs in this tab's worker".to_owned()),
     None => Err("the core has not been started".to_owned()),
   })
 }
@@ -1342,8 +1664,14 @@ fn stopped() -> String {
   "the core is not running".to_owned()
 }
 
-/// Renews the core's token copy from the page's session until the core stops.
-fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::rc::Weak<()>) {
+/// Renews the core's token copy from the page's session until the core stops. With `maybe_link`,
+/// `tokens` is the page's mirror of the copy in the core's worker, which gets each token too.
+fn keep_token_fresh(
+  auth: Rc<dyn Authenticator>,
+  tokens: WebTokens,
+  alive: std::rc::Weak<()>,
+  maybe_link: Option<std::rc::Weak<WorkerLink>>,
+) {
   wasm_bindgen_futures::spawn_local(async move {
     let mut first_token_wait = FIRST_TOKEN_RETRY;
     loop {
@@ -1361,11 +1689,22 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
             auth.refresh_id_token().await;
           }
           *tokens.maybe_id_token.borrow_mut() = auth.id_token();
-          // async-ok: the core's copy of the token, not a signal.
-          if tokens.set(token)
-            && let Err(error) = send(Request::NetworkChanged)
-          {
-            tracing::debug!(%error, "the core is gone before its first token");
+          match maybe_link.as_ref().map(std::rc::Weak::upgrade) {
+            // The worker's core hears of its first token itself.
+            Some(Some(link)) => {
+              let is_bound = tokens.maybe_prover.borrow().is_some();
+              link.send_token(token.clone(), tokens.maybe_id_token.borrow().clone(), is_bound);
+              tokens.set(token);
+            },
+            Some(None) => return,
+            // async-ok: the core's copy of the token, not a signal.
+            None => {
+              if tokens.set(token)
+                && let Err(error) = send(Request::NetworkChanged)
+              {
+                tracing::debug!(%error, "the core is gone before its first token");
+              }
+            },
           }
         },
         Err(error) if tokens.is_waiting() => tracing::debug!(%error, "no access token yet"),
@@ -1384,11 +1723,21 @@ fn keep_token_fresh(auth: Rc<dyn Authenticator>, tokens: WebTokens, alive: std::
 
 /// Tells this tab's UI, and the follower tabs, that the core's data changed.
 fn notify_changed() {
+  if core_worker::is_worker() {
+    core_worker::notify_page(false);
+    return;
+  }
   RUNNING.with(|running| {
-    if let Some(Running::Owner {
-      maybe_channel: Some(channel),
-      ..
-    }) = &*running.borrow()
+    if let Some(
+      Running::Owner {
+        maybe_channel: Some(channel),
+        ..
+      }
+      | Running::Worker {
+        maybe_channel: Some(channel),
+        ..
+      },
+    ) = &*running.borrow()
     {
       channel.announce_change();
     }
@@ -1397,6 +1746,10 @@ fn notify_changed() {
 }
 
 fn notify_local() {
+  if core_worker::is_worker() {
+    core_worker::notify_page(true);
+    return;
+  }
   let listeners: Vec<_> = LISTENERS.with(|listeners| listeners.borrow().clone());
   for listener in listeners {
     if let Ok(mut callback) = listener.try_borrow_mut() {
@@ -1763,7 +2116,7 @@ impl Core {
       return;
     };
     for error in client.take_background_failures() {
-      crate::feedback::report_background_failure(error.to_failure());
+      report_failure(error.to_failure());
     }
   }
 
@@ -1798,7 +2151,7 @@ impl Core {
   ///
   /// Writes that fail are kept in memory until they go through, never dropped (the disk must stay a
   /// prefix of the writes) or refused. With the quota full they pile up, one per record the sync
-  /// writes: once too many wait ([`IndexedDbStore::is_backlogged`]) the sync pauses, and goes on
+  /// writes: once too many wait ([`BrowserStore::is_backlogged`]) the sync pauses, and goes on
   /// when a batch went through (issue #1201). Meanwhile the user still reads what is stored and can
   /// write; the storage banner stays up. The server keeps what the sync didn't fetch: the connection,
   /// which nothing reads while paused, runs out of heartbeat answers and is dropped; the next one
@@ -1938,11 +2291,14 @@ impl Core {
   }
 
   async fn try_open(&mut self) -> Result<CoreStatus, String> {
-    let name = format!("teamcraft-{}", self.user);
-    announce_database(&name);
-    // A guest's device lives as long as the meeting: no browser prompt for it (Firefox asks).
-    if is_member_page() {
-      request_persistent_storage();
+    let name = store_name(self.user);
+    // The page of a worker did both before it started it; the worker has no window for them.
+    if !core_worker::is_worker() {
+      announce_database(&name);
+      // A guest's device lives as long as the meeting: no browser prompt for it (Firefox asks).
+      if is_member_page() {
+        request_persistent_storage();
+      }
     }
     let store = match &self.store {
       // Opened before, when the token wasn't there yet.
@@ -1954,7 +2310,7 @@ impl Core {
         let user = self.user;
         let started_ms = now_ms();
         start_timing::start(Part::StoreRead);
-        let opened = IndexedDbStore::open_reporting(&name, &key, |percent| {
+        let opened = open_store(&name, &key, |percent| {
           // Handed over or signed out meanwhile: whoever opens the store next goes on from here, and the
           // lock this core holds is what that tab waits for.
           if !is_owner_of(user) {
@@ -1974,7 +2330,7 @@ impl Core {
         };
         let store = TrackedStore::with_message_cache(Rc::new(opened), MESSAGE_CACHE_BYTES).with_media_cache();
         self.store = Some(store.clone());
-        watch_page_lifecycle(store.inner());
+        watch_page_lifecycle(Lifecycle::Store(Rc::downgrade(store.inner())));
         store
       },
     };
@@ -2007,7 +2363,7 @@ impl Core {
         // The browser has no OS keychain (e2ee.md §6.5.6): the recovery kit is the way back.
         Ok(CoreStatus::NeedsEnrollment {
           has_existing_identity: self.has_existing_identity().await?,
-          was_data_lost: load_string(&self.store_ready_key()).is_some(),
+          was_data_lost: was_store_ready(self.user),
           can_restore_on_device: false,
         })
       },
@@ -2057,7 +2413,7 @@ impl Core {
     self.backend = None;
     // Dropping the last handle closes the database, so it can be deleted.
     self.store = None;
-    let name = format!("teamcraft-{}", self.user);
+    let name = store_name(self.user);
     OpfsStore::delete(&name)
       .await
       .map_err(|error| error.to_string())?;
@@ -2120,8 +2476,11 @@ impl Core {
     );
     self.catch_up_focus = client.catch_up_focus();
     let mut client = client;
-    // Calls ring and show their roster in the tab that runs the core.
-    client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
+    // Calls ring and show their roster in the tab that runs the core; not from its worker, whose
+    // page has no calls yet (`core_worker`).
+    if !core_worker::is_worker() {
+      client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
+    }
     // The loop reads what a catch-up leaves, slowly, a page now and then while the page is in view
     // ([`BACKLOG_PAGE_GAP`]); the reader fills a hole at once by scrolling there (issues #1448,
     // #1910).
@@ -2130,12 +2489,8 @@ impl Core {
     }
     self.client = Some(client);
     self.maybe_push_check_at_ms = Some(i64::MIN);
-    store_string(&self.store_ready_key(), "1");
+    mark_store_ready(self.user);
     status
-  }
-
-  fn store_ready_key(&self) -> String {
-    format!("{STORE_READY_PREFIX}{}", self.user)
   }
 
   /// The server API; with the store open, every request that changes server state waits until
@@ -2450,7 +2805,7 @@ impl Core {
           Ok(_) => notify_changed(),
           Err(error) => {
             notify_changed();
-            crate::feedback::report_background_failure(error.to_failure());
+            report_failure(error.to_failure());
           },
         }
       },
@@ -3082,7 +3437,7 @@ impl Core {
       .await;
     if let Some(Some(error)) = outcome {
       tracing::warn!(%error, "sending a queued message failed");
-      crate::feedback::report_background_failure(error.to_failure());
+      report_failure(error.to_failure());
     }
     notify_changed();
   }
@@ -3860,9 +4215,65 @@ fn queue_send(backend: &CoreChatBackend<Store>, action: ChatAction) {
 }
 
 fn is_page_visible() -> bool {
+  if core_worker::is_worker() {
+    return core_worker::is_page_visible();
+  }
   web_sys::window()
     .and_then(|window| window.document())
     .is_none_or(|document| document.visibility_state() == web_sys::VisibilityState::Visible)
+}
+
+/// Opens the account's store: on OPFS in the core's worker (moved from IndexedDB the first time),
+/// on IndexedDB in the page. The worker of a tab that handed over may still be letting go of the
+/// files: a refused open is tried again for a moment.
+async fn open_store(
+  name: &str,
+  key: &teamcraft_crypto::secret::SymmetricKey,
+  mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+) -> Result<BrowserStore, StoreError> {
+  if !core_worker::is_worker() {
+    return BrowserStore::open_indexed_db_reporting(name, key, on_progress).await;
+  }
+  let mut attempts = 0;
+  loop {
+    attempts += 1;
+    match BrowserStore::open_opfs_reporting(name, key, &mut on_progress).await {
+      Ok((store, opening)) => {
+        tracing::info!(?opening, "opened the local store in the core's worker");
+        return Ok(store);
+      },
+      Err(StoreError::InUse) if attempts < OPFS_OPEN_ATTEMPTS && on_progress(0).is_continue() => {
+        platform::sleep(OPFS_OPEN_RETRY).await;
+      },
+      Err(error) => return Err(error),
+    }
+  }
+}
+
+/// A background command's failure, for the user: shown here, or by the page of the core's worker.
+fn report_failure(failure: teamcraft_client_api::failure::ActionFailure) {
+  if core_worker::is_worker() {
+    core_worker::report_failure(&failure);
+  } else {
+    crate::feedback::report_background_failure(failure);
+  }
+}
+
+/// Whether the account's store was set up on this device before (`localStorage`, the page's).
+fn was_store_ready(user: UserId) -> bool {
+  if core_worker::is_worker() {
+    return core_worker::was_store_ready();
+  }
+  load_string(&store_ready_key(user)).is_some()
+}
+
+/// Notes that the account's store is set up on this device.
+fn mark_store_ready(user: UserId) {
+  if core_worker::is_worker() {
+    core_worker::mark_store_ready();
+  } else {
+    store_string(&store_ready_key(user), "1");
+  }
 }
 
 /// The renditions whose message went away (#749) and every picture of a purged or no longer listed
@@ -3943,8 +4354,11 @@ impl EnginePart {
   }
 }
 
-/// Whether a member's page runs the core, not a meeting guest's.
+/// Whether a member's page runs the core, not a meeting guest's. A worker runs only a member's.
 fn is_member_page() -> bool {
+  if core_worker::is_worker() {
+    return true;
+  }
   SETUP.with(|setup| {
     setup
       .borrow()
@@ -4096,23 +4510,34 @@ fn expiry_at_ms(maybe_left: Option<std::time::Duration>) -> Option<i64> {
 
 /// Issues the store's queued writes at once when the page is hidden, frozen or unloaded: a tab in
 /// the background may be frozen or discarded without another chance to run (robustness.md,
-/// Lifecycle). One listener per page, for the store opened last.
-fn watch_page_lifecycle(store: &Rc<IndexedDbStore>) {
-  LIFECYCLE_STORE.with(|current| *current.borrow_mut() = Rc::downgrade(store));
-  if IS_WATCHING_LIFECYCLE.with(|is_watching| is_watching.replace(true)) {
+/// Lifecycle). One listener per page, for the store opened last or the core's worker, which also
+/// hears when the page is shown. In the worker only notes the store, for the page's word.
+fn watch_page_lifecycle(target: Lifecycle) {
+  LIFECYCLE.with(|current| *current.borrow_mut() = target);
+  if core_worker::is_worker() || IS_WATCHING_LIFECYCLE.with(|is_watching| is_watching.replace(true)) {
     return;
   }
   let Some(document) = web_sys::window().and_then(|window| window.document()) else {
     return;
   };
   let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(|event: web_sys::Event| {
-    if event.type_() == "visibilitychange" && is_page_visible() {
-      return;
-    }
-    // async-ok: a thread-local weak reference to the store, not a signal.
-    if let Some(store) = LIFECYCLE_STORE.with(|current| current.borrow().upgrade()) {
-      store.write_now();
-    }
+    let is_shown = event.type_() == "visibilitychange" && is_page_visible();
+    // async-ok: thread-local weak references, not signals.
+    LIFECYCLE.with(|current| match &*current.borrow() {
+      Lifecycle::Store(store) => {
+        if let Some(store) = store.upgrade().filter(|_| !is_shown) {
+          store.write_now();
+        }
+      },
+      Lifecycle::Worker(link) => {
+        if let Some(link) = link.upgrade() {
+          link.set_visible(is_page_visible());
+          if !is_shown {
+            link.write_now();
+          }
+        }
+      },
+    });
   });
   let mut is_listening = false;
   for kind in ["visibilitychange", "freeze", "pagehide"] {
@@ -4144,8 +4569,16 @@ fn watch_worker() {
         .ok()
         .and_then(|kind| kind.as_string());
       // Follower tabs get the message too; only the owner has a core to tell.
-      if kind.as_deref() == Some(SUBSCRIPTION_CHANGED) && current_follower().is_none() {
-        drop(send(Request::CheckPush));
+      if kind.as_deref() == Some(SUBSCRIPTION_CHANGED) {
+        match worker_link() {
+          Some(link) => wasm_bindgen_futures::spawn_local(async move {
+            if let Err(error) = link.call("core_check_push", Value::Null).await {
+              tracing::debug!(%error, "the core's worker did not check the push subscription");
+            }
+          }),
+          None if current_follower().is_none() => drop(send(Request::CheckPush)),
+          None => {},
+        }
       }
       // The worker asks only the page whose player made the request.
       if kind.as_deref() == Some(MEDIA_READ) {
