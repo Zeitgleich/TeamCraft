@@ -451,7 +451,7 @@ impl Default for CaptionSettings {
   fn default() -> Self {
     Self {
       language: CaptionLanguage::Auto,
-      partial_interval: Duration::from_millis(1_500),
+      partial_interval: Duration::from_secs(2),
       end_silence: Duration::from_millis(700),
       max_sentence: Duration::from_secs(10),
       speech_threshold_dbfs: -45.0,
@@ -542,7 +542,7 @@ mod tests {
         .iter()
         .filter_map(|frame| segmenter.push(frame, &settings, &mut next))
         .collect();
-      // Four seconds of speech: a part so far every 1.5 s, all of the same sentence.
+      // Four seconds of speech: a part so far every 2 s, all of the same sentence.
       assert_eq!(jobs.len(), 2);
       assert!(
         jobs
@@ -588,7 +588,7 @@ mod tests {
     #[test]
     fn finished_sentences_go_first_and_replace_their_part_so_far() {
       let mut scheduler = Scheduler::new(settings());
-      for frame in frames(&[(true, 80)]) {
+      for frame in frames(&[(true, 110)]) {
         scheduler.take(TapMessage::Frame(speaker(1), frame));
       }
       for frame in frames(&[(true, 80), (false, 40)]) {

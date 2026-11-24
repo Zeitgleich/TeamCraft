@@ -23,9 +23,9 @@ use tracing::{info, warn};
 
 use super::{CallState, lock};
 
-/// CPU threads one recognition uses at most: a quarter-core budget on average (docs/performance.md,
-/// "Live captions"), with headroom for a burst after a sentence.
-const MAX_RECOGNIZER_THREADS: usize = 4;
+/// CPU threads one recognition uses at most. whisper.cpp's threads wait busily between steps, so
+/// more threads cost more CPU for little less delay (docs/performance.md, "Live captions").
+const MAX_RECOGNIZER_THREADS: usize = 2;
 /// Per-phase limits of the download (robustness.md, "Hostile networks"): a slow link may take
 /// minutes for the whole file, but not this long to connect or between two pieces.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(20);

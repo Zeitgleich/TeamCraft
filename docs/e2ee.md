@@ -7701,12 +7701,12 @@ out of the encryption on purpose.
 - **Audio:** each other participant's microphone stream as the playback mixer decodes it (not shared
   screens' sound, nothing while deafened), downsampled to 16 kHz, cut into sentences at pauses by
   level (`teamcraft_media::captions`). A sentence is recognized once it ends (at the latest after
-  10 s), and while it goes on, its part so far every 1.5 s when the recognizer has time. Speaker names
+  10 s), and while it goes on, its part so far every 2 s when the recognizer has time. Speaker names
   come from the call's roster, by device.
 - **Text:** kept in memory, the last 12 lines, for the call screen only; gone when captions go off or
   the call ends. It isn't stored, posted or synced. Saving a transcript is a later step of #215 and
   will be an explicit action that writes into the encrypted local store.
-- **Budget:** a worker thread with at most four CPU threads for one recognition; the call never waits
+- **Budget:** a worker thread with at most two CPU threads for one recognition; the call never waits
   for it (a bounded queue that drops). When it falls behind the speech, captions turn themselves off
   and say why. Numbers: docs/performance.md, "Live captions".
 

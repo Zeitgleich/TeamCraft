@@ -87,6 +87,9 @@ impl SpeechRecognizer for WhisperRecognizer {
     };
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_n_threads(i32::from(self.threads));
+    // Whisper encodes 30 s of audio whatever it is given; a piece of a few seconds needs only its
+    // share of the encoder's context. This makes a short piece several times cheaper.
+    params.set_audio_ctx(audio_context(samples.len()));
     params.set_language(Some(maybe_language.unwrap_or("auto")));
     params.set_translate(false);
     params.set_no_context(true);
@@ -123,6 +126,16 @@ impl SpeechRecognizer for WhisperRecognizer {
   }
 }
 
+/// The encoder context for `samples` at 16 kHz: 50 positions a second (1500 for 30 s), a second of
+/// margin, rounded up to 64 (the encoder's block), at most the full 1500.
+fn audio_context(samples: usize) -> i32 {
+  const POSITIONS_PER_SECOND: usize = 50;
+  const FULL: usize = 1_500;
+  let seconds = samples.div_ceil(16_000) + 1;
+  let positions = (seconds * POSITIONS_PER_SECOND).next_multiple_of(64).min(FULL);
+  i32::try_from(positions).unwrap_or(1_500)
+}
+
 /// Routes whisper.cpp's and ggml's log nowhere (the `log`/`tracing` backends are off), once.
 fn silence_log() {
   static SILENCED: Once = Once::new();
@@ -151,6 +164,13 @@ mod tests {
     for piece in ["Hello.", "(Well) maybe", "It's 3 o'clock"] {
       assert!(!is_annotation(piece), "{piece:?}");
     }
+  }
+
+  #[test]
+  fn the_encoder_context_follows_the_length_up_to_the_full_window() {
+    assert_eq!(audio_context(16_000), 128);
+    assert_eq!(audio_context(10 * 16_000), 576);
+    assert_eq!(audio_context(60 * 16_000), 1_500);
   }
 
   #[test]
