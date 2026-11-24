@@ -123,17 +123,17 @@ jobs:
           rm -rf crates/teamcraft-ui/dist
           cp -r target/e2e-web crates/teamcraft-ui/dist
           SQLX_OFFLINE=true cargo build -p teamcraft-desktop --features custom-protocol
-      - name: Measure the app hidden in the tray
-        timeout-minutes: 40
-        run: |
-          export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
-          xvfb-run -a -s "-screen 0 1600x1000x24" scripts/e2e.sh --prebuilt-web --desktop -- desktop_perf::
       - name: Send to paint (#2364), texts and 12 MP photos from the composer
         timeout-minutes: 20
         run: |
           export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
           export DESKTOP_ECHO_RUNS=20
           xvfb-run -a -s "-screen 0 1600x1000x24" scripts/e2e.sh --prebuilt-web --desktop -- --nocapture desktop_echo::
+      - name: Measure the app hidden in the tray
+        timeout-minutes: 40
+        run: |
+          export E2E_DESKTOP_BIN="$GITHUB_WORKSPACE/target/debug/teamcraft-desktop" E2E_DESKTOP_REQUIRED=1
+          xvfb-run -a -s "-screen 0 1600x1000x24" scripts/e2e.sh --prebuilt-web --desktop -- desktop_perf::
       - name: The small call window (#2077), under a window manager that moves the focus
         timeout-minutes: 20
         run: |

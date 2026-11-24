@@ -56,7 +56,7 @@ async fn a_sent_message_shows_in_the_desktop_app_without_waiting_for_the_shell()
     tokio::time::sleep(Duration::from_millis(500)).await;
   }
   app.wait_for_text(OLDER, WAIT).await.unwrap();
-  app.click(OLDER).await.unwrap();
+  // The only chat opens by itself; its message list and composer are what is measured.
   wait_for_composer(&mut app).await;
   app.evaluate(ECHO_PROBE).await.unwrap();
 
