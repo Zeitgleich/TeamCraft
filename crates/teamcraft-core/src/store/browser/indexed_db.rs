@@ -110,23 +110,12 @@ impl SealedStore<IndexedDbRecords> {
   pub async fn open_reporting(
     name: &str,
     database_key: &SymmetricKey,
-    mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+    on_progress: impl FnMut(u8) -> ControlFlow<()>,
   ) -> Result<Self, StoreError> {
     let backend = IndexedDbRecords::read(name, OpenMode::Upgrade).await?;
     let store = Self::open_backend_to_build(backend, database_key, SealedStoreLimits::default())?;
-    let Some(mut build) = store.start_catalog_build()? else {
-      return Ok(store);
-    };
-    loop {
-      let step = store.step_catalog_build(&mut build)?;
-      store.commit_build_batch().await?;
-      if step == BuildStep::Complete {
-        return Ok(store);
-      }
-      if on_progress(build.percent()).is_break() {
-        return Err(StoreError::InUse);
-      }
-    }
+    build_catalog_committing(&store, |store| Some(store.backend()), on_progress).await?;
+    Ok(store)
   }
 
   /// [`Self::open`] for the service worker, a second writer beside the page that owns the store: at
@@ -147,7 +136,46 @@ impl SealedStore<IndexedDbRecords> {
   /// failed are issued again once their retry backoff ran out (until then the flush doesn't wait
   /// for them), and the flush fails with the reason until they went through.
   pub async fn flush(&self) -> Result<(), StoreError> {
-    let inner = &self.backend().inner;
+    self.backend().flush().await
+  }
+
+  /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
+  /// is being hidden, frozen or unloaded).
+  pub fn write_now(&self) {
+    self.backend().write_now();
+  }
+
+  /// Changes with every write: a reader can tell whether anything was written since it last
+  /// looked without comparing contents.
+  pub fn write_revision(&self) -> u32 {
+    self.backend().write_revision()
+  }
+
+  /// Whether so many records wait for a disk that keeps failing that the owner should stop writing
+  /// what it can fetch again later (issue #1201): nothing is dropped or refused, so they would
+  /// pile up in memory. Ends once a batch committed.
+  pub fn is_backlogged(&self) -> bool {
+    self.backend().is_backlogged()
+  }
+
+  /// How many records may wait for a failing disk before [`Self::is_backlogged`] says so; the
+  /// default is 2,000 (`write_queue::DEFAULT_MAX_UNSAVED`).
+  pub fn set_max_unsaved_writes(&self, max_unsaved: usize) {
+    self.backend().inner.writes.borrow_mut().max_unsaved = max_unsaved;
+  }
+
+  /// How long writes wait after a batch failed before they are issued again: `first`, doubled with
+  /// every batch that fails after it, up to `longest` (1 s and 30 s by default). Zero sends them
+  /// again with every batch and flush.
+  pub fn set_retry_backoff(&self, first: Duration, longest: Duration) {
+    self.backend().inner.writes.borrow_mut().retry_backoff = (first, longest);
+  }
+}
+
+impl IndexedDbRecords {
+  /// See [`IndexedDbStore::flush`].
+  pub(super) async fn flush(&self) -> Result<(), StoreError> {
+    let inner = &self.inner;
     inner.issue_batch(true);
     let maybe_due = inner.writes.borrow().last_batch_due();
     while !inner.writes.borrow().is_closed {
@@ -171,48 +199,51 @@ impl SealedStore<IndexedDbRecords> {
     inner.writes.borrow().failure()
   }
 
-  /// Waits until the catalog build's last batch is committed: the build's backpressure, and the
-  /// moment the page has its thread back.
-  async fn commit_build_batch(&self) -> Result<(), StoreError> {
-    match self.flush().await {
+  /// See [`IndexedDbStore::write_now`].
+  pub(super) fn write_now(&self) {
+    self.inner.issue_queued();
+  }
+
+  /// See [`IndexedDbStore::write_revision`].
+  pub(super) fn write_revision(&self) -> u32 {
+    self.inner.writes.borrow().next_sequence
+  }
+
+  /// See [`IndexedDbStore::is_backlogged`].
+  pub(super) fn is_backlogged(&self) -> bool {
+    self.inner.writes.borrow().is_backlogged()
+  }
+}
+
+/// Runs the first catalog build of `store` one batch per task, each committed before the next
+/// starts ([`IndexedDbStore::open_reporting`]); `records` reaches the IndexedDB records of the
+/// store's backend. `on_progress` may stop it ([`StoreError::InUse`]).
+pub(super) async fn build_catalog_committing<B: RecordBackend>(
+  store: &SealedStore<B>,
+  records: impl Fn(&SealedStore<B>) -> Option<&IndexedDbRecords>,
+  mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+) -> Result<(), StoreError> {
+  let Some(mut build) = store.start_catalog_build()? else {
+    return Ok(());
+  };
+  loop {
+    let step = store.step_catalog_build(&mut build)?;
+    let flushed = match records(store) {
+      Some(records) => records.flush().await,
+      None => Ok(()),
+    };
+    match flushed {
       Err(StoreError::QuotaExceeded) => {
         tracing::warn!("no space for the local store's catalog; it stays in memory for now");
-        Ok(())
       },
-      flushed => flushed,
+      flushed => flushed?,
     }
-  }
-
-  /// Issues what is queued now instead of after the batch delay, without waiting for it (the page
-  /// is being hidden, frozen or unloaded).
-  pub fn write_now(&self) {
-    self.backend().inner.issue_queued();
-  }
-
-  /// Changes with every write: a reader can tell whether anything was written since it last
-  /// looked without comparing contents.
-  pub fn write_revision(&self) -> u32 {
-    self.backend().inner.writes.borrow().next_sequence
-  }
-
-  /// Whether so many records wait for a disk that keeps failing that the owner should stop writing
-  /// what it can fetch again later (issue #1201): nothing is dropped or refused, so they would
-  /// pile up in memory. Ends once a batch committed.
-  pub fn is_backlogged(&self) -> bool {
-    self.backend().inner.writes.borrow().is_backlogged()
-  }
-
-  /// How many records may wait for a failing disk before [`Self::is_backlogged`] says so; the
-  /// default is 2,000 (`write_queue::DEFAULT_MAX_UNSAVED`).
-  pub fn set_max_unsaved_writes(&self, max_unsaved: usize) {
-    self.backend().inner.writes.borrow_mut().max_unsaved = max_unsaved;
-  }
-
-  /// How long writes wait after a batch failed before they are issued again: `first`, doubled with
-  /// every batch that fails after it, up to `longest` (1 s and 30 s by default). Zero sends them
-  /// again with every batch and flush.
-  pub fn set_retry_backoff(&self, first: Duration, longest: Duration) {
-    self.backend().inner.writes.borrow_mut().retry_backoff = (first, longest);
+    if step == BuildStep::Complete {
+      return Ok(());
+    }
+    if on_progress(build.percent()).is_break() {
+      return Err(StoreError::InUse);
+    }
   }
 }
 
