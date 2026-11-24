@@ -30,7 +30,7 @@ pub enum PickKind {
 /// stay those of a list of IDs.
 #[component]
 pub fn IdPicker(
-  id: &'static str,
+  #[prop(into)] id: String,
   label: &'static str,
   kind: PickKind,
   #[prop(into)] value: Signal<String>,
@@ -143,9 +143,11 @@ pub fn IdPicker(
     PickKind::Spaces => IconName::Layers,
     PickKind::PublicChannels => IconName::Hash,
   };
-  let described = error_id(id);
+  let described = error_id(&id);
+  let error_dom_id = described.clone();
   let group_label_id = label_id.clone();
   let list_for_input = list_id.clone();
+  let search_id = format!("{id}-search");
 
   view! {
     // forms.md: a group of controls carries the error state on its container, which takes focus.
@@ -153,12 +155,12 @@ pub fn IdPicker(
       class="field id-picker"
       role="group"
       tabindex="-1"
-      id=id
+      id=id.clone()
       aria-labelledby=group_label_id
       aria-invalid=move || error.get().map(|_| "true")
       aria-describedby=move || error.get().map(|_| described.clone())
     >
-      <label id=label_id for=format!("{id}-search")>{move || i18n.t(label)}</label>
+      <label id=label_id for=search_id.clone()>{move || i18n.t(label)}</label>
       <ul class="token-field" aria-label=move || i18n.t(label)>
         <For each=move || pills.get() key=|(item_id, maybe_item)| (item_id.clone(), maybe_item.is_some()) let:pill>
           {
@@ -189,7 +191,7 @@ pub fn IdPicker(
         </For>
         <li class="token-entry">
           <input
-            id=format!("{id}-search")
+            id=search_id
             node_ref=input
             class="token-input"
             type="search"
@@ -233,7 +235,7 @@ pub fn IdPicker(
           <li class="empty-state">{move || i18n.t(no_match_key)}</li>
         </Show>
       </ul>
-      <p class="field-error" id=error_id(id)>{move || error.get().map(|key| i18n.t(key))}</p>
+      <p class="field-error" id=error_dom_id>{move || error.get().map(|key| i18n.t(key))}</p>
     </div>
   }
 }

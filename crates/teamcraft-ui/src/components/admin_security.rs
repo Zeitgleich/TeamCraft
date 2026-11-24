@@ -12,7 +12,7 @@ use crate::components::admin_policy::{
 };
 use crate::components::people_picker::PeoplePicker;
 use crate::form_errors::FormErrors;
-use crate::i18n::use_i18n;
+use crate::i18n::{I18n, use_i18n};
 use crate::model::{User, UserId};
 use crate::state::use_app_state;
 
@@ -370,6 +370,7 @@ pub fn SecuritySection() -> impl IntoView {
           .map(|option| {
             let slug = option.as_str().to_owned();
             let label_key = format!("policy-call-recording-{slug}");
+            let hint_key = format!("policy-call-recording-{slug}-hint");
             let checked_option = option.clone();
             view! {
               <label class="radio">
@@ -380,7 +381,10 @@ pub fn SecuritySection() -> impl IntoView {
                   prop:checked=move || draft.get().call_recording.recorders == checked_option
                   on:change=move |_| policy.edit(|value| value.call_recording.recorders = option.clone())
                 />
-                <span>{move || i18n.t(&label_key)}</span>
+                <span>
+                  <strong>{move || i18n.t(&label_key)}</strong>
+                  <span class="muted-text small">{move || i18n.t(&hint_key)}</span>
+                </span>
               </label>
             }
           })
@@ -499,6 +503,7 @@ pub fn SecuritySection() -> impl IntoView {
         />
         <SelectRow
           id="policy-approvals"
+          consequence=Signal::derive(move || i18n.t_count("policy-recovery-approvals-consequence", usize::from(draft.get().org_recovery.admins_required)))
           label=Signal::derive(move || i18n.t("policy-recovery-approvals"))
           options=approval_options
           selected=Signal::derive(move || draft.get().org_recovery.admins_required.to_string())
@@ -525,6 +530,7 @@ pub fn SecuritySection() -> impl IntoView {
         />
         <SelectRow
           id="policy-session"
+          consequence=Signal::derive(move || session_consequence(i18n, draft.get().session.maybe_max_age_hours))
           label=Signal::derive(move || i18n.t("policy-session"))
           options=session_options
           selected=Signal::derive(move || draft.get().session.maybe_max_age_hours.unwrap_or(0).to_string())
@@ -535,6 +541,7 @@ pub fn SecuritySection() -> impl IntoView {
         />
         <SelectRow
           id="policy-idle"
+          consequence=Signal::derive(move || idle_consequence(i18n, draft.get().session.maybe_idle_timeout_minutes))
           label=Signal::derive(move || i18n.t("policy-idle"))
           options=idle_options
           selected=Signal::derive(move || draft.get().session.maybe_idle_timeout_minutes.unwrap_or(0).to_string())
@@ -577,6 +584,7 @@ pub fn SecuritySection() -> impl IntoView {
         </div>
         <SelectRow
           id="policy-dm"
+          consequence=Signal::derive(move || guest_dm_consequence(i18n, draft.get().guests.maybe_dm_start.or_else(|| draft.get().guests.maybe_dm_only_with_shared_conversations.map(GuestDmStart::from_shared_only_flag))))
           label=Signal::derive(move || i18n.t("policy-guest-dm"))
           options=dm_options
           selected=Signal::derive(move || {
@@ -597,6 +605,7 @@ pub fn SecuritySection() -> impl IntoView {
         <p class="muted-text small">{move || i18n.t("policy-guest-dm-hint")}</p>
         <SelectRow
           id="policy-guest-expiry"
+          consequence=Signal::derive(move || guest_expiry_consequence(i18n, draft.get().guests.maybe_default_expiry_days))
           label=Signal::derive(move || i18n.t("policy-guest-expiry"))
           options=expiry_options
           selected=Signal::derive(move || draft.get().guests.maybe_default_expiry_days.unwrap_or(u32::MAX).to_string())
@@ -721,6 +730,7 @@ pub fn SecuritySection() -> impl IntoView {
         <legend>{move || i18n.t("policy-sharing")}</legend>
         <SelectRow
           id="policy-history"
+          consequence=Signal::derive(move || history_consequence(i18n, &draft.get().history_default))
           label=Signal::derive(move || i18n.t("policy-history"))
           options=history_options
           selected=Signal::derive(move || match draft.get().history_default {
@@ -739,6 +749,47 @@ pub fn SecuritySection() -> impl IntoView {
 
       <PolicyFooter policy=policy />
     </form>
+  }
+}
+
+/// What a session length means for people (issue #2360).
+fn session_consequence(i18n: I18n, maybe_hours: Option<u32>) -> String {
+  match maybe_hours {
+    None => i18n.t("policy-session-consequence-none"),
+    Some(hours) => i18n.t_count("policy-session-consequence", (hours / 24).max(1) as usize),
+  }
+}
+
+fn idle_consequence(i18n: I18n, maybe_minutes: Option<u32>) -> String {
+  match maybe_minutes {
+    None => i18n.t("policy-idle-consequence-none"),
+    Some(minutes) => i18n.t_count("policy-idle-consequence", minutes as usize),
+  }
+}
+
+fn guest_dm_consequence(i18n: I18n, maybe_start: Option<GuestDmStart>) -> String {
+  let key = match maybe_start {
+    None => "policy-guest-dm-consequence-default",
+    Some(GuestDmStart::Anyone) => "policy-guest-dm-consequence-anyone",
+    Some(GuestDmStart::Shared) => "policy-guest-dm-consequence-shared",
+    // An unknown (newer) value counts as the strictest, as the apps read it.
+    Some(_) => "policy-guest-dm-consequence-nobody",
+  };
+  i18n.t(key)
+}
+
+fn guest_expiry_consequence(i18n: I18n, maybe_days: Option<u32>) -> String {
+  match maybe_days {
+    None => i18n.t("policy-guest-expiry-consequence-default"),
+    Some(0) => i18n.t("policy-guest-expiry-consequence-never"),
+    Some(days) => i18n.t_count("policy-guest-expiry-consequence", days as usize),
+  }
+}
+
+fn history_consequence(i18n: I18n, history: &HistoryPolicy) -> String {
+  match history {
+    HistoryPolicy::Full => i18n.t("policy-history-consequence-full"),
+    _ => i18n.t("policy-history-consequence-from_join"),
   }
 }
 

@@ -480,12 +480,12 @@ policy-saving = Signing and publishing…
 
 ## Administration console: permissions, people, announcement, instance
 admin-permissions-title = Roles and permissions
-admin-permissions-subtitle = What each role may do. Changes apply at once; a channel can only take permissions away again.
+admin-permissions-subtitle = What each role may do. Changes are collected and described below the table; nothing changes until you apply them. A channel can only take permissions away again.
 permissions-scope = Applies to
 permissions-instance = The whole instance
 permissions-instance-hint = These changes apply everywhere unless a space overrides them.
 permissions-space-hint = Changes here apply only in this space and win over the instance.
-permissions-legend = Click a cell to grant or revoke. A highlighted cell is a change you made; click it again to go back to the default. The owner and the signing right cannot change.
+permissions-legend = Click a cell to grant or revoke. A marked cell differs from the default; click it again to go back. The owner and the signing right cannot change.
 permissions-permission = Permission
 permissions-granted = granted
 permissions-revoked = revoked
@@ -499,6 +499,26 @@ permissions-group-content = In conversations
 permissions-group-channel = Managing a channel
 permissions-group-space = Managing a space
 permissions-group-instance = Across the instance
+permissions-scope-locked = Apply or discard your changes before you switch.
+permissions-cell = { $permission }: { $role }
+permissions-default = default
+permissions-review = { $count ->
+    [one] Review the change
+   *[other] Review { $count } changes
+  }
+permissions-apply = Apply changes
+permissions-changes-instance = When you apply, everywhere unless a space says otherwise:
+permissions-changes-space = When you apply, in { $space } only:
+permissions-change-grant = { $role } get “{ $permission }”.
+permissions-change-revoke = { $role } lose “{ $permission }”.
+permissions-change-inherit-instance = { $role }: “{ $permission }” goes back to the built-in default.
+permissions-change-inherit-space = { $role }: “{ $permission }” follows the whole instance again.
+permissions-roles-guest = Guests
+permissions-roles-member = Members
+permissions-roles-space_admin = Space admins
+permissions-roles-channel_admin = Channel admins
+permissions-roles-admin = Admins
+permissions-roles-owner = Owners
 admin-moderation = Channel moderation
 admin-moderation-hint = Take permissions away from members and guests of this channel. Allowed means the scheme decides.
 admin-moderation-allowed = Allowed
@@ -514,6 +534,35 @@ policy-signin-hint = Applies to everybody. Sessions that exceed a limit end at t
 policy-mfa-hint = Identity provider tokens need a second factor; local accounts need an authenticator code.
 policy-password = Shortest password of local accounts
 policy-password-hint = Only for accounts that live in TeamCraft, such as local guests.
+policy-call-recording-off-hint = No one can record calls in TeamCraft.
+policy-call-recording-admins-hint = Owners and admins can record; everybody in the call sees that they do.
+policy-call-recording-members-hint = Every member can record; guests can't.
+policy-session-consequence-none = People stay signed in until they sign out, or until they are inactive for longer than allowed below.
+policy-session-consequence = { $count ->
+    [one] Everybody signs in again a day after signing in, whatever they are doing.
+   *[other] Everybody signs in again { $count } days after signing in, whatever they are doing.
+  }
+policy-idle-consequence-none = Nobody is signed out for being inactive.
+policy-idle-consequence = { $count ->
+    [one] Somebody who does nothing for a minute is signed out.
+   *[other] Somebody who does nothing for { $count } minutes is signed out.
+  }
+policy-recovery-approvals-consequence = { $count ->
+    [one] Access is restored once an admin approves.
+   *[other] Access is restored only once { $count } different admins have approved, so no single admin can take over an account.
+  }
+policy-guest-dm-consequence-default = The server's configuration file decides.
+policy-guest-dm-consequence-nobody = Guests can't write first. They answer when somebody writes to them.
+policy-guest-dm-consequence-shared = Guests can write first to people they already share a channel or conversation with.
+policy-guest-dm-consequence-anyone = Guests can write first to anybody they can find by name.
+policy-guest-expiry-consequence-default = The server's configuration file decides when a new guest's access ends.
+policy-guest-expiry-consequence-never = A new guest keeps access until somebody removes them.
+policy-guest-expiry-consequence = { $count ->
+    [one] A new guest's access ends a day after the invitation, unless a sponsor or admin extends it.
+   *[other] A new guest's access ends { $count } days after the invitation, unless a sponsor or admin extends it.
+  }
+policy-history-consequence-from_join = People added to a new channel read only what is written after they join.
+policy-history-consequence-full = People added to a new channel can also read everything written before they joined.
 policy-guests = Guests
 policy-guest-domains-hint = Guests can only be invited with these domains and their subdomains. Empty: the server file decides.
 policy-guest-dm = Guests may start direct messages with
@@ -1136,13 +1185,13 @@ health-check-oidc_sync = Identity provider sync
 health-check-oidc_sync-hint = Compares users with the identity provider on a schedule. Late after the set number of missed runs, three by default.
 oidc-sync-title = Identity provider sync
 settings-group-mappings = Groups from the identity provider
-settings-group-mappings-hint = Members of a group at the identity provider join these spaces and, of those spaces, these public channels, once each, with the sync's next run. Leaving the group removes nobody. Enter IDs one per line, as for the default spaces.
+settings-group-mappings-hint = Members of a group at the identity provider join these spaces and, of those spaces, these public channels, once each, with the sync's next run. Leaving the group removes nobody.
 settings-group-mappings-rule = Rule
 settings-group-mappings-path = Group path
 settings-group-mappings-path-error = Enter the group's path, for example /engineering.
-settings-group-mappings-spaces = Space IDs
-settings-group-mappings-spaces-error = Enter at least one space ID.
-settings-group-mappings-channels = Public channel IDs (optional)
+settings-group-mappings-spaces = Spaces
+settings-group-mappings-spaces-error = Choose at least one space.
+settings-group-mappings-channels = Public channels in these spaces (optional)
 settings-group-mappings-add = Add rule
 settings-group-mappings-remove = Remove rule
 provider-events-title = Identity provider events

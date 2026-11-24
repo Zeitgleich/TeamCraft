@@ -1,11 +1,12 @@
 //! Identity provider groups to spaces and public channels (docs/provisioning.md §5), on the console's
-//! settings page: one row per rule, the group's path and the IDs of its spaces and channels, as the
-//! default spaces above are entered.
+//! settings page: one row per rule, the group's path, and its spaces and channels chosen by name with
+//! the same pickers as the default spaces above (issue #2360). The rule still holds their IDs.
 
 use leptos::prelude::*;
 use teamcraft_proto::{ConversationId, GroupMappingRule, MAX_GROUP_MAPPINGS, Snowflake, SpaceId};
 
 use crate::components::admin_fields::{list_text, parse_list};
+use crate::components::admin_id_picker::{IdPicker, PickKind};
 use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::use_i18n;
@@ -175,27 +176,24 @@ fn RuleRow(key: u64, draft: RwSignal<Vec<RuleDraft>>, show_errors: RwSignal<bool
         id=path_id
         label="settings-group-mappings-path"
         placeholder="/engineering"
-        is_area=false
         value=Signal::derive(move || rule().path)
         on_input=move |text| edit(|rule, text| rule.path = text, text)
         error=Signal::derive(move || errors().maybe_path)
       />
-      <Field
+      <IdPicker
         id=spaces_id
         label="settings-group-mappings-spaces"
-        placeholder=""
-        is_area=true
+        kind=PickKind::Spaces
         value=Signal::derive(move || rule().spaces)
-        on_input=move |text| edit(|rule, text| rule.spaces = text, text)
+        on_input=Callback::new(move |text| edit(|rule, text| rule.spaces = text, text))
         error=Signal::derive(move || errors().maybe_spaces)
       />
-      <Field
+      <IdPicker
         id=channels_id
         label="settings-group-mappings-channels"
-        placeholder=""
-        is_area=true
+        kind=PickKind::PublicChannels
         value=Signal::derive(move || rule().channels)
-        on_input=move |text| edit(|rule, text| rule.channels = text, text)
+        on_input=Callback::new(move |text| edit(|rule, text| rule.channels = text, text))
         error=Signal::derive(move || errors().maybe_channels)
       />
       <p class="row-actions">
@@ -207,13 +205,12 @@ fn RuleRow(key: u64, draft: RwSignal<Vec<RuleDraft>>, show_errors: RwSignal<bool
   }
 }
 
-/// A labelled input or text area with its error below, marked for assistive technology.
+/// A labelled text input with its error below, marked for assistive technology.
 #[component]
 fn Field(
   id: String,
   label: &'static str,
   placeholder: &'static str,
-  is_area: bool,
   value: Signal<String>,
   on_input: impl Fn(String) + Copy + 'static,
   error: Signal<Option<&'static str>>,
@@ -221,38 +218,21 @@ fn Field(
   let i18n = use_i18n();
   let error_dom_id = error_id(&id);
   let described = error_dom_id.clone();
-  let input = if is_area {
-    view! {
-      <textarea
-        id=id.clone()
-        class="input"
-        rows="2"
-        prop:value=move || value.get()
-        aria-invalid=move || error.get().map(|_| "true")
-        aria-describedby=move || error.get().map(|_| described.clone())
-        on:input=move |ev| on_input(event_target_value(&ev))
-      ></textarea>
-    }
-    .into_any()
-  } else {
-    view! {
+  view! {
+    <div class="field">
+      <label for=id.clone()>{move || i18n.t(label)}</label>
       <input
-        id=id.clone()
+        id=id
         class="input"
         type="text"
+        autocomplete="off"
+        spellcheck="false"
         placeholder=placeholder
         prop:value=move || value.get()
         aria-invalid=move || error.get().map(|_| "true")
         aria-describedby=move || error.get().map(|_| described.clone())
         on:input=move |ev| on_input(event_target_value(&ev))
       />
-    }
-    .into_any()
-  };
-  view! {
-    <div class="field">
-      <label for=id>{move || i18n.t(label)}</label>
-      {input}
       {move || error.get().map(|key| view! { <p class="field-error" id=error_dom_id.clone()>{i18n.t(key)}</p> })}
     </div>
   }
