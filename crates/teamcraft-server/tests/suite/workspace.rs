@@ -282,6 +282,37 @@ async fn invalid_policies_are_rejected_without_changing_the_log() {
   )
   .await;
   assert_eq!(archive.status, StatusCode::BAD_REQUEST);
+  // Issue #2134: a pinned archive account doesn't switch it on yet either.
+  let pinned_archive = json!({"user_id": "9", "identity_fingerprint": b64(&[3u8; 32])});
+  let archive_named = append(
+    &app,
+    &alice,
+    &device,
+    path,
+    0,
+    &policy_payload(1, |p| {
+      p["compliance_archive"]["mode"] = json!("on");
+      p["compliance_archive"]["archive"] = pinned_archive.clone();
+    }),
+  )
+  .await;
+  assert_eq!(archive_named.status, StatusCode::BAD_REQUEST);
+  let one_approval = append(
+    &app,
+    &alice,
+    &device,
+    path,
+    0,
+    &policy_payload(1, |p| {
+      p["compliance_archive"]["exports"] = json!({"approvals_required": 1})
+    }),
+  )
+  .await;
+  assert_eq!(
+    one_approval.status,
+    StatusCode::BAD_REQUEST,
+    "one admin can't export alone"
+  );
   let unlimited = append(
     &app,
     &alice,

@@ -540,6 +540,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .compliance_archive
       .check_holds()
       .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
+    policy
+      .compliance_archive
+      .check_archive()
+      .map_err(|error| CoreError::InvalidRequest(error.to_string()))?;
+    // e2ee.md §11.6: the server refuses `on` until member apps enforce the archive.
+    if policy.compliance_archive.mode != teamcraft_proto::ComplianceArchiveMode::Off {
+      return Err(CoreError::InvalidRequest(
+        "compliance archiving can't be switched on yet".into(),
+      ));
+    }
     self.refuse_holds_on_meeting_chats(&state.policy, &policy)?;
     if policy.maybe_role_signing.is_none() {
       policy.maybe_role_signing = state.policy.maybe_role_signing.clone();

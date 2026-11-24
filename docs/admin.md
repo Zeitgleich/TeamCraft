@@ -1399,8 +1399,10 @@ hold.
   (data-export.md §4.2).
 
 The **compliance archive** (an archive device that keeps every covered conversation and exports it
-for auditors) is designed in data-export.md §4.1 and not built yet: `compliance_archive.mode` stays
-`off`, and the server refuses anything else.
+for auditors) is designed in data-export.md §4.1 and e2ee.md §11 (issue #2134). The policy can pin the
+archive account already; `compliance_archive.mode` stays `off`, and the server and the owners' apps
+refuse `on` until member apps add the archive. An export will need at least two admins' signatures
+(`exports.approvals_required`).
 
 ### 3.15 Link previews (issue #2107)
 

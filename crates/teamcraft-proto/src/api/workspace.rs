@@ -41,10 +41,12 @@ wire_enum! {
 }
 
 wire_enum! {
-  /// Compliance archive (e2ee.md §11). Reserved: only `off` is accepted until the vault node exists
-  /// (data-export.md §4.1); legal holds work without it.
+  /// Compliance archive (e2ee.md §11, data-export.md §4.1). The server refuses `on` until member
+  /// apps add the archive to covered conversations (issue #2134); legal holds work without it.
   pub enum ComplianceArchiveMode {
     Off => "off",
+    /// The vault node named in `archive` receives every covered conversation.
+    On => "on",
   }
 }
 
@@ -99,6 +101,27 @@ pub struct ComplianceArchivePolicy {
   /// listed in `legal_holds`. Owner apps before this re-sign the policy without it.
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub person_holds: Vec<crate::PersonLegalHold>,
+  /// The archive account the owners pinned (issue #2134); may be named before archiving is on.
+  #[serde(rename = "archive", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_archive: Option<crate::ArchiveAccount>,
+  /// Which conversations the archive covers while `mode` is `on`.
+  #[serde(default, skip_serializing_if = "is_default_coverage")]
+  pub covers: crate::ArchiveCoverage,
+  /// How exports from the archive are approved.
+  #[serde(default, skip_serializing_if = "crate::ExportPolicy::is_default")]
+  pub exports: crate::ExportPolicy,
+  /// How long the vault keeps its copy, in days, on top of the workspace retention; unlimited when
+  /// absent. A legal hold suspends it on the vault too.
+  #[serde(
+    rename = "archive_retention_days",
+    default,
+    skip_serializing_if = "Option::is_none"
+  )]
+  pub maybe_archive_retention_days: Option<u32>,
+}
+
+fn is_default_coverage(covers: &crate::ArchiveCoverage) -> bool {
+  *covers == crate::ArchiveCoverage::default()
 }
 
 impl ComplianceArchivePolicy {
@@ -127,6 +150,33 @@ impl ComplianceArchivePolicy {
   /// Checks both lists of holds ([`crate::check_legal_holds`]).
   pub fn check_holds(&self) -> Result<(), crate::LegalHoldError> {
     crate::check_legal_holds(&self.legal_holds, &self.person_holds)
+  }
+
+  /// Checks the archive settings ([`crate::check_archive_settings`]).
+  pub fn check_archive(&self) -> Result<(), crate::ComplianceArchiveError> {
+    crate::check_archive_settings(
+      &self.mode,
+      self.maybe_archive.as_ref(),
+      &self.covers,
+      &self.exports,
+      self.maybe_archive_retention_days,
+    )
+  }
+
+  /// The archive that receives a conversation of `kind` in `maybe_space`, if archiving is on and
+  /// covers it. An unknown mode counts as on when an archive is named: a newer owner app's mode is
+  /// read as archiving, so no member is left without the banner.
+  pub fn archive_covering(
+    &self,
+    kind: &crate::ConversationKind,
+    maybe_space: Option<crate::SpaceId>,
+  ) -> Option<&crate::ArchiveAccount> {
+    let archive = self.maybe_archive.as_ref()?;
+    let is_on = match self.mode {
+      ComplianceArchiveMode::On | ComplianceArchiveMode::Unknown(_) => true,
+      ComplianceArchiveMode::Off => false,
+    };
+    (is_on && self.covers.covers(kind, maybe_space)).then_some(archive)
   }
 }
 
@@ -1035,6 +1085,10 @@ impl Default for WorkspacePolicy {
         mode: ComplianceArchiveMode::Off,
         legal_holds: Vec::new(),
         person_holds: Vec::new(),
+        maybe_archive: None,
+        covers: crate::ArchiveCoverage::default(),
+        exports: crate::ExportPolicy::default(),
+        maybe_archive_retention_days: None,
       },
       maybe_role_signing: None,
       session: SessionPolicy::default(),

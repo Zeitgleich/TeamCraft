@@ -69,8 +69,9 @@ The choices that went beyond the original design draft are now part of `docs/e2e
 instead of MLS external proposals for v1, unsigned additions of further cross-signed devices of
 existing members, random 128-bit content key IDs, XChaCha20-Poly1305 only, the MLS credential as
 signed device certificate, the ciphersuite, and client-generated 128-bit message IDs bound in the
-AEAD. Still open in the docs: how the reserved `system:archive` credential (§11) maps onto the
-certificate-based credential.
+AEAD. The reserved `system:archive` credential (§11) stays unused: the archive's devices use the
+ordinary certificate-based credential, and the signed policy pins the archive account's identity key
+(e2ee.md §11.1).
 
 ## Open questions
 
