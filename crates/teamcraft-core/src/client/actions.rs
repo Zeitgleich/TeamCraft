@@ -266,12 +266,12 @@ pub fn forward_content(
     body: comment.to_string(),
     mentions: Vec::new(),
     meta: MessageMeta {
-      maybe_forwarded: Some(Forwarded {
+      maybe_forwarded: Some(Box::new(Forwarded {
         author_name,
         maybe_conversation_name,
         sent_at_ms: authorship.sent_at_ms,
         body,
-      }),
+      })),
       attachments,
       ..MessageMeta::default()
     },

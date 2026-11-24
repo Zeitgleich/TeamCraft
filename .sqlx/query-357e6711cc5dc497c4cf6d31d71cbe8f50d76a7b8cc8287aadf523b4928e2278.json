@@ -1,0 +1,30 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT ballot FROM poll_ballots\n           WHERE conversation_id = $1 AND message_id = $2 AND voter_user_id = $3",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ballot",
+        "type_info": "Bytea",
+        "origin": {
+          "Table": {
+            "table": "poll_ballots",
+            "name": "ballot"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "357e6711cc5dc497c4cf6d31d71cbe8f50d76a7b8cc8287aadf523b4928e2278"
+}

@@ -179,6 +179,9 @@ pub enum Table {
   /// Messages (`conversation/message`) and conversations (`conversation`) the local search index
   /// has to look at again, written with the message (`crate::search_index`). Native only.
   SearchQueue,
+  /// The ballot boxes of anonymous polls as this device read them last, decrypted and counted,
+  /// keyed `conversation/poll` (`crate::polls`, e2ee.md §4.12.1). Derived: read again from the server.
+  BallotBoxes,
 }
 
 /// A decrypted (or own, not yet sent) message, or a line this device derived itself: from a
@@ -527,7 +530,7 @@ pub struct MessageMeta {
   #[serde(default, skip_serializing_if = "is_false")]
   pub is_also_in_channel: bool,
   #[serde(rename = "forwarded", default, skip_serializing_if = "Option::is_none")]
-  pub maybe_forwarded: Option<Forwarded>,
+  pub maybe_forwarded: Option<Box<Forwarded>>,
   /// Files sent with the text (a `File` message carries a single file without text).
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub attachments: Vec<AttachmentRef>,
@@ -568,6 +571,11 @@ pub struct MessageMeta {
   /// [`MessageContent::PollVote`] and [`MessageContent::PollClose`] messages naming the message.
   #[serde(rename = "poll", default, skip_serializing_if = "Option::is_none")]
   pub maybe_poll: Option<Box<teamcraft_proto::PollSpec>>,
+  /// An anonymous poll (issue #2121, e2ee.md §4.12.1): the poll and the key its ballots are sealed
+  /// with. Not in `poll`, so versions that know only named polls show the text and never send a
+  /// signed vote that names the voter.
+  #[serde(rename = "anonymous_poll", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_anonymous_poll: Option<Box<crate::anonymous_poll::AnonymousPoll>>,
   /// A sticker (issue #2132, e2ee.md §4.14): the message's text is its fallback (`[Sticker: alt]`),
   /// which an older version, a push preview and a device without the picture show.
   #[serde(rename = "sticker", default, skip_serializing_if = "Option::is_none")]
@@ -2031,7 +2039,7 @@ pub fn pick_attached(
 
 impl Table {
   /// Every table; a new variant goes here too (stores that load by name skip unknown tables).
-  pub const ALL: [Self; 39] = [
+  pub const ALL: [Self; 40] = [
     Self::Account,
     Self::Spaces,
     Self::Conversations,
@@ -2071,6 +2079,7 @@ impl Table {
     Self::EntryTallies,
     Self::SearchIndex,
     Self::SearchQueue,
+    Self::BallotBoxes,
   ];
 
   /// The table with this [`Self::name`], if this version knows it.
@@ -2120,6 +2129,7 @@ impl Table {
       Self::EntryTallies => "entry_tallies",
       Self::SearchIndex => "search_index",
       Self::SearchQueue => "search_queue",
+      Self::BallotBoxes => "ballot_boxes",
     }
   }
 }

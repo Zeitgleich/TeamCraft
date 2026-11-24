@@ -307,7 +307,10 @@ private fun RecountAtClosing(viewModel: MainViewModel, poll: Poll) {
 @Composable
 private fun modeText(poll: Poll): String = buildList {
   add(stringResource(if (poll.isMultipleChoice) R.string.poll_multiple_choice else R.string.poll_single_choice))
-  if (!poll.areVotersShown) add(stringResource(R.string.poll_hidden_voters))
+  when {
+    poll.isAnonymous -> add(stringResource(R.string.poll_anonymous))
+    !poll.areVotersShown -> add(stringResource(R.string.poll_hidden_voters))
+  }
   when (poll.results) {
     "always" -> {}
     "after_vote" -> add(stringResource(R.string.poll_results_after_vote))

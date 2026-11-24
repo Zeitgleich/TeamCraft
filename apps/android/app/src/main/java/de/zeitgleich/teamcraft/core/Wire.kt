@@ -249,6 +249,9 @@ data class Poll(
 
   val areVotersShown: Boolean get() = voters == "shown"
 
+  /** Ballots go sealed to the server's ballot box; nobody's choice is named (e2ee.md §4.12.1). */
+  val isAnonymous: Boolean get() = voters == "anonymous"
+
   /** The options the user chose, by position. */
   val myChoices: List<Int> get() = options.indices.filter { options[it].isChosen }
 }

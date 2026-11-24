@@ -54,6 +54,7 @@ import uniffi.teamcraft_ffi.PollFieldItem
 import uniffi.teamcraft_ffi.PollProblemItem
 import uniffi.teamcraft_ffi.PollProblemKind
 import uniffi.teamcraft_ffi.PollResultsItem
+import uniffi.teamcraft_ffi.PollVotersItem
 import uniffi.teamcraft_ffi.PollLimitsItem
 import uniffi.teamcraft_ffi.pollPostAction
 import uniffi.teamcraft_ffi.pollProblems
@@ -73,6 +74,13 @@ enum class PollClosing(@StringRes val label: Int, val afterMs: Long?) {
 }
 
 /** When the poll shows its counts, as the sheet offers it. */
+/** Who sees the votes, with the hint each choice shows (anonymous: e2ee.md §4.12.1). */
+private val VOTERS = listOf(
+  Triple(PollVotersItem.SHOWN, R.string.poll_voters_shown, R.string.poll_voters_shown_hint),
+  Triple(PollVotersItem.HIDDEN, R.string.poll_hide_voters, R.string.poll_hide_voters_hint),
+  Triple(PollVotersItem.ANONYMOUS, R.string.poll_anonymous, R.string.poll_anonymous_hint),
+)
+
 private val RESULTS = listOf(
   PollResultsItem.ALWAYS to R.string.poll_results_always,
   PollResultsItem.AFTER_VOTE to R.string.poll_results_after_vote,
@@ -84,7 +92,7 @@ private val RESULTS = listOf(
  * or one, whether it names who voted, when it shows counts and when it ends. The rules are the
  * core's (`poll_problems`): every error at its field at once, the first one focused on a refused
  * send, and from then on they follow the input (forms.md). "Hide who voted" says it isn't
- * anonymous (e2ee.md §4.12).
+ * anonymous (e2ee.md §4.12); "Anonymous" says what the server still learns (§4.12.1).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -95,7 +103,7 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
   var question by rememberSaveable { mutableStateOf("") }
   val options = remember { mutableStateListOf<String>().apply { repeat(FIRST_OPTIONS) { add("") } } }
   var isMultiple by rememberSaveable { mutableStateOf(false) }
-  var hidesVoters by rememberSaveable { mutableStateOf(false) }
+  var voters by rememberSaveable { mutableStateOf(PollVotersItem.SHOWN) }
   var results by rememberSaveable { mutableStateOf(PollResultsItem.ALWAYS) }
   var closing by rememberSaveable { mutableStateOf(PollClosing.NEVER) }
   var closesAtMs by rememberSaveable { mutableStateOf(System.currentTimeMillis() + 24 * HOUR_MS) }
@@ -111,7 +119,7 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
     question = question,
     options = options.toList(),
     isMultipleChoice = isMultiple,
-    hidesVoters = hidesVoters,
+    voters = voters,
     results = results,
     maybeClosesAtMs = when (closing) {
       PollClosing.NEVER -> null
@@ -206,13 +214,26 @@ fun PollSheet(viewModel: MainViewModel, conversationId: String, onDismiss: () ->
         enabled = options.size < limits.maxOptions.toInt(),
       ) { Text(stringResource(R.string.poll_add_option)) }
       SwitchRow(stringResource(R.string.poll_multiple), isMultiple) { isMultiple = it }
-      SwitchRow(stringResource(R.string.poll_hide_voters), hidesVoters, hint = stringResource(R.string.poll_hide_voters_hint)) { hidesVoters = it }
       ChoiceGroup(
-        title = stringResource(R.string.poll_results),
-        choices = RESULTS.map { (mode, label) -> mode to stringResource(label) },
-        selected = results,
-        onSelect = { results = it },
+        title = stringResource(R.string.poll_voters),
+        choices = VOTERS.map { (mode, label, _) -> mode to stringResource(label) },
+        selected = voters,
+        onSelect = { voters = it },
       )
+      Text(
+        stringResource(VOTERS.first { it.first == voters }.third),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+      )
+      // An anonymous poll shows its counts only once closed: the core sends it so whatever is picked.
+      if (voters != PollVotersItem.ANONYMOUS) {
+        ChoiceGroup(
+          title = stringResource(R.string.poll_results),
+          choices = RESULTS.map { (mode, label) -> mode to stringResource(label) },
+          selected = results,
+          onSelect = { results = it },
+        )
+      }
       ChoiceGroup(
         title = stringResource(R.string.poll_closes),
         choices = PollClosing.entries.map { it to stringResource(it.label) },

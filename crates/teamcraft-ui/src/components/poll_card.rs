@@ -6,7 +6,7 @@
 //! §4.12).
 
 use leptos::prelude::*;
-use teamcraft_client_api::polls::{PollChoice, PollOptionView, PollResults, PollView};
+use teamcraft_client_api::polls::{PollChoice, PollOptionView, PollResults, PollView, PollVoters};
 
 use crate::components::icons::{Icon, IconName};
 use crate::i18n::{I18n, use_i18n};
@@ -176,8 +176,10 @@ fn mode_text(i18n: I18n, poll: &PollView) -> String {
     PollChoice::Multiple => i18n.t("poll-multiple-choice"),
     _ => i18n.t("poll-single-choice"),
   }];
-  if !poll.voters.are_shown() {
-    parts.push(i18n.t("poll-hidden-voters"));
+  match poll.voters {
+    PollVoters::Shown => {},
+    PollVoters::Anonymous => parts.push(i18n.t("poll-anonymous")),
+    _ => parts.push(i18n.t("poll-hidden-voters")),
   }
   match poll.results {
     PollResults::Always => {},

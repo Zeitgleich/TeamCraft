@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO poll_ballot_boxes (conversation_id, message_id, creator_user_id, closes_at)\n         VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a85d263ba9c398e8d15f6954c61f09b9d50f721ecfe794459a5f453b5c60e6d2"
+}

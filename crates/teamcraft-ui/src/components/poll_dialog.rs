@@ -18,7 +18,8 @@ use crate::state::use_app_state;
 
 const POLL_FORM_ID: &str = "poll-form";
 const QUESTION_FIELD: &str = "poll-question";
-const HIDE_VOTERS_HINT_ID: &str = "poll-hide-voters-hint";
+const VOTERS_FIELD: &str = "poll-voters";
+const VOTERS_HINT_ID: &str = "poll-voters-hint";
 const RESULTS_FIELD: &str = "poll-results";
 const CLOSING_SELECT: &str = "poll-closing";
 const CLOSING_FIELD: &str = "poll-closes-at";
@@ -35,7 +36,7 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
     question: RwSignal::new(String::new()),
     options: RwSignal::new(vec![String::new(); FIRST_OPTIONS]),
     is_multiple: RwSignal::new(false),
-    hides_voters: RwSignal::new(false),
+    voters: RwSignal::new(PollVoters::Shown),
     results: RwSignal::new(PollResults::Always),
     closing: RwSignal::new(Closing::Never),
     closes_at: RwSignal::new(crate::clock::format_local_datetime_input(
@@ -46,7 +47,7 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
     question,
     options,
     is_multiple,
-    hides_voters,
+    voters,
     results,
     closing,
     closes_at,
@@ -149,20 +150,43 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
             <input type="checkbox" prop:checked=move || is_multiple.get() on:change=move |ev| is_multiple.set(event_target_checked(&ev)) />
             <span>{move || i18n.t("poll-multiple")}</span>
           </label>
-          <label class="check-row">
-            <input
-              type="checkbox"
-              aria-describedby=HIDE_VOTERS_HINT_ID
-              prop:checked=move || hides_voters.get()
-              on:change=move |ev| hides_voters.set(event_target_checked(&ev))
-            />
-            <span>{move || i18n.t("poll-hide-voters")}</span>
-          </label>
-          <p class="hint" id=HIDE_VOTERS_HINT_ID>{move || i18n.t("poll-hide-voters-hint")}</p>
+          <label for=VOTERS_FIELD>{move || i18n.t("poll-voters")}</label>
+          <select
+            id=VOTERS_FIELD
+            class="input"
+            aria-describedby=VOTERS_HINT_ID
+            on:change=move |ev| {
+              let value = event_target_value(&ev);
+              if let Some((_, _, _, mode)) = VOTERS.iter().find(|(name, _, _, _)| *name == value) {
+                voters.set(mode.clone());
+              }
+            }
+          >
+            {VOTERS
+              .iter()
+              .map(|(value, key, _, mode)| {
+                let mode = mode.clone();
+                view! {
+                  <option value=*value selected=move || voters.get() == mode>{move || i18n.t(key)}</option>
+                }
+              })
+              .collect_view()}
+          </select>
+          <p class="hint" id=VOTERS_HINT_ID>
+            {move || {
+              let mode = voters.get();
+              VOTERS
+                .iter()
+                .find(|(_, _, _, candidate)| *candidate == mode)
+                .map(|(_, _, hint, _)| i18n.t(hint))
+                .unwrap_or_default()
+            }}
+          </p>
           <label for=RESULTS_FIELD>{move || i18n.t("poll-results")}</label>
           <select
             id=RESULTS_FIELD
             class="input"
+            prop:disabled=move || voters.get() == PollVoters::Anonymous
             on:change=move |ev| {
               let value = event_target_value(&ev);
               if let Some((_, _, mode)) = RESULTS.iter().find(|(name, _, _)| *name == value) {
@@ -175,7 +199,14 @@ pub fn PollDialog(conversation: ConversationId) -> impl IntoView {
               .map(|(value, key, mode)| {
                 let mode = mode.clone();
                 view! {
-                  <option value=*value selected=move || results.get() == mode>{move || i18n.t(key)}</option>
+                  <option
+                    value=*value
+                    selected=move || {
+                      if voters.get() == PollVoters::Anonymous { mode == PollResults::AfterClose } else { results.get() == mode }
+                    }
+                  >
+                    {move || i18n.t(key)}
+                  </option>
                 }
               })
               .collect_view()}
@@ -243,6 +274,28 @@ const CLOSINGS: [(&str, &str, Closing); 5] = [
   ("at", "poll-closes-at", Closing::At),
 ];
 
+/// Who sees the votes: value, i18n key, the hint's key and mode.
+const VOTERS: [(&str, &str, &str, PollVoters); 3] = [
+  (
+    "shown",
+    "poll-voters-shown",
+    "poll-voters-shown-hint",
+    PollVoters::Shown,
+  ),
+  (
+    "hidden",
+    "poll-hide-voters",
+    "poll-hide-voters-hint",
+    PollVoters::Hidden,
+  ),
+  (
+    "anonymous",
+    "poll-anonymous",
+    "poll-anonymous-hint",
+    PollVoters::Anonymous,
+  ),
+];
+
 /// The results choices of the select: value, i18n key and mode.
 const RESULTS: [(&str, &str, PollResults); 3] = [
   ("always", "poll-results-always", PollResults::Always),
@@ -266,11 +319,7 @@ fn draft_at(fields: &Fields, now_ms: i64) -> PollDraft {
     } else {
       PollChoice::Single
     },
-    voters: if fields.hides_voters.get() {
-      PollVoters::Hidden
-    } else {
-      PollVoters::Shown
-    },
+    voters: fields.voters.get(),
     results: fields.results.get(),
     maybe_closes_at_ms,
   }
@@ -282,7 +331,7 @@ struct Fields {
   question: RwSignal<String>,
   options: RwSignal<Vec<String>>,
   is_multiple: RwSignal<bool>,
-  hides_voters: RwSignal<bool>,
+  voters: RwSignal<PollVoters>,
   results: RwSignal<PollResults>,
   closing: RwSignal<Closing>,
   /// The date field's value (`2026-10-22T14:30`), used with [`Closing::At`].

@@ -94,7 +94,11 @@ struct PollCardView: View {
   /// "Choose one · Names hidden · After voting": how the poll is answered and what it shows.
   private var modeText: String {
     var parts = [String(localized: poll.isMultipleChoice ? "poll_multiple_choice" : "poll_single_choice")]
-    if !poll.areVotersShown { parts.append(String(localized: "poll_hidden_voters")) }
+    if poll.isAnonymous {
+      parts.append(String(localized: "poll_anonymous"))
+    } else if !poll.areVotersShown {
+      parts.append(String(localized: "poll_hidden_voters"))
+    }
     switch poll.results {
     case "always": break
     case "after_vote": parts.append(String(localized: "poll_results_after_vote"))
@@ -237,7 +241,8 @@ private enum PollSheetField: Hashable {
 /// Makes a poll (#205), as the web dialog and Android do: a question, two or more options, several
 /// answers or one, whether it names who voted, when it shows counts and when it ends. The rules are
 /// the core's (`pollProblems`): every error at its field at once, the first one focused on a
-/// refused send, then they follow the input (forms.md). "Hide who voted" says it isn't anonymous.
+/// refused send, then they follow the input (forms.md). "Hide who voted" says it isn't anonymous;
+/// "Anonymous" says what the server still learns (e2ee.md §4.12.1).
 struct PollSheet: View {
   @Environment(AppModel.self) private var model
   @Environment(\.dismiss) private var dismiss
@@ -246,7 +251,7 @@ struct PollSheet: View {
   @State private var question = ""
   @State private var options = ["", ""]
   @State private var isMultiple = false
-  @State private var hidesVoters = false
+  @State private var voters = PollVotersItem.shown
   @State private var results = PollResultsItem.always
   @State private var closing = PollClosing.never
   @State private var closesAt = Date().addingTimeInterval(86_400)
@@ -321,15 +326,22 @@ struct PollSheet: View {
       }
       Section {
         Toggle("poll_multiple", isOn: $isMultiple)
-        Toggle("poll_hide_voters", isOn: $hidesVoters)
+        Picker("poll_voters", selection: $voters) {
+          Text("poll_voters_shown").tag(PollVotersItem.shown)
+          Text("poll_hide_voters").tag(PollVotersItem.hidden)
+          Text("poll_anonymous").tag(PollVotersItem.anonymous)
+        }
       } footer: {
-        Text("poll_hide_voters_hint")
+        Text(votersHint)
       }
       Section {
-        Picker("poll_results", selection: $results) {
-          Text("poll_results_always").tag(PollResultsItem.always)
-          Text("poll_results_after_vote").tag(PollResultsItem.afterVote)
-          Text("poll_results_after_close").tag(PollResultsItem.afterClose)
+        // An anonymous poll shows its counts only once closed (e2ee.md §4.12.1).
+        if voters != .anonymous {
+          Picker("poll_results", selection: $results) {
+            Text("poll_results_always").tag(PollResultsItem.always)
+            Text("poll_results_after_vote").tag(PollResultsItem.afterVote)
+            Text("poll_results_after_close").tag(PollResultsItem.afterClose)
+          }
         }
         Picker("poll_closes", selection: $closing) {
           ForEach(PollClosing.allCases) { choice in
@@ -378,11 +390,20 @@ struct PollSheet: View {
       default: closing.maybeAfter.map { nowMs + Int64($0 * 1000) }
       }
     return PollDraftItem(
-      question: question, options: options, isMultipleChoice: isMultiple, hidesVoters: hidesVoters,
+      question: question, options: options, isMultipleChoice: isMultiple, voters: voters,
       results: results, maybeClosesAtMs: maybeClosesAtMs)
   }
 
   private var nowMs: Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
+
+  /// What the chosen mode promises, and for anonymous polls what the server still learns.
+  private var votersHint: LocalizedStringKey {
+    switch voters {
+    case .shown: "poll_voters_shown_hint"
+    case .hidden: "poll_hide_voters_hint"
+    case .anonymous: "poll_anonymous_hint"
+    }
+  }
 
   private func currentProblems() -> [PollProblemItem] {
     let now = nowMs

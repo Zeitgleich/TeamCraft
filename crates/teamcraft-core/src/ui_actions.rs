@@ -416,16 +416,37 @@ impl<S: LocalStore> CoreChatBackend<S> {
       tracing::warn!(conversation_id = %conversation, %error, "not sending a poll the limits refuse");
       return;
     }
-    let meta = MessageMeta {
-      maybe_poll: Some(Box::new(poll.spec)),
-      ..MessageMeta::default()
+    let is_anonymous = poll.spec.voters == teamcraft_proto::PollVoters::Anonymous;
+    let meta = if is_anonymous {
+      // e2ee.md §4.12.1: a fresh ballot key, and not in `poll`, so versions that only know named
+      // polls show the text instead of sending signed votes.
+      MessageMeta {
+        maybe_anonymous_poll: Some(Box::new(crate::anonymous_poll::AnonymousPoll::new(
+          poll.spec,
+          &mut rand_core::OsRng,
+        ))),
+        ..MessageMeta::default()
+      }
+    } else {
+      MessageMeta {
+        maybe_poll: Some(Box::new(poll.spec)),
+        ..MessageMeta::default()
+      }
     };
     let content = MessageContent::Text {
       body: poll.fallback,
       mentions: Vec::new(),
       meta,
     };
-    self.enqueue(conversation, None, content);
+    let Some(sent) = self.enqueue(conversation, None, content) else {
+      return;
+    };
+    if is_anonymous {
+      self.command(CoreCommand::Ballot(crate::client::BallotCommand::Open {
+        conversation,
+        poll: sent,
+      }));
+    }
   }
 
   /// Sends a sticker (issue #2132, e2ee.md §4.14): a text message whose text is the fallback that
@@ -467,6 +488,15 @@ impl<S: LocalStore> CoreChatBackend<S> {
       tracing::warn!(conversation_id = %conversation, "not sending a vote the poll doesn't take");
       return;
     }
+    // e2ee.md §4.12.1: an anonymous poll's vote goes to its ballot box sealed, never as a message.
+    if crate::polls::anonymous_poll_of(&poll).is_some() {
+      self.command(CoreCommand::Ballot(crate::client::BallotCommand::Vote {
+        conversation,
+        poll: poll.client_message_id,
+        choices,
+      }));
+      return;
+    }
     let content = MessageContent::PollVote {
       target: poll.client_message_id,
       choices,
@@ -485,6 +515,13 @@ impl<S: LocalStore> CoreChatBackend<S> {
       poll.sender_user_id == self.me_id() || self.poll_moderators(conversation).contains(&self.me_id());
     if !is_allowed || crate::polls::poll_of(&poll).is_none() {
       tracing::warn!(conversation_id = %conversation, "only the poll's sender or a moderator closes it");
+      return;
+    }
+    if crate::polls::anonymous_poll_of(&poll).is_some() {
+      self.command(CoreCommand::Ballot(crate::client::BallotCommand::Close {
+        conversation,
+        poll: poll.client_message_id,
+      }));
       return;
     }
     let content = MessageContent::PollClose {

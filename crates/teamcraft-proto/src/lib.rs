@@ -115,10 +115,10 @@ pub use permission::{
   is_allowed,
 };
 pub use poll::{
-  DEFAULT_MAX_POLL_OPEN_DAYS, DEFAULT_MAX_POLL_OPTION_CHARS, DEFAULT_MAX_POLL_OPTIONS,
-  DEFAULT_MAX_POLL_QUESTION_CHARS, MAX_POLL_OPEN_DAYS_LIMIT, MAX_RECEIVED_POLL_OPTIONS,
-  MAX_RECEIVED_POLL_TEXT_CHARS, MIN_POLL_OPTIONS, PollChoice, PollError, PollLimits, PollResults, PollSpec,
-  PollVoters, closing_problem,
+  BallotBoxResponse, CastBallotRequest, DEFAULT_MAX_POLL_OPEN_DAYS, DEFAULT_MAX_POLL_OPTION_CHARS,
+  DEFAULT_MAX_POLL_OPTIONS, DEFAULT_MAX_POLL_QUESTION_CHARS, MAX_BALLOT_BYTES, MAX_POLL_OPEN_DAYS_LIMIT,
+  MAX_RECEIVED_POLL_OPTIONS, MAX_RECEIVED_POLL_TEXT_CHARS, MIN_POLL_OPTIONS, OpenBallotBoxRequest,
+  PollChoice, PollError, PollLimits, PollResults, PollSpec, PollVoters, closing_problem,
 };
 pub use rendezvous::{RENDEZVOUS_PATH, RendezvousClientMessage, RendezvousServerMessage};
 pub use role::Role;

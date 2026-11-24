@@ -13,6 +13,11 @@
   <string name="poll_multiple">Mehrere Antworten erlauben</string>
   <string name="poll_hide_voters">Verbergen, wer abgestimmt hat</string>
   <string name="poll_hide_voters_hint">Die Umfrage zeigt nur die Zahlen. Anonym ist sie nicht: Die App jedes Mitglieds erhält jede Stimme mit ihrem Absender.</string>
+  <string name="poll_voters">Wer die Stimmen sieht</string>
+  <string name="poll_voters_shown">Zeigen, wer abgestimmt hat</string>
+  <string name="poll_voters_shown_hint">Alle sehen, wer welche Option gewählt hat.</string>
+  <string name="poll_anonymous">Anonym</string>
+  <string name="poll_anonymous_hint">Niemand in der Unterhaltung, auch du nicht, sieht, wer wofür gestimmt hat. Der Server weiß, wer abgestimmt hat, aber nicht wofür. Die Ergebnisse erscheinen, wenn die Umfrage endet.</string>
   <string name="poll_results">Ergebnisse zeigen</string>
   <string name="poll_results_always">Immer</string>
   <string name="poll_results_after_vote">Nach der Abstimmung</string>

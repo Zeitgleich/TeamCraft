@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO poll_ballots (conversation_id, message_id, voter_user_id, ballot)\n             VALUES ($1, $2, $3, $4)\n             ON CONFLICT (conversation_id, message_id, voter_user_id) DO UPDATE SET ballot = EXCLUDED.ballot",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "deb1f99a6cacd937f6f2b7419cd2ec91acf770e20aa8e8f8402264c5588a008d"
+}

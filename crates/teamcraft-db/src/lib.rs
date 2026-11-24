@@ -46,6 +46,7 @@ mod oidc_sync;
 mod org_background;
 mod org_recovery;
 mod permission_override;
+mod poll_ballot;
 mod profile;
 mod provider_events;
 mod push;
@@ -146,6 +147,7 @@ pub use org_recovery::{
   ApprovalOutcome, NewRecoveryRequest, ShareOutcome, StoredApproval, StoredRecoveryRequest, StoredShare,
 };
 pub use permission_override::{OverrideEdit, StoredOverride};
+pub use poll_ballot::{BallotOutcome, ClosedBallotBox, StoredBallotBox};
 pub use profile::{StoredAvatar, StoredProfile, StoredWorkingHours};
 pub use provider_events::ProviderEventHook;
 pub use push::{PushDeviceRow, PushRecipientRow};

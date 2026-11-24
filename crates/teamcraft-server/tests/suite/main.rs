@@ -71,6 +71,7 @@ mod perf_gateway;
 mod perf_history;
 mod permission_updates;
 mod personal_data;
+mod poll_ballots;
 mod precreation;
 mod presence_derived;
 mod profiles;

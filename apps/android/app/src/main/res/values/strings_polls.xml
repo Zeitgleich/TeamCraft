@@ -13,6 +13,11 @@
   <string name="poll_multiple">Allow several answers</string>
   <string name="poll_hide_voters">Hide who voted</string>
   <string name="poll_hide_voters_hint">The poll shows only counts. It isn\'t anonymous: every member\'s app still receives each vote with its sender.</string>
+  <string name="poll_voters">Who sees the votes</string>
+  <string name="poll_voters_shown">Show who voted</string>
+  <string name="poll_voters_shown_hint">Everybody sees who chose each option.</string>
+  <string name="poll_anonymous">Anonymous</string>
+  <string name="poll_anonymous_hint">Nobody in the conversation, you included, sees who voted for what. The server knows who voted, not what. Results show when the poll closes.</string>
   <string name="poll_results">Show results</string>
   <string name="poll_results_always">Always</string>
   <string name="poll_results_after_vote">After voting</string>

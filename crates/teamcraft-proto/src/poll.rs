@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::Base64Bytes;
 use crate::wire_enum::wire_enum;
 
 /// Fewest options a poll has.
@@ -25,6 +26,8 @@ pub const DEFAULT_MAX_POLL_OPTION_CHARS: usize = 100;
 pub const DEFAULT_MAX_POLL_OPEN_DAYS: u32 = 365;
 /// Largest value an admin may set for [`PollLimits::max_open_days`].
 pub const MAX_POLL_OPEN_DAYS_LIMIT: u32 = 3_650;
+/// Largest ballot the server's ballot box takes, in bytes (a ballot of this version is 45).
+pub const MAX_BALLOT_BYTES: usize = 64;
 /// Milliseconds of a day, for [`PollLimits::max_open_days`].
 const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
 
@@ -64,6 +67,9 @@ wire_enum! {
     Shown => "shown",
     /// The poll shows only counts. A member's device still knows who voted for what.
     Hidden => "hidden",
+    /// Ballots go to the server's ballot box sealed, and members get them without their senders
+    /// (e2ee.md §4.12.1). Only in a message's `anonymous_poll`, never in `poll`.
+    Anonymous => "anonymous",
   }
 }
 
@@ -80,6 +86,38 @@ wire_enum! {
     /// Once the poll is closed.
     AfterClose => "after_close",
   }
+}
+
+/// Opens the ballot box of an anonymous poll; sent by the poll's sender once the poll has its
+/// server ID (e2ee.md §4.12.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct OpenBallotBoxRequest {
+  /// When the box closes by itself, in Unix milliseconds: the poll's `closes_at`.
+  #[serde(rename = "closes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_closes_at_ms: Option<i64>,
+}
+
+/// The caller's sealed ballot, replacing an earlier one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct CastBallotRequest {
+  pub ballot: Base64Bytes,
+}
+
+/// An anonymous poll's ballot box as a member sees it. Ballots carry no sender; they show only
+/// once the box is closed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct BallotBoxResponse {
+  pub ballot_count: u32,
+  pub is_closed: bool,
+  #[serde(rename = "closes_at", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_closes_at_ms: Option<i64>,
+  /// The caller's own ballot while the box is open; the server forgets whose ballot is whose
+  /// when it closes.
+  #[serde(rename = "mine", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_mine: Option<Base64Bytes>,
+  /// Every ballot, sorted by their bytes, once the box is closed; empty while open.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub ballots: Vec<Base64Bytes>,
 }
 
 /// How large a poll a sender may make. Receivers only apply the wider

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM poll_ballot_boxes b WHERE b.conversation_id = $1 AND b.message_id < $2\n       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = b.message_id AND m.conversation_id = b.conversation_id)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f5afcc42c6b44940d5031e3caaf6b5eb500d282b64a2ab016ad7f90455fbdecc"
+}

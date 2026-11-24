@@ -1120,6 +1120,7 @@ fn classify(table: Table, key: &str) -> Change {
     Table::Presence => key.parse().map_or(Change::Nothing, Change::User),
     Table::AnnouncedPresence => key.parse().map_or(Change::Live, Change::Announced),
     Table::Unread | Table::Threads | Table::ReadReceipts => Change::Live,
+    Table::BallotBoxes => conversation_of(key),
     Table::PinnedIdentities => Change::Security,
     // The "catching up" marks and the unseen reactions; the rest are sync cursors.
     Table::SyncState => key

@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT (closed_at IS NOT NULL OR COALESCE(closes_at <= $3, false)) AS \"is_closed!\"\n         FROM poll_ballot_boxes WHERE conversation_id = $1 AND message_id = $2 FOR UPDATE",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_closed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "7541ee986d0f58a36ebf306e1753c3d3b57b173bf45305a1a0b49a9c8c5c86a6"
+}

@@ -563,12 +563,24 @@ struct Conversation {
   /// How far each member read each thread.
   thread_read_positions: HashMap<(UserId, ThreadId), MessageId>,
   pinned: HashSet<MessageId>,
+  /// Ballot boxes of anonymous polls, by poll message (e2ee.md §4.12.1).
+  ballot_boxes: BTreeMap<MessageId, FakeBallotBox>,
   /// The newest MLS group information and the epoch it is for.
   maybe_group_info: Option<(u64, Base64Bytes)>,
   /// The signed channel role log (issue #380), oldest first.
   role_log: Vec<teamcraft_proto::ChannelRoleLogEntryResponse>,
   /// The creator of a channel created anchored: the only one whose first role entry is taken.
   maybe_anchored_founder: Option<UserId>,
+}
+
+/// A ballot box like the server's: one ballot per voter while open, voters forgotten on close.
+struct FakeBallotBox {
+  creator: UserId,
+  maybe_closes_at_ms: Option<i64>,
+  is_closed: bool,
+  by_voter: BTreeMap<UserId, Base64Bytes>,
+  /// Ballots whose voters were forgotten.
+  anonymous: Vec<Base64Bytes>,
 }
 
 struct Session {
@@ -2561,6 +2573,14 @@ fn sent_request(entry: &ScheduledMessageResponse) -> SendMessageRequest {
     is_urgent: entry.is_urgent,
     is_channel_mention: entry.is_channel_mention,
     maybe_deletes: None,
+  }
+}
+
+impl FakeBallotBox {
+  fn close(&mut self) {
+    self.is_closed = true;
+    let voters = std::mem::take(&mut self.by_voter);
+    self.anonymous.extend(voters.into_values());
   }
 }
 
@@ -5866,6 +5886,95 @@ impl ServerApi for FakeServerApi {
     })
   }
 
+  async fn open_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    request: &teamcraft_proto::OpenBallotBoxRequest,
+  ) -> Result<(), ApiError> {
+    self.with(|state, me| {
+      let entry = state.member_conversation_mut(conversation, me)?;
+      let sender = entry
+        .messages
+        .iter()
+        .find(|stored| stored.id == message)
+        .map(|stored| stored.sender_user_id)
+        .ok_or_else(|| ApiError::status(400, ErrorCode::InvalidRequest, "unknown message"))?;
+      if sender != me {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "not the poll's sender",
+        ));
+      }
+      if entry.ballot_boxes.contains_key(&message) {
+        return Ok(());
+      }
+      entry.ballot_boxes.insert(
+        message,
+        FakeBallotBox {
+          creator: me,
+          maybe_closes_at_ms: request.maybe_closes_at_ms,
+          is_closed: false,
+          by_voter: BTreeMap::new(),
+          anonymous: Vec::new(),
+        },
+      );
+      state.announce_ballot_box(conversation, message);
+      Ok(())
+    })
+  }
+
+  async fn ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    self.with(|state, me| state.ballot_box_response(conversation, message, me))
+  }
+
+  async fn set_ballot(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_request: Option<&teamcraft_proto::CastBallotRequest>,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    self.with(|state, me| {
+      let now_ms = state.now_ms();
+      let ballot_box = state.ballot_box_mut(conversation, message, me, now_ms)?;
+      if ballot_box.is_closed {
+        return Err(ApiError::status(409, ErrorCode::PollClosed, "the poll is closed"));
+      }
+      match maybe_request {
+        Some(request) => ballot_box.by_voter.insert(me, request.ballot.clone()),
+        None => ballot_box.by_voter.remove(&me),
+      };
+      state.announce_ballot_box(conversation, message);
+      state.ballot_box_response(conversation, message, me)
+    })
+  }
+
+  async fn close_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    self.with(|state, me| {
+      let now_ms = state.now_ms();
+      let ballot_box = state.ballot_box_mut(conversation, message, me, now_ms)?;
+      if ballot_box.creator != me {
+        return Err(ApiError::status(
+          403,
+          ErrorCode::Forbidden,
+          "not the poll's sender",
+        ));
+      }
+      ballot_box.close();
+      state.announce_ballot_box(conversation, message);
+      state.ballot_box_response(conversation, message, me)
+    })
+  }
+
   /// Like the server: the sender and the acknowledging user's devices hear about it.
   async fn acknowledge_message(
     &self,
@@ -8232,6 +8341,7 @@ impl State {
         reactions_seen: HashMap::new(),
         thread_read_positions: HashMap::new(),
         pinned: HashSet::new(),
+        ballot_boxes: BTreeMap::new(),
         maybe_group_info: None,
         role_log: Vec::new(),
         maybe_anchored_founder: None,
@@ -8432,6 +8542,67 @@ impl State {
       .get(&user)
       .and_then(|settings| settings.maybe_send_delivery_receipts)
       .unwrap_or(true)
+  }
+
+  /// The open or closed box of the poll `message`, closed first when its time passed at `now_ms`.
+  fn ballot_box_mut(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    me: UserId,
+    now_ms: i64,
+  ) -> Result<&mut FakeBallotBox, ApiError> {
+    let ballot_box = self
+      .member_conversation_mut(conversation, me)?
+      .ballot_boxes
+      .get_mut(&message)
+      .ok_or_else(|| ApiError::status(404, ErrorCode::BallotBoxNotFound, "no ballot box"))?;
+    if ballot_box
+      .maybe_closes_at_ms
+      .is_some_and(|closes_at| closes_at <= now_ms)
+    {
+      ballot_box.close();
+    }
+    Ok(ballot_box)
+  }
+
+  fn ballot_box_response(
+    &mut self,
+    conversation: ConversationId,
+    message: MessageId,
+    me: UserId,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    let now_ms = self.now_ms();
+    let ballot_box = self.ballot_box_mut(conversation, message, me, now_ms)?;
+    let mut ballots: Vec<Base64Bytes> = Vec::new();
+    if ballot_box.is_closed {
+      ballots.clone_from(&ballot_box.anonymous);
+      ballots.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
+    }
+    Ok(teamcraft_proto::BallotBoxResponse {
+      ballot_count: u32::try_from(ballot_box.by_voter.len() + ballot_box.anonymous.len()).unwrap_or(u32::MAX),
+      is_closed: ballot_box.is_closed,
+      maybe_closes_at_ms: ballot_box.maybe_closes_at_ms,
+      maybe_mine: ballot_box.by_voter.get(&me).cloned(),
+      ballots,
+    })
+  }
+
+  fn announce_ballot_box(&mut self, conversation: ConversationId, message: MessageId) {
+    let Ok(found) = self.conversation(conversation) else {
+      return;
+    };
+    let Some(ballot_box) = found.ballot_boxes.get(&message) else {
+      return;
+    };
+    let event = GatewayEvent::BallotBoxChanged {
+      conversation_id: conversation,
+      message_id: message,
+      ballot_count: u32::try_from(ballot_box.by_voter.len() + ballot_box.anonymous.len()).unwrap_or(u32::MAX),
+      is_closed: ballot_box.is_closed,
+    };
+    let members: Vec<UserId> = found.members.keys().copied().collect();
+    self.publish(members, &event);
   }
 
   fn publish(&mut self, users: impl IntoIterator<Item = UserId>, event: &GatewayEvent) {

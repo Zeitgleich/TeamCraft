@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE poll_ballot_boxes SET closed_at = LEAST($3, COALESCE(closes_at, $3))\n       WHERE conversation_id = $1 AND message_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "34edf8808476d3eb885bf8178b724ecaba52d5b229be2caa814922e962dbae60"
+}

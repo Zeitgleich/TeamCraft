@@ -1,0 +1,25 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT EXISTS (SELECT 1 FROM poll_ballot_boxes WHERE conversation_id = $1 AND message_id = $2\n           AND closed_at IS NULL AND closes_at <= $3) AS \"is_due!\"",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "is_due!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2da9582724f50e575586de4f75d4d57a9cb2b0df120f1c980a70a095a0af8dfa"
+}

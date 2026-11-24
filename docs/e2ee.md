@@ -5308,10 +5308,9 @@ isn't anonymous: every member's app still receives each vote with its sender"):
 | The server                             | that the voter sent some message to the conversation at that time (votes look like any message), not that it is a vote, for which poll, or what                                                                    |
 | Someone removed before the vote        | nothing (§4.2)                                                                                                                                                                                                     |
 
-Real anonymity towards other members would need votes that don't carry the voter's identity, while
-MLS and the sender signatures authenticate every message by its sender. The ways out (blind- or
-ring-signature tokens issued per voter, or votes sealed to the creator alone, who then learns them)
-are not built; the label "anonymous" is reserved for one of them, after a review.
+Real anonymity towards other members needs votes that don't carry the voter's identity, while
+MLS and the sender signatures authenticate every message by its sender. Anonymous polls (§4.12.1)
+take their votes out of MLS for that; the label "anonymous" belongs to them alone.
 
 **Versions before polls.** The poll is a text message, so they show its text: the question, the
 options as a list, and "Update TeamCraft to vote in this poll", in the sender's language. They don't
@@ -5324,6 +5323,112 @@ loads the history anew does.
 **Not done yet:** a reminder before closing, exporting the results as text, receivers ignoring polls
 of senders without `create_poll`, and keeping the role history so a moderator's close counts by the
 role at its server time.
+
+#### 4.12.1 Anonymous polls (issue #2121)
+
+**What "anonymous" can mean here.** Every frame a device sends reaches the server over its signed-in
+connection, so the server always knows which account sent it; and every MLS message names its
+sender to every member (the sender's leaf in the MLS sender data, and the sender signature of
+§4.4). No encoding of a vote inside an MLS message hides the voter from the other members. An
+anonymous poll therefore makes a different trade than a hidden one:
+
+- **Members, the poll's creator included, can't tell who voted for what.** Ballots don't travel
+  through MLS: each is sealed under a key only the conversation's members hold and handed to a
+  ballot box on the server, which gives members the ballots without their senders.
+- **The server learns more than for any other poll:** that this message is an anonymous poll, its
+  closing time, and which account handed in a ballot when, but not the choice, which it can't read.
+- **The server and a member together can tell** who voted for what while the poll is open: the
+  server knows whose ciphertext it is, the member can read it. When the poll closes, the server
+  drops the link between ballots and voters, so from then on only its backups and logs could
+  still tell.
+
+That is the promise and its limit; the apps say both (below). Blind- or ring-signature schemes that
+would hide the voter from the server too are not built (see "Rejected" below).
+
+**Wire format.** The poll is a text message whose `meta.anonymous_poll` holds the poll's fields of
+§4.12 (`question`, `options`, `choice`, `closes_at`), `voters: anonymous`, `results: after_close`,
+and `ballot_key`: 32 random bytes (base64url) the creator's device draws for this poll alone. It is
+deliberately not `meta.poll`: a version that knows polls but not anonymous ones would otherwise
+take votes as signed `poll_vote` messages and give the voter away. Such versions, and those before
+polls, show the message's text ("Update TeamCraft to vote in this poll"). A device ignores
+`voters: anonymous` inside `meta.poll`, and `poll_vote`/`poll_close` messages naming an anonymous
+poll: neither counts.
+
+A ballot is `version (1) || nonce (24) || XChaCha20-Poly1305(ballot_key, choices)` with the
+associated data `label("TeamCraft-v1 poll ballot") || version || conversation ID || the poll's client
+message ID`
+(`teamcraft-crypto::poll_ballot`). `choices` is a fixed-size 4-byte bitmap of the chosen option
+positions (at most 32 options, §4.12), so every ballot of a poll has the same length whatever it
+chooses. Only primitives the crate already uses for messages are involved: a random key, the AEAD,
+a random nonce per ballot.
+
+**The ballot box (server).** Keyed by the poll's server message ID:
+
+| Request                                        | Who                                                | What the server does                                                                                                                            |
+|------------------------------------------------|----------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------|
+| `PUT …/messages/{id}/ballot-box { closes_at }` | the poll's sender                                  | opens the box once; a second call changes nothing                                                                                               |
+| `PUT …/messages/{id}/ballot-box/ballot`        | a member of the conversation                       | keeps this ballot as the caller's one ballot, replacing an earlier one; refused once closed                                                     |
+| `DELETE …/messages/{id}/ballot-box/ballot`     | a member                                           | withdraws the caller's ballot while open                                                                                                        |
+| `POST …/messages/{id}/ballot-box/close`        | the poll's sender, or who may delete others' posts | closes the box                                                                                                                                  |
+| `GET …/messages/{id}/ballot-box`               | a member                                           | the number of ballots, whether closed, the caller's own ballot while open, and every ballot once closed, sorted by their bytes, without senders |
+
+The box closes by itself at `closes_at` by the server's clock, like §4.12. Closing (by either way)
+sets the box's `closed_at` and erases the voter of every ballot in the same transaction. Every
+change sends the conversation's members a `ballot_box_changed` gateway event with the count and
+whether it is closed; a device takes the count from the event and reads the box when the poll
+first shows, when the event says it closed, and when the closing time passed on its clock. The
+user's own choice made on another of their devices shows after the next read. Ballots are at most 64 bytes, one per account; deleting the conversation or the poll's
+message by retention deletes its box.
+
+**Counting (`teamcraft-core::polls`).** While open, a device shows the number of ballots and the
+user's own choice (read from the caller's own ballot). Counts show only once the box is closed:
+every ballot that opens under the poll's key, with the poll's associated data, and holds a vote
+the poll takes (§4.12: options it has, one for a single choice) counts once; byte-identical
+ballots count once; anything else is skipped. A ballot sealed for another poll or conversation
+fails the associated data and doesn't count.
+
+**Who learns what:**
+
+| Who                               | Learns about an anonymous poll                                                                                             |
+|-----------------------------------|----------------------------------------------------------------------------------------------------------------------------|
+| Any member, the creator included  | the question, how many voted (and when the count moved), the results once closed; not who chose what                       |
+| The server                        | that the message is an anonymous poll, its closing time, which account handed in or withdrew a ballot when; not the choice |
+| The server together with a member | who chose what, while the poll is open; after closing only from backups or logs                                            |
+| Someone removed before the vote   | nothing new: the server refuses their ballot, and they don't get the ballots of a later poll they can't read               |
+
+**What this does not protect against**, said in the design and in the app's help text:
+
+- *Ballot stuffing with the server's help.* The server enforces one ballot per account. A hostile
+  server could keep a member's replaced ballot, or let a removed member vote; members can't tell.
+  It can't forge a ballot (it has no key) or change one (the AEAD fails), only keep or drop whole
+  ballots, as it can drop any message.
+- *Timing.* Members see the count move; in a small group, who was online when it moved suggests
+  who voted, though not for what. Counts per option show only after closing, all at once.
+- *The result itself.* If everybody chose the same option, everybody knows what each chose; with
+  two voters, each knows the other's choice. The app doesn't hide results of small polls.
+- *Coercion.* A voter can show their device to someone; nothing is receipt-free.
+
+**What the app promises.** The creator picks "Anonymous" in the poll dialog, with the help text:
+"Nobody in the conversation, you included, sees who voted for what. The server knows who voted,
+not what. Results show when the poll closes." The poll shows "Anonymous" next to the closing
+time. Opening the box, ballots and the close go through the queue of pending actions (issue
+#159), not the outbox: made offline, they are kept across a restart and sent once back, the newest
+ballot of a poll replacing an older one still waiting; a ballot waits while the poll has no server
+ID yet or its box isn't open, and one the server refuses (the poll closed meanwhile) shows as a
+toast and the poll shows the server's state again. A ballot is sealed only when it is sent.
+
+**Rejected.**
+
+- *Votes sealed to the creator,* who counts and posts the result: the creator learns every vote,
+  members see who voted, and the result rests on the creator's word. Not anonymous.
+- *Blind-signature tokens* (one token per member, signed blindly by the creator's device, so a
+  ballot proves it is a member's one vote without naming the member) would make stuffing visible
+  without trusting the server, but need the creator's device online to issue tokens, still need the
+  ballot box to hide senders from members, and a blind signature (RFC 9474) or VOPRF (RFC 9497)
+  crate the project has not reviewed; the Rust implementations of RFC 9474 are not audited, and a
+  VOPRF token only its issuer can check. A later step if stuffing turns out to matter.
+- *Linkable ring signatures* would hide the voter from the server too, but no audited Rust crate
+  implements them, and security.md rules out a construction of our own.
 
 ### 4.13 Custom emoji (issue #207)
 
