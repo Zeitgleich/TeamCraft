@@ -90,6 +90,10 @@ pub mod mute_shortcut;
 pub mod navigation;
 pub use teamcraft_client_api::notetaker;
 #[cfg(target_arch = "wasm32")]
+pub mod core_worker;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod core_worker_messages;
+#[cfg(target_arch = "wasm32")]
 pub mod crash_reports;
 pub mod custom_emoji;
 pub mod notification_pictures;

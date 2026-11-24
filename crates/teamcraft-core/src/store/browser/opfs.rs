@@ -19,7 +19,7 @@
 //! that crashes doesn't lose); [`OpfsStore::flush`] makes them durable on the disk, as the web core
 //! does before every request that changes server state.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ops::ControlFlow;
 
 use teamcraft_crypto::local_store::LookupId;
@@ -56,6 +56,8 @@ pub type OpfsStore = SealedStore<OpfsRecords>;
 /// The sealed records in their log.
 pub struct OpfsRecords {
   log: RefCell<RecordLog<OpfsFile>>,
+  /// Counts the writes, for [`OpfsRecords::write_revision`].
+  writes: Cell<u32>,
 }
 
 /// One file of the log, through its sync access handle; closed when dropped.
@@ -84,24 +86,12 @@ impl SealedStore<OpfsRecords> {
   pub async fn open_reporting(
     name: &str,
     database_key: &SymmetricKey,
-    mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+    on_progress: impl FnMut(u8) -> ControlFlow<()>,
   ) -> Result<(Self, OpfsOpening), StoreError> {
     let (backend, opening) = OpfsRecords::open(name).await?;
     let store = Self::open_backend_to_build(backend, database_key, SealedStoreLimits::default())?;
-    let Some(mut build) = store.start_catalog_build()? else {
-      return Ok((store, opening));
-    };
-    loop {
-      let step = store.step_catalog_build(&mut build)?;
-      // The worker's thread is the core's own: a yield lets its messages in between batches.
-      crate::platform::sleep(std::time::Duration::ZERO).await;
-      if step == BuildStep::Complete {
-        return Ok((store, opening));
-      }
-      if on_progress(build.percent()).is_break() {
-        return Err(StoreError::InUse);
-      }
-    }
+    build_catalog_yielding(&store, on_progress).await?;
+    Ok((store, opening))
   }
 
   /// Deletes the store `name`: its log and what IndexedDB holds of it (records and key wrapping).
@@ -123,23 +113,46 @@ impl SealedStore<OpfsRecords> {
   /// Writes again what the disk refused, makes the log durable, and fails with the reason while
   /// writes are still unsaved (the app shows that changes are not saved on this device).
   pub fn flush(&self) -> Result<(), StoreError> {
-    self
-      .backend()
-      .log
-      .borrow_mut()
-      .flush(SystemClock.now_ms())
-      .map_err(store_error)
+    self.backend().flush()
   }
 
   /// Saves the index, so the next start reads no log: when the page is hidden or closed.
   pub fn checkpoint(&self) -> Result<(), StoreError> {
-    self.backend().log.borrow_mut().checkpoint().map_err(store_error)
+    self.backend().checkpoint()
   }
 
   /// Whether so many records wait for a disk that refuses them that the owner should pause its
   /// sync (issue #1201), as [`super::IndexedDbStore::is_backlogged`].
   pub fn is_backlogged(&self) -> bool {
-    self.backend().log.borrow().is_backlogged()
+    self.backend().is_backlogged()
+  }
+
+  /// Whether OPFS holds a log of the store `name`, so its records moved out of IndexedDB (issue
+  /// #2363): from the page too, creating nothing.
+  pub async fn has_log(name: &str) -> Result<bool, StoreError> {
+    super::service_worker::has_log(name).await
+  }
+}
+
+/// Runs the first catalog build of `store` with a yield between batches: the worker's thread is
+/// the core's own, so its messages get in between. `on_progress` may stop it
+/// ([`StoreError::InUse`]).
+pub(super) async fn build_catalog_yielding<B: RecordBackend>(
+  store: &SealedStore<B>,
+  mut on_progress: impl FnMut(u8) -> ControlFlow<()>,
+) -> Result<(), StoreError> {
+  let Some(mut build) = store.start_catalog_build()? else {
+    return Ok(());
+  };
+  loop {
+    let step = store.step_catalog_build(&mut build)?;
+    crate::platform::sleep(std::time::Duration::ZERO).await;
+    if step == BuildStep::Complete {
+      return Ok(());
+    }
+    if on_progress(build.percent()).is_break() {
+      return Err(StoreError::InUse);
+    }
   }
 }
 
@@ -151,11 +164,13 @@ impl RecordBackend for OpfsRecords {
 
   fn put_record(&self, id: &LookupId, sealed: &[u8]) -> Result<(), StoreError> {
     self.log.borrow_mut().put(id, sealed, SystemClock.now_ms());
+    self.writes.set(self.writes.get().wrapping_add(1));
     Ok(())
   }
 
   fn delete_record(&self, id: &LookupId) -> Result<(), StoreError> {
     self.log.borrow_mut().delete(id, SystemClock.now_ms());
+    self.writes.set(self.writes.get().wrapping_add(1));
     Ok(())
   }
 
@@ -190,7 +205,7 @@ impl RecordBackend for OpfsRecords {
 
 impl OpfsRecords {
   /// Opens the log of the store `name`, or makes it from the IndexedDB store of that name.
-  async fn open(name: &str) -> Result<(Self, OpfsOpening), StoreError> {
+  pub(super) async fn open(name: &str) -> Result<(Self, OpfsOpening), StoreError> {
     let started_ms = js_sys::Date::now();
     let directory = store_directory(name).await?;
     let slots = [
@@ -230,9 +245,34 @@ impl OpfsRecords {
     Ok((
       Self {
         log: RefCell::new(log),
+        writes: Cell::new(0),
       },
       opening,
     ))
+  }
+
+  /// See [`OpfsStore::flush`].
+  pub(super) fn flush(&self) -> Result<(), StoreError> {
+    self
+      .log
+      .borrow_mut()
+      .flush(SystemClock.now_ms())
+      .map_err(store_error)
+  }
+
+  /// See [`OpfsStore::checkpoint`].
+  pub(super) fn checkpoint(&self) -> Result<(), StoreError> {
+    self.log.borrow_mut().checkpoint().map_err(store_error)
+  }
+
+  /// See [`OpfsStore::is_backlogged`].
+  pub(super) fn is_backlogged(&self) -> bool {
+    self.log.borrow().is_backlogged()
+  }
+
+  /// Changes with every write, as [`super::IndexedDbStore::write_revision`].
+  pub(super) fn write_revision(&self) -> u32 {
+    self.writes.get()
   }
 }
 

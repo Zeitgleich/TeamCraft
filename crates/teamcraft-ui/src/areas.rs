@@ -594,34 +594,34 @@ pub(crate) fn chat_request_from_json(
   Ok(Box::pin(crate::web_core::serve_chat_json(command, args)))
 }
 
-/// A follower tab's chat action, as JSON for the tab that runs the core.
+/// A follower tab's chat action, as JSON for the tab that runs the core (or this tab's core worker).
 #[cfg(target_arch = "wasm32")]
 #[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
 pub(crate) fn act_in_owner_tab(
-  follower: Rc<crate::web_tabs::Follower>,
+  link: crate::web_core::CoreLink,
   action: teamcraft_client_api::remote::ChatAction,
 ) -> Result<ChatRun<()>, SplitLoaderError> {
-  Ok(Box::pin(crate::web_core::act_in_owner_tab(follower, action)))
+  Ok(Box::pin(crate::web_core::act_in_owner_tab(link, action)))
 }
 
 /// A follower tab's chat query, as JSON for the tab that runs the core.
 #[cfg(target_arch = "wasm32")]
 #[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
 pub(crate) fn query_owner_tab(
-  follower: Rc<crate::web_tabs::Follower>,
+  link: crate::web_core::CoreLink,
   query: teamcraft_client_api::remote::ChatQuery,
 ) -> Result<ChatRun<teamcraft_client_api::remote::ChatAnswer>, SplitLoaderError> {
-  Ok(Box::pin(crate::web_core::query_owner_tab(follower, query)))
+  Ok(Box::pin(crate::web_core::query_owner_tab(link, query)))
 }
 
 /// A follower tab's read of the snapshot or a feed, as JSON for the tab that runs the core (#1699).
 #[cfg(target_arch = "wasm32")]
 #[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
 pub(crate) fn read_in_owner_tab(
-  follower: Rc<crate::web_tabs::Follower>,
+  link: crate::web_core::CoreLink,
   read: crate::remote_backend::CoreRead,
 ) -> Result<ChatRun<crate::remote_backend::CoreReadAnswer>, SplitLoaderError> {
-  Ok(Box::pin(crate::web_core::read_in_owner_tab(follower, read)))
+  Ok(Box::pin(crate::web_core::read_in_owner_tab(link, read)))
 }
 
 /// The desktop shell takes chat actions and queries in JSON (`core_action`, `core_query`); a browser

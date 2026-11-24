@@ -176,6 +176,29 @@ impl OpfsCopy {
   }
 }
 
+/// Whether OPFS holds a log of the store `name`: its records moved there (issue #2363). Reads the
+/// slots' headers only and creates nothing, so the page can ask before it decides where the core
+/// runs. A slot it can't read (a worker holds it) counts as a log: the move is never undone by
+/// guessing wrong.
+pub(super) async fn has_log(name: &str) -> Result<bool, StoreError> {
+  let Some(directory) = existing_store_directory(name).await? else {
+    return Ok(false);
+  };
+  let Some(files) = LogFiles::find(&directory).await? else {
+    return Ok(false);
+  };
+  let read = |slot| read_file(slot, Some(SLOT_HEADER_BYTES));
+  let (first, second) = match (read(&files.slots[0]).await, read(&files.slots[1]).await) {
+    (Ok(first), Ok(second)) => (first, second),
+    (Err(error), _) | (_, Err(error)) => {
+      tracing::debug!(%error, "a slot of the local store's log can't be read; taking it as moved");
+      return Ok(true);
+    },
+  };
+  let headers = [CopiedFile::new(first), CopiedFile::new(second)];
+  Ok(newest_slot(&headers).map_err(store_error)?.is_some())
+}
+
 /// The handles of a store's log files on OPFS.
 struct LogFiles {
   slots: [FileSystemFileHandle; 2],

@@ -7770,7 +7770,8 @@ The design leaves room for a stricter mode: `IndexedDbStore::open` takes any 256
 deployment can derive it from the passkey PRF (§6.2) instead, at the cost of push previews. Choosing
 that per workspace is a policy setting for later (PLAN.md).
 
-**Records on OPFS (issue #2266, the store's part implemented; the app still uses IndexedDB):**
+**Records on OPFS (issues #2266, #2363; the store implemented, the app's core in a worker behind a
+development switch):**
 IndexedDB can't be read synchronously and `LocalStore` is synchronous, so the IndexedDB store reads
 every record's ciphertext into memory when it opens. A dedicated worker can read the origin private
 file system (OPFS) synchronously, so `OpfsStore` keeps the same sealed records in files there and
@@ -7818,10 +7819,33 @@ reads one when it is asked for. Only the backend under the sealed store changes
 - **Deleting** a store (a reset of an unreadable store, a guest device's cleanup) removes its OPFS
   directory and its IndexedDB database, from the page as from a worker; a browser without OPFS in
   that context has no log to remove.
-- **What is left** for the app to use it (#2266): the core moves into a dedicated worker and the UI
-  reaches it by messages; while a tab's worker holds the store, the service worker asks that worker
-  instead of copying the files. Until then nothing opens `OpfsStore`, so no store is moved, and the
-  service worker finds no log and reads IndexedDB.
+- **The core in a worker (#2363, step 1):** a member's core runs in a dedicated worker of the tab
+  that holds the lock of §9.4 (`crates/teamcraft-ui/src/core_worker.rs`), on the store's one type
+  over both backends (`BrowserStore`). The worker is the page's own code: the page posts its
+  compiled wasm module and the URL of its bindings to `core-worker.js`, which instantiates them, so
+  nothing is downloaded or trusted beyond what the page already runs (the service worker checks
+  `core-worker.js` and the bindings against the signed release like every other file, §9.3); the
+  bindings must come from the page's own origin. The page reaches its worker as a follower tab
+  reaches the owner tab: the same `core_*` commands and change notices, as JSON over `postMessage`.
+  What needs the window stays in the page and crosses the channel: the access and ID tokens (the
+  worker reads the non-extractable DPoP key from IndexedDB itself, §3.1.2; the token never leaves
+  the origin), visibility and the lifecycle (hidden, frozen, closed: the worker saves the index and
+  flushes), the request for persistent storage, the service worker's messages, background
+  failures, and the "store was set up" mark in `localStorage`. Nothing decrypted crosses besides
+  what the page's UI reads today (snapshots, messages, a file's bytes for the viewer).
+- **Which core runs where.** The worker runs when the store already moved (OPFS holds a log of it:
+  `OpfsStore::has_log`, which reads the slots' headers through `getFile()` and creates nothing; a
+  slot it can't read counts as moved) or when the user turned it on (`localStorage`
+  `teamcraft.coreWorker = "1"`, a development switch until the rest of #2363). The move is one
+  way: IndexedDB's records are emptied, so a moved store is never opened in the page again; if its
+  worker can't start, the start fails and the user tries again. A store that hasn't moved falls
+  back to the page when the worker can't start (no module workers, no sync access handles). Guests
+  always run the core in the page on IndexedDB.
+- **What is left** (#2363): calls and streamed videos from a page whose core is in a worker (they
+  need the device key that signs a call's keys, which stays with the core: until then the page
+  answers them as a follower tab, no calls, videos downloaded whole), the service worker asking the
+  owning tab's worker instead of copying the files, the move on by default with its progress on the
+  catalog-build screen, and the measurements of the start.
 
 **Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
 in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a
@@ -8070,7 +8094,12 @@ So exactly one core owns a device's store at a time:
   in the tab's session storage, claims the lock like "Use here" and waits up to 3 s for it instead
   of asking. Browsers without Web Locks run one core per tab, as before. The service worker only reads
   the store (push previews, §7) and opens it without upgrading it (§9.5); on OPFS it reads a copy
-  of the files and can't write at all (§9.1).
+  of the files and can't write at all (§9.1). A store on OPFS is opened by the core in the lock
+  holder's dedicated worker (§9.1, #2363): the tab holds the lock and the channel, its worker the
+  file handles. A handover flushes the worker's store, has it stop its core and drop the store,
+  which closes the handles, then ends the worker, and only then lets the lock go: the next owner's
+  worker opens the files the moment it has the lock. Its open tries again for 3 s if the files are
+  still held (a crashed worker the browser hasn't cleaned up yet), then fails with `InUse`.
 - **Desktop.** One running instance on every OS (Tauri's single-instance plugin: a named mutex on
   Windows, D-Bus on Linux, a Unix socket on macOS); a second launch shows the first instance's window
   and exits. Behind that, an OS file lock (`<store>.lock`, `StoreLock`) keeps any second process off

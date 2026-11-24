@@ -25,6 +25,9 @@ teamcraft-client-api = { path = "../teamcraft-client-api" }
 # for the client core.
 teamcraft-crypto = { path = "../teamcraft-crypto" }
 leptos = { version = "0.8.22", features = ["csr"] }
+# Leptos' task executor, set up by hand in the core's worker, which mounts no UI (core_worker.rs,
+# #2363). Already in the tree through Leptos.
+any_spawner = { version = "0.3", features = ["wasm-bindgen"] }
 # Browser bindings: DOM access for focus, scroll measurement, storage and clipboard-free helpers.
 wasm-bindgen = "0.2"
 js-sys = "0.3"
@@ -49,6 +52,8 @@ web-sys = { version = "0.3", features = [
   # Recording voice messages in the browser (voice_recorder.rs, #204).
   "MediaRecorder", "MediaRecorderOptions", "BlobEvent", "MediaDevices", "MediaStreamConstraints",
   "MediaTrackConstraints", "MediaStreamTrack", "MediaStreamTrackState", "RecordingState", "AnalyserNode", "MediaStreamAudioSourceNode",
+  # The core in a dedicated worker over the OPFS store (core_worker.rs, #2363).
+  "Worker", "WorkerOptions", "WorkerType", "DedicatedWorkerGlobalScope",
 ] }
 # Fluent: the i18n format mandated by the project rules (English source + translations).
 fluent-bundle = "0.16"

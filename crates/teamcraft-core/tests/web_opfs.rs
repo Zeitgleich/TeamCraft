@@ -6,10 +6,12 @@
 // Test helpers outside `#[test]` functions panic on failure like the tests themselves.
 #![allow(clippy::unwrap_used)]
 
+use std::ops::ControlFlow;
+
 use rand_core::{OsRng, RngCore};
 use teamcraft_core::store::{
-  IndexedDbStore, LocalStore, MessageContent, MessageFilter, OpfsOpening, OpfsStore, ServiceWorkerStore,
-  StoreError, StoredMessage, Table,
+  BrowserStore, IndexedDbStore, LocalStore, MessageContent, MessageFilter, OpfsOpening, OpfsStore,
+  ServiceWorkerStore, StoreError, StoredMessage, Table,
 };
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{ClientMessageId, Id, Snowflake, UserId};
@@ -303,6 +305,81 @@ mod in_the_service_worker {
     assert!(has_opfs_directory(&name).await);
     OpfsStore::delete(&name).await.unwrap();
     assert!(!has_opfs_directory(&name).await);
+  }
+}
+
+/// The web core's store type over either backend (issue #2363): the page opens it on IndexedDB,
+/// the core's worker on OPFS.
+mod browser_store {
+  use super::*;
+
+  #[wasm_bindgen_test]
+  async fn the_worker_moves_the_store_and_the_page_can_tell() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let page = BrowserStore::open_indexed_db_reporting(&name, &key, |_| ControlFlow::Continue(()))
+      .await
+      .unwrap();
+    assert!(!page.is_on_opfs());
+    page.put(Table::Users, "1", b"one").unwrap();
+    page.flush().await.unwrap();
+    drop(page);
+    assert!(!OpfsStore::has_log(&name).await.unwrap());
+
+    let (worker, opening) = BrowserStore::open_opfs_reporting(&name, &key, |_| ControlFlow::Continue(()))
+      .await
+      .unwrap();
+    assert!(matches!(opening, OpfsOpening::Migrated { records } if records > 0));
+    assert!(worker.is_on_opfs());
+    assert_eq!(worker.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    let revision = worker.write_revision();
+    worker.put(Table::Users, "2", b"two").unwrap();
+    assert_ne!(worker.write_revision(), revision);
+    // The page went away: the index is saved and the log flushed, so the next open reads no log.
+    worker.write_now();
+    drop(worker);
+    assert!(OpfsStore::has_log(&name).await.unwrap());
+
+    let (reopened, opening) = OpfsStore::open(&name, &key).await.unwrap();
+    assert_eq!(opening, OpfsOpening::Opened);
+    assert_eq!(reopened.get(Table::Users, "2").unwrap(), Some(b"two".to_vec()));
+    drop(reopened);
+    OpfsStore::delete(&name).await.unwrap();
+    assert!(!OpfsStore::has_log(&name).await.unwrap());
+  }
+
+  /// The worker of a tab that handed over still holds the files: the next owner's open is refused
+  /// until it let go, then opens what it wrote.
+  #[wasm_bindgen_test]
+  async fn the_next_owner_opens_once_the_last_one_let_go() {
+    let name = database_name();
+    let key = SymmetricKey::generate(&mut OsRng);
+    let (first, _) = BrowserStore::open_opfs_reporting(&name, &key, |_| ControlFlow::Continue(()))
+      .await
+      .unwrap();
+    first.put(Table::Users, "1", b"one").unwrap();
+    first.flush().await.unwrap();
+    let refused = BrowserStore::open_opfs_reporting(&name, &key, |_| ControlFlow::Continue(())).await;
+    assert!(matches!(refused, Err(StoreError::InUse)));
+    drop(first);
+    let (next, opening) = BrowserStore::open_opfs_reporting(&name, &key, |_| ControlFlow::Continue(()))
+      .await
+      .unwrap();
+    assert_eq!(opening, OpfsOpening::Opened);
+    assert_eq!(next.get(Table::Users, "1").unwrap(), Some(b"one".to_vec()));
+    drop(next);
+    OpfsStore::delete(&name).await.unwrap();
+  }
+
+  /// A store whose directory exists but holds no log (a move that never wrote its header) has not
+  /// moved: its records are still in IndexedDB.
+  #[wasm_bindgen_test]
+  async fn an_empty_log_is_no_move() {
+    let name = database_name();
+    write_opfs_file(&name, "records-0.log", b"").await;
+    write_opfs_file(&name, "records-1.log", b"").await;
+    assert!(!OpfsStore::has_log(&name).await.unwrap());
+    OpfsStore::delete(&name).await.unwrap();
   }
 }
 

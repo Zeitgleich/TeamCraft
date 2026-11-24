@@ -1881,8 +1881,8 @@ requests of this local test server, so read it as the shape of the problem, not 
 The IndexedDB store reads every record's ciphertext into memory when it opens (`store-read` above):
 open time and memory grow with the history. The store on OPFS (`OpfsStore`, e2ee.md §9.1) reads
 an index of where each record is and the log written after it, and a record when it is asked for.
-It runs only in a dedicated worker; the app doesn't use it yet (the core's move into a worker is
-the rest of #2266), so these are the store's own numbers, not the app's start.
+It runs only in a dedicated worker. The app's core runs there behind a development switch (#2363,
+"The core in a worker" below); these are the store's own numbers, not the app's start.
 
 Release build, headless Chromium 156 in `dev/wasm-test` (4 CPUs of a Linux desktop), a dedicated
 worker, the store of "Web start on phones": 30 channels with 705 messages each, 21,631 records with
@@ -1921,6 +1921,42 @@ docker run --rm -v "$PWD":/src:ro -v teamcraft-wasm-target:/target -e CARGO_TARG
   teamcraft-wasm-test:local cargo test --release --target wasm32-unknown-unknown -p teamcraft-core \
   --features service-worker,test-support --test web_opfs -- --include-ignored --nocapture bench_open
 ```
+
+#### The core in a worker: what it downloads (issue #2363)
+
+The OPFS store needs the core in a dedicated worker (e2ee.md §9.1). The download budgets were
+decided before the code (robustness.md, "Download size"):
+
+- **A worker of its own wasm** would carry the core a second time: the engine (`Client` and the
+  page core's dispatch) is about 1.2 MB of the app before wasm-opt, plus the gateway's readers,
+  MLS and the store, and a guest's meeting runs the core in the page, so the app keeps it. A
+  member's first visit would grow by most of that over its 5.95 MB budget, or the core would have
+  to leave the app for a split module that guests load as an extra request.
+- **The worker runs the app's own module** instead: the page posts its compiled
+  `WebAssembly.Module` (`wasm_bindgen::module()`) and the URL of its bindings to `core-worker.js`
+  (about 1 kB), which instantiates it; `main` sees the worker and starts the core host
+  (`crates/teamcraft-ui/src/core_worker.rs`). The wasm is not fetched or compiled again; the
+  bindings' script comes from the cache the page filled. The split modules the core runs (`areas.rs`: workspace,
+  settings, admin, member rounds) load in the worker through the same chunk loader, from the
+  service worker's cache.
+
+| Budget (gzip -9)                       | Limit       | Changes by                                     |
+|----------------------------------------|-------------|------------------------------------------------|
+| A guest's meeting (lobby, meeting)     | 6,720,000 B | the host and the OPFS store's code in the app  |
+| Signed-in first visit                  | 5,950,000 B | the same, and `core-worker.js` (not counted)   |
+| The call module                        | 2,100,000 B | nothing                                        |
+
+Both limits stay as they are. What the app gains is the worker host, the messages and the OPFS
+store's code, which only the worker runs but the app carries (estimated below 30 kB compressed);
+the CI web size job of the pull request has the measured delta. What a page whose core runs in a
+worker loads besides: the `tabs` module with the JSON readers of `ChatAction` and `ChatAnswer`
+(#1413), which a follower tab loads today, in the page and in the worker, from the cache after the
+first time. Not in either budget (it is no first visit's), but a cost of the step: a typed channel
+without JSON would save it, if the start's measurement (#2363, step 5) shows it.
+
+Memory: the page's instance no longer holds the core and the store; the worker's holds them, and
+the store on OPFS holds its index instead of every record (above: 0.9 MiB against 19.7 MiB for
+21,631 records). The module is compiled once, in the page.
 
 #### Own changes show at once (issue #778)
 
