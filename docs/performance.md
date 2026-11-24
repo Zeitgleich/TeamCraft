@@ -1145,6 +1145,28 @@ The same two native clients, each behind a router of its own in a rootless netwo
 - **The SFU without its second port.** Without `TEAMCRAFT_SFU_REFLECT_BIND`, the hard-NAT rows
   stay on the SFU: no device knows that its NAT is hard.
 
+### Call recording with video (issue #2250)
+
+`crates/teamcraft-media/examples/recording_video_bench.rs`: 30 s of a call recorded at real-time
+pace, four received cameras (640x360 at 30 fps, pre-encoded, so the senders' encoding isn't
+counted) and the own 1280x720 camera, with and without video. The process's CPU time against the
+wall time, on an AMD Ryzen 9 5900X (Linux), `teamcraft-media` at `opt-level = 2`, software
+encoder (OpenH264):
+
+| Recording             | CPU (% of one core) | File size      | Dropped pictures / frames |
+|-----------------------|---------------------|----------------|---------------------------|
+| Sound only            | 1.0 %               | 6.6 MB an hour | –                         |
+| Video, four cameras   | 21.6 %              | 165 MB an hour | 0 / 0                     |
+
+- Most of it is decoding the four tracks (the webview decodes them for the screen as well: the
+  shell has no decoded picture to reuse) and OpenH264 at 1280x720, 15 fps; compositing is a few
+  per cent. A hardware encoder (VA-API, VideoToolbox) takes the encoding off the CPU.
+- It only runs while a recording with video runs: no copy, decode or composite otherwise, and
+  nothing while the recording waits for consent. The queues are bounded (256 received frames, 30
+  pictures): a machine that can't keep up drops and counts pictures instead of growing.
+- An eight-hour recording uses the same memory as a minute: one decoded picture per track, one
+  composited frame, the bounded queues, and the sealed writer's 64 KiB chunk.
+
 ## Clients
 
 How fast and how lean the apps are for the person using them; the budgets they must stay within are
