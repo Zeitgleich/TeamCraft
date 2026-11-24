@@ -757,13 +757,30 @@ final class AppModel {
   // MARK: Reading
 
   func conversations() async -> [ConversationItem] {
-    (try? await core().conversations()) ?? []
+    await conversationsIfRead() ?? []
+  }
+
+  /// The conversations, or `nil` when the read failed: no answer, not "no conversations". A screen
+  /// that shows them keeps what it shows then (#2374): an empty list made an open conversation fall
+  /// back to the notification's single message, then to nothing.
+  func conversationsIfRead() async -> [ConversationItem]? {
+    try? await core().conversations()
   }
 
   /// What the newest notification showed of a conversation, while the store hasn't caught it up
   /// yet (issue #1065): its name and the notified message.
   func notifiedConversation(_ conversationId: String) async -> NotifiedConversation? {
-    (try? await core().notifiedConversation(conversationId: conversationId)) ?? nil
+    try? await readNotifiedConversation(conversationId).get()
+  }
+
+  /// Like ``notifiedConversation(_:)``, telling a failed read apart from "nothing notified"
+  /// (#2374): a screen keeps the notified message it shows until a read says the store has it.
+  func readNotifiedConversation(_ conversationId: String) async -> Result<NotifiedConversation?, Error> {
+    do {
+      return .success(try await core().notifiedConversation(conversationId: conversationId))
+    } catch {
+      return .failure(error)
+    }
   }
 
   /// Conversations with a call running now and how many people are in each (issue #1352): the
@@ -1311,7 +1328,15 @@ final class AppModel {
     maybeThreadId: String? = nil, notificationId: String? = nil, maybeMessageId: String? = nil,
     maybeMeetingId: String? = nil
   ) async {
-    guard let conversation = await conversations().first(where: { $0.id == conversationId }) else {
+    guard let read = await conversationsIfRead() else {
+      // The store didn't answer (it may be opening again, or busy behind a stuck connection, #2374).
+      // A tap still opens the conversation: the screen shows it once a read succeeds, or what the
+      // notification showed, or nothing for an ID the store doesn't know. Nothing else is done on
+      // an ID the store couldn't confirm.
+      if identifier == UNNotificationDefaultActionIdentifier { openConversationId = conversationId }
+      return
+    }
+    guard let conversation = read.first(where: { $0.id == conversationId }) else {
       if identifier == UNNotificationDefaultActionIdentifier, await notifiedConversation(conversationId) != nil {
         openConversationId = conversationId
       }

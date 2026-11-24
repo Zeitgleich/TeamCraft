@@ -148,7 +148,38 @@ final class MessageListTests: XCTestCase {
     XCTAssertEqual(stats.longestFrameMs, 120)
   }
 
+  // MARK: Notified message (#1065, #2374)
+
+  func testTheNotifiedMessageShowsInItsPlaceUntilTheStoreHasIt() {
+    let stored = [message("1", 100), message("3", 300)]
+    let shown = withNotified(stored, notified(id: "2", sentAtMs: 200))
+    XCTAssertEqual(shown.map(\.id), ["1", "2", "3"])
+    XCTAssertEqual(shown[1].body, "lunch?")
+    XCTAssertEqual(shown[1].authorName, "Sender")
+    // A read before the catch-up (the client still opening) brings nothing: the row stays.
+    XCTAssertEqual(withNotified([], notified(id: "2", sentAtMs: 200)).map(\.id), ["2"])
+    // Once the store has it, the stored message takes its place.
+    XCTAssertEqual(withNotified(stored + [message("2", 200)], notified(id: "2", sentAtMs: 200)).count, 3)
+  }
+
+  func testAThreadReplyOrAnUnreadableMessageAddsNoRow() {
+    let stored = [message("1", 100)]
+    XCTAssertEqual(withNotified(stored, notified(id: "2", sentAtMs: 200, threadId: "1")).map(\.id), ["1"])
+    XCTAssertEqual(withNotified(stored, notified(id: "2", sentAtMs: 200, text: nil)).map(\.id), ["1"])
+    XCTAssertEqual(withNotified(stored, nil).map(\.id), ["1"])
+  }
+
   // MARK: Helpers
+
+  private func notified(
+    id: String, sentAtMs: Int64, threadId: String? = nil, text: String? = "lunch?"
+  ) -> NotifiedConversation {
+    NotifiedConversation(
+      conversationId: "c", maybeName: "planning", isDirect: false,
+      maybeMessage: NotifiedMessage(
+        messageId: id, maybeSenderId: "s", maybeSenderName: "Sender", isSenderSource: false, maybeText: text,
+        maybeFileName: nil, maybeThreadId: threadId, sentAtMs: sentAtMs))
+  }
 
   private var utc: Calendar {
     var calendar = Calendar(identifier: .gregorian)

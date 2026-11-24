@@ -205,7 +205,9 @@ struct ConversationListView: View {
           return
         }
       #endif
-      conversations = await model.conversations()
+      // A failed read keeps the list shown (#2374): an empty one would close the open conversation
+      // and show the notification's single message instead.
+      if let read = await model.conversationsIfRead() { conversations = read }
       // The chat list shows the core's rows: a signed-in start is done (#1521).
       Perf.chatListShown()
       runningCalls = await model.runningCalls()
