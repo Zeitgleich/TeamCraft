@@ -13,7 +13,6 @@
     <item quantity="other">%1$s, %2$d unread</item>
   </plurals>
   <string name="dm_new">New message</string>
-  <string name="dm_filter">Filter direct messages</string>
   <string name="dm_filter_empty">No direct messages match.</string>
   <string name="dm_empty">Direct messages with one or several colleagues show up here. They don\'t belong to a space.</string>
   <string name="dm_pick_hint">Pick one person for a direct message, or several for a group.</string>

@@ -13,7 +13,6 @@
     <item quantity="other">%1$s, %2$d ungelesen</item>
   </plurals>
   <string name="dm_new">Neue Nachricht</string>
-  <string name="dm_filter">Direktnachrichten filtern</string>
   <string name="dm_filter_empty">Keine Direktnachricht passt.</string>
   <string name="dm_empty">Direktnachrichten mit einer oder mehreren Personen erscheinen hier. Sie gehören zu keinem Space.</string>
   <string name="dm_pick_hint">Eine Person für eine Direktnachricht, mehrere für eine Gruppe.</string>

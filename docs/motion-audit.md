@@ -144,6 +144,32 @@ The apps use the same tokens as the web, so a pop or a fade feels the same every
   nothing runs while they rest. No infinite animation runs off screen.
 - **Open:** the Swift side is not compiled on the Linux host; check it with the next iOS build.
 
+## Home's top area and pull to search (#2389)
+
+- **What moves:** on the phones' home screen a pull down at the top of the list opens the search,
+  in place of a pull to refresh that had nothing to refresh (the connection catches up by itself).
+  The field follows the finger with resistance (Android 0.55 of the finger, 0.2 past the
+  threshold: a rubber band), a haptic tick marks the threshold (Android
+  `GestureThresholdActivate`, iOS a light `UIImpactFeedbackGenerator`), letting go past it springs
+  the field open with the finger's velocity handed over (Android `spring`, low bounce,
+  `StiffnessMediumLow`) and puts the cursor in it; letting go earlier springs back without
+  bounce. A new touch stops the spring where it is. The top bar's search button opens the same
+  search with the same spring.
+- **Header:** Android's header (top bar, banners, chips) scrolls away with the list and comes back
+  on scroll up, as a collapsing top app bar; a header left half-way snaps (180 ms) by velocity or
+  position. iOS keeps its 52 pt header pinned (the field and the cards are what went away); a
+  scroll-driven header on iOS 17 would need offset tracking inside `List`, left for a later step.
+- **iOS:** the list's own bounce is the physics; the field's preview rides in the gap it opens
+  (iOS 18 `onScrollGeometryChange` / `onScrollPhaseChange`). iOS 17 has the header's button only.
+- **Reduced motion:** Android: the list doesn't move, the field fades in its slot and opens and
+  closes without a spring; the header snaps. iOS: the preview only fades, the field appears with
+  an opacity transition.
+- **Cost:** Android moves the list, the field and the header by `graphicsLayer` translations read
+  in the draw phase: no measure or recomposition per frame of a scroll or pull. Opening and
+  closing the search changes the list's top padding once, in the frame the translation is reset,
+  so nothing jumps. On iOS only the small preview view reads the pull distance (an `@Observable`
+  model), so the list's body is not evaluated per frame.
+
 ## Missed opportunities
 
 None worth adding. The UI already animates every state change that teleports; more motion on the

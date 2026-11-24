@@ -100,7 +100,6 @@ class AccessibilityChecksTest {
             ),
             maybeSelectionBar = null,
             quickAccess = QuickAccess(draftCount = 1, maybeScheduledCount = 2),
-            onSearch = {},
             onAccount = {},
             onNavigate = {},
           )

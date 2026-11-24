@@ -1,25 +1,33 @@
 package de.zeitgleich.teamcraft.ui.screens
 
+import android.net.Uri
+import androidx.compose.foundation.layout.windowInsetsTopHeight
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.compositionLocalOf
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.isTraversalGroup
+import androidx.compose.ui.semantics.traversalIndex
+import androidx.compose.ui.unit.Dp
+import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import de.zeitgleich.teamcraft.ui.theme.popOnChange
 import de.zeitgleich.teamcraft.ui.theme.LocalMotion
 import de.zeitgleich.teamcraft.ui.theme.rowMotion
 import de.zeitgleich.teamcraft.ui.PresenceDot
-import de.zeitgleich.teamcraft.ui.PullRefreshIndicator
 import de.zeitgleich.teamcraft.ui.presenceLabel
 import androidx.compose.ui.semantics.heading
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.snap
-import de.zeitgleich.teamcraft.ui.rememberMotionReduced
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.semantics.stateDescription
 import android.content.Context
@@ -106,8 +114,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import de.zeitgleich.teamcraft.ui.pullRefresh
-import de.zeitgleich.teamcraft.ui.rememberPullRefresh
 import de.zeitgleich.teamcraft.ui.theme.FavoritesSort
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.Image
@@ -137,7 +143,6 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.unit.Dp
 import de.zeitgleich.teamcraft.ui.ChatSwipePrefs
 import de.zeitgleich.teamcraft.ui.HomeSpace
 import de.zeitgleich.teamcraft.ui.SelectedSpace
@@ -218,7 +223,6 @@ private val AVATAR_SIZE = 40.dp
 /** Channels are rounded squares, people circles: they tell apart at a glance. */
 private val CHANNEL_SHAPE = RoundedCornerShape(12.dp)
 private val BRAND_LOGO_HEIGHT = 28.dp
-private val QUICK_CARD_WIDTH = 148.dp
 
 /**
  * The main screen, as the desktop's One Home (#237): the brand and the user's avatar on top, one
@@ -230,7 +234,6 @@ fun ChatListScreen(
   accountUserId: String,
   accountName: String,
   onOpen: (String) -> Unit,
-  onSearch: () -> Unit,
   onSettings: () -> Unit,
   onNavigate: (String) -> Unit,
   maybeSelectedId: String? = null,
@@ -357,9 +360,6 @@ fun ChatListScreen(
     maybeConversations = loaded,
     isSyncing = maybeFirstSync != null,
     maybeReadFailure = kept.maybeReadFailure,
-    onRefresh = {
-      if (!viewModel.refreshConnection()) viewModel.showFailure(R.string.refresh_failed)
-    },
     onRetry = {
       viewModel.retryChatList()
       scope.launch { viewModel.refreshChatList(accountUserId) }
@@ -420,7 +420,6 @@ fun ChatListScreen(
         )
       }
     },
-    onSearch = onSearch,
     onAccount = onSettings,
     onNavigate = onNavigate,
     onCreate = { maybeCreating = CreateStep.Menu },
@@ -562,14 +561,11 @@ internal fun MainScaffold(
   maybeConversations: List<ConversationItem>?,
   list: ListState,
   maybeSelectionBar: (@Composable () -> Unit)?,
-  onSearch: () -> Unit,
   onAccount: () -> Unit,
   onNavigate: (String) -> Unit,
   /** Home's button: the "New" menu (#1534). */
   onCreate: () -> Unit = {},
   banners: @Composable () -> Unit = {},
-  /** Pull to refresh (#2006); null where the list has none. */
-  onRefresh: (suspend () -> Unit)? = null,
   /** The first sync is running: an empty list is not known to be empty yet (#297). */
   isSyncing: Boolean = false,
   /** Set when there are no conversations and reading them failed. */
@@ -577,7 +573,7 @@ internal fun MainScaffold(
   onRetry: () -> Unit = {},
   /** Guests browse no channels (as on desktop); Home lists only their own. */
   isGuest: Boolean = false,
-  /** What the quick-access cards on top of Home say (#1488). */
+  /** What the quick-access chips on top of Home and the DMs count (#1488, #2389). */
   quickAccess: QuickAccess = QuickAccess(),
   /** Admins' requests waiting for the user's decision: counted on Activity, shown on top of it. */
   joinRequestCount: Int = 0,
@@ -598,6 +594,22 @@ internal fun MainScaffold(
   val isFabExpanded by remember(shownTab) {
     derivedStateOf { (if (shownTab == ChatTab.Direct) directList else homeList).firstVisibleItemIndex == 0 }
   }
+  val area = rememberHomeTopArea()
+  area.isMotionReduced = rememberMotionReduced()
+  area.isSearchAvailable = maybeSelectionBar == null && shownTab != ChatTab.Activity
+  BackHandler(enabled = area.isSearchOpen) { area.close() }
+  LaunchedEffect(shownTab, maybeSelectionBar == null) {
+    area.showHeader()
+    if (!area.isSearchAvailable) area.close()
+  }
+  val query = HomeQuery(if (area.isSearchOpen) area.query else "", area.chip)
+  val maybeChipRow = when (shownTab) {
+    ChatTab.Activity -> null
+    ChatTab.Direct -> HomeChipRow(quickAccess, maybeFilterChannels = false)
+    ChatTab.Home -> HomeChipRow(quickAccess, maybeFilterChannels = if (isList) true else null)
+  }
+  val density = LocalDensity.current
+  var headerHeight by remember { mutableStateOf(0.dp) }
   // The theme's colour (#202) fills the header and the status bar behind it; the lists sit on a
   // neutral card with rounded top corners, so the theme never colours content.
   Scaffold(
@@ -605,47 +617,82 @@ internal fun MainScaffold(
     // lists' bottom room keep content clear of it.
     contentWindowInsets = ScreenInsets.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal),
     containerColor = LocalTeamCraftColors.current.chrome,
-    topBar = {
-      maybeSelectionBar?.invoke() ?: BrandTopBar(
-        brand,
-        accountUserId,
-        accountName,
-        onSearch = onSearch,
-        onAccount = onAccount,
-        maybeSpaceHeader = maybeSpace?.takeIf { shownTab == ChatTab.Home }?.let { space ->
-          SpaceHeader(space, hasNewElsewhere(spaces, space.id), onSwitchSpace)
-        },
-        spaceMenu = list.spaceMenu,
-      )
-    },
+    // Only the status bar's strip stays: the header scrolls away with the list (#2389).
+    topBar = { StatusBarStrip() },
     snackbarHost = snackbarHost,
   ) { padding ->
-    val pullRefresh = rememberPullRefresh(onRefresh)
-    Box(Modifier.fillMaxSize().padding(padding)) {
-      Column(
+    Box(Modifier.fillMaxSize().padding(padding).semantics { isTraversalGroup = true }) {
+      Box(
         Modifier
           .fillMaxSize()
-          .pullRefresh(pullRefresh)
           .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
-          .background(MaterialTheme.colorScheme.background),
+          .background(MaterialTheme.colorScheme.background)
+          .nestedScroll(area.connection)
+          .semantics { traversalIndex = 1f },
       ) {
-        banners()
-        when {
-          maybeConversations == null && maybeReadFailure != null ->
-            ListFailed(ListPhase.Failed(maybeReadFailure), onRetry)
-          maybeConversations == null -> LoadingScreen()
-          // Nothing yet while the first sync brings the conversations: not "no conversations".
-          maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> ListSkeleton()
-          isList && shownTab == ChatTab.Home && grouping == ChatListGrouping.BySpace ->
-            ListBySpaceTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-          isList && shownTab == ChatTab.Home ->
-            ListTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-          shownTab == ChatTab.Home -> HomeTab(maybeConversations, maybeSpace, list, homeList, onNavigate, canBrowse = !isGuest, quickAccess)
-          shownTab == ChatTab.Direct -> DirectTab(maybeConversations, list, directList, onNavigate)
-          else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNotices = guestNotices, guestNoticeCount = guestNoticeCount, isSyncing = isSyncing)
+        // The pull moves the list as a picture: nothing is measured again while the finger moves.
+        Box(Modifier.fillMaxSize().graphicsLayer { translationY = area.listTranslationPx }) {
+          CompositionLocalProvider(LocalListTop provides area.listTopPadding(headerHeight)) {
+            when {
+              maybeConversations == null && maybeReadFailure != null ->
+                Box(Modifier.padding(top = listTop())) { ListFailed(ListPhase.Failed(maybeReadFailure), onRetry) }
+              maybeConversations == null -> Box(Modifier.padding(top = listTop())) { LoadingScreen() }
+              // Nothing yet while the first sync brings the conversations: not "no conversations".
+              maybeConversations.isEmpty() && isSyncing && shownTab != ChatTab.Activity -> Box(Modifier.padding(top = listTop())) { ListSkeleton() }
+              isList && shownTab == ChatTab.Home && grouping == ChatListGrouping.BySpace ->
+                ListBySpaceTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, query)
+              isList && shownTab == ChatTab.Home ->
+                ListTab(maybeConversations, spaces, list, homeList, onNavigate, canBrowse = !isGuest, query)
+              shownTab == ChatTab.Home -> HomeTab(maybeConversations, maybeSpace, list, homeList, onNavigate, canBrowse = !isGuest, query)
+              shownTab == ChatTab.Direct -> DirectTab(maybeConversations, list, directList, onNavigate, query)
+              else -> ActivityTab(maybeConversations, list, onNavigate, joinRequestCount, joinRequests, guestNotices = guestNotices, guestNoticeCount = guestNoticeCount, isSyncing = isSyncing)
+            }
+          }
         }
+        // Composed only while it shows: the text field's first use is not paid on every start.
+        val isFieldShown by remember { derivedStateOf { area.isSearchOpen || area.pullPx > 0f } }
+        if (isFieldShown) {
+          HomeSearchField(
+            area,
+            Modifier
+              .graphicsLayer {
+                translationY = area.headerHeightPx + area.headerOffsetPx + area.fieldTranslationPx
+                alpha = area.fieldAlpha
+              }
+              .background(MaterialTheme.colorScheme.background)
+              .semantics { traversalIndex = -1f },
+          )
+        }
+        HomeHeader(
+          modifier = Modifier
+            .onSizeChanged {
+              area.headerHeightPx = it.height.toFloat()
+              headerHeight = with(density) { it.height.toDp() }
+            }
+            .graphicsLayer { translationY = area.headerOffsetPx }
+            .semantics { traversalIndex = -2f },
+          bar = {
+            maybeSelectionBar?.invoke() ?: BrandTopBar(
+              brand,
+              accountUserId,
+              accountName,
+              onSearch = {
+                if (shownTab == ChatTab.Activity) onTab(ChatTab.Home)
+                area.open()
+              },
+              onAccount = onAccount,
+              maybeSpaceHeader = maybeSpace?.takeIf { shownTab == ChatTab.Home }?.let { space ->
+                SpaceHeader(space, hasNewElsewhere(spaces, space.id), onSwitchSpace)
+              },
+              spaceMenu = list.spaceMenu,
+            )
+          },
+          banners = banners,
+          maybeChips = maybeChipRow?.let { row ->
+            { HomeChips(row, area.chip, onSelect = { area.chip = it }, onNavigate = onNavigate) }
+          },
+        )
       }
-      PullRefreshIndicator(pullRefresh)
       if (maybeSelectionBar == null) {
         val barModifier = Modifier.windowInsetsPadding(WindowInsets.navigationBars).padding(bottom = FloatingToolbarDefaults.ScreenOffset)
         FloatingTabBar(
@@ -654,7 +701,7 @@ internal fun MainScaffold(
           conversations = maybeConversations.orEmpty(),
           joinRequestCount = joinRequestCount,
           onSelect = onTab,
-          modifier = Modifier.align(Alignment.BottomCenter).then(barModifier),
+          modifier = Modifier.align(Alignment.BottomCenter).then(barModifier).semantics { traversalIndex = 2f },
         )
         // Home and DMs, not twice: empty DMs have the same action in the middle. On Home it opens
         // the "New" menu (message, channel, space); on DMs it starts a message. It sits above the
@@ -672,10 +719,75 @@ internal fun MainScaffold(
             modifier = Modifier
               .align(Alignment.BottomEnd)
               .then(barModifier)
-              .padding(end = Spacing.l, bottom = FloatingToolbarDefaults.ContainerSize + Spacing.l),
+              .padding(end = Spacing.l, bottom = FloatingToolbarDefaults.ContainerSize + Spacing.l)
+              .semantics { traversalIndex = 2f },
           )
         }
       }
+    }
+  }
+}
+
+/** The list's top padding under the header (and the open search): what the header covers. */
+internal val LocalListTop = compositionLocalOf { 0.dp }
+
+@Composable
+private fun listTop(): Dp = LocalListTop.current
+
+/** Room for the header on top and the floating tab bar below. */
+@Composable
+private fun listPadding(): PaddingValues = PaddingValues(top = listTop(), bottom = floatingTabBarClearance())
+
+/** The search text and the filter chip the shown list is narrowed by (#2389). */
+internal class HomeQuery(val text: String, val chip: HomeFilter) {
+  val isFiltering: Boolean get() = text.isNotBlank() || chip != HomeFilter.All
+}
+
+/** The theme's colour behind the status bar, which stays when the header scrolls away. */
+@Composable
+private fun StatusBarStrip() {
+  val colors = LocalTeamCraftColors.current
+  val isDarkHeader = colors.chrome.luminance() < 0.5f
+  Box(
+    Modifier
+      .fillMaxWidth()
+      .windowInsetsTopHeight(TopBarInsets)
+      .background(colors.chrome)
+      .then(if (isDarkHeader) Modifier.darkStatusBarBackdrop() else Modifier),
+  )
+}
+
+/**
+ * The header over the list (#2389): the top bar on the theme's colour, then the banners and the
+ * chips on the list's card. It scrolls away with the list and comes back on scroll up.
+ */
+@Composable
+private fun HomeHeader(
+  modifier: Modifier,
+  bar: @Composable () -> Unit,
+  banners: @Composable () -> Unit,
+  maybeChips: (@Composable () -> Unit)?,
+) {
+  Column(modifier.fillMaxWidth().background(LocalTeamCraftColors.current.chrome)) {
+    bar()
+    Column(
+      Modifier
+        .fillMaxWidth()
+        .clip(RoundedCornerShape(topStart = CONTENT_CARD_RADIUS, topEnd = CONTENT_CARD_RADIUS))
+        .background(MaterialTheme.colorScheme.background),
+    ) {
+      banners()
+      maybeChips?.let { chips -> Box(Modifier.padding(vertical = Spacing.xs)) { chips() } }
+    }
+  }
+}
+
+/** A search hit in the messages, offered on top of the filtered list. */
+private fun LazyListScope.searchMessagesRow(query: HomeQuery, onNavigate: (String) -> Unit) {
+  if (query.text.isBlank()) return
+  item(key = "search-messages") {
+    EntryRow(Icons.Filled.Search, stringResource(R.string.home_search_messages, query.text.trim())) {
+      onNavigate("search?query=${Uri.encode(query.text.trim())}")
     }
   }
 }
@@ -715,8 +827,18 @@ private fun HomeTab(
   listState: LazyListState,
   onNavigate: (String) -> Unit,
   canBrowse: Boolean,
-  quickAccess: QuickAccess,
+  query: HomeQuery,
 ) {
+  // Searching looks through every conversation, not just this space's (one search, #2389).
+  if (query.text.isNotBlank()) {
+    val hits = listSections(conversations, list.lastActivity, query.text)
+    LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = listPadding()) {
+      searchMessagesRow(query, onNavigate)
+      if (hits.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.home_search_empty)) }
+      conversationRows(hits, list, showsSpace = true)
+    }
+    return
+  }
   // Without spaces (yet), Home lists what there is.
   val context = LocalContext.current
   val favoritesSort by remember { AppearancePrefs.prefs(context).favoritesSortChoice }.collectAsState()
@@ -731,8 +853,7 @@ private fun HomeTab(
   val lastActivity = list.lastActivity
   val allRecent = remember(conversations, lastActivity) { recentActivitySection(conversations, lastActivity, isShowingAll = true) }
   val recent = if (isShowingAllRecent) allRecent else allRecent.copy(conversations = allRecent.conversations.take(recentActivityHomeRows))
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
-    item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = listPadding()) {
     if (recent.conversations.isNotEmpty()) {
       collapsibleRows(listOf(recent), list, collapsed, onToggle = collapsing::toggle, showsSpace = true)
       val isCollapsed = recent.collapseKey()?.let { it in collapsed } == true
@@ -770,11 +891,9 @@ private fun HomeTab(
  * below the bar; people are behind the new-message button.
  */
 @Composable
-private fun DirectTab(conversations: List<ConversationItem>, list: ListState, listState: LazyListState, onNavigate: (String) -> Unit) {
-  var dmFilter by rememberSaveable { mutableStateOf("") }
-  var homeChip by rememberSaveable { mutableStateOf(HomeFilter.All) }
+private fun DirectTab(conversations: List<ConversationItem>, list: ListState, listState: LazyListState, onNavigate: (String) -> Unit, query: HomeQuery) {
   if (conversations.none { it.isDirect }) {
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().padding(top = listTop())) {
       RemainingEmptyState(
         icon = Icons.Filled.Email,
         title = stringResource(R.string.dm_empty_title),
@@ -784,13 +903,9 @@ private fun DirectTab(conversations: List<ConversationItem>, list: ListState, li
     }
     return
   }
-  val sections = directSections(conversations, list.lastActivity, dmFilter, homeChip)
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
-    item(key = "filter") {
-      FilterBar(dmFilter, onChange = { dmFilter = it }) {
-        HomeChips(homeChip, onSelect = { homeChip = if (homeChip == it) HomeFilter.All else it })
-      }
-    }
+  val sections = directSections(conversations, list.lastActivity, query.text, query.chip)
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = listPadding()) {
+    searchMessagesRow(query, onNavigate)
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     conversationRows(sections, list, showsSpace = true)
   }
@@ -809,19 +924,12 @@ private fun ListTab(
   listState: LazyListState,
   onNavigate: (String) -> Unit,
   canBrowse: Boolean,
-  quickAccess: QuickAccess,
+  query: HomeQuery,
 ) {
-  var filter by rememberSaveable { mutableStateOf("") }
-  var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
-  val sections = listSections(conversations, list.lastActivity, filter, chip)
-  val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
-    item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
-    item(key = "filter") {
-      FilterBar(filter, onChange = { filter = it }) {
-        HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
-      }
-    }
+  val sections = listSections(conversations, list.lastActivity, query.text, query.chip)
+  val isFiltering = query.isFiltering
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = listPadding()) {
+    searchMessagesRow(query, onNavigate)
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     conversationRows(sections, list, showsSpace = true)
     if (!isFiltering) {
@@ -847,24 +955,17 @@ private fun ListBySpaceTab(
   listState: LazyListState,
   onNavigate: (String) -> Unit,
   canBrowse: Boolean,
-  quickAccess: QuickAccess,
+  query: HomeQuery,
 ) {
-  var filter by rememberSaveable { mutableStateOf("") }
-  var chip by rememberSaveable { mutableStateOf(HomeFilter.All) }
-  val isFiltering = filter.isNotBlank() || chip != HomeFilter.All
-  val grouped = listSections(conversations, list.lastActivity, filter, chip, bySpace = true)
+  val isFiltering = query.isFiltering
+  val grouped = listSections(conversations, list.lastActivity, query.text, query.chip, bySpace = true)
   // While filtering, only matches count: no empty spaces, nothing collapsed away.
   val sections = if (isFiltering) grouped else withEmptySpaces(grouped, spaces)
   val context = LocalContext.current
   val collapsing = remember { CollapsedSections.of(context) }
   val collapsed by collapsing.collapsed.collectAsState()
-  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(bottom = floatingTabBarClearance())) {
-    item(key = "quick-access") { QuickAccessRow(quickAccess, onNavigate) }
-    item(key = "filter") {
-      FilterBar(filter, onChange = { filter = it }) {
-        HomeChips(chip, showsChannels = true, onSelect = { chip = if (chip == it) HomeFilter.All else it })
-      }
-    }
+  LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = listPadding()) {
+    searchMessagesRow(query, onNavigate)
     if (sections.isEmpty()) item(key = "no-match") { EmptyHint(stringResource(R.string.dm_filter_empty)) }
     collapsibleRows(sections, list, if (isFiltering) emptySet() else collapsed, onToggle = collapsing::toggle, canBrowse = canBrowse)
     if (canBrowse && !isFiltering) {
@@ -911,9 +1012,11 @@ private fun ActivityTab(
   isSyncing: Boolean,
 ) {
   val waiting = activityConversations(conversations, list.lastActivity)
-  Column(Modifier.fillMaxSize()) {
+  Column(Modifier.fillMaxSize().padding(top = listTop())) {
     EntryRow(Icons.AutoMirrored.Filled.List, stringResource(R.string.threads_title)) { onNavigate("threads") }
     EntryRow(Icons.Filled.DateRange, stringResource(R.string.home_entry_meetings)) { onNavigate("meetings") }
+    // Drafts and recent messages, also while there is no draft for Home's chip (#2389).
+    EntryRow(Icons.Filled.Edit, stringResource(R.string.drafts_title)) { onNavigate("drafts") }
     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
     if (waiting.isEmpty() && joinRequestCount == 0 && guestNoticeCount == 0 && isSyncing) {
       ListSkeleton()
@@ -1116,89 +1219,6 @@ internal fun quickAccess(conversations: List<ConversationItem>, maybeScheduled: 
     needsAttention = maybeScheduled?.messages?.any { it.needsAttention } == true,
   )
 
-/**
- * The quick-access cards (#1488): Threads, Saved, Drafts and Scheduled side by side, each with an
- * icon, a title and a one-line status; a card with something waiting is tinted.
- */
-@Composable
-private fun QuickAccessRow(quickAccess: QuickAccess, onNavigate: (String) -> Unit) {
-  Row(
-    Modifier
-      .fillMaxWidth()
-      .horizontalScroll(rememberScrollState())
-      .padding(horizontal = Spacing.l, vertical = Spacing.s),
-    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
-  ) {
-    QuickAccessCard(
-      icon = { Icon(Icons.AutoMirrored.Filled.List, contentDescription = null) },
-      title = stringResource(R.string.home_entry_threads),
-      status = stringResource(R.string.quick_threads_status),
-      isHighlighted = false,
-    ) { onNavigate("threads") }
-    QuickAccessCard(
-      icon = { Icon(painterResource(R.drawable.ic_bookmark), contentDescription = null) },
-      title = stringResource(R.string.home_entry_saved),
-      status = stringResource(R.string.quick_saved_status),
-      isHighlighted = false,
-    ) { onNavigate("saved") }
-    QuickAccessCard(
-      icon = { Icon(Icons.Filled.Edit, contentDescription = null) },
-      title = stringResource(R.string.home_entry_drafts),
-      status = if (quickAccess.draftCount > 0) {
-        pluralStringResource(R.plurals.quick_drafts_count, quickAccess.draftCount, quickAccess.draftCount)
-      } else {
-        stringResource(R.string.quick_drafts_none)
-      },
-      isHighlighted = quickAccess.draftCount > 0,
-    ) { onNavigate("drafts") }
-    quickAccess.maybeScheduledCount?.let { count ->
-      QuickAccessCard(
-        icon = { Icon(painterResource(R.drawable.ic_schedule), contentDescription = null) },
-        title = stringResource(R.string.home_entry_scheduled),
-        status = when {
-          quickAccess.needsAttention -> stringResource(R.string.quick_scheduled_attention)
-          count > 0 -> pluralStringResource(R.plurals.quick_scheduled_count, count, count)
-          else -> stringResource(R.string.quick_scheduled_none)
-        },
-        isHighlighted = count > 0 || quickAccess.needsAttention,
-      ) { onNavigate("scheduled") }
-    }
-  }
-}
-
-@Composable
-private fun QuickAccessCard(
-  icon: @Composable () -> Unit,
-  title: String,
-  status: String,
-  isHighlighted: Boolean,
-  onClick: () -> Unit,
-) {
-  val colors = MaterialTheme.colorScheme
-  Card(
-    onClick = onClick,
-    shape = RoundedCornerShape(16.dp),
-    colors = CardDefaults.cardColors(
-      containerColor = if (isHighlighted) colors.primaryContainer else colors.surfaceContainerHigh,
-      contentColor = if (isHighlighted) colors.onPrimaryContainer else colors.onSurface,
-    ),
-    modifier = Modifier.width(QUICK_CARD_WIDTH).semantics(mergeDescendants = true) {},
-  ) {
-    Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
-      Box(Modifier.size(20.dp), contentAlignment = Alignment.Center) { icon() }
-      Text(title, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-      Text(
-        status,
-        style = MaterialTheme.typography.bodySmall,
-        color = if (isHighlighted) colors.onPrimaryContainer else colors.onSurfaceVariant,
-        fontWeight = if (isHighlighted) FontWeight.SemiBold else FontWeight.Normal,
-        maxLines = 1,
-        overflow = TextOverflow.Ellipsis,
-      )
-    }
-  }
-}
-
 /** The rounded top corners of the neutral card the main screen's lists sit on. */
 private val CONTENT_CARD_RADIUS = 20.dp
 
@@ -1218,9 +1238,7 @@ private fun BrandTopBar(
   spaceMenu: @Composable (String, String, Boolean, () -> Unit) -> Unit = { _, _, _, _ -> },
 ) {
   val colors = LocalTeamCraftColors.current
-  val isDarkHeader = colors.chrome.luminance() < 0.5f
   TopAppBar(
-    modifier = if (isDarkHeader) Modifier.darkStatusBarBackdrop() else Modifier,
     title = {
       val header = maybeSpaceHeader
       if (header != null) {
@@ -1248,7 +1266,8 @@ private fun BrandTopBar(
         AccountAvatar(accountUserId, accountName, size = 32.dp)
       }
     },
-    windowInsets = TopBarInsets,
+    // The status bar's strip and the Scaffold's padding keep it clear of the system bars.
+    windowInsets = WindowInsets(0),
     colors = TopAppBarDefaults.topAppBarColors(
       containerColor = colors.chrome,
       titleContentColor = colors.onChrome,
@@ -1333,42 +1352,6 @@ private fun EmptyStateContent(icon: ImageVector, title: String, text: String, ma
     maybeAction?.let { (label, action) ->
       Button(onClick = action, modifier = Modifier.padding(top = Spacing.s)) { Text(label) }
     }
-  }
-}
-
-/** Unread / People / Groups; pressing the selected chip again shows everything. */
-@Composable
-private fun HomeChips(selected: HomeFilter, showsChannels: Boolean = false, onSelect: (HomeFilter) -> Unit) {
-  Row(
-    Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = Spacing.l),
-    horizontalArrangement = Arrangement.spacedBy(Spacing.s),
-  ) {
-    val chips = listOf(
-      HomeFilter.Unread to R.string.home_filter_unread,
-      HomeFilter.People to R.string.home_filter_people,
-      HomeFilter.Groups to R.string.home_filter_groups,
-    ) + if (showsChannels) listOf(HomeFilter.Channels to R.string.channels) else emptyList()
-    for ((chip, label) in chips) {
-      FilterChip(selected = chip == selected, onClick = { onSelect(chip) }, label = { Text(stringResource(label)) })
-    }
-  }
-}
-
-/**
- * Filtering the list: a compact field with the chips under it, about half the height the field and
- * the entries above it took before, so the first conversations show without scrolling.
- */
-@Composable
-private fun FilterBar(value: String, onChange: (String) -> Unit, chips: @Composable () -> Unit) {
-  Column(Modifier.fillMaxWidth().padding(top = Spacing.xs, bottom = Spacing.xs), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
-    CompactSearchField(
-      value = value,
-      onChange = onChange,
-      placeholder = stringResource(R.string.dm_filter),
-      modifier = Modifier.padding(horizontal = Spacing.l),
-      isFieldDeferred = true,
-    )
-    chips()
   }
 }
 
@@ -1942,7 +1925,7 @@ private fun SelectionTopBar(
   val actions = selectionActions(selected)
   TopAppBar(
     title = { Text(pluralStringResource(R.plurals.chats_selected, selected.size, selected.size)) },
-    windowInsets = TopBarInsets,
+    windowInsets = WindowInsets(0),
     navigationIcon = {
       IconButton(onClick = onDone) { Icon(Icons.Filled.Close, contentDescription = stringResource(R.string.cancel)) }
     },

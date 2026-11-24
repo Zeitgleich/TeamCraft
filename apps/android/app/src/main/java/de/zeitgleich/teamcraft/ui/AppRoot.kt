@@ -351,7 +351,7 @@ private fun ReadyNavigation(
       .onPreviewKeyEvent { event ->
         when (shortcutFor(event)) {
           ShortcutAction.Search -> {
-            if (currentRoute != "search") navigation.navigate("search") { launchSingleTop = true }
+            if (currentRoute?.startsWith("search") != true) navigation.navigate("search") { launchSingleTop = true }
             true
           }
           ShortcutAction.NextUnread -> {
@@ -385,7 +385,6 @@ private fun ReadyNavigation(
           accountUserId = account.userId,
           accountName = account.displayName,
           onOpen = { if (isWide) maybeSelected = it else navigation.openConversation(it) },
-          onSearch = { navigation.navigate("search") },
           onSettings = { navigation.navigate("settings") },
           onNavigate = { route -> navigation.navigate(route) },
           maybeSelectedId = maybeSelected.takeIf { isWide },
@@ -460,9 +459,11 @@ private fun ReadyNavigation(
         onOpenPermalink = openPermalinkInApp,
       )
     }
-    composable("search") {
+    // Home's search hands its text over (#2389): "search messages for …".
+    composable("search?query={query}", arguments = listOf(navArgument("query") { type = NavType.StringType; defaultValue = "" })) { entry ->
       SearchScreen(
         viewModel = viewModel,
+        initialQuery = entry.arguments?.getString("query").orEmpty(),
         // At the message, flashed, in its thread when it is in one (#2003).
         onOpen = { hit ->
           navigation.openChatAt(hit.message.conversation, hit.message.maybeThread, maybeFocus = hit.message.id)

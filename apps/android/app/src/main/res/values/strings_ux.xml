@@ -288,14 +288,13 @@
   <string name="color_theme_import_invalid">A theme code is four hex colours separated by commas.</string>
   <!-- Home layout (#1488): bottom navigation, quick-access cards, sections. -->
   <string name="nav_direct">DMs</string>
-  <string name="quick_threads_status">Replies you follow</string>
-  <string name="quick_saved_status">Kept for later</string>
-  <string name="quick_drafts_none">No drafts</string>
+  <string name="home_search_placeholder">Search conversations</string>
+  <string name="home_search_messages">Search messages for “%1$s”</string>
+  <string name="home_search_empty">No conversation matches.</string>
   <plurals name="quick_drafts_count">
     <item quantity="one">%d draft</item>
     <item quantity="other">%d drafts</item>
   </plurals>
-  <string name="quick_scheduled_none">Nothing scheduled</string>
   <plurals name="quick_scheduled_count">
     <item quantity="one">%d waiting to send</item>
     <item quantity="other">%d waiting to send</item>
