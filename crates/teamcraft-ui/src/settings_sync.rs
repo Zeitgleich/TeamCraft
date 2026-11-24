@@ -158,6 +158,7 @@ synced_prefs! {
   "calls.status_sounds" => calls.status_sounds,
   "calls.small_window" => calls.small_window,
   "calls.direct_connections" => calls.direct_connections,
+  "calls.caption_language" => calls.caption_language,
   "onboarding.done" => onboarding.done,
   "onboarding.is_dismissed" => onboarding.is_dismissed,
   "files.sort" => files.sort,

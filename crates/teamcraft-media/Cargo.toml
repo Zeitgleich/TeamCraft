@@ -103,6 +103,12 @@ v4l2 = ["native", "dep:v4l"]
 # at runtime a missing element or plugin falls back to OpenH264.
 gstreamer = ["native", "dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
+# Live captions of a call on this device (#215, `captions`): who speaks when, the recognizer's
+# worker thread and the speech model's pinned SHA-256. No engine; tests use a fake.
+captions = ["native", "dep:sha2", "dep:teamcraft-client-api"]
+# ... with whisper.cpp as the engine (`captions_whisper`): the desktop app.
+captions-whisper = ["captions", "dep:whisper-rs"]
+
 # Background effects (blur, background images) as WGSL compute shaders on wgpu: Vulkan, Metal,
 # D3D12 natively, WebGPU in the browser.
 effects = ["dep:wgpu", "dep:bytemuck", "dep:futures-channel", "dep:pollster", "dep:zune-jpeg", "dep:zune-png", "dep:jpeg-encoder"]
@@ -171,6 +177,10 @@ tract-nnef = { version = "0.23.9", optional = true, default-features = false }
 tract-onnx-opl = { version = "0.23.9", optional = true }
 # The downloaded model's SHA-256 (as teamcraft-crypto computes hashes; MIT/Apache-2.0).
 sha2 = { version = "0.11.0", optional = true }
+# Live captions (#215): whisper.cpp (MIT, built with cmake like libopus) through safe bindings
+# (Unlicense). Its log is silenced, never forwarded: a debug build of whisper.cpp prints tokens.
+# Runs on the CPU; models are downloaded on demand.
+whisper-rs = { version = "0.16.0", optional = true }
 # Safe libopus bindings; libopus (BSD-3-Clause) is the reference Opus implementation.
 opus = { version = "0.4.0", optional = true }
 # The browser's voice decoder (#2140): a pure-Rust port of libopus (BSD-3-Clause), bit-exact with
@@ -301,6 +311,11 @@ nix = { version = "0.31.3", default-features = false, features = ["resource"] }
 [[bin]]
 name = "teamcraft-call"
 required-features = ["native"]
+
+# What live captions cost at the call's pace (#215; see the example's docs).
+[[example]]
+name = "caption_bench"
+required-features = ["captions-whisper"]
 
 # Per-frame costs of encoding, effects and segmentation (see the example's docs).
 [[example]]

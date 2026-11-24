@@ -1402,6 +1402,17 @@ pub trait CallBackend {
   fn stop_call_recording(&self) {}
   /// Deletes the finished recording.
   fn discard_call_recording(&self) {}
+  /// The speech model of live captions (#215), where this app captions calls (the desktop app);
+  /// `None` where it doesn't (the browser): no captions button there.
+  fn caption_model(&self) -> Option<crate::calls::CaptionModelState> {
+    None
+  }
+  /// Turns live captions of the active call on this device on or off, or changes their
+  /// language (e2ee.md §8.6); on downloads the speech model first where it is missing, which the
+  /// UI asks the user before.
+  fn set_call_captions(&self, _is_on: bool, _language: crate::calls::CaptionLanguage) {}
+  /// Deletes the downloaded speech model.
+  fn delete_caption_model(&self) {}
   /// Calls ringing for the user that they haven't answered or declined.
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     Vec::new()

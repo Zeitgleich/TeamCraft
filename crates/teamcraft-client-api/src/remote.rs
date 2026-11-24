@@ -94,6 +94,11 @@ pub struct CallSnapshot {
   /// A finished recording waiting for the user to post or delete it.
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub maybe_recording_take: Option<crate::calls::CallRecordingTake>,
+  /// The speech model of live captions (#215): present where this app captions calls (the
+  /// desktop shell), which is what shows the captions button. Absent from the browser and older
+  /// shells.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_captions_model: Option<crate::calls::CaptionModelState>,
 }
 
 /// Something the user did in or about a call.
@@ -195,6 +200,17 @@ pub enum CallAction {
   StopRecording,
   /// Deletes the finished take.
   DiscardRecording,
+  /// Turns live captions on this device on or off (#215, e2ee.md §8.6), or changes their
+  /// language while on. Turning them on downloads the speech model first where it is missing
+  /// ([`CallSnapshot::maybe_captions_model`]); the UI asks before. Refused where the app doesn't
+  /// caption.
+  SetCaptions {
+    is_on: bool,
+    #[serde(default)]
+    language: crate::calls::CaptionLanguage,
+  },
+  /// Deletes the downloaded speech model (settings); captions that run go off.
+  DeleteCaptionModel,
   /// Opens the system's video effects panel (macOS: Portrait, background, Studio Light).
   OpenSystemVideoEffects,
   /// Which call status sounds play (a device setting; also before any call).

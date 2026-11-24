@@ -278,6 +278,10 @@ enum Command {
   /// Starts handing the call's audio to a recording, or stops (e2ee.md §8.3); the engine sends
   /// the signed notice.
   Recording(Option<RecordingSink>),
+  /// Hands the others' voices to live captions on this device, or stops (#215). Nothing is sent
+  /// to anybody: captions are this device's own.
+  #[cfg(feature = "captions")]
+  Captions(Option<crate::captions::CaptionTap>),
   /// Reads what the call's video does (stats for nerds, #938).
   #[cfg(feature = "call-view")]
   VideoStats(oneshot::Sender<teamcraft_client_api::video_stats::VideoStatsReport>),
@@ -545,6 +549,14 @@ impl NativeCall {
   pub fn set_recording(&self, maybe_sink: Option<RecordingSink>) {
     // A closed channel means the call already ended; nothing records any more.
     let _ = self.commands.send(Command::Recording(maybe_sink));
+  }
+
+  /// Hands the others' voices to live captions on this device (`tap`), or stops with `None`
+  /// (#215, e2ee.md §8.6). Unlike a recording, nobody is told: nothing leaves the device.
+  #[cfg(feature = "captions")]
+  pub fn set_captions(&self, maybe_tap: Option<crate::captions::CaptionTap>) {
+    // A closed channel means the call already ended; nothing to caption.
+    let _ = self.commands.send(Command::Captions(maybe_tap));
   }
 
   /// Takes the call over from the account's other devices.
@@ -1126,6 +1138,8 @@ async fn run_call(
               direct.set_user_allows(does_allow, &mut engine, Instant::now());
             }
           },
+          #[cfg(feature = "captions")]
+          Some(Command::Captions(maybe_tap)) => sinks.mixer.set_caption_tap(maybe_tap),
           Some(Command::Recording(maybe_sink)) => {
             engine.set_recording(maybe_sink.is_some());
             maybe_recording = maybe_sink;

@@ -56,6 +56,9 @@ pub struct PlaybackMixer {
   /// The sound of our own shared screen: the speakers play it too, so the echo canceller has to
   /// know it, or the microphone sends it a second time.
   echo_reference: VecDeque<f32>,
+  /// Where the others' voices go for live captions on this device (#215), while they are on.
+  #[cfg(feature = "captions")]
+  maybe_caption_tap: Option<crate::captions::CaptionTap>,
 }
 
 struct RemoteAudio {
@@ -206,6 +209,8 @@ impl PlaybackMixer {
       is_deafened: false,
       maybe_processor: None,
       echo_reference: VecDeque::new(),
+      #[cfg(feature = "captions")]
+      maybe_caption_tap: None,
     }
   }
 
@@ -263,11 +268,29 @@ impl PlaybackMixer {
   /// A participant left: forget its streams.
   pub fn remove(&mut self, sender: DeviceId) {
     self.streams.retain(|(device_id, _), _| *device_id != sender);
+    #[cfg(feature = "captions")]
+    if let Some(tap) = &self.maybe_caption_tap {
+      tap.end(sender);
+    }
   }
 
   /// One of a participant's streams ended (a screen share's sound stopped).
   pub fn remove_stream(&mut self, sender: DeviceId, origin: AudioOrigin) {
     self.streams.remove(&(sender, origin));
+    #[cfg(feature = "captions")]
+    if origin == AudioOrigin::Microphone
+      && let Some(tap) = &self.maybe_caption_tap
+    {
+      tap.end(sender);
+    }
+  }
+
+  /// Hands the others' voices (their microphones, not shared screens' sound) to live captions,
+  /// frame by frame as they are played, or stops with `None` (#215). Deafened, nothing is
+  /// captioned: nothing is heard either.
+  #[cfg(feature = "captions")]
+  pub fn set_caption_tap(&mut self, maybe_tap: Option<crate::captions::CaptionTap>) {
+    self.maybe_caption_tap = maybe_tap;
   }
 
   /// Our own shared screen's sound as it is captured (mono 48 kHz), for the echo canceller only;
@@ -287,13 +310,24 @@ impl PlaybackMixer {
   /// The next 20 ms of mixed audio (call every 20 ms). Lost packets are concealed.
   pub fn next_frame(&mut self) -> Result<Vec<f32>, AudioPipelineError> {
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
-    for stream in self.streams.values_mut() {
+    for (key, stream) in self.streams.iter_mut() {
       stream.decode_frame()?;
       let available = stream.decoded.len().min(FRAME_SAMPLES_PER_CHANNEL);
       let samples = stream.decoded.drain(..available);
       if self.is_deafened {
         continue;
       }
+      #[cfg(feature = "captions")]
+      if let (Some(tap), (sender, AudioOrigin::Microphone)) = (&self.maybe_caption_tap, key) {
+        let frame: Vec<f32> = samples.collect();
+        tap.push(*sender, &frame);
+        for (slot, sample) in mix.iter_mut().zip(frame) {
+          *slot += sample;
+        }
+        continue;
+      }
+      // The stream's key matters only to captions.
+      let _ = key;
       for (slot, sample) in mix.iter_mut().zip(samples) {
         *slot += sample;
       }

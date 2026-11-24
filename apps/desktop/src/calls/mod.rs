@@ -13,6 +13,7 @@
 //! Before a join, the pre-join screen checks the camera and microphone here (`preview`): the
 //! camera through the call's effects into the self view, the microphone into a level meter.
 
+mod captions;
 mod codec_library;
 pub mod commands;
 mod preview;
@@ -31,9 +32,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use teamcraft_client_api::call_view::{CallSignal, CallView};
 use teamcraft_client_api::calls::{
-  ActiveCall, AudioSystem, BackgroundEffect as UiBackgroundEffect, CallEndReason, CallPreview, CallRequest,
-  CallStatusSounds, CameraFallback, DevicePresence, MediaDevice, MediaDevices, PreviewCamera, PushToTalk,
-  ScreenShareSound, VideoQuality,
+  ActiveCall, AudioSystem, BackgroundEffect as UiBackgroundEffect, CallCaptions, CallEndReason, CallPreview,
+  CallRequest, CallStatusSounds, CameraFallback, CaptionLanguage, CaptionModelState, DevicePresence,
+  MediaDevice, MediaDevices, PreviewCamera, PushToTalk, ScreenShareSound, VideoQuality,
 };
 use teamcraft_client_api::crash_reporting::CallRef;
 use teamcraft_client_api::failure::{ActionFailure, CallFailure, FailureKind};
@@ -56,8 +57,9 @@ use teamcraft_media::call_native::{
 use teamcraft_media::call_resilience::{JoinTicket, JoinTicketError, certificate_hash_from_hex};
 use teamcraft_media::call_telemetry::{CallTelemetry, STATS_SAMPLE_INTERVAL, TelemetryThresholds};
 use teamcraft_media::call_video::ReceivedVideoFrame;
-use teamcraft_media::call_view::{CallRoster, status_cues};
+use teamcraft_media::call_view::{CallRoster, CaptionText, status_cues};
 use teamcraft_media::camera_choice::CameraReport;
+use teamcraft_media::captions::{CaptionTap, CaptionUpdate};
 use teamcraft_media::effects::{BackgroundImage, EffectHandle};
 use teamcraft_media::ringtone;
 use teamcraft_media::system_audio::SystemAudioCapture;
@@ -70,6 +72,7 @@ use teamcraft_proto::{
 };
 use tokio::sync::{mpsc, oneshot};
 
+use self::captions::{CaptionModels, CaptionSession};
 use self::codec_library::CodecLibrary;
 use self::preview::{CameraCheck, LevelWatch, MicrophoneCheck, Preview};
 use self::self_view::SelfView;
@@ -112,6 +115,8 @@ pub struct CallHost {
   screen_picker: OpenPicker,
   /// Where call recordings are written.
   recording_folder: recording::RecordingFolder,
+  /// The speech model of live captions (#215).
+  captions: CaptionModels,
 }
 
 /// The system's screen picker while a share start waits for the user's choice in it: stopping
@@ -139,6 +144,8 @@ pub struct MediaFiles {
   /// The recording key of the local secrets, which keeps a recording readable after a crash
   /// (#2116); without it a crash loses the recording.
   pub maybe_recording_keys: Option<Arc<dyn RecordingKeys>>,
+  /// Where the speech model of live captions is downloaded to (#215), in the data folder.
+  pub caption_model_folder: PathBuf,
 }
 
 #[derive(Default)]
@@ -177,6 +184,11 @@ struct CallState {
   camera_quality: VideoQuality,
   /// This device's recording of the call and its take (e2ee.md §8.3).
   recordings: recording::Recordings,
+  /// The speech model of live captions (#215); set when the host is made.
+  maybe_captions_model: Option<CaptionModelState>,
+  /// Counts the user's captions changes: a start that finishes after a newer change (off, another
+  /// language, a new call) is dropped.
+  caption_generation: u64,
 }
 
 /// Control of the task that owns the [`NativeCall`].
@@ -209,6 +221,8 @@ enum Control {
   NetworkChanged,
   /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
   Recording(Option<teamcraft_media::call_recording::RecordingSink>),
+  /// Starts live captions with this session and tap, or stops them (#215).
+  Captions(Option<(CaptionSession, CaptionTap)>),
   Subscribe {
     stream_id: MediaStreamId,
     maybe_max_layer: Option<u8>,
@@ -302,8 +316,13 @@ impl CallHost {
     report_failure: FailureReporter,
     files: MediaFiles,
   ) -> Self {
+    let captions = CaptionModels::new(files.caption_model_folder);
+    let state = CallState {
+      maybe_captions_model: Some(captions.initial_state()),
+      ..CallState::default()
+    };
     Self {
-      state: Arc::new(Mutex::new(CallState::default())),
+      state: Arc::new(Mutex::new(state)),
       notify,
       report_failure,
       media: tokio::sync::Mutex::new(None),
@@ -316,6 +335,7 @@ impl CallHost {
       levels: LevelWatch::default(),
       screen_picker: OpenPicker::default(),
       recording_folder: recording::RecordingFolder::new(files.recording_folder, files.maybe_recording_keys),
+      captions,
     }
   }
 
@@ -353,6 +373,7 @@ impl CallHost {
       call_reports: Vec::new(),
       can_record: true,
       maybe_recording_take: state.recordings.take(),
+      maybe_captions_model: state.maybe_captions_model,
     }
   }
 
@@ -749,6 +770,88 @@ impl CallHost {
     let finished = recording::finish(&self.state).await;
     self.changed();
     finished
+  }
+
+  /// Turns live captions on this device on (downloading the speech model first where it is
+  /// missing; the UI asked the user) or off, or changes their language (#215, e2ee.md §8.6).
+  /// Nobody else in the call is told: nothing leaves the device. The error is `ActionFailure` wire
+  /// text.
+  pub async fn set_captions(&self, is_on: bool, language: CaptionLanguage) -> Result<(), String> {
+    let generation = {
+      let mut state = lock(&self.state);
+      state.caption_generation += 1;
+      state.caption_generation
+    };
+    if !is_on {
+      self.control(Control::Captions(None)).await;
+      self.clear_captions();
+      return Ok(());
+    }
+    if self.media.lock().await.is_none() {
+      return Err(ActionFailure::other("no call to caption").to_wire());
+    }
+    {
+      let mut state = lock(&self.state);
+      let Some(active) = state.view.maybe_active.as_mut() else {
+        return Err(ActionFailure::other("no call to caption").to_wire());
+      };
+      // The sentences count from one again in the new session: earlier lines go.
+      active.maybe_captions = Some(CallCaptions {
+        language,
+        lines: Vec::new(),
+        is_starting: true,
+      });
+    }
+    self.changed();
+    let started = match self.captions.ensure(&self.state, &*self.notify).await {
+      Ok(()) => self.captions.start(language).await,
+      Err(failure) => Err(failure),
+    };
+    // Turned off, changed again or the call ended meanwhile: this start is moot (dropping the
+    // session stops its worker).
+    if lock(&self.state).caption_generation != generation {
+      return Ok(());
+    }
+    let session = match started {
+      Ok(session) => session,
+      Err(failure) => {
+        self.clear_captions();
+        return Err(failure);
+      },
+    };
+    self.control(Control::Captions(Some(session))).await;
+    if let Some(captions) = lock(&self.state)
+      .view
+      .maybe_active
+      .as_mut()
+      .and_then(|active| active.maybe_captions.as_mut())
+    {
+      captions.is_starting = false;
+    }
+    self.changed();
+    Ok(())
+  }
+
+  /// Deletes the downloaded speech model (#215); captions that run go off.
+  pub async fn delete_caption_model(&self) -> Result<(), String> {
+    self.set_captions(false, CaptionLanguage::Auto).await?;
+    self.captions.delete().await?;
+    let mut state = lock(&self.state);
+    if state.maybe_captions_model != Some(CaptionModelState::Unsupported) {
+      state.maybe_captions_model = Some(CaptionModelState::Missing {
+        size_bytes: teamcraft_media::caption_model::CAPTION_MODEL.size_bytes,
+      });
+    }
+    drop(state);
+    self.changed();
+    Ok(())
+  }
+
+  fn clear_captions(&self) {
+    if let Some(active) = lock(&self.state).view.maybe_active.as_mut() {
+      active.maybe_captions = None;
+    }
+    self.changed();
   }
 
   /// Deletes the take the user didn't want.
@@ -1484,8 +1587,13 @@ async fn run_media(
   let mut sample_tick = tokio::time::interval(STATS_SAMPLE_INTERVAL);
   sample_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
   let mut is_hang_up = false;
+  // Live captions while they are on (#215); dropping the session stops its worker.
+  let mut maybe_captions: Option<CaptionSession> = None;
   loop {
     tokio::select! {
+      maybe_update = next_caption(&mut maybe_captions) => {
+        on_caption(maybe_update, &mut maybe_captions, &call, &roster, &shared);
+      },
       _ = level_tick.tick() => {
         shared.levels.publish(microphone_level.get());
         // At its maximum (or after a failed write) the call stopped handing the recording audio
@@ -1581,6 +1689,16 @@ async fn run_media(
         Some(Control::DirectConnections(is_allowed)) => call.set_direct_connections(is_allowed),
         Some(Control::NetworkChanged) => call.network_changed(),
         Some(Control::Recording(maybe_sink)) => call.set_recording(maybe_sink),
+        Some(Control::Captions(maybe_start)) => {
+          let maybe_tap = maybe_start.map(|(session, tap)| {
+            maybe_captions = Some(session);
+            tap
+          });
+          if maybe_tap.is_none() {
+            maybe_captions = None;
+          }
+          call.set_captions(maybe_tap);
+        },
         Some(Control::HangUp) => {
           is_hang_up = true;
           break;
@@ -1704,6 +1822,52 @@ fn on_event(
   if roster.apply(&mut lock(&shared.state).view, event) {
     (shared.notify)();
   }
+}
+
+/// The next update of the running captions; never, while they are off.
+async fn next_caption(maybe_captions: &mut Option<CaptionSession>) -> Option<CaptionUpdate> {
+  match maybe_captions {
+    Some(session) => session.next_update().await,
+    None => std::future::pending().await,
+  }
+}
+
+/// A caption goes to the view under its speaker's name; captions that stopped by themselves (too
+/// slow for the speech, a failed recognizer) go off, and the user hears why.
+fn on_caption(
+  maybe_update: Option<CaptionUpdate>,
+  maybe_captions: &mut Option<CaptionSession>,
+  call: &NativeCall,
+  roster: &CallRoster,
+  shared: &MediaShared,
+) {
+  if let Some(CaptionUpdate::Text {
+    speaker,
+    sentence,
+    text,
+    is_final,
+  }) = maybe_update
+  {
+    let caption = CaptionText {
+      speaker,
+      sentence,
+      text,
+      is_final,
+    };
+    if roster.apply_caption(&mut lock(&shared.state).view, caption) {
+      (shared.notify)();
+    }
+    return;
+  }
+  *maybe_captions = None;
+  call.set_captions(None);
+  if let Some(active) = lock(&shared.state).view.maybe_active.as_mut() {
+    active.maybe_captions = None;
+  }
+  if let Some(failure) = maybe_update.as_ref().and_then(captions::stopped_failure) {
+    (shared.report_failure)(failure);
+  }
+  (shared.notify)();
 }
 
 /// The telemetry's new problem reports go to the page with the next snapshot.
@@ -2725,6 +2889,8 @@ mod tests {
         recording_folder: std::env::temp_dir()
           .join(format!("teamcraft-call-recordings-test-{}", std::process::id())),
         maybe_recording_keys: None,
+        caption_model_folder: std::env::temp_dir()
+          .join(format!("teamcraft-caption-models-test-{}", std::process::id())),
       },
     )
   }

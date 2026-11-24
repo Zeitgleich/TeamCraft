@@ -490,6 +490,9 @@ pub struct CallPrefs {
   /// workspace policy allows it (ARCHITECTURE.md §6.7, #127): on until the user turns it off, which
   /// keeps every call of theirs on the server.
   pub direct_connections: bool,
+  /// The language live captions recognize (#215): recognized per sentence until the user picks
+  /// one. Captions themselves start off in every call.
+  pub caption_language: teamcraft_client_api::calls::CaptionLanguage,
 }
 
 impl Default for CallPrefs {
@@ -515,6 +518,7 @@ impl Default for CallPrefs {
       camera_quality: teamcraft_client_api::calls::VideoQuality::Auto,
       small_window: teamcraft_client_api::call_mini::CallMiniPolicy::WhenAway,
       direct_connections: true,
+      caption_language: teamcraft_client_api::calls::CaptionLanguage::Auto,
     }
   }
 }

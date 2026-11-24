@@ -876,6 +876,14 @@ impl Host {
         self.recordings.discard().await;
         self.changed();
       },
+      // Captions are recognized on the device by the desktop app only so far (#215); the page
+      // offers no button here (`maybe_captions_model` is absent).
+      CallAction::SetCaptions { .. } | CallAction::DeleteCaptionModel => {
+        return Err(ActionFailure::new(
+          FailureKind::Call(CallFailure::CaptionsUnsupported),
+          "the browser doesn't caption calls",
+        ));
+      },
       CallAction::Unknown => return Err(ActionFailure::other("unknown call action")),
     }
     Ok(None)
@@ -1822,6 +1830,7 @@ impl Host {
         call_reports: state.view.call_reports.clone(),
         can_record: recording::Recordings::can_record(),
         maybe_recording_take: self.recordings.take(),
+        maybe_captions_model: None,
       }
     };
     let Ok(json) = serde_json::to_string(&snapshot) else {

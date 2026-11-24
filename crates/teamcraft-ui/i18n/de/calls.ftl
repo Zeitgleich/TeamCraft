@@ -519,3 +519,29 @@ call-announce-reacted = { $count ->
 call-announce-reacted-many = { $count } Reaktionen
 # The row of participant tiles; focusable so a keyboard can scroll it (#2287).
 call-filmstrip = Teilnehmende
+
+## Live captions (#215): recognized on this device only.
+call-captions = Untertitel
+call-captions-label = Live-Untertitel
+call-captions-only-here = Untertitel · nur auf diesem Gerät
+call-captions-language = Sprache der Untertitel
+call-captions-language-auto = Sprache erkennen
+call-captions-language-en = Englisch
+call-captions-language-de = Deutsch
+call-captions-language-fr = Französisch
+call-captions-language-es = Spanisch
+call-captions-language-it = Italienisch
+call-captions-language-nl = Niederländisch
+call-captions-language-pl = Polnisch
+call-captions-language-pt = Portugiesisch
+call-captions-someone = Jemand
+call-captions-starting = Untertitel starten…
+call-captions-listening = Untertitel erscheinen hier, sobald jemand spricht.
+call-captions-downloading = Sprachmodell wird geladen… { $percent } %
+call-captions-ask-title = Untertitel einschalten?
+call-captions-ask-text = Für Untertitel wird einmalig ein Sprachmodell ({ $size }) geladen. Der Ton des Anrufs wird auf diesem Computer in Text umgewandelt: Weder Ton noch Text verlassen ihn, und niemand im Anruf wird benachrichtigt.
+call-captions-ask-cancel = Nicht jetzt
+call-captions-ask-download = Laden und einschalten
+error-call-captions-overloaded = Untertitel ausgeschaltet: Dieser Computer ist zu ausgelastet, um mit dem Gesprochenen Schritt zu halten. Der Anruf läuft weiter.
+error-call-caption-model-unavailable = Untertitel konnten nicht starten: Das Sprachmodell konnte nicht geladen werden. Versuche es später noch einmal.
+error-call-captions-unsupported = Der Prozessor dieses Computers kann keine Untertitel erzeugen.

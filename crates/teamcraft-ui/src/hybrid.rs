@@ -1678,6 +1678,22 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     }
   }
 
+  fn caption_model(&self) -> Option<teamcraft_client_api::calls::CaptionModelState> {
+    self.maybe_calls.as_ref().and_then(RemoteCalls::caption_model)
+  }
+
+  fn set_call_captions(&self, is_on: bool, language: teamcraft_client_api::calls::CaptionLanguage) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::SetCaptions { is_on, language });
+    }
+  }
+
+  fn delete_caption_model(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::DeleteCaptionModel);
+    }
+  }
+
   fn incoming_calls(&self) -> Vec<IncomingCall> {
     self
       .maybe_calls

@@ -406,6 +406,8 @@ pub async fn call_action(
     },
     CallAction::StopRecording => calls.stop_recording().await?,
     CallAction::DiscardRecording => calls.discard_recording(),
+    CallAction::SetCaptions { is_on, language } => calls.set_captions(is_on, language).await?,
+    CallAction::DeleteCaptionModel => calls.delete_caption_model().await?,
     CallAction::OpenSystemVideoEffects => open_system_video_effects(&app)?,
     CallAction::SetPushToTalk {
       is_enabled,

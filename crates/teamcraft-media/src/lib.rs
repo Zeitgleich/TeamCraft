@@ -105,6 +105,12 @@ pub mod call_web;
 #[cfg(feature = "native")]
 pub mod camera_choice;
 pub mod camera_governor;
+#[cfg(feature = "captions")]
+pub mod caption_model;
+#[cfg(feature = "captions")]
+pub mod captions;
+#[cfg(feature = "captions-whisper")]
+pub mod captions_whisper;
 // Used by the nokhwa cameras (macOS, Windows); tested on every platform.
 #[cfg(feature = "native")]
 #[cfg_attr(
