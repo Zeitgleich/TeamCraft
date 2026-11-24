@@ -379,7 +379,14 @@ private enum SeparatorChoice: Hashable {
     switch self {
     case .auto: return "text_preview_separator_auto"
     case .custom(let text): return LocalizedStringKey("\"\(text)\"")
-    case .picked(let slug): return LocalizedStringKey("text_preview_separator_\(slug)")
+    case .picked(let slug):
+      switch slug {
+      case "comma": return "text_preview_separator_comma"
+      case "semicolon": return "text_preview_separator_semicolon"
+      case "tab": return "text_preview_separator_tab"
+      case "pipe": return "text_preview_separator_pipe"
+      default: return "text_preview_separator_colon"
+      }
     }
   }
 

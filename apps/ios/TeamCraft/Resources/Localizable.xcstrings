@@ -5257,22 +5257,6 @@
         }
       }
     },
-    "text_preview_find": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Find"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Suchen"
-          }
-        }
-      }
-    },
     "text_preview_find_hint": {
       "localizations": {
         "en": {
@@ -5285,22 +5269,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "In der Datei suchen"
-          }
-        }
-      }
-    },
-    "text_preview_find_none": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No match"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Keine Treffer"
           }
         }
       }
@@ -5401,38 +5369,6 @@
         }
       }
     },
-    "text_preview_copied": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Copied"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Kopiert"
-          }
-        }
-      }
-    },
-    "text_preview_row_column": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Row %lld, column %lld"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Zeile %lld, Spalte %lld"
-          }
-        }
-      }
-    },
     "text_preview_header_cell": {
       "localizations": {
         "en": {
@@ -5445,22 +5381,6 @@
           "stringUnit": {
             "state": "translated",
             "value": "Spalte %lld"
-          }
-        }
-      }
-    },
-    "text_preview_table_summary": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld rows, %lld columns"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "%lld Zeilen, %lld Spalten"
           }
         }
       }

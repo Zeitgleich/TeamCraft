@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-  <string name="text_preview_title">Preview of %1$s</string>
   <string name="text_preview_view_table">Table</string>
   <string name="text_preview_view_text">Text</string>
   <string name="text_preview_separator">Separator</string>
@@ -27,9 +26,7 @@
   <string name="text_preview_copy_cell">Copy cell</string>
   <string name="text_preview_copy_row">Copy row</string>
   <string name="text_preview_copied">Copied</string>
-  <string name="text_preview_row_column">Row %1$d, column %2$d</string>
   <string name="text_preview_header_cell">Column %1$d</string>
-  <string name="text_preview_table_summary">%1$d rows, %2$d columns</string>
   <string name="text_preview_truncated">Only the first part of the file is shown. Open it in another app to see the rest.</string>
   <string name="text_preview_columns_dropped">Rows with more than 256 columns are cut off.</string>
   <string name="text_preview_not_a_table">This file doesn\'t read as a table with this separator. It is shown as text.</string>
