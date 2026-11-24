@@ -20,7 +20,10 @@ struct PendingConversationView: View {
       }
     }
     .task(id: model.changeCount) {
-      maybeNotified = await model.notifiedConversation(conversationId)
+      // A failed read keeps the message shown until one says the store has it (#2374); before the
+      // first answer the loading line stays.
+      guard case .success(let read) = await model.readNotifiedConversation(conversationId) else { return }
+      maybeNotified = read
       hasLoaded = true
     }
   }
