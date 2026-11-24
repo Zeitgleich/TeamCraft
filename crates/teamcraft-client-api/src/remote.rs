@@ -3573,13 +3573,13 @@ mod tests {
       r#"{"action":"set_recovery_key","recovery_key":"K"}"#
     );
     let rotate = ChatAction::RotateBackupKey {
-      recovery_key: SecretText("K".into()),
+      recovery_key: SecretText("QQQQ-ZZZZ".into()),
     };
     assert_eq!(
       serde_json::to_string(&rotate).expect("serialize"),
-      r#"{"action":"rotate_backup_key","recovery_key":"K"}"#
+      r#"{"action":"rotate_backup_key","recovery_key":"QQQQ-ZZZZ"}"#
     );
-    assert!(!format!("{rotate:?}").contains('K'));
+    assert!(!format!("{rotate:?}").contains("QQQQ"));
     let passkey = PasskeyWire {
       credential_id: "Y3JlZA".into(),
       prf_salt: "c2FsdA".into(),

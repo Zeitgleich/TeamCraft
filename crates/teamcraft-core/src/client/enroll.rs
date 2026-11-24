@@ -507,7 +507,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       keys.push(org_wrap);
     }
     // Devices of the user that survived keep working with the new key (e2ee.md §6.6).
-    keys.extend(self.handoff_wraps(&self.account.backup_key()).await?);
+    // Boxed: an org recovery is rare, and enrollment's future stays small.
+    keys.extend(Box::pin(self.handoff_wraps(&self.account.backup_key())).await?);
     self.store_wrapped_keys(&keys)?;
     match new_secret {
       NewBackupSecret::RecoveryKey(_) => self.note_recovery_key_set()?,

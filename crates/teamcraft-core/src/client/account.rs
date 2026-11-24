@@ -99,7 +99,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// from the server, and uploads local changes.
   pub async fn sync_account_data(&mut self) -> Result<(), CoreError> {
     let _step = crate::timing::step("account_data_sync");
-    self.resume_backup_key_rotation().await?;
+    // Boxed: rarely more than a store read, and it keeps every sync's future small.
+    Box::pin(self.resume_backup_key_rotation()).await?;
     let remote = match self.read_ahead.key_bag.take() {
       Some(remote) => remote?,
       None => self.api.key_bag().await?,

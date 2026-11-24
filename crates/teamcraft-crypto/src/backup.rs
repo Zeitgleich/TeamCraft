@@ -774,7 +774,10 @@ mod tests {
       let decoded = WrappedBackupKey::from_bytes(&wrapped.to_bytes().unwrap()).unwrap();
 
       assert_eq!(decoded.method(), WrapMethod::PasskeyPrf);
-      assert_eq!(passkey_credentials(&[decoded.clone()]), [credential.clone()]);
+      assert_eq!(
+        passkey_credentials(std::slice::from_ref(&decoded)),
+        std::slice::from_ref(&credential)
+      );
       // Another device evaluating the same passkey with the stored PRF input opens it.
       let other_device = PasskeyPrfWrapper::new(credential, &prf_output(7)).unwrap();
       let unwrapped = other_device.unwrap_key(ALICE, &decoded).unwrap();

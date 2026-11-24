@@ -42,10 +42,16 @@ mod passkey {
       .add_passkey(credential.clone(), &prf_output(1))
       .await
       .unwrap();
-    assert_eq!(device.passkeys().await.unwrap(), [credential.clone()]);
+    assert_eq!(
+      device.passkeys().await.unwrap(),
+      std::slice::from_ref(&credential)
+    );
 
     // A device without keys learns which passkey to ask for, and recovers with it.
-    assert_eq!(passkey_credentials(&api).await.unwrap(), [credential.clone()]);
+    assert_eq!(
+      passkey_credentials(&api).await.unwrap(),
+      std::slice::from_ref(&credential)
+    );
     let recovered = enroll(&api, with_passkey(&credential, 1)).await.unwrap();
     assert_eq!(recovered.identity_fingerprint(), device.identity_fingerprint());
 
