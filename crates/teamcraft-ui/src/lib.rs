@@ -32,6 +32,7 @@ pub mod call_mini;
 pub mod calls;
 pub mod channel_access;
 pub mod channel_policy;
+pub mod churn_watch;
 pub mod clock;
 pub mod components;
 pub mod composer_focus;

@@ -72,6 +72,14 @@ Every app keeps the recent `tracing` events of its own process in a **bounded ri
   the app (the same ring the diagnostics export of #1094 shares, which is redacted now as well).
   The lines of the logs are merged by time.
 
+### Top bar churn (#2338)
+
+The page counts how often the top bar and the desktop downloads button are built and how often the
+button's visibility flips (`teamcraft-ui::churn_watch`). The first events of a start are `info`
+lines ("top bar change"); more than 12 events in a minute give one `warn` line ("the top bar is
+flickering") with the counts per kind, then silence until a quiet minute passed. A flicker seen once
+in the field is so visible in a report's log afterwards.
+
 ### Redaction
 
 security.md already forbids logging content, file names, keys, tokens, passwords and push payloads.
