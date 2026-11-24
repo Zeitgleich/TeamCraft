@@ -57,6 +57,7 @@ mod status_presets;
 mod stickers;
 mod store_threads;
 mod strict_channel;
+mod text_preview;
 mod types;
 mod video;
 mod voice;
@@ -136,6 +137,10 @@ use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
 use teamcraft_core::device_activity::ActivityReports;
 use teamcraft_media::openh264_library::{self, OpenH264Binary};
+pub use text_preview::{
+  CellFind, CellHit, ColumnInfo, DelimiterChoice, LineFind, LineMatch, PreviewEncoding, TableInfo,
+  TextPreview, TextPreviewError, TextPreviewInfo, open_text_preview,
+};
 use tokio::sync::{mpsc, oneshot};
 use tracing::Instrument as _;
 pub use types::{

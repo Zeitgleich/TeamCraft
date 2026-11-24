@@ -150,6 +150,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import de.zeitgleich.teamcraft.ui.SharedFiles
+import de.zeitgleich.teamcraft.ui.TextPreviewRequest
+import de.zeitgleich.teamcraft.ui.isTextPreviewable
 import androidx.core.graphics.PaintCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -1111,8 +1113,13 @@ private fun MessageList(
   }
 }
 
-/** Opens a decrypted download in another app through the FileProvider; a failure shows a message. */
-fun openFile(context: Context, file: File, mediaType: String) = SharedFiles.open(context, file, mediaType)
+/**
+ * Opens a decrypted download: text and delimited files in the in-app preview (#2342), anything else
+ * in another app through the FileProvider; a failure shows a message.
+ */
+fun openFile(context: Context, file: File, mediaType: String, fileName: String = file.name) {
+  if (isTextPreviewable(fileName, mediaType)) TextPreviewRequest.show(file, mediaType, fileName) else SharedFiles.open(context, file, mediaType)
+}
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable

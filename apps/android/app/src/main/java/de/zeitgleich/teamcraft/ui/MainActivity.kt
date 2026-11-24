@@ -43,6 +43,7 @@ import de.zeitgleich.teamcraft.ui.screens.LoadingMarkOverlay
 import de.zeitgleich.teamcraft.ui.screens.LockScreen
 import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
+import de.zeitgleich.teamcraft.ui.screens.TextPreviewHost
 import de.zeitgleich.teamcraft.ui.theme.TeamCraftTheme
 import uniffi.teamcraft_ffi.AppActivity
 import uniffi.teamcraft_ffi.CallPhase
@@ -181,6 +182,8 @@ class MainActivity : FragmentActivity() {
               }
             }
           }
+          // Text and CSV files of the chats open here (#2342), over whichever screen asked.
+          if (!isLocked.value) TextPreviewHost()
           // The animated mark while the core starts, from where the system splash left it (#463).
           LoadingMarkOverlay(isLoading = state == AppState.Starting, maybeHandoff = splashHandoff.value)
         }

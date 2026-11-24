@@ -27,6 +27,7 @@ struct AttachmentView: View {
   var isInBubble = false
 
   @State private var maybePreviewURL: URL?
+  @State private var maybeTextPreview: TextPreviewTarget?
   @State private var isPreviewRefused = false
   @State private var isWaitingToOpen = false
   /// How saving to Photos went from the tile's menu (#2011).
@@ -99,6 +100,7 @@ struct AttachmentView: View {
     .quickLookPreview($maybePreviewURL)
     .alert("video_unplayable", isPresented: $isPreviewRefused) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
+    .fullScreenCover(item: $maybeTextPreview) { target in TextPreviewView(target: target) }
     .onChange(of: file.transfer.state) { _, state in
       automaticDownloadMoved(to: state)
       guard isWaitingToOpen, state == "local" || state == "failed" else { return }
@@ -367,6 +369,10 @@ struct AttachmentView: View {
 
   private func preview(_ path: String) {
     DownloadUse.mark(path)
+    if TextPreviewKind.isPreviewable(fileName: file.fileName, mediaType: file.mediaType) {
+      maybeTextPreview = TextPreviewTarget(path: path, fileName: file.fileName, mediaType: file.mediaType)
+      return
+    }
     maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
     isPreviewRefused = maybePreviewURL == nil
   }
@@ -694,6 +700,7 @@ struct FilesGalleryView: View {
 
   @State private var files: [FileInfo]?
   @State private var maybePreviewURL: URL?
+  @State private var maybeTextPreview: TextPreviewTarget?
   @State private var isPreviewRefused = false
   @State private var maybeViewing: PictureTarget?
   @State private var maybeVideo: FileInfo?
@@ -732,6 +739,7 @@ struct FilesGalleryView: View {
     .alert("video_unplayable", isPresented: $isPreviewRefused) { Button("done", role: .cancel) {} }
     .fullScreenCover(item: $maybeViewing) { target in PictureViewer(target: target) }
     .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
+    .fullScreenCover(item: $maybeTextPreview) { target in TextPreviewView(target: target) }
   }
 
   private struct LoadKey: Hashable {
@@ -761,8 +769,12 @@ struct FilesGalleryView: View {
         maybeVideo = file
       } else if file.transfer.state == "local", let path = file.transfer.path {
         DownloadUse.mark(path)
-        maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
-        isPreviewRefused = maybePreviewURL == nil
+        if TextPreviewKind.isPreviewable(fileName: file.fileName, mediaType: file.mediaType) {
+          maybeTextPreview = TextPreviewTarget(path: path, fileName: file.fileName, mediaType: file.mediaType)
+        } else {
+          maybePreviewURL = VideoFileCheck.previewURL(path: path, mediaType: file.mediaType)
+          isPreviewRefused = maybePreviewURL == nil
+        }
       } else if file.transfer.state == "remote" || file.transfer.state == "failed" {
         Task { await model.perform(.downloadFile(conversationId: file.conversation, messageId: file.message)) }
       }
