@@ -1,12 +1,15 @@
 //! Replacing the backup key (e2ee.md §6.6, issue #1965).
 //!
-//! After a recovery kit was seen by others, or a device was lost, replacing the kit alone isn't
+//! After a recovery kit, passphrase or passkey was exposed, replacing the factor alone isn't
 //! enough: a server that kept the old wrap list still opens the backup with the old kit. Rotation
 //! draws a new backup key, encrypts the key bag with it and uploads it with a new wrap list: the new
 //! kit, the org key (if the workspace has one) and one signed hand-off per other active device of
 //! the user, so those devices switch to the new key on their next sync without linking again.
 //! Passkey and legacy passphrase wraps are dropped (they wrap the old key and can't be re-made
 //! without the user); the user adds passkeys again.
+//!
+//! Not a remedy for a lost device: it still holds the identity key and could sign a hand-off of its
+//! own. That device is revoked instead (e2ee.md §6.6, §3).
 //!
 //! Interruptions: the new key and its wraps are stored on this device before the upload. A start
 //! that finds them finishes the rotation: if the server already has the bag under the new key the

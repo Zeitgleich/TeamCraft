@@ -6331,8 +6331,8 @@ bots' passphrase comes from the bridge's configuration; both are exempt):
 
 ### 6.6 Replacing the backup key (issue #1965)
 
-After a recovery kit was seen by others, or a device was lost, replacing the kit alone isn't enough
-(§6.5.9). Settings > Security & privacy > **Replace backup key** draws a new backup key, encrypts the
+After a recovery kit, a legacy passphrase or a passkey was exposed (seen by others, copied, synced
+to an account that leaked), replacing the factor alone isn't enough (§6.5.9). Settings > Security & privacy > **Replace backup key** draws a new backup key, encrypts the
 key bag with it and uploads it with a new wrap list. The user saves and checks a new kit first, as
 in §6.5.4 (`Client::rotate_backup_key_with_kit`).
 
@@ -6372,7 +6372,8 @@ copy (§6.5.6) on its next start.
 
 **Why the signature.** The server knows every device's public agreement key and could seal a key
 of its own choosing; a device that adopted it would decrypt a bag the server forged (pins, content
-keys). Only the user's devices hold the identity key, so only they can sign a hand-off. A replayed
+keys). Only holders of the user's identity key can sign a hand-off: the user's devices, and also a
+device that was lost or stolen with its data (see below). A replayed
 older hand-off gives an older key, which doesn't open the current bag (and older bags are refused
 by their sequence, §6), so it is never adopted.
 
@@ -6388,10 +6389,22 @@ server, since the bag and its wraps are one compare-and-swap write.
 retry); the earlier device adopts the winner's key through its hand-off, and its kit stops working.
 Settings shows when the kit that counts was made (`recovery_key_set_at`).
 
-**What it doesn't do:** a removed device kept the old key and the old bags it saw; rotation stops
-it from reading what is added to the bag afterwards, together with removing it (§3). A server that
-kept old bags still has them under the old key; their contents are what the old key holder could
-read anyway.
+**What it protects against, and what not.** Rotation retires an **exposed recovery factor**: whoever
+holds the old kit, passphrase or passkey (alone or together with the server's old wrap lists) can no
+longer open the backup from then on. It does **not** protect against a **lost or stolen device**
+that still has its data: that device holds the identity key and the old backup key. Its holder (with
+or without the server) can sign a hand-off of a backup key of their own choosing and build a bag that
+carries the identity, so the user's other devices would accept it; and the same identity key lets it
+sign device lists and certificates. Rotating the backup key changes none of that, and the
+confirmation in Settings doesn't offer it for a lost device.
+
+The remedy for a lost device is to **revoke** it from another device (§3, signed device list): the
+server ends its session at once, the signed list drops it, and it is removed from every group, so it
+gets no new content keys through a server that follows the list. What it already holds (the identity
+key, the old backup key, what it could read) stays with it. Replacing the identity key while keeping
+the account's history isn't designed yet (follow-up); today only a full reset gives the account a
+new identity key (§3.2). A server that kept old bags still has them under the old key; their
+contents are what the old key's holder could read anyway.
 
 ## 7. Push notifications (Threema model, extended)
 

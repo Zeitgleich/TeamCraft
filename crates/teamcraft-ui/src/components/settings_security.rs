@@ -710,7 +710,8 @@ fn PasskeyItem(number: usize, credential_id: String) -> impl IntoView {
   }
 }
 
-/// Replacing the backup key (e2ee.md §6.6), after a kit was seen by others or a device was lost:
+/// Replacing the backup key (e2ee.md §6.6), after a kit, passphrase or passkey was exposed (not for a
+/// lost device, which is signed out instead):
 /// a confirmation that says what stops working, then the kit steps for the new key.
 #[component]
 fn RotateRow(editing: RwSignal<Editing>) -> impl IntoView {
