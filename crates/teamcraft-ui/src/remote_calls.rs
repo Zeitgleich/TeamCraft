@@ -199,6 +199,11 @@ impl RemoteCalls {
     self.snapshot.borrow().maybe_recording_take
   }
 
+  /// The speech model of live captions, where the call's module captions (#215).
+  pub fn caption_model(&self) -> Option<teamcraft_client_api::calls::CaptionModelState> {
+    self.snapshot.borrow().maybe_captions_model
+  }
+
   pub fn incoming(&self) -> Vec<IncomingCall> {
     self.snapshot.borrow().incoming.clone()
   }
@@ -834,6 +839,7 @@ mod tests {
         maybe_own_recording: None,
         reactions: Vec::new(),
         is_hand_raised: false,
+        maybe_captions: None,
       }),
       incoming: Vec::new(),
       running: vec![RunningCall {
@@ -852,6 +858,7 @@ mod tests {
       call_reports: Vec::new(),
       can_record: false,
       maybe_recording_take: None,
+      maybe_captions_model: None,
     };
     assert_eq!(roster_of(&snapshot, conversation), vec![carol, dave]);
     assert!(roster_of(&snapshot, id_from_raw(8)).is_empty());

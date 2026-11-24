@@ -5,8 +5,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
-  ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, EncryptionFailure, MAX_KEPT_REACTIONS,
-  Participant, RemoteVideoTrack, ScreenShareSound, ShownReaction,
+  ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, CaptionLine, EncryptionFailure,
+  MAX_CAPTION_LINES, MAX_KEPT_REACTIONS, Participant, RemoteVideoTrack, ScreenShareSound, ShownReaction,
 };
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKind};
 
@@ -324,6 +324,48 @@ impl CallRoster {
   }
 
   /// This device's share ended: neither it nor its sound shows any more.
+  /// A line of this device's live captions (#215): the speaker's sentence so far replaces its
+  /// earlier text, a new sentence adds a line, the oldest go beyond [`MAX_CAPTION_LINES`]. A final
+  /// sentence with no words takes its line away. `false` (nothing to show) while captions are off
+  /// or the speaker's device isn't in the roster.
+  pub fn apply_caption(&self, view: &mut CallView, caption: CaptionText) -> bool {
+    let Some(captions) = view
+      .maybe_active
+      .as_mut()
+      .and_then(|active| active.maybe_captions.as_mut())
+    else {
+      return false;
+    };
+    let Some(user) = self.users_by_device.get(&caption.speaker).copied() else {
+      return false;
+    };
+    let maybe_line = captions.lines.iter().position(|line| line.id == caption.sentence);
+    match (maybe_line, caption.text.is_empty()) {
+      (Some(index), true) => {
+        captions.lines.remove(index);
+      },
+      (Some(index), false) => {
+        let line = &mut captions.lines[index];
+        line.text = caption.text;
+        line.is_final = caption.is_final;
+      },
+      (None, true) => return false,
+      (None, false) => {
+        if captions.lines.len() >= MAX_CAPTION_LINES {
+          captions.lines.remove(0);
+        }
+        captions.lines.push(CaptionLine {
+          id: caption.sentence,
+          user,
+          text: caption.text,
+          is_final: caption.is_final,
+          at: now_ms(),
+        });
+      },
+    }
+    true
+  }
+
   fn end_own_screen(&mut self, active: &mut ActiveCall) {
     if let Some(device) = self.own_device {
       self.sharing_screen.remove(&device);
@@ -476,6 +518,17 @@ impl CallRoster {
     }
     by_user.into_values().collect()
   }
+}
+
+/// One recognized sentence (or its part so far) of this device's live captions, by device: the
+/// roster names the person ([`CallRoster::apply_caption`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CaptionText {
+  pub speaker: DeviceId,
+  /// Counts up while captions run; the part so far and the final text share it.
+  pub sentence: u64,
+  pub text: String,
+  pub is_final: bool,
 }
 
 /// The wall clock in milliseconds, for when a reaction arrived.
@@ -815,6 +868,66 @@ mod tests {
       assert!(reactions.iter().all(|shown| shown.user == user(2)));
       assert_eq!(reactions.last().unwrap().id, (MAX_KEPT_REACTIONS + 3) as u64);
       assert!(reactions.windows(2).all(|pair| pair[0].id < pair[1].id));
+    }
+
+    #[test]
+    fn captions_replace_a_sentence_so_far_and_stay_bounded() {
+      use teamcraft_client_api::calls::{CallCaptions, CaptionLanguage};
+
+      let mut view = active_view();
+      let mut roster = CallRoster::new(device(10));
+      roster.apply(&mut view, CallEngineEvent::ParticipantJoined(participant(2, 20)));
+      let text = |sentence: u64, text: &str, is_final: bool| CaptionText {
+        speaker: device(20),
+        sentence,
+        text: text.to_owned(),
+        is_final,
+      };
+      assert!(
+        !roster.apply_caption(&mut view, text(1, "off", false)),
+        "captions are off"
+      );
+      view.maybe_active.as_mut().unwrap().maybe_captions = Some(CallCaptions {
+        language: CaptionLanguage::German,
+        lines: Vec::new(),
+        is_starting: false,
+      });
+      let lines = |view: &CallView| {
+        view
+          .maybe_active
+          .as_ref()
+          .unwrap()
+          .maybe_captions
+          .clone()
+          .unwrap()
+          .lines
+      };
+      assert!(roster.apply_caption(&mut view, text(1, "good", false)));
+      assert!(roster.apply_caption(&mut view, text(1, "good morning", true)));
+      let shown = lines(&view);
+      assert_eq!(shown.len(), 1);
+      assert_eq!(
+        (shown[0].user, shown[0].text.as_str(), shown[0].is_final),
+        (user(2), "good morning", true)
+      );
+      // Of a device the roster doesn't know: nobody to name.
+      assert!(!roster.apply_caption(
+        &mut view,
+        CaptionText {
+          speaker: device(99),
+          ..text(2, "who", true)
+        }
+      ));
+      // A sentence that turned out to have no words leaves no line.
+      assert!(roster.apply_caption(&mut view, text(3, "uh", false)));
+      assert!(roster.apply_caption(&mut view, text(3, "", true)));
+      assert_eq!(lines(&view).len(), 1);
+      for sentence in 10..10 + MAX_CAPTION_LINES as u64 + 2 {
+        roster.apply_caption(&mut view, text(sentence, "more", true));
+      }
+      let shown = lines(&view);
+      assert_eq!(shown.len(), MAX_CAPTION_LINES);
+      assert_eq!(shown.last().unwrap().id, 10 + MAX_CAPTION_LINES as u64 + 1);
     }
 
     #[test]

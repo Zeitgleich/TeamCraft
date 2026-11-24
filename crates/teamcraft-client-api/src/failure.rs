@@ -264,10 +264,18 @@ pub enum CallFailure {
   /// The call's end-to-end encryption couldn't be set up with everyone in it (a key that didn't
   /// verify, a DAVE change this device couldn't apply), so this device left the call.
   EncryptionFailed,
+  /// Live captions (#215) fell behind the speech: this computer is too busy to recognize it in
+  /// time, so captions turned themselves off. The call goes on.
+  CaptionsOverloaded,
+  /// The speech model of live captions couldn't be downloaded, wasn't the published file, or
+  /// didn't load: captions stay off.
+  CaptionModelUnavailable,
+  /// This computer can't run live captions (an x86-64 processor without AVX2).
+  CaptionsUnsupported,
 }
 
 impl CallFailure {
-  const ALL: [Self; 34] = [
+  const ALL: [Self; 37] = [
     Self::MicrophoneDenied,
     Self::MicrophoneMissing,
     Self::MicrophoneInUse,
@@ -302,6 +310,9 @@ impl CallFailure {
     Self::ServerLost,
     Self::ConnectionLost,
     Self::EncryptionFailed,
+    Self::CaptionsOverloaded,
+    Self::CaptionModelUnavailable,
+    Self::CaptionsUnsupported,
   ];
 
   /// Stable name on the wire, after [`CALL_PREFIX`].
@@ -341,6 +352,9 @@ impl CallFailure {
       Self::ServerLost => "server_lost",
       Self::ConnectionLost => "connection_lost",
       Self::EncryptionFailed => "encryption_failed",
+      Self::CaptionsOverloaded => "captions_overloaded",
+      Self::CaptionModelUnavailable => "caption_model_unavailable",
+      Self::CaptionsUnsupported => "captions_unsupported",
     }
   }
 

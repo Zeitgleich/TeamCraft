@@ -206,6 +206,7 @@ fn main() -> anyhow::Result<()> {
         maybe_segmentation_model: app.path().resolve(BUNDLED_MODEL, BaseDirectory::Resource).ok(),
         recording_folder: app.path().app_cache_dir()?.join("call-recordings"),
         maybe_recording_keys: Some(Arc::clone(&vault) as Arc<dyn calls::RecordingKeys>),
+        caption_model_folder: app.path().app_data_dir()?.join("speech-models"),
       };
       let emitter = app.handle().clone();
       let report_failure: FailureReporter = Arc::new(move |failure| {

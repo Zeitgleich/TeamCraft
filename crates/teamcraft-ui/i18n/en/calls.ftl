@@ -519,3 +519,29 @@ call-announce-reacted = { $count ->
 call-announce-reacted-many = { $count } reactions
 # The row of participant tiles; focusable so a keyboard can scroll it (#2287).
 call-filmstrip = Participants
+
+## Live captions (#215): recognized on this device only.
+call-captions = Captions
+call-captions-label = Live captions
+call-captions-only-here = Captions · only on this device
+call-captions-language = Captions language
+call-captions-language-auto = Detect language
+call-captions-language-en = English
+call-captions-language-de = German
+call-captions-language-fr = French
+call-captions-language-es = Spanish
+call-captions-language-it = Italian
+call-captions-language-nl = Dutch
+call-captions-language-pl = Polish
+call-captions-language-pt = Portuguese
+call-captions-someone = Someone
+call-captions-starting = Starting captions…
+call-captions-listening = Captions appear here when someone speaks.
+call-captions-downloading = Downloading the speech model… { $percent } %
+call-captions-ask-title = Turn on captions?
+call-captions-ask-text = Captions need a speech model ({ $size }), downloaded once. The call’s audio is turned into text on this computer: neither the audio nor the text leaves it, and nobody else in the call is told.
+call-captions-ask-cancel = Not now
+call-captions-ask-download = Download and turn on
+error-call-captions-overloaded = Captions turned off: this computer is too busy to keep up with the speech. The call goes on.
+error-call-caption-model-unavailable = Captions couldn’t start: the speech model couldn’t be downloaded or loaded. Try again later.
+error-call-captions-unsupported = This computer’s processor can’t run captions.

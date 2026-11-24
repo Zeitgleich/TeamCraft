@@ -90,6 +90,10 @@ allow = [
 exceptions = [
   { crate = "jpeg-encoder", allow = ["IJG"] },
   { crate = "libbz2-rs-sys", allow = ["bzip2-1.0.6"] },
+  # Live captions (#215): the whisper.cpp bindings are public domain (Unlicense, OSI approved);
+  # whisper.cpp itself, compiled in, is MIT.
+  { crate = "whisper-rs", allow = ["Unlicense"] },
+  { crate = "whisper-rs-sys", allow = ["Unlicense"] },
 ]
 
 [bans]

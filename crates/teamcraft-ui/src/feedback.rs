@@ -199,6 +199,9 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       CallFailure::ServerLost => "error-call-server-lost",
       CallFailure::ConnectionLost => "error-call-connection-lost",
       CallFailure::EncryptionFailed => "error-call-encryption-failed",
+      CallFailure::CaptionsOverloaded => "error-call-captions-overloaded",
+      CallFailure::CaptionModelUnavailable => "error-call-caption-model-unavailable",
+      CallFailure::CaptionsUnsupported => "error-call-captions-unsupported",
     },
     FailureKind::Server(code) => match code {
       ErrorCode::NotSpaceMember => "error-not-space-member",

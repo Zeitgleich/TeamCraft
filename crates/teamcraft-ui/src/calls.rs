@@ -963,6 +963,7 @@ mod tests {
         maybe_own_recording: None,
         reactions: Vec::new(),
         is_hand_raised: false,
+        maybe_captions: None,
       };
       call.resume(&active);
       assert_eq!(call.phase.get_untracked(), CallPhase::Active);
@@ -1060,6 +1061,7 @@ mod tests {
       maybe_own_recording: None,
       reactions: Vec::new(),
       is_hand_raised: false,
+      maybe_captions: None,
     }
   }
 

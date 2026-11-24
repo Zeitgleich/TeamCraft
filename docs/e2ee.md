@@ -7677,6 +7677,48 @@ can (see "Not signed" above).
 
 **Logs.** Neither the apps nor the SFU log a signal's content; the SFU logs dropped ones by count.
 
+### 8.6 Live captions on the device (issue #215)
+
+A participant can turn on captions of what the others say. They are recognized **on this device**,
+from the audio it already decrypted to play: no audio and no text goes to the server, to a cloud
+service or to the others, and nobody in the call is told (there is nothing to tell: the device
+learns nothing it didn't hear). This is the opposite of the notetaker (§8.2), which takes the audio
+out of the encryption on purpose.
+
+- **Where:** the desktop app so far (Linux, macOS, Windows). The browser and the mobile apps show no
+  captions button yet; the mobile apps will use the system's recognizer in on-device mode only, and
+  the browser a WebAssembly build, each in its own step of #215.
+- **Engine:** whisper.cpp through `whisper-rs` (`teamcraft_media::captions_whisper`), on the CPU,
+  behind the `SpeechRecognizer` trait (a fake in tests). Its log is silenced, never forwarded: a debug
+  build of whisper.cpp prints tokens, and recognized text must never reach a log or a crash report.
+- **Model:** whisper.cpp's multilingual base model, quantized (`ggml-base-q5_1.bin`, 57 MiB, MIT),
+  not shipped with the app. The first press of "Captions" asks before downloading it (size, and that
+  nothing leaves the computer). The download is pinned to a commit of the model repository and checked
+  against a pinned SHA-256 (`teamcraft_media::caption_model`) when it is written and again whenever it
+  is loaded; a file that fails the check is deleted. Once downloaded, captions work offline. The
+  download tells the model host this device's address and that it fetched the model, nothing about
+  any call.
+- **Audio:** each other participant's microphone stream as the playback mixer decodes it (not shared
+  screens' sound, nothing while deafened), downsampled to 16 kHz, cut into sentences at pauses by
+  level (`teamcraft_media::captions`). A sentence is recognized once it ends (at the latest after
+  10 s), and while it goes on, its part so far every 2 s when the recognizer has time. Speaker names
+  come from the call's roster, by device.
+- **Text:** kept in memory, the last 12 lines, for the call screen only; gone when captions go off or
+  the call ends. It isn't stored, posted or synced. Saving a transcript is a later step of #215 and
+  will be an explicit action that writes into the encrypted local store.
+- **Budget:** a worker thread with at most two CPU threads for one recognition; the call never waits
+  for it (a bounded queue that drops). When it falls behind the speech, captions turn themselves off
+  and say why. Numbers: docs/performance.md, "Live captions".
+
+**What a hostile server can do.** Nothing new: it never sees the audio in the clear, and captions add
+no message, signal or request during a call.
+
+**What a hostile member can do.** Say things, as always; this device transcribes what it plays.
+
+**Admin policy.** None yet: with nothing leaving the device, captions are like listening closely.
+Sharing captions with the others (the speaker's own recognition sent over the call's encrypted
+channel) would need a notice to everybody and a policy, and is a separate step of #215.
+
 ## 9. Local storage
 
 - Local database: SQLite with SQLCipher; key in the sealed files of local secrets, under the one

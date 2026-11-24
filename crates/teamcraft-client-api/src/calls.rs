@@ -784,10 +784,138 @@ pub struct ActiveCall {
   /// shell keeps the call over a reload) shows it so. Absent from older shells.
   #[serde(default, skip_serializing_if = "std::ops::Not::not")]
   pub is_hand_raised: bool,
+  /// Live captions on this device (#215, e2ee.md §8.6): present while they are on. Only this
+  /// device sees them; nothing about them leaves it. Absent from older shells and the browser.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_captions: Option<CallCaptions>,
 }
 
 /// How many of the others' latest reactions [`ActiveCall::reactions`] keeps.
 pub const MAX_KEPT_REACTIONS: usize = 16;
+
+/// How many caption lines [`CallCaptions::lines`] keeps: the overlay shows the last few, the
+/// rest is gone (a transcript to keep is a later step of #215).
+pub const MAX_CAPTION_LINES: usize = 12;
+
+/// Live captions of the call, recognized on this device from the audio it plays (#215, e2ee.md
+/// §8.6): neither the audio nor the text leaves the device, and the others aren't told.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CallCaptions {
+  /// The language spoken, as picked (or recognized per sentence with [`CaptionLanguage::Auto`]).
+  pub language: CaptionLanguage,
+  /// The latest lines, oldest first, at most [`MAX_CAPTION_LINES`]. A line that isn't final yet
+  /// is replaced by the same `id` as the speaker goes on.
+  #[serde(default)]
+  pub lines: Vec<CaptionLine>,
+  /// The speech model is still loading: the overlay says captions are starting.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_starting: bool,
+}
+
+/// One person's sentence in the captions.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaptionLine {
+  /// Counts up within the call; a partial line and its final text share it.
+  pub id: u64,
+  pub user: UserId,
+  pub text: String,
+  /// The sentence ended (a pause, or its longest length): the text no longer changes.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_final: bool,
+  /// When the sentence started (wall clock).
+  pub at: TimestampMs,
+}
+
+/// The language captions recognize. Whisper's multilingual model covers many more; these are
+/// the ones offered so far. A value from a newer UI that this shell doesn't know reads as `Auto`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum CaptionLanguage {
+  #[serde(rename = "en")]
+  English,
+  #[serde(rename = "de")]
+  German,
+  #[serde(rename = "fr")]
+  French,
+  #[serde(rename = "es")]
+  Spanish,
+  #[serde(rename = "it")]
+  Italian,
+  #[serde(rename = "nl")]
+  Dutch,
+  #[serde(rename = "pl")]
+  Polish,
+  #[serde(rename = "pt")]
+  Portuguese,
+  /// Recognized per sentence.
+  #[default]
+  #[serde(rename = "auto", other)]
+  Auto,
+}
+
+/// Where this device stands with the speech model captions need (#215): it is downloaded on
+/// first use, not shipped with the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum CaptionModelState {
+  /// Not downloaded yet: turning captions on downloads it, after the user agreed to its size.
+  Missing {
+    size_bytes: u64,
+  },
+  Downloading {
+    received_bytes: u64,
+    size_bytes: u64,
+  },
+  /// Downloaded and checked: captions start without the network.
+  Ready {
+    size_bytes: u64,
+  },
+  /// This computer can't run the speech model (an x86-64 processor without AVX2).
+  Unsupported,
+  #[serde(other)]
+  Unknown,
+}
+
+impl CaptionLanguage {
+  pub const ALL: [Self; 9] = [
+    Self::Auto,
+    Self::English,
+    Self::German,
+    Self::French,
+    Self::Spanish,
+    Self::Italian,
+    Self::Dutch,
+    Self::Polish,
+    Self::Portuguese,
+  ];
+
+  /// The ISO 639-1 code the recognizer takes; `None` for [`Self::Auto`].
+  pub fn code(self) -> Option<&'static str> {
+    match self {
+      Self::Auto => None,
+      Self::English => Some("en"),
+      Self::German => Some("de"),
+      Self::French => Some("fr"),
+      Self::Spanish => Some("es"),
+      Self::Italian => Some("it"),
+      Self::Dutch => Some("nl"),
+      Self::Polish => Some("pl"),
+      Self::Portuguese => Some("pt"),
+    }
+  }
+
+  /// The wire value ("auto", "en", ...), for a select's option values.
+  pub fn as_str(self) -> &'static str {
+    self.code().unwrap_or("auto")
+  }
+
+  /// Reads [`Self::as_str`] back; anything else is `Auto`.
+  pub fn from_str_or_auto(value: &str) -> Self {
+    Self::ALL
+      .into_iter()
+      .find(|language| language.as_str() == value)
+      .unwrap_or_default()
+  }
+}
 
 /// Somebody else's reaction in the call (#2324).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

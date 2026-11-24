@@ -137,6 +137,9 @@ One channel per hotline or one shared channel, configurable. **One thread per ca
   `#hotline` channels** – nothing else. Running it on the same VPS as `teamcraft-server` is acceptable
   for that reason; the UI marks hotline calls as "phone call – not end-to-end encrypted".
 - Hotline content should stay in `#hotline`; sensitive follow-ups belong in normal channels.
+- The hotline's transcripts come from the voice agent provider or `teamcraft-pbx`, by design: it is a
+  phone call to an AI agent. That is separate from the live captions of ordinary calls (issue #215,
+  e2ee.md §8.6), which are recognized on each participant's own device and never leave it.
 
 ## 8. Features
 

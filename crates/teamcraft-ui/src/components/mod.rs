@@ -51,6 +51,7 @@ pub mod brand_logo;
 pub mod bundle_banner;
 pub mod call_announcer;
 pub mod call_audio_menu;
+pub mod call_captions;
 pub mod call_chat;
 pub mod call_encryption;
 pub mod call_mini_window;

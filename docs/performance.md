@@ -3028,6 +3028,41 @@ TEAMCRAFT_SEARCH_DIR=$TMPDIR TEAMCRAFT_SEARCH_MESSAGES=100000 cargo test --relea
 - **Still open** (#154): full-history search on a new device (segments are fetched on mobile, but
   no app publishes them), search off the UI thread on the desktop, a measured 500,000-message run.
 
+### Live captions on the desktop (issue #215)
+
+Captions recognize the others' speech on this computer with whisper.cpp (base model, q5_1, 57 MiB,
+e2ee.md §8.6). They are off until the user turns them on in a call, and they cost CPU only while
+someone speaks: silence hands the recognizer nothing.
+
+**Method.** `crates/teamcraft-media/examples/caption_bench.rs` plays speech through the caption worker
+at the call's pace (a 20 ms frame every 20 ms, as the playback mixer does) and reports the process's
+CPU time over all threads, averaged over the speech's length, and how long after the speech ended the
+last text came. The speech is synthesized (espeak-ng), about 30 s of uninterrupted talk: the worst
+case, as a real speaker pauses and the recognizer then rests. Linux, AMD Ryzen 9 5900X, November 2026.
+
+| Speech                        | Threads | CPU (% of one core) | Last text after the speech | Fell behind |
+|-------------------------------|---------|---------------------|----------------------------|-------------|
+| English, 1 speaker            | 2       | 50 %                | 0.3 s                      | no          |
+| German, 1 speaker             | 2       | 54 %                | 0.8 s                      | no          |
+| German, language detected     | 2       | 97 %                | 1.6 s                      | no          |
+| English, 2 speakers at once   | 2       | 85 %                | 0.5 s                      | no          |
+| English, 1 speaker            | 1       | 45 %                | 0.5 s                      | no          |
+
+**What brought it there.** Whisper encodes a 30 s window whatever it is given. The first version ran
+at 322 % of one core with four threads; giving the encoder only the piece's length (`audio_ctx`,
+`captions_whisper::audio_context`) cut that to 117 %. whisper.cpp's threads wait busily between
+steps, so two threads instead of four (81 %) and the sentence so far every 2 s instead of 1.5 s
+brought it to 50 %. Picking the language instead of detecting it halves the cost again: detection
+runs the encoder once more per piece.
+
+**Budget.** At most two CPU threads for recognition, and on average below one core while one person
+talks without a pause on a current desktop. A slower computer falls behind instead of slowing the
+call: sentences that ended queue up to four, and beyond that, or when the bounded frame queue fills,
+captions turn themselves off and say so (`CaptionUpdate::Overloaded`). Memory: the model (57 MiB)
+plus whisper's state: the bench's whole process peaks at 155 MiB; it is freed when captions go off. Not measured yet:
+laptops on battery, macOS and Windows (whisper.cpp uses the same CPU code there; on macOS it adds the
+Accelerate framework).
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37

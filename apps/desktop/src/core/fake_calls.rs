@@ -144,10 +144,12 @@ impl FakeCalls {
       // No camera here, and nothing to measure.
       | CallAction::SetPreview { .. }
       | CallAction::MeasureLink { .. }
-      // The fake call records nothing.
+      // The fake call records and captions nothing.
       | CallAction::StartRecording { .. }
       | CallAction::StopRecording
       | CallAction::DiscardRecording
+      | CallAction::SetCaptions { .. }
+      | CallAction::DeleteCaptionModel
       | CallAction::TestSpeakers { .. }
       | CallAction::Unknown => {},
     }
@@ -185,6 +187,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
     maybe_own_recording: None,
     reactions: Vec::new(),
     is_hand_raised: false,
+    maybe_captions: None,
     is_deafened: false,
     is_secured: true,
     maybe_privacy_code: Some("31 07 58".to_owned()),

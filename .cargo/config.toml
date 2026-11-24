@@ -1,0 +1,5 @@
+[env]
+# whisper.cpp (live captions, #215): ggml builds for the build machine's CPU by default
+# (-march=native), which would crash users' older processors. Off, it builds for a baseline (on
+# x86-64 with AVX2, FMA and F16C; the app checks for them before it offers captions).
+GGML_NATIVE = "OFF"

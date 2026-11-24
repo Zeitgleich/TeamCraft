@@ -11,6 +11,7 @@ use crate::calls::{
 use crate::components::add_to_call::AddPeople;
 use crate::components::call_announcer::CallAnnouncer;
 use crate::components::call_audio_menu::AudioMenu;
+use crate::components::call_captions::{CaptionsPanel, use_captions_control};
 use crate::components::call_chat::{CallChat, CallChatPanel, CallChatToast};
 use crate::components::call_notetaker::{NotetakerBanner, notetaker_refusal_key, use_notetaker_in_call};
 use crate::components::call_popover::CallPopover;
@@ -69,6 +70,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
     Memo::new(move |_| remote.with(|tiles| tiles.iter().map(|tile| tile.user.id).collect::<Vec<_>>()));
   let (notetaker, notetaker_invite) = use_notetaker_in_call(request.conversation, others);
   let recording = use_recording_control();
+  let captions = use_captions_control();
   let is_notetaker_present =
     Memo::new(move |_| notetaker.get().is_some_and(|notetaker| notetaker.is_present));
   let remote_sharer = Memo::new(move |_| {
@@ -837,6 +839,7 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
         <div class="call-stage-wrap" node_ref=stage_wrap>
           {stage}
           <FloatingReactions names=announced_remote />
+          <CaptionsPanel control=captions />
         </div>
         <Show when=move || chat.is_open.get() fallback=|| ()>
           <CallChatPanel chat=chat />
@@ -1015,6 +1018,17 @@ pub fn CallScreen(request: CallRequest) -> impl IntoView {
               i18n.t(if recording.is_recording.get() { "call-recording-stop" } else { "call-recording-start" })
             })
             on_press=move || recording.toggle()
+          />
+        </Show>
+        // Live captions, recognized on this device only (#215, e2ee.md §8.6): where the app
+        // captions calls and this computer runs the speech model.
+        <Show when=move || captions.is_offered.get() fallback=|| ()>
+          <ControlButton
+            is_active=captions.is_on
+            is_toggle=true
+            icon=IconName::Captions
+            label=Signal::derive(move || i18n.t("call-captions"))
+            on_press=move || captions.toggle()
           />
         </Show>
         // A phone's control bar keeps to what a call needs.
