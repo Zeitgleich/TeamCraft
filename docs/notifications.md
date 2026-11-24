@@ -217,6 +217,15 @@ is only available while the signed push-content policy lets it show on the lock 
 and mark notifications (iOS: relevance score); they do not stop the server from pushing, and an extension
 without the filtering entitlement cannot suppress a notification.
 
+### Mentions in a channel's notes
+
+A mention on a page of a channel's notes (issue #2361, e2ee.md §4.11, "Mentions") notifies the member
+it names like a message that mentions them: the server pushes for the IDs the edit names, and the
+device says "Anna mentioned you in the notes" with the channel as the title, never the page's text.
+Opening it opens the notes on that page at the mention (desktop, web, Android, iOS). Edits that name
+somebody else, and snapshots of the page, stay hidden. Such a mention doesn't count in the channel's
+unread or mention badge yet.
+
 ## Group mentions
 
 `@accounting` of a user group the sender may mention in a conversation (`use_group_mentions`, admin.md

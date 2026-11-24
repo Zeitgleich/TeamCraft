@@ -41,6 +41,8 @@ import de.zeitgleich.teamcraft.security.ScreenPrefs.Companion.prefs
 import de.zeitgleich.teamcraft.security.promptUnlock
 import de.zeitgleich.teamcraft.ui.screens.LoadingMarkOverlay
 import de.zeitgleich.teamcraft.ui.screens.LockScreen
+import de.zeitgleich.teamcraft.ui.screens.NotesRequest
+import de.zeitgleich.teamcraft.ui.screens.NotesToOpen
 import de.zeitgleich.teamcraft.ui.screens.ShareWaitingNotice
 import de.zeitgleich.teamcraft.ui.screens.SplashHandoff
 import de.zeitgleich.teamcraft.ui.screens.TextPreviewHost
@@ -133,6 +135,7 @@ class MainActivity : FragmentActivity() {
       else -> savedInstanceState.getString(KEY_APP_LINK)
     }
     if (savedInstanceState == null) LaunchShortcut.of(intent)?.let { LaunchShortcut.pending.value = it }
+    if (savedInstanceState == null) notesToOpen(intent)?.let { NotesToOpen.pending.value = it }
     TeamCraftApplication.graph(this).scope.launch { AppShortcuts.publish(applicationContext) }
     setContent {
       // The server's brand colors the whole app (branding.md §5), not only the sign-in screen.
@@ -285,6 +288,7 @@ class MainActivity : FragmentActivity() {
     // with, so a copy of this share cut short by a kill is lost (docs/robustness-audit.md).
     setIntent(intent)
     conversationToOpen(intent)?.let { openConversation.value = it }
+    notesToOpen(intent)?.let { NotesToOpen.pending.value = it }
     sharedContent(intent, packageName)?.let(viewModel::receiveShare)
     appLinkOf(intent)?.let { appLink.value = it }
     LaunchShortcut.of(intent)?.let { LaunchShortcut.pending.value = it }
@@ -321,6 +325,13 @@ class MainActivity : FragmentActivity() {
     return intent.getStringExtra(EXTRA_CONVERSATION_ID)?.takeIf(LaunchToken::isConversationId)
   }
 
+  /** The notes page of a mention in them (#2361), from one of the app's own notifications. */
+  private fun notesToOpen(intent: Intent): NotesRequest? {
+    val conversationId = conversationToOpen(intent) ?: return null
+    val page = intent.getStringExtra(EXTRA_NOTES_PAGE) ?: return null
+    return NotesRequest(conversationId, page.takeIf { it.isNotEmpty() })
+  }
+
   companion object {
     /** Whether an activity of this process was created before: the next start is warm. */
     private var hasStartedBefore = false
@@ -330,6 +341,8 @@ class MainActivity : FragmentActivity() {
 
     const val EXTRA_CONVERSATION_ID = "conversation_id"
     const val EXTRA_LAUNCH_TOKEN = "launch_token"
+    /** The notes page a notification of a mention opens; empty for the channel's first page. */
+    const val EXTRA_NOTES_PAGE = "notes_page"
 
     /** Per process, so the lock outlives the activity (recreated in the background, rotated). */
     private val lockState = AppLockState(SystemClock::elapsedRealtime)

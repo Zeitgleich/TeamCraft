@@ -89,6 +89,8 @@ enum NotificationKeys {
   /// on Join or a swipe away can be reported to the server (docs/notifications.md, "Meeting notices").
   static let meetingId = "meeting_id"
   static let meetingStartsAt = "meeting_starts_at"
+  /// A mention in the channel's notes (#2361): the page a tap opens, empty for the first page.
+  static let notesPage = "notes_page"
 
   static let messageKind = "message"
   static let callKind = "call"
@@ -110,7 +112,7 @@ enum NotificationKeys {
   static func userInfo(
     kind: String, conversationId: String, maybeTag: String?, maybeMessageId: String? = nil,
     maybeThreadId: String? = nil, maybeCallId: String? = nil, maybeMeetingId: String? = nil,
-    maybeMeetingStartsAtMs: Int64? = nil
+    maybeMeetingStartsAtMs: Int64? = nil, maybeNotesPage: String? = nil
   ) -> [AnyHashable: Any] {
     var info: [AnyHashable: Any] = [Self.kind: kind, conversation: conversationId]
     if let maybeTag { info[NotificationAuthenticator.tagKey] = maybeTag }
@@ -119,6 +121,7 @@ enum NotificationKeys {
     if let maybeCallId { info[call] = maybeCallId }
     if let maybeMeetingId { info[meetingId] = maybeMeetingId }
     if let maybeMeetingStartsAtMs { info[meetingStartsAt] = String(maybeMeetingStartsAtMs) }
+    if let maybeNotesPage { info[notesPage] = maybeNotesPage }
     return info
   }
 }

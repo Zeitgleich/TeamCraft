@@ -399,6 +399,7 @@ impl ChatBackend for MockBackend {
     maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    _mentions: Vec<UserId>,
   ) {
     let mut state = self.state.borrow_mut();
     let may_post = state

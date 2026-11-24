@@ -17,8 +17,8 @@ pub use teamcraft_client_api::notify::{
 use teamcraft_proto::{ChannelMentions, DndCandidate, PushContentMode};
 
 use crate::model::{
-  Conversation, ConversationId, ConversationKind, Message, MessageId, PresenceStatus, SpaceId, ThreadId,
-  User, UserId, is_pending,
+  Conversation, ConversationId, ConversationKind, Message, MessageId, PageMention, PresenceStatus, SpaceId,
+  ThreadId, User, UserId, is_pending,
 };
 use crate::notify_sync::{LocalZone, dnd_to_server};
 use crate::prefs::{NotificationPrefs, NotifyLevel, ThreadReplies};
@@ -377,6 +377,61 @@ impl Notifier {
   }
 }
 
+/// Watches the edits of channels' notes that mentioned the user (issue #2361). The first look only
+/// records the newest one: those kept from before were notified then, or by a push.
+#[derive(Default)]
+pub struct PageMentionWatch {
+  has_looked: Cell<bool>,
+  maybe_newest_seen: Cell<Option<MessageId>>,
+}
+
+impl PageMentionWatch {
+  /// The mentions newer than the newest one seen, oldest first.
+  pub fn new_mentions(&self, mentions: Vec<PageMention>) -> Vec<PageMention> {
+    let maybe_newest = mentions.iter().map(|mention| mention.message).max();
+    let has_looked = self.has_looked.replace(true);
+    let maybe_seen = self.maybe_newest_seen.get();
+    if maybe_newest > maybe_seen {
+      self.maybe_newest_seen.set(maybe_newest);
+    }
+    if !has_looked {
+      return Vec::new();
+    }
+    mentions
+      .into_iter()
+      .filter(|mention| maybe_seen.is_none_or(|seen| mention.message > seen))
+      .collect()
+  }
+}
+
+/// Whether a mention in `conversation`'s notes by `sender` notifies, by the same policy as a
+/// message mentioning the user: muted conversations, quiet hours, do-not-disturb and the level.
+pub fn notifies_page_mention(
+  prefs: &NotificationPrefs,
+  me: &User,
+  conversation: &Conversation,
+  sender: UserId,
+  is_viewing: bool,
+  maybe_dnd_until: Option<crate::model::TimestampMs>,
+) -> bool {
+  let now = now_ms();
+  let input = PolicyInput {
+    prefs,
+    me,
+    conversation,
+    sender,
+    body: "",
+    kind: CandidateKind::Message,
+    now,
+    is_viewing,
+    is_urgent: false,
+    mentions_me: true,
+    utc_offset_minutes: local_utc_offset_minutes(now),
+    maybe_dnd_until,
+  };
+  decide(&input) == Decision::Notify
+}
+
 /// Channels of every space and the direct conversations.
 pub fn all_conversations(backend: &dyn crate::backend::Backend) -> Vec<Conversation> {
   let mut conversations = Vec::new();
@@ -733,6 +788,42 @@ mod tests {
         mentions_me: false,
         maybe_poll: None,
       }
+    }
+  }
+
+  mod page_mentions {
+    use super::*;
+    use crate::model::id_from_raw;
+
+    fn mention(message: u64) -> PageMention {
+      PageMention {
+        conversation: id_from_raw(1),
+        maybe_page: None,
+        by: id_from_raw(2),
+        message: id_from_raw(message),
+        at: 0,
+      }
+    }
+
+    #[test]
+    fn the_first_look_only_records_and_later_ones_report_what_is_newer() {
+      let watch = PageMentionWatch::default();
+      assert!(watch.new_mentions(vec![mention(5), mention(7)]).is_empty());
+      assert!(
+        watch.new_mentions(vec![mention(5), mention(7)]).is_empty(),
+        "nothing new"
+      );
+      let new = watch.new_mentions(vec![mention(5), mention(7), mention(9)]);
+      assert_eq!(new, vec![mention(9)]);
+      // An older one read late (older history) notifies nothing.
+      assert!(watch.new_mentions(vec![mention(6), mention(9)]).is_empty());
+    }
+
+    #[test]
+    fn a_first_look_at_none_reports_the_first_that_comes() {
+      let watch = PageMentionWatch::default();
+      assert!(watch.new_mentions(Vec::new()).is_empty());
+      assert_eq!(watch.new_mentions(vec![mention(3)]), vec![mention(3)]);
     }
   }
 

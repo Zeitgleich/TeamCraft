@@ -33,7 +33,7 @@ use crate::viewport::{CompactDepth, CompactPane, Layout, current_layout};
 use teamcraft_client_api::actions::{NewChannel, NewSpace, PermalinkTarget};
 use teamcraft_client_api::failure::{CallFailure, FailureKind};
 use teamcraft_client_api::files_query::{FileKind, FileScope};
-use teamcraft_proto::{MeetingId, Role};
+use teamcraft_proto::{CanvasPageId, MeetingId, Role};
 
 /// How many of the newest messages are searched for the first unread one.
 const UNREAD_SCAN_LIMIT: usize = 500;
@@ -426,6 +426,9 @@ pub struct AppState {
   pub jump_to_latest: RwSignal<u64>,
   /// A request to scroll a conversation's feed to a message index (jump to date).
   pub jump_to_index: RwSignal<Option<(ConversationId, usize)>>,
+  /// A page of a channel's notes to open, at the user's mention on it (issue #2361): the channel's
+  /// header shows its notes, the notes the page, and the page takes the request.
+  pub notes_request: RwSignal<Option<NotesRequest>>,
   /// The "New messages" position of the open conversation, taken before it was marked as read.
   pub unread_marker: RwSignal<Option<UnreadMarker>>,
   /// The first visible message of conversations the user left while scrolled up, to return there.
@@ -461,6 +464,14 @@ pub struct AppState {
   /// (`history.rs` takes it).
   follows_url: StoredValue<bool>,
   pub settings: Settings,
+}
+
+/// A page of a channel's notes to open ([`AppState::open_notes`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotesRequest {
+  pub conversation: ConversationId,
+  /// A further page; `None` for the channel's first one.
+  pub maybe_page: Option<CanvasPageId>,
 }
 
 /// Where the app starts: the first conversation of a space, or Home with the welcome page when
@@ -559,6 +570,7 @@ impl AppState {
       awaits_first_conversation: RwSignal::new(start.is_none()),
       jump_to_latest: RwSignal::new(0),
       jump_to_index: RwSignal::new(None),
+      notes_request: RwSignal::new(None),
       unread_marker: RwSignal::new(None),
       edit_request: RwSignal::new(None),
       highlighted: RwSignal::new(None),
@@ -1280,6 +1292,16 @@ impl AppState {
     if conversation.has_unread() {
       self.write(|backend| backend.mark_read(id));
     }
+  }
+
+  /// Opens a channel's notes on a page, scrolled to the user's mention on it (a notification of a
+  /// mention in the notes, issue #2361).
+  pub fn open_notes(&self, conversation: ConversationId, maybe_page: Option<CanvasPageId>) {
+    self.open_conversation(conversation);
+    self.notes_request.set(Some(NotesRequest {
+      conversation,
+      maybe_page,
+    }));
   }
 
   /// Sending in a conversation reads everything before the sent message: the user answers what they

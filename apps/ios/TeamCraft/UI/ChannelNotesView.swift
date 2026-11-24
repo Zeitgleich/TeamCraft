@@ -10,26 +10,39 @@ struct ChannelNotesView: View {
   @Environment(\.scenePhase) private var scenePhase
   @AppStorage("share_typing") private var isSharingTyping = true
   let conversationId: String
+  /// Opened from a mention (#2361): scrolled to the user's first mention once the page shows it.
+  private let seeksMention: Bool
 
   @State private var maybePageId: String?
+  @State private var hasSoughtMention = false
   @State private var maybePage: CanvasPageItem?
   @State private var history = OlderHistory.complete
   @State private var historyPages = 0
   @State private var files: [FileInfo] = []
   @State private var maybePresence: CanvasPresenceItem?
 
+  /// `maybeStartPageId`: the page to show first (`nil`: the channel's first page).
+  init(conversationId: String, maybeStartPageId: String? = nil, seeksMention: Bool = false) {
+    self.conversationId = conversationId
+    self.seeksMention = seeksMention
+    _maybePageId = State(initialValue: maybeStartPageId)
+  }
+
   var body: some View {
     NavigationStack {
-      ScrollView {
-        LazyVStack(alignment: .leading, spacing: 10) {
-          if let page = maybePage {
-            content(page)
-          } else {
-            ProgressView().frame(maxWidth: .infinity).padding()
+      ScrollViewReader { proxy in
+        ScrollView {
+          LazyVStack(alignment: .leading, spacing: 10) {
+            if let page = maybePage {
+              content(page)
+            } else {
+              ProgressView().frame(maxWidth: .infinity).padding()
+            }
           }
+          .padding(.horizontal, 16)
+          .padding(.bottom, 32)
         }
-        .padding(.horizontal, 16)
-        .padding(.bottom, 32)
+        .onChange(of: maybePage) { _, page in scrollToMention(page, proxy: proxy) }
       }
       .background(Theme.background)
       .navigationTitle(Text("channel_notes_title"))
@@ -50,6 +63,19 @@ struct ChannelNotesView: View {
     .onDisappear { leave(maybePageId) }
   }
 
+  /// Once, when the page first shows the user's mention: older edits may still be loading.
+  private func scrollToMention(_ maybePage: CanvasPageItem?, proxy: ScrollViewProxy) {
+    guard seeksMention, !hasSoughtMention, let page = maybePage, let me = model.maybeUserId,
+      let blockId = ChannelNotes.firstMention(of: me, in: page)
+    else { return }
+    hasSoughtMention = true
+    if UIAccessibility.isReduceMotionEnabled {
+      proxy.scrollTo(blockId, anchor: .center)
+    } else {
+      withAnimation { proxy.scrollTo(blockId, anchor: .center) }
+    }
+  }
+
   @ViewBuilder
   private func content(_ page: CanvasPageItem) -> some View {
     if !page.pages.isEmpty { pagePicker(page) }
@@ -63,7 +89,8 @@ struct ChannelNotesView: View {
         empty
       } else {
         ForEach(page.blocks, id: \.id) { block in
-          ChannelNoteBlock(block: block, maybeFile: ChannelNotes.file(of: block, in: files))
+          ChannelNoteBlock(block: block, maybeFile: ChannelNotes.file(of: block, in: files), maybeMeId: model.maybeUserId)
+            .id(block.id)
         }
       }
     }
@@ -188,6 +215,7 @@ struct ChannelNotesView: View {
 private struct ChannelNoteBlock: View {
   let block: CanvasBlockItem
   let maybeFile: FileInfo?
+  let maybeMeId: String?
 
   var body: some View {
     switch block.kind {
@@ -231,7 +259,7 @@ private struct ChannelNoteBlock: View {
   }
 
   private func text(_ style: Font.TextStyle) -> Text {
-    Text(ChannelNotes.attributed(block.runs)).font(.app(style))
+    Text(ChannelNotes.attributed(block.runs, maybeMeId: maybeMeId)).font(.app(style))
   }
 
   private func marked(_ marker: String) -> some View {

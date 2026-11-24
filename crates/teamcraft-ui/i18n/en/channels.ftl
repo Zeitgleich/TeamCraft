@@ -19,6 +19,7 @@ channel-tab-notes = Notes
 
 ## A channel's shared notes (Notes tab)
 canvas-page-label = Shared notes
+canvas-mention-picker = People to mention
 canvas-toolbar = Formatting
 canvas-kind-paragraph = Text
 canvas-kind-bullet = Bulleted list

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use teamcraft_crypto::push::open_wakeup;
 use teamcraft_crypto::secret::SymmetricKey;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationKind, ConversationResponse, Id, ListMessagesQuery,
+  Base64Bytes, CanvasPageId, ConversationId, ConversationKind, ConversationResponse, Id, ListMessagesQuery,
   ListMessagesResponse, MessageId, MessageResponse, PushContentMode, PushKind, PushWakeUp, Snowflake,
   SourcePictureHash, UserId, UserSummary,
 };
@@ -91,6 +91,17 @@ pub struct PushPreview {
   /// Why the notification shows less than the message, if it does: for the diagnostics, so a
   /// "New message" can be explained without ever logging what the message said.
   pub maybe_gap: Option<PreviewGap>,
+  /// The notes page an edit that mentions this user is on (issue #2361): opening the notification
+  /// opens it. Set with [`PreviewGap::MentionedInNotes`], and kept under the limits like the
+  /// conversation it opens.
+  pub maybe_notes: Option<NotesTarget>,
+}
+
+/// A page of a channel's notes a notification opens.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotesTarget {
+  /// A further page; `None` for the channel's first one.
+  pub maybe_page: Option<CanvasPageId>,
 }
 
 /// Why a notification shows less than the message.
@@ -112,6 +123,9 @@ pub enum PreviewGap {
   /// This user was added to the conversation: no text of its own, the apps say so in their language
   /// instead of "New message".
   AddedYou,
+  /// An edit of the channel's notes mentions this user (issue #2361): the apps say "mentioned you in
+  /// the notes" in their language and open the page ([`PushPreview::maybe_notes`]).
+  MentionedInNotes,
   /// The workspace policy lets notifications show less.
   WorkspacePolicy,
   /// This device's own setting lets notifications show less.
@@ -217,7 +231,7 @@ pub async fn push_preview<A: PreviewApi>(
     None => None,
   };
   // Only messages have content to fetch; a withdrawal names the newest message read, not one to show.
-  let (content, is_silent, is_conversation_verified, maybe_source, maybe_picture) =
+  let (content, is_silent, is_conversation_verified, maybe_source, maybe_picture, maybe_notes) =
     match (&wake_up.kind, wake_up.maybe_message_id) {
       (PushKind::Message | PushKind::Mention, Some(message_id)) => {
         preview_content(store, maybe_api, &wake_up, message_id).await
@@ -240,8 +254,9 @@ pub async fn push_preview<A: PreviewApi>(
           .is_some_and(|conversation| conversation.maybe_my_membership.is_some()),
         None,
         None,
+        None,
       ),
-      _ => (Ok(PreviewContent::Unavailable), false, false, None, None),
+      _ => (Ok(PreviewContent::Unavailable), false, false, None, None, None),
     };
   let is_sender_source = maybe_source.is_some();
   let maybe_sender_source_picture = maybe_source
@@ -268,6 +283,7 @@ pub async fn push_preview<A: PreviewApi>(
     is_silent,
     is_conversation_verified,
     maybe_gap,
+    maybe_notes,
   };
   Ok(
     preview
@@ -433,13 +449,14 @@ impl std::fmt::Debug for PushSession {
 
 /// What a message gives its notification: the content or why there is none, whether it was sent
 /// silently, whether it is known to belong to the wake-up's conversation, the integration source
-/// that posted it and the preview of its picture.
+/// that posted it, the preview of its picture and the notes page it mentions the user on.
 type ReadPreview = (
   Result<PreviewContent, PreviewGap>,
   bool,
   bool,
   Option<ShownSource>,
   Option<PreviewPicture>,
+  Option<NotesTarget>,
 );
 
 /// From the store if the app already has the message, else fetched and decrypted; failures only
@@ -475,7 +492,7 @@ async fn preview_content<A: PreviewApi>(
     }
   }
   let Some(api) = maybe_api else {
-    return (Err(PreviewGap::NoSession), false, false, None, None);
+    return (Err(PreviewGap::NoSession), false, false, None, None, None);
   };
   match fetch_and_decrypt(store, api, wake_up, message_id).await {
     Ok((sender, content)) => readable_preview(store, conversation, sender, &content),
@@ -487,7 +504,7 @@ async fn preview_content<A: PreviewApi>(
         conversation_id = %conversation,
         "no preview for push"
       );
-      (Err(PreviewGap::NotDecrypted), false, false, None, None)
+      (Err(PreviewGap::NotDecrypted), false, false, None, None, None)
     },
   }
 }
@@ -499,13 +516,23 @@ fn readable_preview(
   sender: UserId,
   content: &ShownContent,
 ) -> ReadPreview {
+  if let Some(notes) = mentions_this_user(store, content) {
+    return (
+      Err(PreviewGap::MentionedInNotes),
+      false,
+      true,
+      None,
+      None,
+      Some(notes),
+    );
+  }
   if is_hidden_change(content) {
     let gap = if adds_this_user(store, content) {
       PreviewGap::AddedYou
     } else {
       PreviewGap::Hidden
     };
-    return (Err(gap), false, true, None, None);
+    return (Err(gap), false, true, None, None, None);
   }
   (
     Ok(content_preview(content)),
@@ -513,6 +540,7 @@ fn readable_preview(
     true,
     shown_source(store, conversation, sender, content),
     preview_picture(content),
+    None,
   )
 }
 
@@ -546,7 +574,7 @@ fn shown_source(
 /// client, so it still shows that something came.
 fn is_hidden_change(content: &ShownContent) -> bool {
   match content {
-    ShownContent::Change | ShownContent::MemberAdded(_) => true,
+    ShownContent::Change | ShownContent::MemberAdded(_) | ShownContent::PageMention { .. } => true,
     ShownContent::Text { .. } | ShownContent::File(_) | ShownContent::Unknown => false,
   }
 }
@@ -561,6 +589,17 @@ fn adds_this_user(store: &impl LocalStore, content: &ShownContent) -> bool {
     .ok()
     .flatten()
     .is_some_and(|account| account.user_id == *user)
+}
+
+/// The notes page of an edit that mentions this user (issue #2361); others it mentions stay hidden.
+fn mentions_this_user(store: &impl LocalStore, content: &ShownContent) -> Option<NotesTarget> {
+  let ShownContent::PageMention { mentions, maybe_page } = content else {
+    return None;
+  };
+  let me = records::load_account(store).ok().flatten()?.user_id;
+  mentions.contains(&me).then(|| NotesTarget {
+    maybe_page: maybe_page.clone(),
+  })
 }
 
 /// Whether the read position this device knows has passed this wake-up's message: read elsewhere
@@ -875,6 +914,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: true,
       maybe_gap: Some(PreviewGap::Hidden),
+      maybe_notes: None,
     };
     for mode in [PushContentMode::Sender, PushContentMode::Generic] {
       assert_eq!(
@@ -1001,6 +1041,7 @@ mod tests {
         is_silent: false,
         is_conversation_verified: true,
         maybe_gap: None,
+        maybe_notes: None,
       };
       full.maybe_picture = preview_picture(&shown(&photo("look", "image/png", PNG)));
       assert!(
@@ -1090,6 +1131,7 @@ mod tests {
         update: teamcraft_proto::Base64Bytes::new(vec![1]),
         is_snapshot: false,
         maybe_page: None,
+        mentions: Vec::new(),
       },
       MessageContent::ChannelRolesEntry {
         version: 2,
@@ -1236,6 +1278,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: true,
       maybe_gap: None,
+      maybe_notes: None,
     };
     assert_eq!(full.clone().limited_to(&PushContentMode::Full), full);
     let sender = full.clone().limited_to(&PushContentMode::Sender);
@@ -1302,6 +1345,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: false,
       maybe_gap: Some(PreviewGap::NotDecrypted),
+      maybe_notes: None,
     };
     assert!(failed.needs_catch_up());
     assert_eq!(failed.clone().limited_to(&PushContentMode::Full), failed);
@@ -1351,6 +1395,7 @@ mod tests {
       is_silent: false,
       is_conversation_verified: false,
       maybe_gap: Some(PreviewGap::NoSession),
+      maybe_notes: None,
     };
     assert!(missing.needs_server());
 

@@ -468,6 +468,7 @@ class MessageNotificationSpecTest {
       appName = "App",
       newMessage = "New message",
       addedYou = "Added you",
+      mentionedInNotes = "Mentioned you in the notes",
       newMessageFrom = { "from $it" },
       newMessagesFrom = { count, names -> "$count from $names" },
       newMessages = { count -> "$count new" },

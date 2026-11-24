@@ -16,7 +16,8 @@
 
 use serde::{Deserialize, Serialize};
 use teamcraft_proto::{
-  Base64Bytes, CanvasPageId, ConversationId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES, UserId,
+  Base64Bytes, CanvasPageId, ConversationId, MAX_LISTED_CANVAS_PAGES, MAX_UNLISTED_CANVAS_PAGES, MessageId,
+  UserId,
 };
 
 use crate::error::CoreError;
@@ -30,6 +31,13 @@ pub const CANVAS_PREFIX: &str = "canvas/";
 /// The key prefix of the further pages a conversation has records of ([`KeptPages`]):
 /// `canvas-pages/{conversation}`.
 const KEPT_PAGES_PREFIX: &str = "canvas-pages/";
+
+/// The key of the page edits that mentioned this user ([`PageMention`]) in [`Table::Account`].
+const MENTIONS_KEY: &str = "canvas-mentions";
+
+/// Page mentions kept, the newest by the server's order: the desktop and web notifications look
+/// only at ones newer than what they saw, so older ones are of no use.
+const MAX_KEPT_MENTIONS: usize = 50;
 
 /// Which further pages of a conversation this device keeps updates of. The core can't read the
 /// first page's list of pages (a Yjs document), so the page's editor tells it ([`note_pages`]):
@@ -158,6 +166,57 @@ pub fn take_update(
     record.updates_since_snapshot.saturating_add(1)
   };
   records::put_json(store, Table::Account, &key, &record)
+}
+
+/// An edit of a page that mentioned this user (issue #2361): what the desktop and web apps notify
+/// of, as "mentioned you in the notes of #channel", opening the page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageMention {
+  pub conversation: ConversationId,
+  #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_page: Option<CanvasPageId>,
+  pub by: UserId,
+  /// The edit's message, as the server numbered it.
+  pub message: MessageId,
+  pub at_ms: i64,
+}
+
+/// Keeps a page edit of another member that named `me` among its mentions. The mentions are the
+/// ones inside the signed ciphertext (never the server's list); a snapshot names none.
+pub fn note_mention(
+  store: &impl LocalStore,
+  page: &PageKey,
+  by: UserId,
+  mentions: &[UserId],
+  message: MessageId,
+  at_ms: i64,
+) -> Result<(), CoreError> {
+  let Some(me) = records::load_account(store)?.map(|account| account.user_id) else {
+    return Ok(());
+  };
+  if by == me || !mentions.contains(&me) {
+    return Ok(());
+  }
+  let mut kept = page_mentions(store)?;
+  if kept.iter().any(|mention| mention.message == message) {
+    return Ok(());
+  }
+  kept.push(PageMention {
+    conversation: page.conversation,
+    maybe_page: page.maybe_page.clone(),
+    by,
+    message,
+    at_ms,
+  });
+  kept.sort_by_key(|mention| mention.message);
+  let excess = kept.len().saturating_sub(MAX_KEPT_MENTIONS);
+  kept.drain(..excess);
+  records::put_json(store, Table::Account, MENTIONS_KEY, &kept)
+}
+
+/// The page edits that mentioned this user, oldest first ([`note_mention`]).
+pub fn page_mentions(store: &impl LocalStore) -> Result<Vec<PageMention>, CoreError> {
+  Ok(records::get_json(store, Table::Account, MENTIONS_KEY)?.unwrap_or_default())
 }
 
 /// Makes room for a further page's update: a listed page has its place; an unlisted one moves to

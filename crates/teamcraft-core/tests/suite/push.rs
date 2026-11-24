@@ -559,6 +559,60 @@ async fn being_added_still_shows_while_others_being_added_does_not() {
   assert_hidden(&bob, &wake_up_for(&server, &bob, &alice, channel, added)).await;
 }
 
+/// A mention on the notes reaches the member it names as "mentioned you in the notes", with the
+/// page to open; everybody else's device stays quiet, as for any page edit (issue #2361).
+#[tokio::test]
+async fn a_mention_in_the_notes_shows_only_to_the_member_it_names() {
+  let (server, mut alice, mut bob, channel) = channel_with_two().await;
+  let mut carol = Peer::enroll(&server, "Carol").await;
+  alice
+    .client
+    .add_member(channel, carol.client.user_id())
+    .await
+    .unwrap();
+  carol
+    .client
+    .register_push(PushProvider::WebPush, "{}")
+    .await
+    .unwrap();
+  let page = teamcraft_proto::CanvasPageId::parse("a1").unwrap();
+  alice
+    .client
+    .send_canvas_update(
+      channel,
+      Some(page.clone()),
+      vec![1, 2, 3],
+      false,
+      vec![bob.client.user_id()],
+    )
+    .await
+    .unwrap();
+  let edit = alice
+    .store
+    .messages(channel, MessageFilter::All)
+    .unwrap()
+    .iter()
+    .filter_map(|message| message.maybe_server_id)
+    .max()
+    .unwrap();
+
+  bob.client.catch_up_for_push(channel).await.unwrap();
+  let sealed = wake_up_for(&server, &bob, &alice, channel, edit);
+  let preview = push_preview(bob.store.as_ref(), Some(&bob.api), &sealed)
+    .await
+    .unwrap();
+  assert_eq!(preview.maybe_gap, Some(PreviewGap::MentionedInNotes));
+  assert_eq!(
+    preview.content,
+    PreviewContent::Unavailable,
+    "never the page's text"
+  );
+  assert_eq!(preview.maybe_notes.and_then(|notes| notes.maybe_page), Some(page));
+
+  carol.client.catch_up_for_push(channel).await.unwrap();
+  assert_hidden(&carol, &wake_up_for(&server, &carol, &alice, channel, edit)).await;
+}
+
 /// Read on another device: the record says so as soon as this device has fetched it.
 #[tokio::test]
 async fn a_message_past_the_read_position_counts_as_read() {

@@ -9,7 +9,7 @@
 //! (`From<&MessageContent>`): the tests check both for every kind.
 
 use serde::Deserialize;
-use teamcraft_proto::{Base64Bytes, ConversationId, MessageId, SourceIdentity, UserId};
+use teamcraft_proto::{Base64Bytes, CanvasPageId, ConversationId, MessageId, SourceIdentity, UserId};
 
 use crate::store::{AttachmentRef, ConversationEvent, MessageContent, StoredMessage};
 
@@ -52,6 +52,12 @@ pub enum ShownContent {
   File(ShownFile),
   /// Somebody was added to the conversation.
   MemberAdded(UserId),
+  /// An edit of the channel's notes that mentions people (issue #2361): hidden like any page edit,
+  /// except from those it mentions. A snapshot mentions nobody.
+  PageMention {
+    mentions: Vec<UserId>,
+    maybe_page: Option<CanvasPageId>,
+  },
   /// A change to the conversation (an edit, a reaction, a system note, …): no message to announce.
   Change,
   /// Of a kind this version doesn't know (from a newer client).
@@ -69,6 +75,15 @@ pub struct ShownFile {
 }
 
 impl ShownContent {
+  /// A page edit (not a snapshot): one that mentions people on a page that keeps the rules, else a
+  /// change like any. An edit naming an invalid page is dropped on receipt and notifies nobody.
+  fn page_edit(mentions: Vec<UserId>, maybe_page: Option<CanvasPageId>) -> Self {
+    if mentions.is_empty() || maybe_page.as_ref().is_some_and(|page| !page.is_valid()) {
+      return Self::Change;
+    }
+    Self::PageMention { mentions, maybe_page }
+  }
+
   /// The integration source as [`crate::integration_sources::shown_source`] takes it.
   pub(crate) fn source(&self) -> Option<SourceIdentity> {
     let Self::Text { maybe_source, .. } = self else {
@@ -102,6 +117,12 @@ impl From<&MessageContent> for ShownContent {
       MessageContent::Event {
         event: ConversationEvent::MemberAdded { user, .. },
       } => Self::MemberAdded(*user),
+      MessageContent::Canvas {
+        mentions,
+        is_snapshot: false,
+        maybe_page,
+        ..
+      } => Self::page_edit(mentions.clone(), maybe_page.clone()),
       MessageContent::Edit { .. }
       | MessageContent::Delete { .. }
       | MessageContent::Deleted
@@ -145,7 +166,14 @@ enum ContentWire {
   IndexSegment,
   Pin,
   Bookmarks,
-  Canvas,
+  Canvas {
+    #[serde(default)]
+    is_snapshot: bool,
+    #[serde(rename = "page", default)]
+    maybe_page: Option<CanvasPageId>,
+    #[serde(default)]
+    mentions: Vec<UserId>,
+  },
   Reaction,
   PollVote,
   PollClose,
@@ -199,6 +227,11 @@ impl From<ContentWire> for ShownContent {
       ContentWire::Event {
         event: EventWire::MemberAdded { user },
       } => Self::MemberAdded(user),
+      ContentWire::Canvas {
+        is_snapshot: false,
+        maybe_page,
+        mentions,
+      } => Self::page_edit(mentions, maybe_page),
       ContentWire::Event {
         event: EventWire::Other,
       }
@@ -208,7 +241,7 @@ impl From<ContentWire> for ShownContent {
       | ContentWire::IndexSegment
       | ContentWire::Pin
       | ContentWire::Bookmarks
-      | ContentWire::Canvas
+      | ContentWire::Canvas { .. }
       | ContentWire::Reaction
       | ContentWire::PollVote
       | ContentWire::PollClose
@@ -343,6 +376,13 @@ mod tests {
         update: Base64Bytes::new(vec![1]),
         is_snapshot: true,
         maybe_page: None,
+        mentions: vec![id(3)],
+      },
+      MessageContent::Canvas {
+        update: Base64Bytes::new(vec![1]),
+        is_snapshot: false,
+        maybe_page: CanvasPageId::parse("p1"),
+        mentions: vec![id(3)],
       },
       MessageContent::Event {
         event: ConversationEvent::MemberAdded {
@@ -429,10 +469,22 @@ mod tests {
       Some("Monitoring")
     );
     assert_eq!(
+      ShownContent::from(&contents[10]),
+      ShownContent::Change,
+      "a snapshot"
+    );
+    assert_eq!(
       ShownContent::from(&contents[11]),
+      ShownContent::PageMention {
+        mentions: vec![id(3)],
+        maybe_page: CanvasPageId::parse("p1"),
+      }
+    );
+    assert_eq!(
+      ShownContent::from(&contents[12]),
       ShownContent::MemberAdded(id(5))
     );
-    assert_eq!(ShownContent::from(&contents[12]), ShownContent::Change);
+    assert_eq!(ShownContent::from(&contents[13]), ShownContent::Change);
   }
 
   #[test]
@@ -445,6 +497,12 @@ mod tests {
     );
     assert_eq!(
       read(r#"{"type":"reaction","target":"x","new":true}"#),
+      ShownContent::Change
+    );
+    // A page edit that mentions nobody, or names a page beyond the rules, is a change.
+    assert_eq!(read(r#"{"type":"canvas","update":"AQ=="}"#), ShownContent::Change);
+    assert_eq!(
+      read(r#"{"type":"canvas","update":"AQ==","page":"no/such page","mentions":["3"]}"#),
       ShownContent::Change
     );
     assert_eq!(

@@ -96,6 +96,9 @@ enum class PushPath {
   /** This user was added to the conversation: says so. */
   ADDED_YOU,
 
+  /** An edit of the channel's notes mentions this user: says so and opens the page. */
+  MENTIONED_IN_NOTES,
+
   /** Placeholders by why the first try could not read the message. */
   PLACEHOLDER_NO_SESSION,
   PLACEHOLDER_NOT_DECRYPTED,
@@ -141,6 +144,7 @@ enum class PushPath {
       NotificationGap.NOT_SHOWABLE -> NOT_SHOWABLE
       NotificationGap.HIDDEN -> HIDDEN
       NotificationGap.ADDED_YOU -> ADDED_YOU
+      NotificationGap.MENTIONED_IN_NOTES -> MENTIONED_IN_NOTES
       NotificationGap.WORKSPACE_POLICY, NotificationGap.DEVICE_SETTING -> LIMITED
     }
   }

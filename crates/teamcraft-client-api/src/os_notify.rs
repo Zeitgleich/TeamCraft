@@ -22,6 +22,9 @@ const MEETING_TAG_PREFIX: &str = "meeting:";
 const REMINDER_TAG_PREFIX: &str = "reminder:";
 /// Tag prefix of an admin's request to join a private channel; `{conversation}:{user}` follows.
 const JOIN_REQUEST_TAG_PREFIX: &str = "admin-join:";
+/// An edit of a channel's notes that mentions the user (issue #2361): `notes:{conversation}` for
+/// the first page, `notes:{conversation}:{page}` for a further one.
+const NOTES_TAG_PREFIX: &str = "notes:";
 /// Side of a notification picture in pixels: the generated tile the UI draws and what the shell
 /// scales a cached picture to (the services show it at 48 to 80 points, so this is sharp at 2x).
 pub const NOTIFICATION_PICTURE_PX: u32 = 128;
@@ -213,6 +216,11 @@ pub enum TagTarget {
     conversation: String,
     user: String,
   },
+  /// A mention in a channel's notes: the conversation, and the further page if it is one.
+  Notes {
+    conversation: String,
+    maybe_page: Option<String>,
+  },
 }
 
 impl NotificationTag {
@@ -245,6 +253,18 @@ impl NotificationTag {
     ))
   }
 
+  /// The tag of a mention in a channel's notes, on its first page (`None`) or a further one.
+  pub fn notes(conversation: impl ToString, maybe_page: Option<&teamcraft_proto::CanvasPageId>) -> Self {
+    match maybe_page {
+      Some(page) => Self(format!(
+        "{NOTES_TAG_PREFIX}{}:{}",
+        conversation.to_string(),
+        page.as_str()
+      )),
+      None => Self(format!("{NOTES_TAG_PREFIX}{}", conversation.to_string())),
+    }
+  }
+
   /// A tag as a platform handed it back.
   pub fn from_raw(raw: impl Into<String>) -> Self {
     Self(raw.into())
@@ -265,6 +285,15 @@ impl NotificationTag {
       TagTarget::Meeting(id.to_owned())
     } else if tag.starts_with(REMINDER_TAG_PREFIX) {
       TagTarget::Reminder
+    } else if let Some(rest) = tag.strip_prefix(NOTES_TAG_PREFIX) {
+      let (conversation, maybe_page) = match rest.split_once(':') {
+        Some((conversation, page)) => (conversation, Some(page.to_owned())),
+        None => (rest, None),
+      };
+      TagTarget::Notes {
+        conversation: conversation.to_owned(),
+        maybe_page,
+      }
     } else if let Some((conversation, user)) = tag
       .strip_prefix(JOIN_REQUEST_TAG_PREFIX)
       .and_then(|rest| rest.split_once(':'))
@@ -381,6 +410,20 @@ mod tests {
       TagTarget::JoinRequest {
         conversation: "42".into(),
         user: "7".into()
+      }
+    );
+    assert_eq!(
+      NotificationTag::notes(42, None).target(),
+      TagTarget::Notes {
+        conversation: "42".into(),
+        maybe_page: None
+      }
+    );
+    assert_eq!(
+      NotificationTag::notes(42, teamcraft_proto::CanvasPageId::parse("a1-b2").as_ref()).target(),
+      TagTarget::Notes {
+        conversation: "42".into(),
+        maybe_page: Some("a1-b2".into())
       }
     );
     assert_eq!(NotificationTag::conversation(42).as_str(), "42");

@@ -209,6 +209,8 @@ final class AppModel {
   private(set) var maybeScheduledCount: Int?
   /// The conversation a notification asked to open.
   var openConversationId: String?
+  /// The notes a notification of a mention in them asked to open; the conversation's pane takes it.
+  var openedNotes: OpenedNotes?
   /// "Hand over" on the lobby reminder after leaving a meeting's call from CallKit (#1859): the
   /// choice of whom to hand the meeting to shows over whatever screen is up.
   var maybeLobbyHandover: LobbyHandoverRequest?
@@ -1326,7 +1328,7 @@ final class AppModel {
   func handle(
     notificationAction identifier: String, conversationId: String, tag: String?, replyText: String?,
     maybeThreadId: String? = nil, notificationId: String? = nil, maybeMessageId: String? = nil,
-    maybeMeetingId: String? = nil
+    maybeMeetingId: String? = nil, maybeNotesPage: String? = nil
   ) async {
     guard let read = await conversationsIfRead() else {
       // The store didn't answer (it may be opening again, or busy behind a stuck connection, #2374).
@@ -1366,6 +1368,10 @@ final class AppModel {
     default:
       openConversationId = conversationId
       reopen(conversationId)
+      // A mention in the channel's notes opens them on its page (#2361); "" names the first page.
+      if let page = maybeNotesPage {
+        openedNotes = OpenedNotes(conversationId: conversationId, maybePageId: page.isEmpty ? nil : page)
+      }
     }
   }
 
@@ -2293,6 +2299,13 @@ private final class ResumeOnce: @unchecked Sendable {
   }
 }
 
+
+/// A page of a channel's notes to open, at the user's mention on it (`AppModel.openedNotes`, #2361).
+struct OpenedNotes: Equatable {
+  let conversationId: String
+  /// A further page; `nil` for the channel's first one.
+  let maybePageId: String?
+}
 
 /// A conversation opened again from outside the app (`AppModel.reopenedConversation`).
 struct ReopenedConversation: Equatable {

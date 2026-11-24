@@ -592,6 +592,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
     maybe_page: Option<&CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    mentions: Vec<UserId>,
   ) {
     if maybe_page.is_some_and(|page| !page.is_valid()) {
       tracing::warn!(%conversation, "a page edit naming an invalid page was not sent");
@@ -605,14 +606,32 @@ impl<S: LocalStore> CoreChatBackend<S> {
       tracing::warn!(%conversation, "a page edit where the user may not post was not sent");
       return;
     }
+    let mentions = if is_snapshot {
+      Vec::new()
+    } else {
+      self.page_mentions_to_send(conversation, mentions)
+    };
     self.control(
       conversation,
       MessageContent::Canvas {
         update: Base64Bytes::new(update),
         is_snapshot,
         maybe_page: maybe_page.cloned(),
+        mentions,
       },
     );
+  }
+
+  /// Whom a page edit notifies of its mentions (issue #2361): the members of the channel the editor
+  /// named, not the user, each once, and no more than a message may name (the server refuses more).
+  fn page_mentions_to_send(&self, conversation: ConversationId, mut mentions: Vec<UserId>) -> Vec<UserId> {
+    let members = self.members(conversation);
+    let me = self.me_id();
+    mentions.retain(|user| *user != me && members.contains(user));
+    mentions.sort_unstable();
+    mentions.dedup();
+    mentions.truncate(self.mention_cap_in(conversation));
+    mentions
   }
 
   /// Replaces the page's updates with the editor's merge of them and its history with the one

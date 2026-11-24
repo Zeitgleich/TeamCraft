@@ -123,6 +123,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
       replyText: reply, maybeThreadId: info[NotificationKeys.thread] as? String,
       notificationId: response.notification.request.identifier,
       maybeMessageId: info[NotificationKeys.message] as? String,
-      maybeMeetingId: info[NotificationKeys.meetingId] as? String)
+      maybeMeetingId: info[NotificationKeys.meetingId] as? String,
+      maybeNotesPage: info[NotificationKeys.notesPage] as? String)
   }
 }

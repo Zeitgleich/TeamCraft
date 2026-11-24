@@ -97,6 +97,10 @@ pub struct CanvasRunItem {
   pub is_code: bool,
   /// A web address (`http://` or `https://`) only: whatever else a client stored is no link.
   pub maybe_link: Option<String>,
+  /// The user this stretch mentions (issue #2361), in decimal: the app shows it as a chip.
+  /// Defaulted, so runs the apps build need no change.
+  #[uniffi(default = None)]
+  pub maybe_mention: Option<String>,
 }
 
 /// Who else has a page open, and who edited it lately without having it open: the line under the
@@ -411,6 +415,7 @@ impl CanvasRunItem {
       is_strike: style.is_strike,
       is_code: style.is_code,
       maybe_link: style.maybe_link.clone(),
+      maybe_mention: style.maybe_mention.map(|user| user.to_string()),
     }
   }
 }

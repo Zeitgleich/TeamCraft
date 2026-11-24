@@ -93,7 +93,7 @@ pub fn CanvasPages(
       return;
     };
     pages.set(list.with_value(CanvasDoc::pages));
-    let _ = state.try_write(|backend| backend.edit_canvas(conversation, None, update, false));
+    let _ = state.try_write(|backend| backend.edit_canvas(conversation, None, update, false, Vec::new()));
     note_pages();
   };
 

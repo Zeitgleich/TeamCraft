@@ -409,10 +409,11 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    mentions: Vec<teamcraft_proto::UserId>,
   ) {
     self
       .chat
-      .edit_canvas(conversation, maybe_page, update, is_snapshot);
+      .edit_canvas(conversation, maybe_page, update, is_snapshot, mentions);
   }
 
   fn note_canvas_pages(
@@ -430,6 +431,10 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     maybe_page: Option<&teamcraft_proto::CanvasPageId>,
   ) -> Vec<teamcraft_client_api::model::CanvasPeer> {
     self.chat.canvas_peers(conversation, maybe_page)
+  }
+
+  fn page_mentions(&self) -> Vec<teamcraft_client_api::model::PageMention> {
+    self.chat.page_mentions()
   }
 
   fn announce_canvas(

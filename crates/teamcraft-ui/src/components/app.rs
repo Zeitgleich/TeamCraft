@@ -1106,20 +1106,26 @@ fn sync_tray(state: AppState, i18n: crate::i18n::I18n) {
 }
 
 /// Browser: a click on a push notification names a conversation, either as a message from the service
-/// worker (a page is open) or as `?conversation_id=` of the page it opened.
+/// worker (a page is open) or as `?conversation_id=` of the page it opened. A mention in the notes
+/// names the page too (`notes_page`, empty for the first page): the notes open there (issue #2361).
 fn open_conversations_from_notifications(state: AppState) {
   const FIELD: &str = "conversation_id";
+  const NOTES_FIELD: &str = "notes_page";
   let Some(window) = web_sys::window() else { return };
-  let open = move |text: &str| {
-    if let Ok(conversation) = text.parse::<ConversationId>() {
-      state.open_conversation(conversation);
+  let open = move |text: &str, maybe_notes_page: Option<String>| {
+    let Ok(conversation) = text.parse::<ConversationId>() else {
+      return;
+    };
+    match maybe_notes_page {
+      Some(page) => state.open_notes(conversation, teamcraft_proto::CanvasPageId::parse(&page)),
+      None => state.open_conversation(conversation),
     }
   };
   if let Ok(search) = window.location().search()
     && let Ok(params) = web_sys::UrlSearchParams::new_with_str(&search)
     && let Some(value) = params.get(FIELD)
   {
-    open(&value);
+    open(&value, params.get(NOTES_FIELD));
   }
   let liveness = OwnerLiveness::of_current_owner();
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
@@ -1127,16 +1133,18 @@ fn open_conversations_from_notifications(state: AppState) {
       return;
     }
     let data = event.data();
-    let is_click = js_sys::Reflect::get(&data, &"type".into())
-      .ok()
-      .and_then(|value| value.as_string())
-      .is_some_and(|kind| kind == "open_conversation");
-    if is_click
-      && let Some(value) = js_sys::Reflect::get(&data, &FIELD.into())
+    let text = |key: &str| {
+      js_sys::Reflect::get(&data, &key.into())
         .ok()
         .and_then(|value| value.as_string())
-    {
-      open(&value);
+    };
+    let maybe_notes_page = match text("type").as_deref() {
+      Some("open_conversation") => None,
+      Some("open_notes") => Some(text(NOTES_FIELD).unwrap_or_default()),
+      _ => return,
+    };
+    if let Some(value) = text(FIELD) {
+      open(&value, maybe_notes_page);
     }
   });
   if window

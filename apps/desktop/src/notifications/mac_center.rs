@@ -144,7 +144,7 @@ pub fn show(notification: &OsNotification, maybe_picture: Option<&Path>) {
   let thread = match notification.tag.target() {
     TagTarget::Conversation(id) | TagTarget::Call(id) | TagTarget::MissedCall(id) => id,
     TagTarget::Meeting(id) => id,
-    TagTarget::JoinRequest { conversation, .. } => conversation,
+    TagTarget::JoinRequest { conversation, .. } | TagTarget::Notes { conversation, .. } => conversation,
     TagTarget::Reminder => String::new(),
   };
   content.setThreadIdentifier(&NSString::from_str(&thread));

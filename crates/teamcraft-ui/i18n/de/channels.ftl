@@ -19,6 +19,7 @@ channel-tab-notes = Notizen
 
 ## Gemeinsame Notizen eines Kanals (Tab „Notizen“)
 canvas-page-label = Gemeinsame Notizen
+canvas-mention-picker = Personen zum Erwähnen
 canvas-toolbar = Formatierung
 canvas-kind-paragraph = Text
 canvas-kind-bullet = Aufzählung

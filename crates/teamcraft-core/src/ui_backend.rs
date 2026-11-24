@@ -2592,17 +2592,18 @@ impl<S: LocalStore> CoreChatBackend<S> {
     let direct = self.mentions_in(conversation, body);
     let may_mention = self.may_mention_groups_in(conversation);
     let reach = group_mention_reach(body, &self.mentionable_groups_in(conversation, may_mention));
-    let cap = if may_mention {
-      DEFAULT_MAX_MENTIONS_PER_MESSAGE
-    } else {
-      DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS
-    };
+    let cap = mention_cap(may_mention);
     meta.group_mentions = reach.handles.clone();
     MessageContent::Text {
       body: body.to_owned(),
       mentions: expanded_mentions(direct, &reach, cap),
       meta,
     }
+  }
+
+  /// How many people a message in the conversation may name ([`mention_cap`]).
+  pub(crate) fn mention_cap_in(&self, conversation: ConversationId) -> usize {
+    mention_cap(self.may_mention_groups_in(conversation))
   }
 
   fn may_mention_groups_in(&self, conversation: ConversationId) -> bool {
@@ -4259,8 +4260,9 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     maybe_page: Option<&teamcraft_proto::CanvasPageId>,
     update: Vec<u8>,
     is_snapshot: bool,
+    mentions: Vec<UserId>,
   ) {
-    self.ui_edit_canvas(conversation, maybe_page, update, is_snapshot);
+    self.ui_edit_canvas(conversation, maybe_page, update, is_snapshot, mentions);
   }
 
   fn canvas_peers(
@@ -4271,6 +4273,20 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     self
       .canvas_presence
       .peers(conversation, maybe_page, self.me, self.clock.now_ms())
+  }
+
+  fn page_mentions(&self) -> Vec<teamcraft_client_api::model::PageMention> {
+    self
+      .read(crate::canvas::page_mentions(&self.store))
+      .into_iter()
+      .map(|mention| teamcraft_client_api::model::PageMention {
+        conversation: mention.conversation,
+        maybe_page: mention.maybe_page,
+        by: mention.by,
+        message: mention.message,
+        at: mention.at_ms,
+      })
+      .collect()
   }
 
   fn announce_canvas(
@@ -4675,6 +4691,16 @@ fn view_kind(response: &ConversationResponse) -> ConversationKind {
 /// (issue #943): its lines never pile up as an unread number, mentions still count. Only a member
 /// who set the channel's level to "all" themselves gets the count, so the per-channel notification
 /// setting is the switch and a channel that follows its space or the default stays quiet.
+/// How many people a message may name: the server's default caps, the larger one where the user
+/// may use group mentions (docs/e2ee.md §4.4).
+fn mention_cap(may_mention_groups: bool) -> usize {
+  if may_mention_groups {
+    DEFAULT_MAX_MENTIONS_PER_MESSAGE
+  } else {
+    DEFAULT_MAX_MENTIONS_WITHOUT_GROUP_MENTIONS
+  }
+}
+
 fn shown_unread_messages(response: &ConversationResponse, kind: ConversationKind, messages: u32) -> u32 {
   let wants_every_message = response.maybe_my_membership.as_ref().is_some_and(|membership| {
     !membership.is_notification_inherited && membership.notification_level == NotificationLevel::All

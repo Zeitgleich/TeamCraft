@@ -5112,8 +5112,8 @@ for predecessors that had arrived and two devices showed different pages (a rand
 **Transport: a hidden message.** An edit is a `canvas` message (`MessageContent::Canvas { update,
 is_snapshot }`), encrypted with the channel's content key and signed by the sending device like
 any message (§4.4), sent through the outbox, delivered live through the gateway. The server sees an
-ordinary message of the channel: sender, device, time, size; no mentions, never urgent, nothing
-that says it is a page. Clients don't list it and it counts as nothing unread (like reactions,
+ordinary message of the channel: sender, device, time, size; never urgent, nothing that says it is a
+page, and mentions only when the edit mentions somebody (below). Clients don't list it and it counts as nothing unread (like reactions,
 pins and bookmarks). The editor applies an edit at once and sends the edits of a burst of typing
 as one update: after 600 ms without typing, at most 2 s after the first. An edit not sent yet when
 the app is killed in that moment is lost; once handed to the core it is in the outbox and goes out
@@ -5202,6 +5202,29 @@ The line under the toolbar shows the avatars and names of the others who have th
 names the members whose edits arrived in the last two minutes without having it open (a phone, a
 client from before presence) as editing. The carets are thin bars in the hue of each member's
 avatar, with their name.
+
+**Mentions (issue #2361).** A mention is an inline object in the sense above: the text `@Name` with
+a `mention` attribute holding the user's ID in decimal; a version that doesn't know the attribute
+shows the text. A value that is no ID is plain text. The editor's `@` opens a picker of the
+channel's members (never the user); the picked one goes in as the mention and a plain space after
+it, and Backspace takes the whole mention. With the next edit the editor names the people it
+mentioned with the picker since its last edit and who are still on the page (`mentions` of the
+`canvas` message, inside the ciphertext); the core keeps only channel members other than the user,
+each once, up to the mentions a message may name, and the outbox hands them to the server as
+`mentioned_user_ids`, which a snapshot never carries (an edit that mentions somebody is never sent as
+a snapshot; the snapshot waits for the next edit). An undo, a redo or a restore that brings a mention
+back names nobody: it never went through the picker. What the server learns is what it learns of
+any message that mentions people: a list of members' IDs on a message of the channel. It still
+doesn't learn that the message is a page edit, nor which page or where on it.
+
+A receiving device believes the list inside the signed ciphertext, never the server's. A page edit
+that names the user (not their own, not a snapshot, on a page ID that keeps the rules) notifies as
+"Anna mentioned you in the notes" with the channel as the title: by the push preview on the phones
+and the web (`PreviewGap::MentionedInNotes`, never the page's text), and on desktop and web from the
+device's record of such edits (`canvas::page_mentions`, the newest 50 in the encrypted store),
+under the policy of a message that mentions the user (mutes, quiet hours, do-not-disturb, level). A
+tap opens the notes on that page, scrolled to the user's first mention. For everybody else a page
+edit stays hidden, as before. It doesn't count towards the channel's unread mentions yet.
 
 The phones show the page read-only, without a caret, and take part in presence all the same: while
 a page is shown and the app is in the foreground, the app asks the core every 10 s and whenever

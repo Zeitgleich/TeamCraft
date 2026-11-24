@@ -1199,6 +1199,20 @@ pub struct ThreadSummary {
   pub has_mention: bool,
 }
 
+/// An edit of a channel's notes that mentioned the user (issue #2361): what the desktop and web
+/// apps notify of, opening the page.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageMention {
+  pub conversation: ConversationId,
+  /// A further page; `None` for the channel's first one.
+  #[serde(rename = "page", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_page: Option<teamcraft_proto::CanvasPageId>,
+  pub by: UserId,
+  /// The edit's message, as the server numbered it: newer ones have greater IDs.
+  pub message: MessageId,
+  pub at: TimestampMs,
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

@@ -56,6 +56,8 @@ data class MessageNotificationSpec(
    * push brings it before the sync, so the store may not hold it yet.
    */
   val maybeNewestMessageId: String? = null,
+  /** The newest wake-up mentioned the user in the channel's notes (#2361): a tap opens the page. */
+  val maybeNotes: NotesTarget? = null,
 ) {
   /** The button shows the action as running ("Marking as read…") and does nothing when tapped. */
   val maybeRunningAction: MessageAction?
@@ -255,6 +257,7 @@ object MessageNotificationSpecs {
       // Only on a notification that acts: one without actions has nothing to show a state for.
       maybeActionStatus = maybeActionStatus.takeIf { privacy.offersActions },
       maybeNewestMessageId = newestMessageId(entry.lines),
+      maybeNotes = entry.maybeNotes,
     )
   }
 

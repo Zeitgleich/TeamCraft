@@ -21,6 +21,14 @@ data class ConversationNotification(
   /** Version of the channel's own picture (#1956); `null` for DMs and channels without one. */
   @SerialName("channel_image_version") val maybeChannelImageVersion: String? = null,
   val lines: List<NotificationLine> = emptyList(),
+  /** The newest wake-up mentioned the user in the channel's notes (#2361): opening goes there. */
+  @SerialName("notes") val maybeNotes: NotesTarget? = null,
+)
+
+/** A page of a channel's notes a notification opens: a further page, or the first (`null`). */
+@Serializable
+data class NotesTarget(
+  @SerialName("page_id") val maybePageId: String? = null,
 )
 
 /** One message (or the user's own reply) in a conversation's notification. */

@@ -57,6 +57,8 @@ struct ChatPane: View {
   @State private var isShowingMembers = false
   /// A channel's shared notes, read-only on the phone (#1456).
   @State private var isShowingNotes = false
+  /// The notes were opened from a mention in them (#2361): on its page, at the mention.
+  @State private var maybeNotesRequest: OpenedNotes?
   /// What the next message replies to; kept in the core with the draft (#1115).
   @State private var maybeReply: ComposerReply?
   @State private var maybeSelectingText: Message?
@@ -303,7 +305,17 @@ struct ChatPane: View {
       }
     }
     .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
-    .sheet(isPresented: $isShowingNotes) { ChannelNotesView(conversationId: conversation.id) }
+    .sheet(isPresented: $isShowingNotes, onDismiss: { maybeNotesRequest = nil }) {
+      ChannelNotesView(
+        conversationId: conversation.id, maybeStartPageId: maybeNotesRequest?.maybePageId,
+        seeksMention: maybeNotesRequest != nil)
+    }
+    .onChange(of: model.openedNotes, initial: true) { _, opened in
+      guard let opened, opened.conversationId == conversation.id else { return }
+      model.openedNotes = nil
+      maybeNotesRequest = opened
+      isShowingNotes = true
+    }
     .sheet(item: $maybeForwarding) { target in
       ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
     }
