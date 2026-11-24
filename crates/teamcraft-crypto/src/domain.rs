@@ -17,7 +17,12 @@ pub(crate) const EPHEMERAL_SIGNATURE: &str = "TeamCraft-v1 ephemeral signal sign
 pub(crate) const ATTACHMENT_AAD: &str = "TeamCraft-v1 attachment chunk";
 pub(crate) const KEY_BAG_AAD: &str = "TeamCraft-v1 key bag";
 pub(crate) const BACKUP_KEY_WRAP_AAD: &str = "TeamCraft-v1 backup key wrap";
+/// HKDF info of the key a passkey's PRF output wraps the backup key with (e2ee.md §6.2.1).
 pub(crate) const PASSKEY_PRF_KDF: &str = "TeamCraft-v1 passkey prf backup key wrap";
+/// HPKE info of a backup key sealed to one of the user's devices after a rotation (e2ee.md §6.6).
+pub(crate) const BACKUP_KEY_HANDOFF: &str = "TeamCraft-v1 backup key handoff";
+/// The identity key's signature on such a hand-off.
+pub(crate) const BACKUP_KEY_HANDOFF_SIGNATURE: &str = "TeamCraft-v1 backup key handoff signature";
 /// HKDF info of the key that a recovery kit's key wraps the backup key with (e2ee.md §6.5.2).
 pub(crate) const RECOVERY_KEY_WRAP_KDF: &str = "TeamCraft-v1 recovery key backup key wrap";
 /// Hash input label of a recovery key's checksum (e2ee.md §6.5.1).

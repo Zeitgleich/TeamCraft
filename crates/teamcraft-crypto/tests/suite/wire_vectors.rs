@@ -13,8 +13,9 @@ use openmls_traits::signatures::Signer as _;
 use rand_core::{CryptoRng, RngCore, impls};
 use teamcraft_crypto::attachment::{self, AttachmentKey};
 use teamcraft_crypto::backup::{
-  Argon2Settings, BackupKey, BackupKeyWrapper, PassphraseWrapper, RecoveryKeyWrapper, SymmetricKeyWrapper,
-  WrappedBackupKey, decode_wrapped_key_list, encode_wrapped_key_list,
+  Argon2Settings, BackupKey, BackupKeyWrapper, PasskeyCredential, PasskeyPrfWrapper, PassphraseWrapper,
+  RecoveryKeyWrapper, SymmetricKeyWrapper, WrappedBackupKey, decode_wrapped_key_list,
+  encode_wrapped_key_list,
 };
 use teamcraft_crypto::content_key::{ContentKey, ContentKeyId, ContentKeyRing};
 use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
@@ -107,6 +108,8 @@ const ENCRYPTED_KEY_BAG: &str = concat!(
 // seeded RNG: backup wraps, the local stores, messages and attachments.
 const KEYSTORE_KEY: [u8; 32] = [0x88; 32];
 const PASSKEY_PRF_OUTPUT: [u8; 32] = [0x99; 32];
+const PASSKEY_CREDENTIAL_ID: &[u8] = b"passkey credential";
+const PASSKEY_PRF_SALT: [u8; 32] = [0x9a; 32];
 const PASSPHRASE: &[u8] = b"correct horse battery staple";
 const RECOVERY_KEY: &str = "000G-40R4-0M30-E209-185G-R38E-1W1J-JG7V";
 const DATABASE_KEY: [u8; 32] = [0xaa; 32];
@@ -122,9 +125,12 @@ const WRAP_DEVICE_KEYSTORE: &str = concat!(
   "010100ca2f588abe12870846ce266e597cffbb3d4aec2a7a6e87213015b9e43ed715626532fba2ceaf080c587ccd5ad7",
   "e3d86c99d7236c7f9450823972e3007b35ceec282e2ba071be630f2b",
 );
+/// Passkey wraps name their credential and PRF input since #1965; no client ever made the earlier
+/// form without parameters (the passkey step was a placeholder), so it was replaced, not kept.
 const WRAP_PASSKEY_PRF: &str = concat!(
-  "0102009d3080237d64f550a1136b7ad25c2a436d129b6e30be56a330ac76cc3cf44be4a3cb3538141cbb1b877514abbb",
-  "7417002bf669a3f365620ac25d5a161a7297ab9d9868954fa6be0dba",
+  "0102340112706173736b65792063726564656e7469616c9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a9a",
+  "9a9a9a9a9a9a9a9d3080237d64f550a1136b7ad25c2a436d129b6e30be56a33035c5e694ffcc5426b22219bcb8ee0b9c",
+  "b17d83119f146e0250ccfeed3658f2b36e333f94b2eb24e3a43b6f998eefc96f",
 );
 const WRAP_PASSPHRASE: &str = concat!(
   "01031c000000400000000100000001038fde99fcf93f9457a4a89d26aa80f0ee767f2fd7d7173cc969e6900288a3e76e",
@@ -420,7 +426,13 @@ mod backup_wraps {
         WRAP_DEVICE_KEYSTORE,
       ),
       (
-        Box::new(SymmetricKeyWrapper::passkey_prf(&SecretBytes::new(PASSKEY_PRF_OUTPUT.to_vec())).unwrap()),
+        Box::new(
+          PasskeyPrfWrapper::new(
+            PasskeyCredential::new(PASSKEY_CREDENTIAL_ID.to_vec(), PASSKEY_PRF_SALT).unwrap(),
+            &SecretBytes::new(PASSKEY_PRF_OUTPUT.to_vec()),
+          )
+          .unwrap(),
+        ),
         11,
         WRAP_PASSKEY_PRF,
       ),
