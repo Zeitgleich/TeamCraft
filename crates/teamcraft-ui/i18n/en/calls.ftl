@@ -495,6 +495,23 @@ tile-recording = recording
 call-recording-left = { $name } (left the call, may still be listening)
 call-recording-unconfirmed = The server hasn't confirmed that the others are told about your recording. They may not see it.
 
+# Consent to a recording (#2115)
+call-recording-asking-by = { $names } asks to record
+call-recording-waiting = Asking for consent: { $answered } of { $total } answered
+call-recording-waiting-for = Waiting for { $names }
+call-recording-start-now = Start now
+call-recording-start-now-hint = Start recording without those who haven't answered. Their voices stay out of the recording until they allow it.
+call-recording-left-out = Not recording { $names }
+call-recording-consent-ask = { $name } wants to record this call.
+call-recording-consent-ask-running = { $name } is recording this call.
+call-recording-consent-explain = Your voice is only recorded if you allow it. You can change your answer at any time.
+call-recording-consent-allow = Allow
+call-recording-consent-decline = Don't allow
+call-recording-consent-allowed = Your voice is in { $name }'s recording.
+call-recording-consent-declined = Your voice is not in { $name }'s recording.
+call-recording-consent-withdraw = Leave me out
+tile-not-recorded = not recorded
+
 ## Call announcements (#2281): said once by the call's live region
 call-announce-joined = { $names } joined the call
 call-announce-joined-many = { $count } people joined the call

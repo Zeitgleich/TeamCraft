@@ -495,6 +495,23 @@ tile-recording = nimmt auf
 call-recording-left = { $name } (hat den Anruf verlassen, hört eventuell noch zu)
 call-recording-unconfirmed = Der Server hat nicht bestätigt, dass die anderen von deiner Aufnahme erfahren. Sie sehen sie eventuell nicht.
 
+# Zustimmung zu einer Aufnahme (#2115)
+call-recording-asking-by = { $names } möchte aufnehmen
+call-recording-waiting = Zustimmung erbeten: { $answered } von { $total } haben geantwortet
+call-recording-waiting-for = Warten auf { $names }
+call-recording-start-now = Jetzt starten
+call-recording-start-now-hint = Aufnahme ohne diejenigen starten, die noch nicht geantwortet haben. Ihre Stimmen bleiben außen vor, bis sie zustimmen.
+call-recording-left-out = Ohne { $names }
+call-recording-consent-ask = { $name } möchte diesen Anruf aufnehmen.
+call-recording-consent-ask-running = { $name } nimmt diesen Anruf auf.
+call-recording-consent-explain = Deine Stimme wird nur aufgenommen, wenn du zustimmst. Du kannst deine Antwort jederzeit ändern.
+call-recording-consent-allow = Zustimmen
+call-recording-consent-decline = Nicht zustimmen
+call-recording-consent-allowed = Deine Stimme ist in der Aufnahme von { $name }.
+call-recording-consent-declined = Deine Stimme ist nicht in der Aufnahme von { $name }.
+call-recording-consent-withdraw = Mich herausnehmen
+tile-not-recorded = nicht aufgenommen
+
 ## Ansagen im Anruf (#2281): einmal vom Live-Bereich des Anrufs gesagt
 call-announce-joined = { $names } ist dem Anruf beigetreten
 call-announce-joined-many = { $count } Personen sind dem Anruf beigetreten

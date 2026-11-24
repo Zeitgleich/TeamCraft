@@ -19,6 +19,11 @@
 //!   downloads the decrypted file. The take stays, to post or delete.
 //! - **Left over (#2116):** on the desktop a recording a crash, a kill or a quit left is offered at
 //!   the next start ("A recording from … was not finished"), with the same choices.
+//! - **Consent (#2115):** where the signed policy says `all_consent`, a recording asks everybody
+//!   first. The recorder sees who answered and can start without those who haven't; everybody
+//!   else is asked ("Allow" / "Don't allow", or leave the call), and can change their answer while
+//!   it runs. Who isn't in the recording carries "Not recorded" on their tile. The answers are
+//!   signed by each device (the media layer); this module only shows them and passes them on.
 
 use std::collections::BTreeSet;
 
@@ -28,7 +33,7 @@ use serde_json::json;
 use teamcraft_client_api::actions::{FileSource, MessagePriority, OutgoingFile, OutgoingMessage};
 use teamcraft_client_api::admin::format_bytes;
 use teamcraft_client_api::backend::Backend;
-use teamcraft_client_api::calls::CallRecordingTake;
+use teamcraft_client_api::calls::{CallRecordingTake, OwnRecordingConsent, RecordingConsentState};
 use teamcraft_client_api::failure::ActionFailure;
 use teamcraft_proto::{CallRecordingPolicy, RecorderRole, Role, UserId};
 
@@ -50,7 +55,9 @@ struct RecordingStatus {
   maybe_own_since: Option<i64>,
   /// The SFU doesn't confirm the own notice: the others may not see the recording.
   is_own_unconfirmed: bool,
-  /// The others who record, by name, in a stable order.
+  /// The answers to the own recording, where it asks for consent (#2115).
+  maybe_own_consent: Option<OwnRecordingConsent>,
+  /// The others who record (or ask to), by name, in a stable order.
   others: Vec<Recorder>,
 }
 
@@ -62,6 +69,12 @@ struct Recorder {
   is_allowed: bool,
   /// The server says they left, but their device may still hear the call.
   has_left: bool,
+  /// This device's part in their recording (#2115).
+  consent: RecordingConsentState,
+  /// It asks for consent and records nothing yet.
+  is_asking: bool,
+  /// Their notice verified: only then is this device asked.
+  is_verified: bool,
 }
 
 /// Where the take card is: its choices, or one of them waiting to be confirmed.
@@ -111,16 +124,36 @@ pub fn use_recording_control() -> RecordingControl {
 }
 
 impl RecordingControl {
-  /// Starts recording, or stops the running recording.
+  /// Starts recording, or stops the running recording. Where the policy says `all_consent`, the
+  /// recording asks everybody first (#2115).
   pub fn toggle(&self) {
     let state = self.state;
     if self.is_recording.get_untracked() {
       state.write(|backend| backend.stop_call_recording());
     } else {
-      let max_secs = self.policy.get_untracked().max_seconds();
-      state.write(|backend| backend.start_call_recording(max_secs));
+      let policy = self.policy.get_untracked();
+      let (max_secs, requires_consent) = (policy.max_seconds(), policy.requires_consent());
+      state.write(|backend| backend.start_call_recording(max_secs, requires_consent));
     }
   }
+}
+
+/// Whether this device is left out of a running recording that asked for consent (#2115): its
+/// own tile says "Not recorded".
+pub fn is_self_left_out(state: AppState) -> bool {
+  state.read(|backend| {
+    backend.active_call().is_some_and(|active| {
+      active.recorders.iter().any(|recorder| {
+        !recorder.is_asking
+          && matches!(
+            recorder.consent,
+            RecordingConsentState::Unanswered
+              | RecordingConsentState::Declined
+              | RecordingConsentState::Unknown
+          )
+      })
+    })
+  })
 }
 
 /// Who records the call right now, for the call announcer: whether this device does, and the
@@ -132,7 +165,7 @@ pub fn recording_now(state: AppState) -> (bool, Vec<(UserId, String)>) {
     status
       .others
       .into_iter()
-      .filter(|recorder| !recorder.has_left)
+      .filter(|recorder| !recorder.has_left && !recorder.is_asking)
       .map(|recorder| (recorder.user, recorder.name))
       .collect(),
   )
@@ -147,9 +180,27 @@ pub fn RecordingIndicator() -> impl IntoView {
   let status = Memo::new(move |_| state.read(recording_status));
   move || {
     let status = status.get();
-    let names = names_of(i18n, &status.others);
-    let text = match (status.maybe_own_since, names.is_empty()) {
-      (None, true) => return None,
+    let (asking, recording): (Vec<Recorder>, Vec<Recorder>) = status
+      .others
+      .iter()
+      .cloned()
+      .partition(|recorder| recorder.is_asking);
+    let names = names_of(i18n, &recording);
+    let is_own_waiting = status
+      .maybe_own_consent
+      .as_ref()
+      .is_some_and(|consent| consent.is_waiting);
+    let asking_view = (!asking.is_empty()).then(|| {
+      let text = i18n.t_with("call-recording-asking-by", &[("names", &names_of(i18n, &asking))]);
+      view! { <span class="recording-pill is-asking">{text}</span> }
+    });
+    let own_consent_view = status
+      .maybe_own_consent
+      .clone()
+      .map(|consent| view! { <OwnConsentStatus consent=consent /> });
+    let maybe_own_since = status.maybe_own_since.filter(|_| !is_own_waiting);
+    let text = match (maybe_own_since, names.is_empty()) {
+      (None, true) => return Some(view! { {asking_view} {own_consent_view} }.into_any()),
       (Some(since), true) => {
         // The call clock ticks every second while the call shows.
         call.elapsed_ms.track();
@@ -160,18 +211,170 @@ pub fn RecordingIndicator() -> impl IntoView {
       (Some(_), false) => i18n.t_with("call-recording-own-and-by", &[("names", &names)]),
     };
     let is_unconfirmed = status.is_own_unconfirmed;
-    Some(view! {
-      <span class="recording-pill" title=i18n.t("call-recording-detail")>
-        <span class="recording-dot" aria-hidden="true"></span>
-        <span>{text}</span>
-      </span>
-      {is_unconfirmed.then(|| view! {
-        <span class="recording-pill is-warning" role="alert">
-          <Icon name=IconName::Alert />
-          <span>{i18n.t("call-recording-unconfirmed")}</span>
+    Some(
+      view! {
+        <span class="recording-pill" title=i18n.t("call-recording-detail")>
+          <span class="recording-dot" aria-hidden="true"></span>
+          <span>{text}</span>
         </span>
-      })}
-    })
+        {is_unconfirmed.then(|| view! {
+          <span class="recording-pill is-warning" role="alert">
+            <Icon name=IconName::Alert />
+            <span>{i18n.t("call-recording-unconfirmed")}</span>
+          </span>
+        })}
+        {asking_view}
+        {own_consent_view}
+      }
+      .into_any(),
+    )
+  }
+}
+
+/// The answers to this device's own recording that asks for consent (#2115): while it waits,
+/// who has answered and "Start now"; while it records, who isn't in it.
+#[component]
+fn OwnConsentStatus(consent: OwnRecordingConsent) -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let name_of = move |user: &UserId| {
+    state
+      .read(|backend| backend.user(*user))
+      .map(|user| user.display_name)
+      .filter(|name| !name.is_empty())
+      .unwrap_or_else(|| i18n.t("call-recording-someone"))
+  };
+  let left_out: Vec<String> = consent
+    .declined
+    .iter()
+    .chain(&consent.unanswered)
+    .map(name_of)
+    .collect();
+  if consent.is_waiting {
+    let answered = consent.allowed.len() + consent.declined.len();
+    let total = answered + consent.unanswered.len();
+    let text = i18n.t_with(
+      "call-recording-waiting",
+      &[("answered", &answered.to_string()), ("total", &total.to_string())],
+    );
+    let waiting_for = consent
+      .unanswered
+      .iter()
+      .map(name_of)
+      .collect::<Vec<_>>()
+      .join(", ");
+    view! {
+      <span class="recording-pill is-asking" role="status" title=i18n.t_with("call-recording-waiting-for", &[("names", &waiting_for)])>
+        <span>{text}</span>
+        <button
+          type="button"
+          class="btn btn-small"
+          title=i18n.t("call-recording-start-now-hint")
+          on:click=move |_| state.write(|backend| backend.start_call_recording_now())
+        >
+          {i18n.t("call-recording-start-now")}
+        </button>
+      </span>
+    }
+    .into_any()
+  } else if left_out.is_empty() {
+    ().into_any()
+  } else {
+    view! {
+      <span class="recording-pill is-asking">
+        <Icon name=IconName::MicOff />
+        <span>{i18n.t_with("call-recording-left-out", &[("names", &left_out.join(", "))])}</span>
+      </span>
+    }
+    .into_any()
+  }
+}
+
+/// Asks this device about the others' recordings that ask for consent (#2115), and lets it change
+/// its answer while they run. Only verified asks: nobody is asked on the server's word.
+#[component]
+pub fn RecordingConsentPrompt() -> impl IntoView {
+  let state = use_app_state();
+  let i18n = use_i18n();
+  let call = state.call;
+  let others = Memo::new(move |_| state.read(recording_status).others);
+  let answer = move |recorder: UserId, is_allowed: bool| {
+    state.write(|backend| backend.answer_call_recording(recorder, is_allowed));
+  };
+  move || {
+    let asks: Vec<Recorder> = others
+      .get()
+      .into_iter()
+      .filter(|recorder| {
+        recorder.is_verified && !recorder.has_left && recorder.consent != RecordingConsentState::NotAsked
+      })
+      .collect();
+    let (unanswered, answered): (Vec<Recorder>, Vec<Recorder>) = asks.into_iter().partition(|recorder| {
+      matches!(
+        recorder.consent,
+        RecordingConsentState::Unanswered | RecordingConsentState::Unknown
+      )
+    });
+    let prompts = unanswered
+      .into_iter()
+      .map(|recorder| {
+        let name = names_of(i18n, std::slice::from_ref(&recorder));
+        let key = if recorder.is_asking {
+          "call-recording-consent-ask"
+        } else {
+          "call-recording-consent-ask-running"
+        };
+        let user = recorder.user;
+        view! {
+          <div class="call-recording-banner" role="alertdialog" aria-labelledby=format!("recording-ask-{user}")>
+            <Icon name=IconName::Record />
+            <p id=format!("recording-ask-{user}")>
+              {i18n.t_with(key, &[("name", &name)])}
+              " "
+              {i18n.t("call-recording-consent-explain")}
+              {(!recorder.is_allowed).then(|| view! { <strong>" "{i18n.t("call-recording-not-allowed")}</strong> })}
+            </p>
+            <div class="call-recording-actions">
+              <button type="button" class="btn btn-small btn-primary" on:click=move |_| answer(user, true)>
+                {i18n.t("call-recording-consent-allow")}
+              </button>
+              <button type="button" class="btn btn-small" on:click=move |_| answer(user, false)>
+                {i18n.t("call-recording-consent-decline")}
+              </button>
+              <button type="button" class="btn btn-small btn-danger" on:click=move |_| call.leave()>
+                {i18n.t("call-leave")}
+              </button>
+            </div>
+          </div>
+        }
+      })
+      .collect_view();
+    // Answered: a quiet line that says where this device stands, with the way back.
+    let changes = answered
+      .into_iter()
+      .map(|recorder| {
+        let name = names_of(i18n, std::slice::from_ref(&recorder));
+        let user = recorder.user;
+        let is_allowed = recorder.consent == RecordingConsentState::Allowed;
+        let (key, action_key) = if is_allowed {
+          (
+            "call-recording-consent-allowed",
+            "call-recording-consent-withdraw",
+          )
+        } else {
+          ("call-recording-consent-declined", "call-recording-consent-allow")
+        };
+        view! {
+          <div class="call-recording-consent-line" role="status">
+            <span>{i18n.t_with(key, &[("name", &name)])}</span>
+            <button type="button" class="btn btn-small" on:click=move |_| answer(user, !is_allowed)>
+              {i18n.t(action_key)}
+            </button>
+          </div>
+        }
+      })
+      .collect_view();
+    view! { {prompts} {changes} }
   }
 }
 
@@ -181,7 +384,15 @@ pub fn RecordingBanner() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let call = state.call;
-  let others = Memo::new(move |_| state.read(recording_status).others);
+  // Recordings that ask for consent are the prompt's (#2115); this banner tells of the others.
+  let others = Memo::new(move |_| {
+    state
+      .read(recording_status)
+      .others
+      .into_iter()
+      .filter(|recorder| recorder.consent == RecordingConsentState::NotAsked)
+      .collect::<Vec<_>>()
+  });
   // Who was recording at the last look, and the banner shown: (was running at the join, who).
   let seen = StoredValue::new(BTreeSet::<UserId>::new());
   let shown = RwSignal::new(None::<(bool, Vec<UserId>)>);
@@ -434,21 +645,30 @@ fn recording_status(backend: &dyn Backend) -> RecordingStatus {
         .is_some_and(|user| user.is_guest || user.is_bot);
       let is_admin = owners.contains(&recorder.user) || admins.contains(&recorder.user);
       let role = policy.role_of(recorder.user, is_guest_or_bot, is_admin);
+      // Where the policy wants consent, a recording that doesn't ask isn't allowed either (#2115).
+      let skips_consent = policy.requires_consent() && recorder.consent == RecordingConsentState::NotAsked;
       Recorder {
         user: recorder.user,
         name: maybe_user
           .map(|user| user.display_name)
           .filter(|name| !name.is_empty())
           .unwrap_or_default(),
-        is_allowed: policy.allows(role),
+        is_allowed: policy.allows(role) && !skips_consent,
         has_left: recorder.has_left,
+        consent: recorder.consent,
+        is_asking: recorder.is_asking,
+        is_verified: recorder.is_verified,
       }
     })
     .collect();
   others.sort_by(|a, b| a.name.cmp(&b.name).then(a.user.cmp(&b.user)));
   RecordingStatus {
-    maybe_own_since: active.maybe_own_recording.map(|own| own.started_at),
-    is_own_unconfirmed: active.maybe_own_recording.is_some_and(|own| own.is_unconfirmed),
+    maybe_own_since: active.maybe_own_recording.as_ref().map(|own| own.started_at),
+    is_own_unconfirmed: active
+      .maybe_own_recording
+      .as_ref()
+      .is_some_and(|own| own.is_unconfirmed),
+    maybe_own_consent: active.maybe_own_recording.and_then(|own| own.maybe_consent),
     others,
   }
 }

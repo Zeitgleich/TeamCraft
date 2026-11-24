@@ -66,6 +66,9 @@ pub struct LimitsSection {
   /// It stops recording when the SFU hasn't confirmed its recording notice for this long: the
   /// others may not see the recording, and the bot never records unannounced.
   pub unconfirmed_notice_secs: u64,
+  /// Where the policy asks everybody for consent (#2115): the bot waits this long for every
+  /// answer, then records without those who haven't answered (they stay out until they allow it).
+  pub consent_wait_secs: u64,
   /// At shutdown, calls in progress get this long to finish their takes and queue them for
   /// posting; a take not finished by then is lost.
   pub shutdown_drain_secs: u64,
@@ -141,6 +144,7 @@ impl RecorderConfig {
       alone: Duration::from_secs(self.limits.alone_timeout_secs),
       join: Duration::from_secs(self.limits.join_timeout_secs),
       unconfirmed: Duration::from_secs(self.limits.unconfirmed_notice_secs),
+      consent_wait: Duration::from_secs(self.limits.consent_wait_secs),
     }
   }
 }
@@ -162,6 +166,7 @@ impl Default for LimitsSection {
       alone_timeout_secs: 60,
       join_timeout_secs: 60,
       unconfirmed_notice_secs: 30,
+      consent_wait_secs: 120,
       shutdown_drain_secs: 30,
     }
   }

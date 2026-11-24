@@ -42,7 +42,9 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_level::SharedLevel;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{BindingRole, CallKeyAuthenticator, CallKeyError};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineError, CallEngineEvent, OwnVideoEnd};
+use teamcraft_media::call_engine::{
+  CallEngineConfig, CallEngineError, CallEngineEvent, OwnVideoEnd, RecordingConsentRule,
+};
 use teamcraft_media::call_resilience::{
   JoinTicket, JoinTicketError, ResilienceConfig, certificate_hashes_from_hex,
 };
@@ -237,8 +239,16 @@ enum Control {
     maybe_max_lines: Option<u16>,
   },
   StatusSounds(CallStatusSounds),
-  /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
-  Recording(Option<call_web::recording::WebRecordingSink>),
+  /// Hands the call's audio to a recording, or stops (e2ee.md §8.3); asking for consent first
+  /// where the rule says so (#2115).
+  Recording(Option<(call_web::recording::WebRecordingSink, RecordingConsentRule)>),
+  /// A recording that waits for consent starts without those who haven't answered (#2115).
+  StartRecordingNow,
+  /// This device's answer to a person's recordings that ask for consent (#2115).
+  AnswerRecording {
+    recorder: teamcraft_proto::UserId,
+    is_allowed: bool,
+  },
   NetworkChanged,
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   /// Time for the call's telemetry to sample the video stats ([`STATS_SAMPLE_INTERVAL`]).
@@ -870,8 +880,15 @@ impl Host {
       CallAction::TestSpeakers { .. } => {
         return Err(ActionFailure::other("the page plays the speaker test itself"));
       },
-      CallAction::StartRecording { max_secs } => self.start_recording(max_secs).await?,
+      CallAction::StartRecording {
+        max_secs,
+        requires_consent,
+      } => self.start_recording(max_secs, requires_consent).await?,
       CallAction::StopRecording => self.stop_recording().await?,
+      CallAction::StartRecordingNow => self.control(Control::StartRecordingNow),
+      CallAction::AnswerRecording { recorder, is_allowed } => {
+        self.control(Control::AnswerRecording { recorder, is_allowed });
+      },
       CallAction::DiscardRecording => {
         self.recordings.discard().await;
         self.changed();
@@ -896,7 +913,11 @@ impl Host {
   /// Starts recording the active call on this device (e2ee.md §8.3); the call tells everybody in
   /// it. The page offers it only where the verified policy allows the user; the length is clamped
   /// to what a policy may allow.
-  async fn start_recording(self: &Rc<Self>, max_secs: u32) -> Result<(), ActionFailure> {
+  async fn start_recording(
+    self: &Rc<Self>,
+    max_secs: u32,
+    requires_consent: bool,
+  ) -> Result<(), ActionFailure> {
     if !recording::Recordings::can_record() {
       return Err(ActionFailure::other("this browser can't record calls"));
     }
@@ -924,7 +945,12 @@ impl Host {
       self.finish_recording().await;
       return Err(ActionFailure::other("the call ended"));
     }
-    self.control(Control::Recording(Some(sink)));
+    let rule = if requires_consent {
+      RecordingConsentRule::AskEverybody
+    } else {
+      RecordingConsentRule::TellOnly
+    };
+    self.control(Control::Recording(Some((sink, rule))));
     self.update_active(|active| active.maybe_own_recording = Some(own));
     Ok(())
   }
@@ -1998,7 +2024,9 @@ async fn apply(call: &WebCall, control: Control) {
       maybe_max_lines,
     } => call.set_video_quality(stream_id, maybe_max_lines),
     Control::StatusSounds(sounds) => call.set_status_cues(status_cues(sounds)),
-    Control::Recording(maybe_sink) => call.set_recording(maybe_sink),
+    Control::Recording(maybe_recording) => call.set_recording(maybe_recording),
+    Control::StartRecordingNow => call.start_recording_now(),
+    Control::AnswerRecording { recorder, is_allowed } => call.answer_recording(recorder, is_allowed),
     Control::NetworkChanged => call.network_changed(),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
     Control::TelemetrySample | Control::Leave | Control::HangUp => {},

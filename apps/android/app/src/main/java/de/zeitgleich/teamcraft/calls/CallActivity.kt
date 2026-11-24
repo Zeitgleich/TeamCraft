@@ -751,6 +751,7 @@ private fun CallScreen(
         reactionEmoji(reaction)?.let { emoji -> ownReaction = OwnReaction((ownReaction?.count ?: 0L) + 1, emoji) }
       },
       maybeOnHand = { calls.setHandRaised(it) },
+      maybeOnRecordingAnswer = { recorder, isAllowed -> calls.answerRecording(recorder, isAllowed) },
     ),
     banner = {
       // Picture-in-picture shows the stage only.

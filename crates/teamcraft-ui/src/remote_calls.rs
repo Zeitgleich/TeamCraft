@@ -228,6 +228,7 @@ impl RemoteCalls {
         has_hand_raised: false,
         is_sharing_screen: false,
         is_recording: false,
+        is_left_out_of_recording: false,
       })
       .collect()
   }
@@ -815,6 +816,7 @@ mod tests {
           has_hand_raised: false,
           is_sharing_screen: false,
           is_recording: false,
+          is_left_out_of_recording: false,
         }],
         active_speakers: Vec::new(),
         is_camera_on: false,

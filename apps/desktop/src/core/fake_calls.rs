@@ -147,6 +147,8 @@ impl FakeCalls {
       // The fake call records and captions nothing.
       | CallAction::StartRecording { .. }
       | CallAction::StopRecording
+      | CallAction::StartRecordingNow
+      | CallAction::AnswerRecording { .. }
       | CallAction::DiscardRecording
       | CallAction::SetCaptions { .. }
       | CallAction::DeleteCaptionModel
@@ -198,6 +200,7 @@ fn active_call(request: CallRequest, carol: UserId) -> ActiveCall {
       has_hand_raised: false,
       is_sharing_screen: false,
       is_recording: false,
+      is_left_out_of_recording: false,
     }],
     active_speakers: vec![carol],
     is_camera_on: false,

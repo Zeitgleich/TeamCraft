@@ -49,7 +49,7 @@ use teamcraft_media::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInf
 use teamcraft_media::audio_processing::AudioProcessingConfig;
 use teamcraft_media::bwe::BweConfig;
 use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
-use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd};
+use teamcraft_media::call_engine::{CallEngineConfig, CallEngineEvent, OwnVideoEnd, RecordingConsentRule};
 use teamcraft_media::call_native::{
   DecodeReporter, DirectPathConfig, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError,
   TicketFuture, TrustFuture, TrustSource,
@@ -68,7 +68,7 @@ use teamcraft_media::video_capture::{CameraInfo, CaptureError};
 use teamcraft_media::video_pipeline::{BlackReport, VideoSendConfig, VideoStartError, preferred_encoders};
 use teamcraft_proto::{
   AudioCodec, CallReaction, CallRosterEntry, ConversationId, DeviceId, GatewayEvent, MediaCapabilities,
-  MediaStreamId, VideoCodec, VideoTrackKind,
+  MediaStreamId, UserId, VideoCodec, VideoTrackKind,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -220,7 +220,19 @@ enum Control {
   DirectConnections(bool),
   NetworkChanged,
   /// Hands the call's audio to a recording, or stops (e2ee.md §8.3).
-  Recording(Option<teamcraft_media::call_recording::RecordingSink>),
+  Recording(
+    Option<(
+      teamcraft_media::call_recording::RecordingSink,
+      teamcraft_media::call_engine::RecordingConsentRule,
+    )>,
+  ),
+  /// A recording that waits for consent starts without those who haven't answered (#2115).
+  StartRecordingNow,
+  /// This device's answer to a person's recordings that ask for consent (#2115).
+  AnswerRecording {
+    recorder: UserId,
+    is_allowed: bool,
+  },
   /// Starts live captions with this session and tap, or stops them (#215).
   Captions(Option<(CaptionSession, CaptionTap)>),
   Subscribe {
@@ -750,7 +762,9 @@ impl CallHost {
   }
 
   /// Starts recording the call on this device (e2ee.md §8.3); the call tells everybody in it.
-  pub async fn start_recording(&self, max_secs: u32) -> Result<(), String> {
+  /// With `requires_consent` (the verified policy's `all_consent`, #2115) it asks everybody first
+  /// and records only who allowed it.
+  pub async fn start_recording(&self, max_secs: u32, requires_consent: bool) -> Result<(), String> {
     if self.media.lock().await.is_none() {
       return Err("no call to record".to_owned());
     }
@@ -758,9 +772,27 @@ impl CallHost {
       .recording_folder
       .start(&self.state, max_secs, unix_ms())
       .await?;
-    self.control(Control::Recording(Some(sink))).await;
+    let rule = if requires_consent {
+      RecordingConsentRule::AskEverybody
+    } else {
+      RecordingConsentRule::TellOnly
+    };
+    self.control(Control::Recording(Some((sink, rule)))).await;
     self.changed();
     Ok(())
+  }
+
+  /// Starts a recording that waits for consent without those who haven't answered (#2115): they
+  /// stay out of it until they allow it.
+  pub async fn start_recording_now(&self) {
+    self.control(Control::StartRecordingNow).await;
+  }
+
+  /// Answers `recorder`'s recordings of this call that ask for consent (#2115).
+  pub async fn answer_recording(&self, recorder: UserId, is_allowed: bool) {
+    self
+      .control(Control::AnswerRecording { recorder, is_allowed })
+      .await;
   }
 
   /// Stops the recording; its take waits for the user to post or delete it. Fails when writing
@@ -1688,7 +1720,9 @@ async fn run_media(
         Some(Control::StatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
         Some(Control::DirectConnections(is_allowed)) => call.set_direct_connections(is_allowed),
         Some(Control::NetworkChanged) => call.network_changed(),
-        Some(Control::Recording(maybe_sink)) => call.set_recording(maybe_sink),
+        Some(Control::Recording(maybe_recording)) => call.set_recording(maybe_recording),
+        Some(Control::StartRecordingNow) => call.start_recording_now(),
+        Some(Control::AnswerRecording { recorder, is_allowed }) => call.answer_recording(recorder, is_allowed),
         Some(Control::Captions(maybe_start)) => {
           let maybe_tap = maybe_start.map(|(session, tap)| {
             maybe_captions = Some(session);

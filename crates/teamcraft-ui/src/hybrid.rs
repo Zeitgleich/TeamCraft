@@ -1665,9 +1665,24 @@ impl<C: ChatBackend> CallBackend for Hybrid<C> {
     self.maybe_calls.as_ref().and_then(RemoteCalls::recording_take)
   }
 
-  fn start_call_recording(&self, max_secs: u32) {
+  fn start_call_recording(&self, max_secs: u32, requires_consent: bool) {
     if let Some(calls) = &self.maybe_calls {
-      calls.act(CallAction::StartRecording { max_secs });
+      calls.act(CallAction::StartRecording {
+        max_secs,
+        requires_consent,
+      });
+    }
+  }
+
+  fn start_call_recording_now(&self) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::StartRecordingNow);
+    }
+  }
+
+  fn answer_call_recording(&self, recorder: UserId, is_allowed: bool) {
+    if let Some(calls) = &self.maybe_calls {
+      calls.act(CallAction::AnswerRecording { recorder, is_allowed });
     }
   }
 

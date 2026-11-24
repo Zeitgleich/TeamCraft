@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::{
   AdminSelfJoin, CallRecorders, DirectMediaMode, GuestDmStart, HistoryPolicy, LeaverRemovalMode,
-  RecordingFiles, ScreenShareResolution,
+  RecordingConsentMode, RecordingFiles, ScreenShareResolution,
 };
 
 use crate::components::admin_console::SectionHeader;
@@ -428,6 +428,23 @@ pub fn SecuritySection() -> impl IntoView {
           error=Signal::derive(move || errors.message(RECORDER_BOT_ID))
         />
         <p class="muted-text small">{move || i18n.t("policy-call-recording-bot-hint")}</p>
+        // Consent from everybody (#2115): off by default, the recording only tells.
+        <CheckRow
+          name="call_recording_consent"
+          label=Signal::derive(move || i18n.t("policy-call-recording-consent"))
+          hint=Signal::derive(move || i18n.t("policy-call-recording-consent-hint"))
+          checked=Signal::derive(move || draft.get().call_recording.requires_consent())
+          disabled=Signal::derive(move || !draft.get().call_recording.is_enabled())
+          on_change=move |value| {
+            policy.edit(|p| {
+              p.call_recording.consent = if value {
+                RecordingConsentMode::AllConsent
+              } else {
+                RecordingConsentMode::NoticeOnly
+              };
+            })
+          }
+        />
         // Saving as an unencrypted file on the device (#2116): allowed by default.
         <CheckRow
           name="call_recording_local_files"

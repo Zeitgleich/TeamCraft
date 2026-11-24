@@ -32,6 +32,10 @@ struct ActiveCall: Identifiable, Equatable {
   var unverifiedUserIds: [String] = []
   /// The users who record the call, from their signed notices (#216, e2ee.md §8.3).
   var recordingUserIds: [String] = []
+  /// The others' recordings that ask this device for consent, and its answers (#2115).
+  var recordingConsents: [RecordingConsentInfo] = []
+  /// The people left out of a running recording that asked for consent: "Not recorded" on their tile.
+  var leftOutOfRecordingUserIds: [String] = []
   /// The users who muted their microphone.
   var mutedUserIds: [String] = []
   /// The users with a raised hand (#2324): their tiles show it.
@@ -264,6 +268,12 @@ final class CallManager: NSObject, @unchecked Sendable {
     maybeSession?.setHandRaised(isRaised: isRaised)
   }
 
+  /// Answers a person's recordings of the call that ask for consent (#2115): this device's voice
+  /// in them, or left out. The core signs the answer; only queued for the call's thread.
+  func answerRecording(_ recorderUserId: String, isAllowed: Bool) {
+    maybeSession?.answerRecording(recorderUserId: recorderUserId, isAllowed: isAllowed)
+  }
+
   /// Turns the camera on or off during a call (CallKit is told so the system UI shows a video call).
   @MainActor
   func setCameraEnabled(_ isEnabled: Bool) async {
@@ -481,6 +491,8 @@ final class CallManager: NSObject, @unchecked Sendable {
     call.reconnectingUserIds = []
     call.unverifiedUserIds = []
     call.recordingUserIds = []
+    call.recordingConsents = []
+    call.leftOutOfRecordingUserIds = []
     call.mutedUserIds = []
     call.raisedHandUserIds = []
     call.isHandRaised = false
@@ -904,6 +916,8 @@ extension CallManager: CallListener {
       call.reconnectingUserIds = state.reconnectingUserIds
       call.unverifiedUserIds = state.unverifiedUserIds
       call.recordingUserIds = state.recordingUserIds
+      call.recordingConsents = state.recordingConsents
+      call.leftOutOfRecordingUserIds = state.leftOutOfRecordingUserIds
       call.mutedUserIds = state.mutedUserIds
       call.raisedHandUserIds = state.raisedHandUserIds
       call.isHandRaised = state.isHandRaised

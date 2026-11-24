@@ -552,6 +552,10 @@ pub struct Participant {
   /// A device of the person records the call (e2ee.md §8.3): the tile carries the mark.
   #[serde(default)]
   pub is_recording: bool,
+  /// A recording that asked for consent runs and the person's devices aren't in it: they declined
+  /// or haven't allowed it (#2115). The tile says "Not recorded".
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_left_out_of_recording: bool,
 }
 
 /// A running drop-in huddle in a channel.
@@ -928,7 +932,7 @@ pub struct ShownReaction {
   pub at: TimestampMs,
 }
 
-/// Somebody else recording the call (e2ee.md §8.3).
+/// Somebody else recording the call (e2ee.md §8.3), or asking to (#2115).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CallRecorder {
   pub user: UserId,
@@ -939,10 +943,36 @@ pub struct CallRecorder {
   /// group, so it may still hear the call: the recording shows until it is out.
   #[serde(default)]
   pub has_left: bool,
+  /// What the recording needs from this device (#2115): nothing (it only tells), or this
+  /// device's answer.
+  #[serde(default)]
+  pub consent: RecordingConsentState,
+  /// It asks for consent and records nothing yet.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub is_asking: bool,
+}
+
+/// This device's part in another person's recording (#2115).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingConsentState {
+  /// The recording only tells (`notice_only`): everybody it hears is in it.
+  #[default]
+  NotAsked,
+  /// It asks, and this device hasn't answered (or can't yet: the recorder's key isn't verified
+  /// here). Its voice stays out until it allows it.
+  Unanswered,
+  /// This device allowed its voice in it.
+  Allowed,
+  /// This device declined: its voice stays out.
+  Declined,
+  /// From a newer shell: shown as unanswered.
+  #[serde(other)]
+  Unknown,
 }
 
 /// This device's recording of the call.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnCallRecording {
   /// When it started (wall clock), for the elapsed time the UI shows.
   pub started_at: TimestampMs,
@@ -951,6 +981,24 @@ pub struct OwnCallRecording {
   /// The SFU doesn't confirm the notice that tells the others: they may not see the recording.
   #[serde(default)]
   pub is_unconfirmed: bool,
+  /// It asked everybody for consent (#2115): who answered how. Absent where it only tells.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub maybe_consent: Option<OwnRecordingConsent>,
+}
+
+/// The answers to this device's recording that asks for consent (#2115), by person.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnRecordingConsent {
+  /// It waits for answers and records nothing yet; "Start now" starts it without those who
+  /// haven't answered.
+  pub is_waiting: bool,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub allowed: Vec<UserId>,
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub declined: Vec<UserId>,
+  /// In the call without an answer yet: left out until they allow it.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub unanswered: Vec<UserId>,
 }
 
 /// A finished recording on this device, waiting for the user to post it into the call's

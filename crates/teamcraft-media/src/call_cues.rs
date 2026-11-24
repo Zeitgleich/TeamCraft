@@ -149,8 +149,14 @@ impl CuePlayer {
       CallEngineEvent::ParticipantReconnecting(_) if !self.is_playing(CallCue::Reconnecting) => {
         self.play(CallCue::OtherReconnecting);
       },
+      // A recording that only asks for consent (#2115) records nothing yet: the cue plays once it
+      // records.
       CallEngineEvent::RecordersChanged(recorders) => {
-        let now: Vec<DeviceId> = recorders.iter().map(|recorder| recorder.device_id).collect();
+        let now: Vec<DeviceId> = recorders
+          .iter()
+          .filter(|recorder| !recorder.is_requesting)
+          .map(|recorder| recorder.device_id)
+          .collect();
         if now.iter().any(|device| !self.recorders.contains(device)) {
           self.play(CallCue::RecordingStarted);
         }
@@ -368,6 +374,11 @@ mod tests {
             maybe_user_id: None,
             is_verified: true,
             has_left: false,
+            take: 1,
+            asks_consent: false,
+            is_requesting: false,
+            maybe_own_answer: None,
+            allowed: Vec::new(),
           })
           .collect(),
       )

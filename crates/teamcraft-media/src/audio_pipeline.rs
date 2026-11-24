@@ -309,34 +309,47 @@ impl PlaybackMixer {
 
   /// The next 20 ms of mixed audio (call every 20 ms). Lost packets are concealed.
   pub fn next_frame(&mut self) -> Result<Vec<f32>, AudioPipelineError> {
+    Ok(self.next_frames(None)?.0)
+  }
+
+  /// The next 20 ms of mixed audio, and with `Some(admitted)` also a second mix of only those
+  /// devices' streams: what a recording that asked for consent may take in (#2115). Everybody
+  /// else's voice stays out of it, played or not.
+  pub fn next_frames(
+    &mut self,
+    maybe_admitted: Option<&[DeviceId]>,
+  ) -> Result<(Vec<f32>, Option<Vec<f32>>), AudioPipelineError> {
     let mut mix = vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL];
-    for (key, stream) in self.streams.iter_mut() {
+    let mut maybe_admitted_mix = maybe_admitted.map(|_| vec![0.0f32; FRAME_SAMPLES_PER_CHANNEL]);
+    for ((sender, origin), stream) in self.streams.iter_mut() {
       stream.decode_frame()?;
       let available = stream.decoded.len().min(FRAME_SAMPLES_PER_CHANNEL);
-      let samples = stream.decoded.drain(..available);
+      let frame: Vec<f32> = stream.decoded.drain(..available).collect();
       if self.is_deafened {
         continue;
       }
       #[cfg(feature = "captions")]
-      if let (Some(tap), (sender, AudioOrigin::Microphone)) = (&self.maybe_caption_tap, key) {
-        let frame: Vec<f32> = samples.collect();
+      if let (Some(tap), AudioOrigin::Microphone) = (&self.maybe_caption_tap, origin) {
         tap.push(*sender, &frame);
-        for (slot, sample) in mix.iter_mut().zip(frame) {
+      }
+      // The stream's origin matters only to captions.
+      let _ = origin;
+      if let (Some(admitted_mix), Some(admitted)) = (maybe_admitted_mix.as_mut(), maybe_admitted)
+        && admitted.contains(sender)
+      {
+        for (slot, sample) in admitted_mix.iter_mut().zip(&frame) {
           *slot += sample;
         }
-        continue;
       }
-      // The stream's key matters only to captions.
-      let _ = key;
-      for (slot, sample) in mix.iter_mut().zip(samples) {
+      for (slot, sample) in mix.iter_mut().zip(frame) {
         *slot += sample;
       }
     }
-    for sample in &mut mix {
+    for sample in mix.iter_mut().chain(maybe_admitted_mix.iter_mut().flatten()) {
       *sample = sample.clamp(-1.0, 1.0);
     }
     self.analyze(&mix)?;
-    Ok(mix)
+    Ok((mix, maybe_admitted_mix))
   }
 
   /// The far-end signal for the echo canceller: what the speakers play, plus our own shared
@@ -520,6 +533,55 @@ mod tests {
       }
       let peak = last.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
       assert!(peak > 0.35, "both tones are audible in the mix, peak {peak}");
+    }
+
+    /// #2115: a recording that asked for consent mixes only who allowed it; the speakers still
+    /// play everybody.
+    #[test]
+    fn the_admitted_mix_leaves_out_who_didnt_allow_it() {
+      let (a, b) = (device(1), device(2));
+      let mut mixer = PlaybackMixer::new(JitterBufferConfig {
+        target_depth_packets: 1,
+        max_depth_packets: 10,
+        max_adaptive_depth_packets: 1,
+        max_excess_packets: 10,
+      });
+      let mut first = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      let mut second = CapturePipeline::new(OpusEncoderConfig::default()).unwrap();
+      for index in 0..10u16 {
+        let start = u64::from(index) * 960;
+        for frame in first.push(&sine_tone(300.0, 0.3, start, 960)).unwrap() {
+          mixer
+            .push(a, AudioOrigin::Microphone, SequenceNumber(index), frame.opus)
+            .unwrap();
+        }
+        for frame in second.push(&sine_tone(500.0, 0.3, start, 960)).unwrap() {
+          mixer
+            .push(b, AudioOrigin::Microphone, SequenceNumber(index), frame.opus)
+            .unwrap();
+        }
+      }
+      let peak = |frame: &[f32]| frame.iter().fold(0.0f32, |peak, sample| peak.max(sample.abs()));
+      let (mut played, mut admitted) = (Vec::new(), Vec::new());
+      for _ in 0..10 {
+        let (mix, maybe_admitted) = mixer.next_frames(Some(&[a])).unwrap();
+        played = mix;
+        admitted = maybe_admitted.unwrap();
+      }
+      assert!(peak(&played) > 0.35, "both play");
+      // One tone of 0.3 is in it, not the sum of both.
+      assert!(peak(&admitted) > 0.1, "the allowed voice is in it");
+      assert!(peak(&admitted) < 0.35, "the other isn't");
+      assert!(
+        mixer
+          .next_frames(Some(&[]))
+          .unwrap()
+          .1
+          .unwrap()
+          .iter()
+          .all(|sample| *sample == 0.0)
+      );
+      assert!(mixer.next_frames(None).unwrap().1.is_none());
     }
 
     /// A voice on a thin uplink (#1893) sends 60 ms packets: each plays over three 20 ms frames,

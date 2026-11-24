@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 
 use teamcraft_bot_runtime::call::CallAccess;
 use teamcraft_media::audio_io::AudioSink;
-use teamcraft_media::call_engine::CallEngineEvent;
+use teamcraft_media::call_engine::{CallEngineEvent, RecordingConsentRule};
 use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
 use teamcraft_media::call_recording::{CallRecorder, CallRecordingError, CallRecordingTake};
 use teamcraft_proto::{CallId, ConversationId, DeviceId, UserId};
@@ -38,6 +38,9 @@ pub struct SessionParams {
   pub device_id: DeviceId,
   /// The policy's longest recording: one part of the call.
   pub max_take: Duration,
+  /// The policy asks everybody for consent (#2115): the recording asks first and records only
+  /// who allowed it.
+  pub requires_consent: bool,
   /// Where takes are written, sealed.
   pub folder: PathBuf,
   pub limits: SessionLimits,
@@ -52,6 +55,9 @@ pub struct SessionLimits {
   pub join: Duration,
   /// The SFU hasn't confirmed the recording notice for this long: stop, the others may not know.
   pub unconfirmed: Duration,
+  /// A recording that asks for consent waits this long for every answer, then starts without
+  /// those who haven't answered (#2115).
+  pub consent_wait: Duration,
 }
 
 /// A running session, from the worker's side.
@@ -124,6 +130,8 @@ struct Running {
   started: Instant,
   maybe_alone_since: Option<Instant>,
   maybe_unconfirmed_since: Option<Instant>,
+  /// Since when the recording asks for consent and waits for answers (#2115).
+  maybe_asking_since: Option<Instant>,
   was_secured: bool,
 }
 
@@ -218,6 +226,7 @@ impl Running {
       started: Instant::now(),
       maybe_alone_since: None,
       maybe_unconfirmed_since: None,
+      maybe_asking_since: None,
       was_secured: false,
     }
   }
@@ -246,6 +255,14 @@ impl Running {
         if let Err(reason) = self.start_take(call) {
           return Some(reason);
         }
+      },
+      CallEngineEvent::OwnRecordingConsent(maybe_status) => {
+        let is_waiting = maybe_status.is_some_and(|status| status.is_waiting);
+        self.maybe_asking_since = match (is_waiting, self.maybe_asking_since) {
+          (false, _) => None,
+          (true, Some(since)) => Some(since),
+          (true, None) => Some(Instant::now()),
+        };
       },
       CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed) => {
         self.maybe_unconfirmed_since = match (is_unconfirmed, self.maybe_unconfirmed_since) {
@@ -280,6 +297,14 @@ impl Running {
       .is_some_and(|since| now.saturating_duration_since(since) >= self.params.limits.unconfirmed)
     {
       return Some(StopReason::NoticeUnconfirmed);
+    }
+    // Nobody presses "Start now" for the bot: it starts without who hasn't answered after a while.
+    if self
+      .maybe_asking_since
+      .is_some_and(|since| now.saturating_duration_since(since) >= self.params.limits.consent_wait)
+    {
+      self.maybe_asking_since = None;
+      call.start_recording_now();
     }
     let is_alone = !self
       .users_by_device
@@ -322,7 +347,13 @@ impl Running {
     // No kept key: a crash loses the take, and nothing on the disk can be read without the key.
     let recorder = CallRecorder::start(&path, self.params.max_take, None)
       .map_err(|error| StopReason::WriteFailed(error.to_string()))?;
-    call.set_recording(Some(recorder.sink()));
+    // A next part keeps the running recording (and its answers): the call doesn't ask again.
+    let rule = if self.params.requires_consent {
+      RecordingConsentRule::AskEverybody
+    } else {
+      RecordingConsentRule::TellOnly
+    };
+    call.set_recording(Some((recorder.sink(), rule)));
     info!(conversation_id = %self.params.conversation, part = self.part, "recording the call");
     self.maybe_recorder = Some(recorder);
     Ok(())
@@ -521,11 +552,13 @@ mod tests {
       user_id: id(RECORDER),
       device_id: id(RECORDER),
       max_take: Duration::from_secs(600),
+      requires_consent: false,
       folder: folder.to_path_buf(),
       limits: SessionLimits {
         alone: Duration::from_secs(60),
         join: Duration::from_secs(20),
         unconfirmed: Duration::from_secs(30),
+        consent_wait: Duration::from_secs(120),
       },
     }
   }

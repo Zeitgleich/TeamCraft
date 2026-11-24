@@ -16,6 +16,7 @@ use teamcraft_client_api::calls::MAX_KEPT_REACTIONS;
 use teamcraft_core::client::{CallKeySigner, DirectMediaInputs};
 use teamcraft_core::connection::{ConnectionState as CoreConnectionState, ConnectionStatus, NetworkChanges};
 use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
+use teamcraft_crypto::call_recording::ConsentAnswer;
 use teamcraft_crypto::identity::VerifiedDevice;
 use teamcraft_media::audio_io::{AudioDeviceChoice, AudioSink, AudioSource};
 use teamcraft_media::audio_processing::AudioProcessingConfig;
@@ -27,6 +28,7 @@ use teamcraft_media::call_native::{
   DirectPathConfig, JoinTicketSource, NativeCall, NativeCallConfig, NativeCallError, TicketFuture,
   TrustFuture, TrustSource, measure_link,
 };
+use teamcraft_media::call_recording_notice::Recorder;
 use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError, ResilienceConfig};
 use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
@@ -235,6 +237,25 @@ pub struct VideoTrackInfo {
   pub is_screen: bool,
 }
 
+/// Somebody else's recording that asks this device for consent (#2115), and this device's
+/// answer. Only verified asks are listed: nobody is asked on the server's word.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct RecordingConsentInfo {
+  pub recorder_user_id: String,
+  /// It waits for answers and records nothing yet.
+  pub is_asking: bool,
+  pub answer: RecordingConsentAnswer,
+}
+
+/// This device's answer to a recording that asks for consent (#2115).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum RecordingConsentAnswer {
+  /// Not answered yet: the voice stays out until it allows it. The app asks.
+  Unanswered,
+  Allowed,
+  Declined,
+}
+
 /// Somebody else's reaction in the call (#2324).
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct CallReactionInfo {
@@ -321,6 +342,14 @@ pub struct CallStateInfo {
   /// screen shows who records for as long as they do; nothing hides it.
   #[uniffi(default = [])]
   pub recording_user_ids: Vec<String>,
+  /// The others' recordings that ask this device for consent, and its answers (#2115): an
+  /// unanswered one is asked about ("Allow" / "Don't allow"), an answered one can be changed.
+  #[uniffi(default = [])]
+  pub recording_consents: Vec<RecordingConsentInfo>,
+  /// The people left out of a running recording that asked for consent (they declined or haven't
+  /// allowed it, #2115): their tile says "Not recorded".
+  #[uniffi(default = [])]
+  pub left_out_of_recording_user_ids: Vec<String>,
   /// The call runs on the fallback for networks that block UDP (ARCHITECTURE.md §6.6): the app says
   /// quality may be lower.
   #[uniffi(default = false)]
@@ -444,6 +473,11 @@ enum Control {
   SendReaction(CallReaction),
   /// The hand raised or lowered (#2324).
   SetHandRaised(bool),
+  /// This device's answer to a person's recordings that ask for consent (#2115).
+  AnswerRecording {
+    recorder: UserId,
+    is_allowed: bool,
+  },
   StartCamera {
     format: CaptureFormat,
     done: oneshot::Sender<Result<(), TeamCraftError>>,
@@ -526,6 +560,16 @@ impl CallSession {
   /// Raises or lowers this device's hand for everybody else in the call (#2324).
   pub fn set_hand_raised(&self, is_raised: bool) {
     self.send(Control::SetHandRaised(is_raised));
+  }
+
+  /// Answers `recorder_user_id`'s recordings of this call that ask for consent (#2115): this
+  /// device's voice in them, or left out. A new answer replaces the last; an id that isn't one is
+  /// ignored.
+  pub fn answer_recording(&self, recorder_user_id: String, is_allowed: bool) {
+    match recorder_user_id.parse::<UserId>() {
+      Ok(recorder) => self.send(Control::AnswerRecording { recorder, is_allowed }),
+      Err(_) => warn!("answer to a recording with an invalid user id ignored"),
+    }
   }
 
   /// Other devices' video and frames go to `listener` from now on.
@@ -827,6 +871,8 @@ pub(crate) async fn join(
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
     recording_user_ids: Vec::new(),
+    recording_consents: Vec::new(),
+    left_out_of_recording_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,
@@ -940,6 +986,7 @@ async fn run_call(
   let mut muted = BTreeSet::new();
   let mut refused = BTreeSet::new();
   let mut signals = SignalState::default();
+  let mut recordings = RecordingState::default();
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
@@ -985,12 +1032,16 @@ async fn run_call(
             watch_video(&call, &event, context.own_device, &mut video);
           }
           let has_signal = signals.apply(&roster, &event);
+          let has_recording_news = recordings.apply(&event);
           if let Some(end) = apply_event(state, &mut reconnecting, &mut roster, &mut muted, &mut refused, event) {
             reason = end;
             break;
           }
           if has_signal {
             signals.report(state, &roster);
+          }
+          if has_recording_news {
+            recordings.report(state, &roster);
           }
           context.hub.report(state.clone());
         },
@@ -1044,6 +1095,7 @@ async fn apply_control(
       call.set_hand_raised(is_raised);
       state.is_hand_raised = is_raised;
     },
+    Control::AnswerRecording { recorder, is_allowed } => call.answer_recording(recorder, is_allowed),
     Control::SetDeafened(is_deafened) => {
       call.set_deafened(is_deafened);
       state.is_deafened = is_deafened;
@@ -1514,6 +1566,85 @@ impl SignalState {
   }
 }
 
+/// The others' recordings as the engine reports them, for the asks and the "Not recorded" marks
+/// (#2115).
+#[derive(Default)]
+struct RecordingState {
+  recorders: Vec<Recorder>,
+}
+
+impl RecordingState {
+  /// Follows an engine event; `true` when the asks or the marks may change (a recorder, or who is
+  /// in the call).
+  fn apply(&mut self, event: &CallEngineEvent) -> bool {
+    match event {
+      CallEngineEvent::RecordersChanged(recorders) => {
+        self.recorders = recorders.clone();
+        true
+      },
+      CallEngineEvent::Joined { .. }
+      | CallEngineEvent::ParticipantJoined(_)
+      | CallEngineEvent::ParticipantLeft(_) => true,
+      _ => false,
+    }
+  }
+
+  fn report(&self, state: &mut CallStateInfo, roster: &BTreeMap<DeviceId, UserId>) {
+    let user_of = |recorder: &Recorder| {
+      recorder
+        .maybe_user_id
+        .or_else(|| roster.get(&recorder.device_id).copied())
+    };
+    let mut consents: Vec<RecordingConsentInfo> = Vec::new();
+    for recorder in self
+      .recorders
+      .iter()
+      .filter(|recorder| recorder.asks_consent && recorder.is_verified)
+    {
+      let Some(user) = user_of(recorder) else {
+        continue;
+      };
+      let answer = match recorder.maybe_own_answer {
+        None => RecordingConsentAnswer::Unanswered,
+        Some(ConsentAnswer::Allow) => RecordingConsentAnswer::Allowed,
+        Some(ConsentAnswer::Decline) => RecordingConsentAnswer::Declined,
+      };
+      let user_id = user.to_string();
+      match consents
+        .iter_mut()
+        .find(|known| known.recorder_user_id == user_id)
+      {
+        // Of a person's several recording devices, the one that still needs an answer shows.
+        Some(known) => {
+          known.is_asking |= recorder.is_requesting;
+          if answer == RecordingConsentAnswer::Unanswered {
+            known.answer = answer;
+          }
+        },
+        None => consents.push(RecordingConsentInfo {
+          recorder_user_id: user_id,
+          is_asking: recorder.is_requesting,
+          answer,
+        }),
+      }
+    }
+    state.recording_consents = consents;
+    let left_out: BTreeSet<UserId> = roster
+      .iter()
+      .filter(|(device, _)| {
+        self.recorders.iter().any(|recorder| {
+          recorder.asks_consent
+            && !recorder.is_requesting
+            && recorder.device_id != **device
+            && !recorder.allowed.contains(device)
+        })
+      })
+      .map(|(_, user)| *user)
+      .collect();
+    state.left_out_of_recording_user_ids = left_out.iter().map(ToString::to_string).collect();
+  }
+}
+
 /// Updates the call's state; returns why the call ends if the event ends it. `reconnecting`:
 /// other devices that are rejoining; `roster`: other devices in the call and their users;
 /// `refused`: devices whose call key binding did not verify (kept out of the media group).
@@ -1552,8 +1683,10 @@ fn apply_event(
     },
     // The engine says it again whenever a recorder starts, stops or leaves.
     CallEngineEvent::RecordersChanged(recorders) => {
+      // One that only asks for consent records nothing yet (#2115): `recording_consents` has it.
       let users: BTreeSet<UserId> = recorders
         .iter()
+        .filter(|recorder| !recorder.is_requesting)
         .filter_map(|recorder| {
           recorder
             .maybe_user_id
@@ -1719,6 +1852,8 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     reconnecting_user_ids: Vec::new(),
     unverified_user_ids: Vec::new(),
     recording_user_ids: Vec::new(),
+    recording_consents: Vec::new(),
+    left_out_of_recording_user_ids: Vec::new(),
     is_on_limited_network: false,
     is_video_held_for_voice: false,
     is_video_yielded_for_voice: false,
@@ -2336,6 +2471,67 @@ mod tests {
       CallEngineEvent::ParticipantLeft(device(30)),
     );
     assert_eq!(state.speaking_user_ids, vec!["2".to_string()]);
+  }
+
+  /// #2115: a verified ask shows with this device's answer, and who isn't allowed into a
+  /// running recording that asked is marked.
+  #[test]
+  fn consent_asks_and_left_out_marks_follow_the_recorders() {
+    let mut state = ended(conversation(5), CallEndReason::Left);
+    let roster = BTreeMap::from([
+      (device(20), user(2)),
+      (device(30), user(3)),
+      (device(40), user(4)),
+    ]);
+    let mut recordings = RecordingState::default();
+    let recorder = |is_requesting: bool, maybe_own_answer: Option<ConsentAnswer>| Recorder {
+      device_id: device(20),
+      maybe_user_id: Some(user(2)),
+      is_verified: true,
+      has_left: false,
+      take: 7,
+      asks_consent: true,
+      is_requesting,
+      maybe_own_answer,
+      allowed: vec![device(30)],
+    };
+    assert!(recordings.apply(&CallEngineEvent::RecordersChanged(vec![recorder(true, None)])));
+    recordings.report(&mut state, &roster);
+    assert_eq!(
+      state.recording_consents,
+      vec![RecordingConsentInfo {
+        recorder_user_id: "2".into(),
+        is_asking: true,
+        answer: RecordingConsentAnswer::Unanswered,
+      }]
+    );
+    assert!(
+      state.left_out_of_recording_user_ids.is_empty(),
+      "nothing recorded yet"
+    );
+
+    recordings.apply(&CallEngineEvent::RecordersChanged(vec![recorder(
+      false,
+      Some(ConsentAnswer::Decline),
+    )]));
+    recordings.report(&mut state, &roster);
+    assert_eq!(
+      state.recording_consents[0].answer,
+      RecordingConsentAnswer::Declined
+    );
+    // The recorder itself is in its recording; the one who allowed it too; the other isn't.
+    assert_eq!(state.left_out_of_recording_user_ids, vec!["4".to_string()]);
+
+    let unverified = Recorder {
+      is_verified: false,
+      ..recorder(true, None)
+    };
+    recordings.apply(&CallEngineEvent::RecordersChanged(vec![unverified]));
+    recordings.report(&mut state, &roster);
+    assert!(
+      state.recording_consents.is_empty(),
+      "nobody is asked on the server's word"
+    );
   }
 
   #[test]

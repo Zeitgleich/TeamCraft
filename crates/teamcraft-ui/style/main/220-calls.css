@@ -1857,6 +1857,22 @@
   top: 36px;
 }
 
+/* Left out of a recording that asked for consent (#2115): under the badges of the same corner. */
+.tile-status-left-out {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tile-status-warning ~ .tile-status-left-out,
+.tile-status-recording ~ .tile-status-left-out {
+  top: 36px;
+}
+
+.tile-status-warning ~ .tile-status-recording ~ .tile-status-left-out {
+  top: 64px;
+}
+
 .call-recording-banner {
   display: flex;
   flex-wrap: wrap;
@@ -2174,4 +2190,26 @@
   .call-captions-header {
     color: var(--call-text);
   }
+}
+
+/* A recording that asks for consent (#2115): neutral, it records nothing yet; and who isn't in a
+   running one. */
+.recording-pill.is-asking {
+  background: var(--call-notice-bg);
+  color: var(--call-notice-text);
+}
+
+.recording-pill .btn-small {
+  margin: -2px -8px -2px 0;
+}
+
+/* This device's answer to a running recording that asked, with the way to change it. */
+.call-recording-consent-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 8px 20px 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
 }

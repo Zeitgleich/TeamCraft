@@ -6,12 +6,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use teamcraft_client_api::call_view::CallView;
 use teamcraft_client_api::calls::{
   ActiveCall, CallEndReason, CallRecorder, CallStatusSounds, CaptionLine, EncryptionFailure,
-  MAX_CAPTION_LINES, MAX_KEPT_REACTIONS, Participant, RemoteVideoTrack, ScreenShareSound, ShownReaction,
+  MAX_CAPTION_LINES, MAX_KEPT_REACTIONS, OwnRecordingConsent, Participant, RecordingConsentState,
+  RemoteVideoTrack, ScreenShareSound, ShownReaction,
 };
+use teamcraft_crypto::call_recording::ConsentAnswer;
 use teamcraft_proto::{DeviceId, MediaStreamId, UserId, VideoCodec, VideoTrackKind};
 
 use crate::call_cues::StatusCues;
-use crate::call_engine::{CallEngineEvent, OwnVideoEnd};
+use crate::call_engine::{CallEngineEvent, OwnConsentStatus, OwnVideoEnd};
 use crate::call_recording_notice::Recorder;
 use crate::call_resilience::CallTransport;
 
@@ -120,6 +122,12 @@ impl CallRoster {
       CallEngineEvent::RecordersChanged(recorders) => {
         roster.recording = recorders;
         active.recorders = roster.recorders();
+      },
+      CallEngineEvent::OwnRecordingConsent(maybe_status) => {
+        if let Some(own) = active.maybe_own_recording.as_mut() {
+          own.maybe_consent = maybe_status.map(|status| roster.own_consent(&status));
+        }
+        return true;
       },
       CallEngineEvent::OwnRecordingUnconfirmed(is_unconfirmed) => {
         if let Some(own) = active.maybe_own_recording.as_mut() {
@@ -466,8 +474,9 @@ impl CallRoster {
     users.into_iter().collect()
   }
 
-  /// Who records, one entry per person: verified when every recording device of theirs is,
-  /// left when every one of them left.
+  /// Who records (or asks to), one entry per person: verified when every recording device of
+  /// theirs is, left when every one of them left, asking while any of them asks, and this
+  /// device's answer as the least it gave any of them (#2115).
   fn recorders(&self) -> Vec<CallRecorder> {
     let mut by_user: Vec<CallRecorder> = Vec::new();
     for recorder in &self.recording {
@@ -477,19 +486,60 @@ impl CallRoster {
       else {
         continue;
       };
+      let consent = consent_state(recorder);
       match by_user.iter_mut().find(|known| known.user == user) {
         Some(known) => {
           known.is_verified &= recorder.is_verified;
           known.has_left &= recorder.has_left;
+          known.is_asking |= recorder.is_requesting;
+          known.consent = least_consent(known.consent, consent);
         },
         None => by_user.push(CallRecorder {
           user,
           is_verified: recorder.is_verified,
           has_left: recorder.has_left,
+          consent,
+          is_asking: recorder.is_requesting,
         }),
       }
     }
     by_user
+  }
+
+  /// The answers to this device's own recording, by person (#2115): a person is waited for while
+  /// any device of theirs is, declined where any declined, else allowed.
+  fn own_consent(&self, status: &OwnConsentStatus) -> OwnRecordingConsent {
+    let user_of = |device: &DeviceId| self.users_by_device.get(device).copied();
+    let unanswered: BTreeSet<UserId> = status.unanswered.iter().filter_map(user_of).collect();
+    let declined: BTreeSet<UserId> = status
+      .declined
+      .iter()
+      .filter_map(user_of)
+      .filter(|user| !unanswered.contains(user))
+      .collect();
+    let allowed: BTreeSet<UserId> = status
+      .allowed
+      .iter()
+      .filter_map(user_of)
+      .filter(|user| !unanswered.contains(user) && !declined.contains(user))
+      .collect();
+    OwnRecordingConsent {
+      is_waiting: status.is_waiting,
+      allowed: allowed.into_iter().collect(),
+      declined: declined.into_iter().collect(),
+      unanswered: unanswered.into_iter().collect(),
+    }
+  }
+
+  /// Whether `device` is left out of a running recording that asked for consent (#2115): one by
+  /// another device that doesn't have its verified "allow".
+  fn is_left_out(&self, device: &DeviceId) -> bool {
+    self.recording.iter().any(|recorder| {
+      recorder.asks_consent
+        && !recorder.is_requesting
+        && recorder.device_id != *device
+        && !recorder.allowed.contains(device)
+    })
   }
 
   fn participants(&self) -> Vec<Participant> {
@@ -503,8 +553,10 @@ impl CallRoster {
         has_hand_raised: false,
         is_sharing_screen: false,
         is_recording: false,
+        is_left_out_of_recording: false,
       });
       participant.is_muted &= self.muted.contains(device);
+      participant.is_left_out_of_recording |= self.is_left_out(device);
       participant.has_hand_raised |= self.raised_hands.contains(device);
       participant.is_recording |= self
         .recording
@@ -517,6 +569,27 @@ impl CallRoster {
         .any(|(sender, kind)| sender == device && *kind == VideoTrackKind::Camera);
     }
     by_user.into_values().collect()
+  }
+}
+
+/// This device's part in a recording, from what the engine says (#2115).
+fn consent_state(recorder: &Recorder) -> RecordingConsentState {
+  match (recorder.asks_consent, recorder.maybe_own_answer) {
+    (false, _) => RecordingConsentState::NotAsked,
+    (true, None) => RecordingConsentState::Unanswered,
+    (true, Some(ConsentAnswer::Allow)) => RecordingConsentState::Allowed,
+    (true, Some(ConsentAnswer::Decline)) => RecordingConsentState::Declined,
+  }
+}
+
+/// Of two devices' states of one person, what the person sees: the one that still needs them.
+fn least_consent(a: RecordingConsentState, b: RecordingConsentState) -> RecordingConsentState {
+  use RecordingConsentState::{Allowed, Declined, NotAsked, Unanswered, Unknown};
+  match (a, b) {
+    (Unanswered | Unknown, _) | (_, Unanswered | Unknown) => Unanswered,
+    (Declined, _) | (_, Declined) => Declined,
+    (Allowed, _) | (_, Allowed) => Allowed,
+    (NotAsked, NotAsked) => NotAsked,
   }
 }
 

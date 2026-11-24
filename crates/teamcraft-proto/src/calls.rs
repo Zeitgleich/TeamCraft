@@ -247,6 +247,15 @@ pub enum CallClientMessage {
   SetRecording {
     notice: Base64Bytes,
   },
+  /// This device's signed answer to another device's recording that asks for consent (e2ee.md
+  /// §8.3, #2115): it allows its voice in that take, or declines. The SFU can't forge it: it keeps
+  /// the latest one per device and recorder (at most [`crate::MAX_RECORDING_CONSENT_BYTES`] each,
+  /// [`crate::MAX_RECORDING_CONSENTS_PER_DEVICE`] recorders), forwards it
+  /// ([`CallEvent::RecordingConsent`]), confirms it ([`CallEvent::RecordingConsentKept`]) and hands
+  /// it to devices that join later.
+  SetRecordingConsent {
+    consent: Base64Bytes,
+  },
   /// This device's own voice is being lost or held up on its upload (an uplink that collapsed),
   /// or recovered (#1889). While it is, the SFU sends it no video: the acknowledgements of what it
   /// receives share the upload its voice is short of. Sent when it changes; a new connection
@@ -469,6 +478,19 @@ pub enum CallEvent {
   /// user when it isn't; an SFU from before sends none. Older clients read `Unknown`.
   RecordingNoticeKept {
     notice: Base64Bytes,
+  },
+  /// Another device's signed answer to a recording that asks for consent
+  /// ([`CallClientMessage::SetRecordingConsent`]), as it sent it. After `joined` the SFU sends the
+  /// latest ones of every device in the call. The recorder mixes in only devices whose "allow" for
+  /// its take verified against their DAVE key (#2115). Older clients read `Unknown`.
+  RecordingConsent {
+    device_id: DeviceId,
+    consent: Base64Bytes,
+  },
+  /// To the sender of a [`CallClientMessage::SetRecordingConsent`]: the SFU keeps the answer and
+  /// hands it to the others. The app sends it again until it is confirmed.
+  RecordingConsentKept {
+    consent: Base64Bytes,
   },
   /// Devices whose audio the SFU currently forwards, loudest first.
   ActiveSpeakers {
@@ -852,6 +874,10 @@ impl fmt::Debug for CallClientMessage {
         .debug_struct("SetRecording")
         .field("notice_bytes", &notice.len())
         .finish(),
+      Self::SetRecordingConsent { consent } => f
+        .debug_struct("SetRecordingConsent")
+        .field("consent_bytes", &consent.len())
+        .finish(),
       Self::UplinkHurt { is_hurt } => f.debug_struct("UplinkHurt").field("is_hurt", is_hurt).finish(),
       Self::DirectOffer { to_device_id, sealed } => f
         .debug_struct("DirectOffer")
@@ -1229,6 +1255,32 @@ mod tests {
     };
     let json = serde_json::to_string(&kept).unwrap();
     assert_eq!(json, r#"{"type":"recording_notice_kept","notice":"AQID"}"#);
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), kept);
+  }
+
+  #[test]
+  fn recording_consent_wire_format() {
+    let message = CallClientMessage::SetRecordingConsent {
+      consent: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&message).unwrap();
+    assert_eq!(json, r#"{"type":"set_recording_consent","consent":"AQID"}"#);
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), message);
+    let event = CallEvent::RecordingConsent {
+      device_id: "7".parse().unwrap(),
+      consent: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&event).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"recording_consent","device_id":"7","consent":"AQID"}"#
+    );
+    assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), event);
+    let kept = CallEvent::RecordingConsentKept {
+      consent: Base64Bytes::new(vec![1, 2, 3]),
+    };
+    let json = serde_json::to_string(&kept).unwrap();
+    assert_eq!(json, r#"{"type":"recording_consent_kept","consent":"AQID"}"#);
     assert_eq!(serde_json::from_str::<CallEvent>(&json).unwrap(), kept);
   }
 

@@ -9,21 +9,33 @@
 //! only puts an indicator on everybody's screen and a line in the log about itself; one that
 //! records without a notice is the covert capture no notice can prevent.
 //!
+//! A notice that asks for consent and records nothing yet (`requesting`, #2115) counts as not
+//! recording: the log has the recording from the moment it records.
+//!
 //! The layout is the TLS encoding of `teamcraft_crypto::call_recording::SignedRecordingNotice`,
-//! version 1 (fixed size, no length prefixes); a test signs a notice with that type and reads it
-//! back here, so the two can't drift apart silently.
+//! version 2 (fixed size, no length prefixes); a test signs a notice with that type and reads it
+//! back here, so the two can't drift apart silently. The same holds for the recorder a consent
+//! names ([`consent_recorder`]), by which the SFU keeps one consent per device and recorder.
 
 use teamcraft_proto::{CallId, DeviceId, Id};
 
-/// The only notice encoding there is; a newer one is ignored (no report), not misread.
-const NOTICE_VERSION: u8 = 1;
+/// The only notice encoding there is; another one is ignored (no report), not misread.
+const NOTICE_VERSION: u8 = 2;
 const STATE_STOPPED: u8 = 0;
 const STATE_RECORDING: u8 = 1;
-/// version (1) + call id (8) + device id (8) + sequence (8) + state (1) + signature (64).
-const NOTICE_BYTES: usize = 90;
+const STATE_REQUESTING: u8 = 2;
+/// version (1) + call id (8) + device id (8) + sequence (8) + take (8) + asks consent (1) +
+/// state (1) + signature (64).
+const NOTICE_BYTES: usize = 99;
 const CALL_ID_AT: usize = 1;
 const DEVICE_ID_AT: usize = 9;
-const STATE_AT: usize = 25;
+const STATE_AT: usize = 34;
+/// The only consent encoding there is.
+const CONSENT_VERSION: u8 = 1;
+/// version (1) + call id (8) + device id (8) + recorder (8) + take (8) + sequence (8) + answer (1)
+/// + signature (64).
+const CONSENT_BYTES: usize = 106;
+const CONSENT_RECORDER_AT: usize = 17;
 
 /// What a notice says, unverified.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +54,7 @@ impl RecordingClaim {
     }
     let is_recording = match notice[STATE_AT] {
       STATE_RECORDING => true,
-      STATE_STOPPED => false,
+      STATE_STOPPED | STATE_REQUESTING => false,
       _ => return None,
     };
     Some(Self {
@@ -59,6 +71,15 @@ impl RecordingClaim {
   }
 }
 
+/// The recorder a signed consent (#2115) answers, unverified: what the SFU keeps one consent per.
+/// `None` for anything that isn't a version 1 consent of the expected size.
+pub fn consent_recorder(consent: &[u8]) -> Option<u64> {
+  if consent.len() != CONSENT_BYTES || consent[0] != CONSENT_VERSION {
+    return None;
+  }
+  read_u64(consent, CONSENT_RECORDER_AT)
+}
+
 fn read_u64(bytes: &[u8], at: usize) -> Option<u64> {
   let field: [u8; 8] = bytes.get(at..at + 8)?.try_into().ok()?;
   Some(u64::from_be_bytes(field))
@@ -72,7 +93,9 @@ fn raw(snowflake: i64) -> Option<u64> {
 #[cfg(test)]
 mod tests {
   use teamcraft_crypto::call_binding::CallId as CryptoCallId;
-  use teamcraft_crypto::call_recording::{RecordingNoticeSigner, RecordingState};
+  use teamcraft_crypto::call_recording::{
+    ConsentAnswer, RecordingAnnouncement, RecordingNoticeSigner, RecordingState,
+  };
   use teamcraft_crypto::ids::DeviceId as CryptoDeviceId;
   use teamcraft_proto::Snowflake;
 
@@ -86,7 +109,11 @@ mod tests {
         CryptoCallId::new(call),
         CryptoDeviceId::new(device),
         1_700_000_000_000,
-        state,
+        RecordingAnnouncement {
+          take: 1_700_000_000_000,
+          asks_consent: true,
+          state,
+        },
       )
       .unwrap()
       .to_bytes()
@@ -114,6 +141,35 @@ mod tests {
     );
     let stopped = RecordingClaim::read(&signed(7, 42, RecordingState::Stopped)).unwrap();
     assert!(!stopped.is_recording);
+    let asking = RecordingClaim::read(&signed(7, 42, RecordingState::Requesting)).unwrap();
+    assert!(!asking.is_recording, "asking for consent records nothing yet");
+  }
+
+  #[test]
+  fn reads_the_recorder_of_what_the_crypto_crate_signs_as_a_consent() {
+    let signer = RecordingNoticeSigner::from_dave_private_key(&[7; 32]).unwrap();
+    let consent = signer
+      .sign_consent(
+        CryptoCallId::new(7),
+        CryptoDeviceId::new(43),
+        CryptoDeviceId::new(42),
+        1,
+        2,
+        ConsentAnswer::Allow,
+      )
+      .unwrap()
+      .to_bytes()
+      .unwrap();
+    assert_eq!(consent_recorder(&consent), Some(42));
+    assert_eq!(consent_recorder(&consent[..105]), None, "cut short");
+    assert_eq!(
+      consent_recorder(&signed(7, 42, RecordingState::Recording)),
+      None,
+      "a notice"
+    );
+    let mut newer = consent;
+    newer[0] = 2;
+    assert_eq!(consent_recorder(&newer), None, "a newer version");
   }
 
   #[test]
@@ -128,14 +184,14 @@ mod tests {
   fn ignores_what_isnt_a_known_notice() {
     let notice = signed(7, 42, RecordingState::Recording);
     assert_eq!(RecordingClaim::read(&[]), None);
-    assert_eq!(RecordingClaim::read(&notice[..89]), None, "cut short");
+    assert_eq!(RecordingClaim::read(&notice[..98]), None, "cut short");
     assert_eq!(
       RecordingClaim::read(&[notice.as_slice(), &[0]].concat()),
       None,
       "too long"
     );
     let mut newer = notice.clone();
-    newer[0] = 2;
+    newer[0] = 3;
     assert_eq!(RecordingClaim::read(&newer), None, "a newer version");
     let mut unknown_state = notice;
     unknown_state[STATE_AT] = 9;

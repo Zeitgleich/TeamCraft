@@ -27620,6 +27620,166 @@
           }
         }
       }
+    },
+    "call_recording_consent_ask %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ wants to record this call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ möchte diesen Anruf aufnehmen."
+          }
+        }
+      }
+    },
+    "call_recording_consent_ask_running %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ is recording this call."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ nimmt diesen Anruf auf."
+          }
+        }
+      }
+    },
+    "call_recording_consent_explain": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your voice is only recorded if you allow it. You can change your answer at any time."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Stimme wird nur aufgenommen, wenn du zustimmst. Du kannst deine Antwort jederzeit ändern."
+          }
+        }
+      }
+    },
+    "call_recording_consent_allow": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zustimmen"
+          }
+        }
+      }
+    },
+    "call_recording_consent_decline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Don't allow"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht zustimmen"
+          }
+        }
+      }
+    },
+    "call_recording_consent_allowed %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your voice is in %@'s recording."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Stimme ist in der Aufnahme von %@."
+          }
+        }
+      }
+    },
+    "call_recording_consent_declined %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your voice is not in %@'s recording."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Deine Stimme ist nicht in der Aufnahme von %@."
+          }
+        }
+      }
+    },
+    "call_recording_consent_withdraw": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leave me out"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mich herausnehmen"
+          }
+        }
+      }
+    },
+    "call_tile_not_recorded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not recorded"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nicht aufgenommen"
+          }
+        }
+      }
+    },
+    "call_person_not_recorded %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, not recorded"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@, nicht aufgenommen"
+          }
+        }
+      }
     }
   },
   "version": "1.0"
