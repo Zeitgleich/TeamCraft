@@ -37,6 +37,7 @@ pub fn TopBar() -> impl IntoView {
   // The browser has its own buttons; the desktop webview has none (#874).
   let has_history_buttons = tauri::is_available();
   let has_downloads_slot = tauri::is_available();
+  crate::churn_watch::record(crate::churn_watch::ChurnKind::TopBarMounted);
   let downloads_slot = DownloadsSlot(RwSignal::new(false));
   provide_context(downloads_slot);
   let was_downloads_shown = has_downloads_slot

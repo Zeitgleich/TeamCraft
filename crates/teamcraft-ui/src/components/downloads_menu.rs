@@ -12,6 +12,7 @@ use teamcraft_client_api::actions::{DownloadControl, DownloadEntry, DownloadStat
 use teamcraft_client_api::admin::format_bytes;
 use wasm_bindgen::JsCast;
 
+use crate::churn_watch::{self, ChurnKind};
 use crate::clock::now_ms;
 use crate::components::icons::{Icon, IconName};
 use crate::components::sheet::MenuSurface;
@@ -40,6 +41,19 @@ pub fn DownloadsButton() -> impl IntoView {
   let entries = Memo::new(move |_| listed.with(|listed| listed.entries.clone()));
   let is_shown = Memo::new(move |_| listed.with(|listed| listed.is_shown(was_shown)));
   let is_answered = Memo::new(move |_| listed.with(|listed| listed.is_answered));
+  // Every mount and flip is counted: a flicker seen once in the field shows in the debug log (#2338).
+  churn_watch::record(ChurnKind::DownloadsMounted);
+  Effect::new(move |previous: Option<bool>| {
+    let is_now = is_shown.get();
+    if previous.is_some_and(|was| was != is_now) {
+      churn_watch::record(if is_now {
+        ChurnKind::DownloadsShown
+      } else {
+        ChurnKind::DownloadsHidden
+      });
+    }
+    is_now
+  });
   Effect::new(move |_| {
     if is_answered.get() {
       settings::store_string(
