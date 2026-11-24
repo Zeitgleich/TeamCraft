@@ -1,7 +1,7 @@
-//! The container's health check. The notetaker listens on no port, so instead of probing an
-//! endpoint like the bridge, `teamcraft-notetaker healthcheck` reads a liveness file the worker
-//! rewrites every few seconds while its loop runs: missing or too old means unhealthy (the loop
-//! hangs or the process is gone).
+//! The container's health check. The bots listen on no port, so instead of probing an endpoint like
+//! the bridge, `teamcraft-notetaker healthcheck` (and `teamcraft-recorder healthcheck`) reads a
+//! liveness file the worker rewrites every few seconds while its loop runs: missing or too old
+//! means unhealthy (the loop hangs or the process is gone).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -122,7 +122,7 @@ mod tests {
   }
 
   fn scratch_file(name: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!("teamcraft-notetaker-health-{}", std::process::id()));
+    let directory = std::env::temp_dir().join(format!("teamcraft-bot-health-{}", std::process::id()));
     std::fs::create_dir_all(&directory).unwrap();
     directory.join(format!("{name}.alive"))
   }

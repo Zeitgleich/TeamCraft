@@ -1,0 +1,42 @@
+[package]
+name = "teamcraft-recorder"
+description = "Headless TeamCraft participant that records the calls of its conversations and posts the recordings, encrypted"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+name = "teamcraft_recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamcraft-recorder"
+path = "src/main.rs"
+
+[dependencies]
+# Configuration, enrollment, join tickets, the gateway and liveness, shared with the notetaker.
+teamcraft-bot-runtime = { path = "../teamcraft-bot-runtime" }
+teamcraft-core = { path = "../teamcraft-core" }
+# The native call driver and the call recording pipeline every app uses (mix, Opus, sealed file).
+teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-ops.workspace = true
+teamcraft-proto.workspace = true
+anyhow.workspace = true
+figment.workspace = true
+# Free space on the recordings' disk (`statvfs`), as the server measures its own.
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs"] }
+serde.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "sync", "time", "macros", "signal"] }
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+figment = { workspace = true, features = ["test"] }
+# A session against a real SFU in the same process, with device-bound DAVE keys.
+teamcraft-bot-runtime = { path = "../teamcraft-bot-runtime", features = ["test-support"] }

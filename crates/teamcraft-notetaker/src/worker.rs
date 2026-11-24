@@ -17,17 +17,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use teamcraft_core::api::{GatewayConnection, ServerApi};
+use teamcraft_bot_runtime::gateway::{GatewayKeeper, GatewayStep};
+pub use teamcraft_bot_runtime::tickets::TicketFactory;
+use teamcraft_bot_runtime::unix_ms;
+use teamcraft_core::api::ServerApi;
 use teamcraft_core::client::OutgoingFile;
 use teamcraft_core::notetaker::{JoinRequest, NotetakerLedger, notetaker_policy};
 use teamcraft_core::records;
 use teamcraft_core::store::{LocalStore, Table};
 use teamcraft_core::{Client, CoreError};
-use teamcraft_media::call_native::JoinTicketSource;
 use teamcraft_media::call_resilience::JoinTicket;
-use teamcraft_proto::{
-  CallId, ConversationId, GatewayClientMessage, GatewayEvent, NotetakerPolicy, NotetakerScope, UserId,
-};
+use teamcraft_proto::{CallId, ConversationId, GatewayEvent, NotetakerPolicy, NotetakerScope, UserId};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -41,15 +41,10 @@ use crate::session::{
   StopReason,
 };
 use crate::summary::{SummaryInput, SummarySettings, summarize};
-use crate::texts::Texts;
 use crate::transcript::{Names, Transcript};
 
 /// How often the worker looks at the gateway, the requests and the calls.
 const TICK: Duration = Duration::from_millis(500);
-/// Keep-alive for the gateway (the server expects one every 30 seconds).
-const HEARTBEAT: Duration = Duration::from_secs(20);
-const RECONNECT_BACKOFF_MIN: Duration = Duration::from_secs(1);
-const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(30);
 /// While a `this_call` request waits and no call is known, the server is asked this often.
 const CALL_CHECK_INTERVAL: Duration = Duration::from_secs(15);
 /// The same for a standing `every_call` request: the gateway announces calls; this is a backstop.
@@ -70,11 +65,6 @@ pub struct WorkerSettings {
   pub shutdown_drain: Duration,
 }
 
-/// Fresh join tickets for a conversation's call, for rejoining after a lost connection.
-pub trait TicketFactory: Send + Sync {
-  fn for_conversation(&self, conversation: ConversationId) -> Arc<dyn JoinTicketSource>;
-}
-
 pub struct Worker<A: ServerApi, S: LocalStore> {
   client: Client<A, S>,
   settings: WorkerSettings,
@@ -82,10 +72,7 @@ pub struct Worker<A: ServerApi, S: LocalStore> {
   tickets: Arc<dyn TicketFactory>,
   /// OpenRouter requests at the same time, all calls together.
   limiter: Arc<Semaphore>,
-  gateway: Option<A::Gateway>,
-  next_connect: Instant,
-  backoff: Duration,
-  last_heartbeat: Instant,
+  gateway: GatewayKeeper<A::Gateway>,
   last_flush: Instant,
   call_events: mpsc::UnboundedReceiver<GatewayEvent>,
   /// Calls running in the bot's conversations, as the gateway said.
@@ -173,10 +160,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
       credentials,
       tickets,
       limiter: Arc::new(Semaphore::new(max_concurrent_requests.max(1))),
-      gateway: None,
-      next_connect: now,
-      backoff: RECONNECT_BACKOFF_MIN,
-      last_heartbeat: now,
+      gateway: GatewayKeeper::new(now),
       last_flush: now,
       call_events,
       running_calls: HashMap::new(),
@@ -225,9 +209,14 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     if let Some(liveness) = &mut self.maybe_liveness {
       liveness.touch(now);
     }
-    self.keep_gateway(now).await;
-    if self.gateway.is_none() {
-      return;
+    match self.gateway.keep(&mut self.client, now).await {
+      GatewayStep::Down => return,
+      // Calls may have ended or begun while the connection was away: ask again.
+      GatewayStep::Connected => {
+        self.running_calls.clear();
+        self.next_check.clear();
+      },
+      GatewayStep::Up => {},
     }
     if !self.has_resumed {
       self.has_resumed = true;
@@ -497,7 +486,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     if record.has_announced {
       return;
     }
-    let texts = Texts::for_language(&record.policy.language);
+    let texts = crate::texts::for_language(&record.policy.language);
     let notice = joined_notice(&texts, &record.policy);
     if let Err(error) = self.client.send_text(conversation, None, &notice).await {
       // The text is in the outbox and goes out with a later flush.
@@ -516,7 +505,7 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     record.transcript = outcome.transcript.clone();
     if !outcome.was_secured && outcome.transcript.is_empty() {
       if outcome.reason == StopReason::JoinTimeout {
-        let texts = Texts::for_language(&record.policy.language);
+        let texts = crate::texts::for_language(&record.policy.language);
         if let Err(error) = self
           .client
           .send_text(conversation, None, &texts.get("join-failed"))
@@ -705,50 +694,6 @@ impl<A: ServerApi, S: LocalStore> Worker<A, S> {
     }
   }
 
-  /// Connects (with backoff), processes what the server sent, and sends heartbeats.
-  async fn keep_gateway(&mut self, now: Instant) {
-    if self.gateway.is_none() {
-      if now < self.next_connect {
-        return;
-      }
-      match self.client.connect_gateway().await {
-        Ok((connection, outcome)) => {
-          info!(?outcome, "gateway connected");
-          self.gateway = Some(connection);
-          self.backoff = RECONNECT_BACKOFF_MIN;
-          self.last_heartbeat = now;
-          // Calls may have ended or begun while the connection was away: ask again.
-          self.running_calls.clear();
-          self.next_check.clear();
-        },
-        Err(error) => {
-          warn!(%error, retry_in = ?self.backoff, "gateway connection failed");
-          self.next_connect = now + self.backoff;
-          self.backoff = (self.backoff * 2).min(RECONNECT_BACKOFF_MAX);
-          return;
-        },
-      }
-    }
-    let Some(connection) = self.gateway.as_mut() else {
-      return;
-    };
-    if let Err(error) = self.client.pump(connection).await {
-      warn!(%error, "gateway connection lost");
-      self.gateway = None;
-      self.next_connect = now + RECONNECT_BACKOFF_MIN;
-      return;
-    }
-    if now.saturating_duration_since(self.last_heartbeat) >= HEARTBEAT {
-      self.last_heartbeat = now;
-      if let Some(connection) = self.gateway.as_mut()
-        && let Err(error) = connection.send(&GatewayClientMessage::Heartbeat).await
-      {
-        warn!(%error, "heartbeat failed");
-        self.gateway = None;
-      }
-    }
-  }
-
   fn delay_start(&mut self, conversation: ConversationId) {
     self.next_check.insert(conversation, Instant::now() + START_RETRY);
     self.running_calls.remove(&conversation);
@@ -836,7 +781,7 @@ async fn write_report(
   let names = Names::new(
     known_names,
     &record.transcript,
-    &Texts::for_language(&record.policy.language),
+    &crate::texts::for_language(&record.policy.language),
   );
   let date = crate::report::date_time(record.started_at_ms);
   let participants: Vec<String> = record
@@ -869,7 +814,7 @@ async fn write_report(
       }
     },
   };
-  let texts = Texts::for_language(&record.policy.language);
+  let texts = crate::texts::for_language(&record.policy.language);
   let report = compose(&ReportInput {
     texts: &texts,
     policy: &record.policy,
@@ -905,10 +850,4 @@ fn session_key(conversation: ConversationId) -> String {
 
 fn served_key(conversation: ConversationId) -> String {
   format!("{SERVED_PREFIX}{conversation}")
-}
-
-fn unix_ms() -> i64 {
-  std::time::SystemTime::now()
-    .duration_since(std::time::UNIX_EPOCH)
-    .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }

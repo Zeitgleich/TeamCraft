@@ -1,7 +1,7 @@
 # Container images
 
-OCI images of the server binaries, the integration bridge and the notetaker, built from the workspace
-root:
+OCI images of the server binaries, the integration bridge, the notetaker and the recorder bot, built
+from the workspace root:
 
 | Image                 | Containerfile                       | Listens on                                                                           | Health check                      |
 |-----------------------|-------------------------------------|--------------------------------------------------------------------------------------|-----------------------------------|
@@ -9,12 +9,14 @@ root:
 | `teamcraft-sfu`       | `teamcraft-sfu.Containerfile`       | `4433/udp` (QUIC), `8081/tcp` (health), `8082/tcp` (call fallback, behind the proxy) | `teamcraft-sfu healthcheck`       |
 | `teamcraft-bridge`    | `teamcraft-bridge.Containerfile`    | `8088/tcp` (webhooks, logs)                                                          | `teamcraft-bridge healthcheck`    |
 | `teamcraft-notetaker` | `teamcraft-notetaker.Containerfile` | nothing (connects out)                                                               | `teamcraft-notetaker healthcheck` |
+| `teamcraft-recorder`  | `teamcraft-recorder.Containerfile`  | nothing (connects out)                                                               | `teamcraft-recorder healthcheck`  |
 
 ```sh
 podman build --format docker -f containers/teamcraft-server.Containerfile    -t teamcraft-server .
 podman build --format docker -f containers/teamcraft-sfu.Containerfile       -t teamcraft-sfu .
 podman build --format docker -f containers/teamcraft-bridge.Containerfile    -t teamcraft-bridge .
 podman build --format docker -f containers/teamcraft-notetaker.Containerfile -t teamcraft-notetaker .
+podman build --format docker -f containers/teamcraft-recorder.Containerfile  -t teamcraft-recorder .
 ```
 
 `--format docker` keeps the `HEALTHCHECK` instruction; the OCI format has none. Orchestrators
@@ -57,6 +59,14 @@ while they upload, in the volume `/var/spool/teamcraft-bridge`.
 OpenRouter. Its database and the liveness file `healthcheck` reads are in the volume
 `/var/lib/teamcraft-notetaker`. It sends call audio out of the end-to-end encryption, so run it only
 on a host trusted with that (docs/e2ee.md §8.2, docs/admin.md §3.7).
+
+`teamcraft-recorder`: a TOML file (`--config`, `TEAMCRAFT_RECORDER_CONFIG`;
+`crates/teamcraft-recorder/teamcraft-recorder.example.toml`) plus `TEAMCRAFT_RECORDER_*` variables
+(the bot token, store key and passphrase, best as files under `/run/secrets`). It listens on no
+port; it connects out to the server and the SFU. Its database, the sealed takes, the copies waiting
+for their upload and the liveness file are in the volume `/var/lib/teamcraft-recorder`. It holds the
+keys of the calls it records, so run it only on a host trusted with them (docs/e2ee.md §8.3,
+docs/operations.md "Recorder bot").
 
 `teamcraft-sfu`: environment variables, documented in `crates/teamcraft-sfu/src/main.rs`
 (`TEAMCRAFT_SFU_BIND`, `TEAMCRAFT_SFU_CERT`/`_KEY`, `TEAMCRAFT_SFU_JOIN_TOKEN_PUBLIC_KEY`/`_ISSUER`,

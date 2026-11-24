@@ -188,7 +188,7 @@ mod tests {
 
   #[test]
   fn the_join_notice_names_the_model_and_who_may_stop_it() {
-    let texts = Texts::for_language("en");
+    let texts = crate::texts::for_language("en");
     let mut policy = NotetakerPolicy::default();
     let notice = joined_notice(&texts, &policy);
     assert!(notice.contains("OpenRouter (mistralai/voxtral-mini-transcribe-3-0)"));
@@ -202,7 +202,7 @@ mod tests {
 
   #[test]
   fn the_result_has_the_summary_details_footer_and_transcript() {
-    let texts = Texts::for_language("en");
+    let texts = crate::texts::for_language("en");
     let policy = NotetakerPolicy::default();
     let transcript = transcript();
     let names = names(&transcript, &texts);
@@ -234,7 +234,7 @@ mod tests {
 
   #[test]
   fn an_early_end_a_failed_summary_and_gaps_are_said() {
-    let texts = Texts::for_language("de");
+    let texts = crate::texts::for_language("de");
     let policy = NotetakerPolicy::default();
     let mut transcript = transcript();
     transcript.failed_pieces = 2;
@@ -261,7 +261,7 @@ mod tests {
 
   #[test]
   fn without_speech_there_is_a_short_note_and_no_file() {
-    let texts = Texts::for_language("en");
+    let texts = crate::texts::for_language("en");
     let transcript = Transcript::default();
     let names = names(&transcript, &texts);
     let report = compose(&ReportInput {

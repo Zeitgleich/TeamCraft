@@ -66,6 +66,7 @@ repository's end-to-end harness against it (`tests/e2e/tests/suite/deployed.rs`,
 | `teamcraft-sfu`       | none (rooms live while a call lasts)                                                                             | config only  |
 | `teamcraft-bridge`    | SQLCipher database with the bot's keys and its channels' content keys                                            | yes          |
 | `teamcraft-notetaker` | SQLCipher database with the bot's keys, its conversations' content keys and the transcripts of calls in progress | yes          |
+| `teamcraft-recorder`  | SQLCipher database with the bot's keys and its conversations' content keys; recordings waiting for their upload  | yes          |
 | Identity provider     | users, roles, sessions                                                                                           | its own      |
 
 The server only holds ciphertext. A stolen database or bucket gives an attacker metadata (who is in
@@ -79,8 +80,8 @@ exists; clients can still read what they have stored locally.
 - `GET /healthz` is liveness, `GET /readyz` also checks the database and answers 503 once a shutdown
   has begun. The images ship
   `teamcraft-server healthcheck [--ready]`, `teamcraft-sfu healthcheck`, `teamcraft-bridge
-  healthcheck` and `teamcraft-notetaker healthcheck` (its liveness file, the notetaker listens on
-  no port) for container health checks (no curl in the images).
+  healthcheck`, `teamcraft-notetaker healthcheck` and `teamcraft-recorder healthcheck` (their
+  liveness files, the bots listen on no port) for container health checks (no curl in the images).
 - **Dependencies** (`[dependencies]`, issue #743). Each backend (database, object storage, identity
   provider, push gateway, SFU control) has a circuit breaker: after `failure_threshold` (3) failures
   in a row it counts as down, requests that need it are answered at once with **503, `Retry-After`
@@ -758,6 +759,41 @@ How the apps behave on networks between the user and the server (issue #157):
   account's sign-in, the server check, brand images, the video codec download) go through the
   core's HTTP client too, with the same proxy and certificate authorities (#433).
 
+## Recorder bot
+
+`teamcraft-recorder` (#2273, admin.md §3.13, e2ee.md §8.3) records the calls of the conversations
+its bot account is a member of and posts each recording, encrypted, into the call's conversation.
+It is a call participant with the call's keys: **run it on a machine you trust like the people's
+own devices**, not next to the server on an untrusted VPS. One instance per bot account.
+
+- **Configuration:** `crates/teamcraft-recorder/teamcraft-recorder.example.toml` documents every
+  option; each can also be set as `TEAMCRAFT_RECORDER_<SECTION>__<KEY>`. It needs the server's
+  URL, the bot's token, a 32-byte key for its database and, on the first run, a recovery passphrase
+  for the bot's keys (keep it; the bot re-enrolls with it when its database is lost).
+- **Disk:** a volume for the database, the sealed takes of calls being recorded (`recordings`,
+  about 14 MB an hour each) and the decrypted copies waiting for their upload (`uploads`, deleted
+  once uploaded). A take doesn't start with less than `min_free_mib` (1 GiB) free; the
+  conversation is told instead. The folders are made readable by the bot's user only.
+- **Turning it on:** in the console, create the bot (Administration → Integrations), pick it under
+  Security → Call recording ("Recorder bot") with a mode that lets it record, and add it to the
+  channels whose calls must be recorded. It records only while the owners' signed policy names it;
+  without that it runs idle and joins nothing.
+- **Restarts and shutdown:** on SIGTERM it stops recording (everybody is told), finishes the takes
+  and queues them, within `shutdown_drain_secs`; their uploads go on at the next start. A crash or
+  a kill loses the take being recorded (its key was only in memory; what is left on the disk can't
+  be read and is deleted at the next start); the bot then rejoins a call still running and the
+  conversation is told that a part is missing.
+- **Health:** `teamcraft-recorder healthcheck` checks the liveness file the bot rewrites every
+  10 s (`health.max_age_secs`, 120 s). Logs name conversations and calls, never what was said or a
+  file's name.
+- **Checking it by hand:** with the policy naming the bot, start a call in a channel the bot is in
+  from two apps. Within a few seconds both show "Recorded by" with the bot's name and play the
+  tone; the record buttons are disabled under `recorder_bot_only` and say why. Leave the call from
+  both: about `alone_timeout_secs` later the bot leaves, and a message "Recording of the call (…
+  min)" with an Ogg file appears in the channel; it plays both voices. The audit log shows the
+  bot's "Call recording started" and "stopped". Turn the policy off during a call: the bot stops
+  recording and leaves at once.
+
 ## Backup and restore
 
 ### PostgreSQL
@@ -818,7 +854,7 @@ bigger ones only download.
 2. Server and SFU with the same configuration and **the same secrets** (see below), including the
    settings key (`[secrets]`; without it the mail and calendar passwords set in the console must be
    entered again), identity provider reachable.
-3. Bridges and the notetaker: restore their database file (it holds the bot's keys) or re-enroll
+3. Bridges, the notetaker and the recorder bot: restore their database file (it holds the bot's keys) or re-enroll
    them with their passphrase (the bot's backup key is on the server, so a lost database is
    recoverable; a lost notetaker database also loses the transcript of a call in progress).
 4. Clients reconnect and run a full sync; devices whose rows were lost re-register.

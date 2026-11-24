@@ -461,6 +461,7 @@ call-tile-join = Beitreten
 # Call recording (#216, e2ee.md §8.3)
 call-recording-start = Aufnehmen
 call-recording-stop = Aufnahme beenden
+call-recording-bot-only = Deine Organisation nimmt Anrufe nur mit ihrem Aufnahme-Bot auf.
 call-recording-own = Aufnahme { $time }
 call-recording-by = Aufnahme durch { $names }
 call-recording-own-and-by = Aufnahme durch dich und { $names }

@@ -9,15 +9,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teamcraft_core::CallKeySigner;
-use teamcraft_crypto::call_binding::{CallBindingError, CallId as CryptoCallId, SignedCallKeyBinding};
-use teamcraft_media::audio_io::{AudioSink, AudioSource};
-use teamcraft_media::bwe::BweConfig;
-use teamcraft_media::call_auth::{CallBindingSigner, DeviceCallKeyAuthenticator};
-use teamcraft_media::call_engine::{AudioOrigin, CallEngineConfig, CallEngineEvent};
-use teamcraft_media::call_native::{JoinTicketSource, NativeCall, NativeCallConfig};
-use teamcraft_media::call_resilience::JoinTicket;
-use teamcraft_proto::{CallId, ConversationId, DeviceId, MediaCapabilities, NotetakerPolicy, UserId};
+pub use teamcraft_bot_runtime::call::CallAccess;
+use teamcraft_media::audio_io::AudioSink;
+use teamcraft_media::call_engine::{AudioOrigin, CallEngineEvent};
+use teamcraft_media::call_native::{NativeCall, NativeCallConfig};
+use teamcraft_proto::{CallId, ConversationId, DeviceId, NotetakerPolicy, UserId};
 use tokio::sync::{Semaphore, mpsc, watch};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -52,14 +48,6 @@ pub struct SessionLimits {
   pub max_call: Duration,
   pub alone: Duration,
   pub join: Duration,
-}
-
-/// How to reach the call: the prepared join and the keys.
-pub struct CallAccess {
-  pub ticket: JoinTicket,
-  pub signer: CallKeySigner,
-  pub devices: Vec<teamcraft_crypto::identity::VerifiedDevice>,
-  pub tickets: Arc<dyn JoinTicketSource>,
 }
 
 /// A running session, from the worker's side.
@@ -123,9 +111,6 @@ type Transcribed = (
   Option<UserId>,
   Result<crate::openrouter::Transcription, OpenRouterError>,
 );
-
-/// Signs this device's DAVE key with the device key the core holds.
-struct CoreSigner(CallKeySigner);
 
 /// The session's own state while it runs.
 struct Running {
@@ -439,52 +424,15 @@ impl Running {
 /// The native call: muted, audio frames to the session, only the conversation's verified devices
 /// trusted (e2ee.md §8).
 pub fn native_config(params: &SessionParams, access: CallAccess) -> Result<NativeCallConfig, String> {
-  let engine = CallEngineConfig {
-    user_id: params.user_id,
-    device_id: params.device_id,
-    // Audio only: the notetaker neither sends nor watches video.
-    capabilities: MediaCapabilities::default(),
-    bwe: BweConfig::default(),
-  };
-  let authenticator =
-    DeviceCallKeyAuthenticator::from_verified(Arc::new(CoreSigner(access.signer)), access.devices)
-      .map_err(|error| error.to_string())?;
-  let mut config =
-    NativeCallConfig::device_bound(access.ticket.sfu_url, access.ticket.token, engine, authenticator);
-  config.certificate_hashes = access.ticket.certificate_hashes;
-  config.source = AudioSource::Silence;
-  config.sink = AudioSink::Frames;
-  config.is_muted_at_start = true;
-  config.maybe_ticket_source = Some(access.tickets);
-  Ok(config)
-}
-
-impl CallBindingSigner for CoreSigner {
-  fn sign_call_key_binding(
-    &self,
-    call_id: CryptoCallId,
-    dave_public_key: &[u8],
-    not_after: u64,
-  ) -> Result<SignedCallKeyBinding, CallBindingError> {
-    self.0.sign_call_key_binding(call_id, dave_public_key, not_after)
-  }
+  teamcraft_bot_runtime::call::bot_call_config(params.user_id, params.device_id, access, AudioSink::Frames)
 }
 
 #[cfg(test)]
 mod tests {
-  use std::collections::HashMap;
-  use std::net::{Ipv6Addr, SocketAddr};
-
   use base64::Engine;
   use base64::engine::general_purpose::STANDARD;
-  use rand_core::OsRng;
-  use teamcraft_crypto::identity::{DeviceKeyPair, IdentityKeyPair};
-  use teamcraft_crypto::ids::{DeviceId as CryptoDeviceId, UserId as CryptoUserId};
-  use teamcraft_media::call_auth::CallKeyAuthenticator;
-  use teamcraft_sfu::auth::DevTokenVerifier;
-  use teamcraft_sfu::config::SfuConfig;
-  use teamcraft_sfu::server::{CALL_PATH, Sfu};
-  use wtransport::Identity;
+  use teamcraft_bot_runtime::test_call::{authenticators, call_config, start_sfu};
+  use teamcraft_media::audio_io::AudioSource;
 
   use super::*;
   use crate::test_support::{FakeOpenRouter, Reply};
@@ -506,11 +454,13 @@ mod tests {
     )])
     .await;
     let (port, certificate_hash) = start_sfu().await;
-    let mut authenticators = authenticators();
+    let mut authenticators = authenticators(&[SPEAKER, NOTETAKER]);
     let speaker = NativeCall::join(call_config(
       port,
       certificate_hash,
+      CALL,
       SPEAKER,
+      &[NOTETAKER],
       authenticators.remove(&SPEAKER).unwrap(),
     ))
     .await
@@ -518,7 +468,9 @@ mod tests {
     let mut config = call_config(
       port,
       certificate_hash,
+      CALL,
       NOTETAKER,
+      &[SPEAKER],
       authenticators.remove(&NOTETAKER).unwrap(),
     );
     config.source = AudioSource::Silence;
@@ -596,75 +548,6 @@ mod tests {
       prior: Transcript::default(),
       prior_elapsed: Duration::ZERO,
     }
-  }
-
-  fn call_config(
-    port: u16,
-    certificate_hash: [u8; 32],
-    device: u64,
-    authenticator: Arc<dyn CallKeyAuthenticator>,
-  ) -> NativeCallConfig {
-    let engine = CallEngineConfig {
-      user_id: id(device as i64),
-      device_id: id(device as i64),
-      capabilities: MediaCapabilities::default(),
-      bwe: BweConfig::default(),
-    };
-    let sfu_url = format!(
-      "https://{}{CALL_PATH}",
-      SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port)
-    );
-    let mut config = NativeCallConfig::new(sfu_url, format!("dev:{CALL}:{device}:{device}"), engine);
-    config.maybe_certificate_hash = Some(certificate_hash);
-    config.source = AudioSource::Tone {
-      frequency_hz: 220.0,
-      amplitude: 0.3,
-    };
-    config.sink = AudioSink::Discard;
-    let other = if device == SPEAKER { NOTETAKER } else { SPEAKER };
-    config.maybe_trusted_roster = Some(vec![id(other as i64)]);
-    config.maybe_authenticator = Some(authenticator);
-    config
-  }
-
-  /// Device-bound DAVE keys of both devices, each verifying the other's certificate.
-  fn authenticators() -> HashMap<u64, Arc<dyn CallKeyAuthenticator>> {
-    let mut key_pairs = Vec::new();
-    let mut verified = HashMap::new();
-    for device in [SPEAKER, NOTETAKER] {
-      let identity = IdentityKeyPair::generate(&mut OsRng);
-      let user = CryptoUserId::new(device);
-      let key_pair = DeviceKeyPair::generate(user, CryptoDeviceId::new(device), &mut OsRng);
-      let certificate = identity.certify_device(user, &key_pair.public_keys()).unwrap();
-      verified.insert(
-        id::<DeviceId>(device as i64),
-        certificate.verify(&identity.public_key()).unwrap(),
-      );
-      key_pairs.push((device, key_pair));
-    }
-    key_pairs
-      .into_iter()
-      .map(|(device, key_pair)| {
-        let authenticator: Arc<dyn CallKeyAuthenticator> = Arc::new(DeviceCallKeyAuthenticator::new(
-          Arc::new(key_pair),
-          verified.clone(),
-        ));
-        (device, authenticator)
-      })
-      .collect()
-  }
-
-  async fn start_sfu() -> (u16, [u8; 32]) {
-    let config = SfuConfig {
-      bind_addr: SocketAddr::from((Ipv6Addr::UNSPECIFIED, 0)),
-      ..SfuConfig::default()
-    };
-    let identity = Identity::self_signed(["localhost", "127.0.0.1", "::1"]).unwrap();
-    let sfu = Sfu::bind(config, identity, Arc::new(DevTokenVerifier)).unwrap();
-    let port = sfu.local_addr().unwrap().port();
-    let certificate_hash = *sfu.certificate_hash().as_ref();
-    tokio::spawn(sfu.run());
-    (port, certificate_hash)
   }
 
   fn id<T: std::str::FromStr>(raw: i64) -> T

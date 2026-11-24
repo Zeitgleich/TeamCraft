@@ -1,0 +1,36 @@
+[package]
+name = "teamcraft-bot-runtime"
+description = "What TeamCraft's headless call participants share: configuration, enrollment, join tickets, the gateway connection, liveness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+teamcraft-core = { path = "../teamcraft-core" }
+teamcraft-crypto = { path = "../teamcraft-crypto" }
+# The native call driver (WebTransport, DAVE, Opus): the bots are ordinary call participants.
+teamcraft-media = { path = "../teamcraft-media", features = ["native"] }
+teamcraft-proto.workspace = true
+base64.workspace = true
+# The posted texts in German and English, from Fluent files like the app's.
+fluent-bundle = "0.16"
+unic-langid = "0.9"
+secrecy.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+tracing.workspace = true
+# A real SFU in the same process with device-bound DAVE keys, for the bots' call tests.
+teamcraft-sfu = { path = "../teamcraft-sfu", optional = true }
+rand_core = { workspace = true, optional = true }
+wtransport = { version = "0.7.2", features = ["quinn", "self-signed"], optional = true }
+
+[features]
+# Helpers for the bots' tests: an in-process SFU and two devices' call keys.
+test-support = ["dep:teamcraft-sfu", "dep:rand_core", "dep:wtransport"]

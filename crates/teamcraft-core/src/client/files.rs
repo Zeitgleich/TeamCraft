@@ -420,6 +420,17 @@ pub enum TransferFailure {
   Intercepted,
 }
 
+/// A file on this device to send ([`Client::queue_staged_file`]).
+#[cfg(not(target_arch = "wasm32"))]
+pub struct StagedFile {
+  pub path: std::path::PathBuf,
+  pub file_name: String,
+  pub media_type: String,
+  pub size_bytes: u64,
+  /// The length of audio or video, for the player before it is downloaded.
+  pub maybe_duration_ms: Option<u64>,
+}
+
 /// A share link this user created (only its creator has the fragment).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredShareLink {
@@ -487,6 +498,48 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     save_pending_upload(&self.store, &pending)?;
     self.upload_pending().await?;
     self.flush_outbox().await?;
+    Ok(id)
+  }
+
+  /// Queues text with a file on this device's disk (a headless client's large file: the recorder
+  /// bot's call recording, #2273): the message is stored at once and sent after the file is
+  /// uploaded by [`Self::upload_pending`], which reads it in parts and keeps retrying, also across
+  /// restarts. A file in [`super::ClientSettings::maybe_upload_staging_dir`] is deleted once its
+  /// upload finished or failed for good. Nothing goes to the network here.
+  #[cfg(not(target_arch = "wasm32"))]
+  pub fn queue_staged_file(
+    &mut self,
+    conversation: ConversationId,
+    body: &str,
+    file: StagedFile,
+  ) -> Result<ClientMessageId, CoreError> {
+    let content = MessageContent::text(body, Vec::new());
+    let id = self.enqueue(conversation, None, content)?;
+    let pending = PendingUpload {
+      conversation_id: conversation,
+      client_message_id: id,
+      files: vec![PendingFile {
+        size_bytes: file.size_bytes,
+        file_name: file.file_name,
+        media_type: file.media_type,
+        source: UploadSource::Path {
+          path: file.path.to_string_lossy().into_owned(),
+        },
+        maybe_done: None,
+        maybe_failure: None,
+        maybe_slot: None,
+        maybe_parts: None,
+        retry: UploadRetry::default(),
+        maybe_thumbnail: None,
+        maybe_dimensions: None,
+        maybe_duration_ms: file.maybe_duration_ms,
+        maybe_waveform: None,
+        is_held: false,
+        role: FileRole::Attachment,
+      }],
+      purpose: UploadPurpose::Message,
+    };
+    save_pending_upload(&self.store, &pending)?;
     Ok(id)
   }
 

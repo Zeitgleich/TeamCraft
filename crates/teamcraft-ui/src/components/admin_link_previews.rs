@@ -49,8 +49,8 @@ pub fn LinkPreviewGroup(policy: PolicyDraft, errors: FormErrors) -> impl IntoVie
       text.set(current.domains.join("\n"));
     }
   });
-  // After a refused save, the error follows the input (forms.md).
-  Effect::new(move |_| errors.follow(draft.with(|policy| link_preview_errors(policy, i18n))));
+  // After a refused save the error follows the input (forms.md): the security form's own effect
+  // keeps all of its fields' errors, this one's with them.
 
   let set = move |next_choice: Choice, next_text: String| {
     choice.set(next_choice);

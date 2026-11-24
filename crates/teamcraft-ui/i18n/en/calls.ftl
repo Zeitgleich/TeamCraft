@@ -461,6 +461,7 @@ call-tile-join = Join
 # Call recording (#216, e2ee.md §8.3)
 call-recording-start = Record
 call-recording-stop = Stop recording
+call-recording-bot-only = Your organization records calls with its recorder only.
 call-recording-own = Recording { $time }
 call-recording-by = Recorded by { $names }
 call-recording-own-and-by = Recorded by you and { $names }

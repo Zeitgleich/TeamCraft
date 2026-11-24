@@ -80,6 +80,7 @@ pub async fn append(
     let document = check_policy_payload(request.payload.as_slice(), version)?;
     check_org_backgrounds_exist(state, &document.policy.call_backgrounds).await?;
     check_notetaker_bot(state, &document.policy.notetaker).await?;
+    check_recorder_bot(state, &document.policy.call_recording).await?;
     // The policy this entry follows, from the log, not this instance's cache: if another entry
     // is appended meanwhile, this append conflicts and nothing is audited.
     let previous = policy_at(state, request.expected_version).await?;
@@ -457,7 +458,8 @@ fn check_policy_payload(payload: &[u8], expected_new_version: u64) -> Result<Pol
   // understands (e2ee.md §8.3).
   if !policy.call_recording.is_valid() {
     return Err(ApiError::InvalidRequest(
-      "call_recording: unknown recorders or max_minutes out of range".into(),
+      "call_recording: unknown recorders, max_minutes out of range, or recorder_bot_only without its bot"
+        .into(),
     ));
   }
   Ok(document)
@@ -576,6 +578,25 @@ async fn check_notetaker_bot(
   if !maybe_user.is_some_and(|user| user.kind == teamcraft_proto::UserKind::Bot && !user.is_deactivated) {
     return Err(ApiError::InvalidRequest(
       "notetaker: the account is not an active bot account".into(),
+    ));
+  }
+  Ok(())
+}
+
+/// A named recorder bot (e2ee.md §8.3, #2273) is an active bot account. Clients trust only the
+/// signature; this keeps owners from publishing a recorder that can't sign in, or a person's
+/// account as the "bot".
+async fn check_recorder_bot(
+  state: &AppState,
+  recording: &teamcraft_proto::CallRecordingPolicy,
+) -> Result<(), ApiError> {
+  let Some(bot) = recording.maybe_bot else {
+    return Ok(());
+  };
+  let maybe_user = state.database.get_user(bot).await?;
+  if !maybe_user.is_some_and(|user| user.kind == teamcraft_proto::UserKind::Bot && !user.is_deactivated) {
+    return Err(ApiError::InvalidRequest(
+      "call_recording: the recorder bot is not an active bot account".into(),
     ));
   }
   Ok(())
