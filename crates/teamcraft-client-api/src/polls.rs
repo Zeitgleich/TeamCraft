@@ -159,11 +159,17 @@ impl PollView {
 }
 
 impl PollDraft {
-  /// The poll to send: question and options trimmed, empty option fields left out.
+  /// The poll to send: question and options trimmed, empty option fields left out. An anonymous
+  /// poll shows its counts only once closed, whatever the draft says (e2ee.md §4.12.1).
   pub fn spec(&self) -> PollSpec {
+    let results = if self.voters == PollVoters::Anonymous {
+      PollResults::AfterClose
+    } else {
+      self.results.clone()
+    };
     PollSpec {
       maybe_closes_at_ms: self.maybe_closes_at_ms,
-      results: self.results.clone(),
+      results,
       ..PollSpec::from_input(
         &self.question,
         &self.options,

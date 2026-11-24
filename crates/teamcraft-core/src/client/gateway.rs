@@ -852,6 +852,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
       GatewayEvent::KeyBagUpdate { .. } => Ok(()),
       // Another device of the user, or the server's release of one (docs/scheduled-messages.md).
+      GatewayEvent::BallotBoxChanged {
+        conversation_id,
+        message_id,
+        ballot_count,
+        is_closed,
+      } => {
+        self
+          .note_ballot_box_changed(conversation_id, message_id, ballot_count, is_closed)
+          .await
+      },
       #[cfg(feature = "ui")]
       GatewayEvent::ScheduledMessagesUpdate => {
         // Read by the upkeep, so that a burst of events costs one read.

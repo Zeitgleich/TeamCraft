@@ -76,6 +76,23 @@ pub enum PendingAction {
     target: ClientMessageId,
     is_pinned: bool,
   },
+  /// Opens the ballot box of the user's anonymous poll once it has its server ID (e2ee.md §4.12.1).
+  OpenBallotBox {
+    conversation: ConversationId,
+    poll: ClientMessageId,
+  },
+  /// The user's ballot in an anonymous poll, sealed when sent; no choices withdraw it. A newer
+  /// one replaces it in the queue.
+  Ballot {
+    conversation: ConversationId,
+    poll: ClientMessageId,
+    choices: Vec<u32>,
+  },
+  /// Closes an anonymous poll's ballot box.
+  CloseBallotBox {
+    conversation: ConversationId,
+    poll: ClientMessageId,
+  },
   /// The user's manual presence (do not disturb, invisible, automatic).
   Presence { request: SetPresenceRequest },
   /// The user's custom status (PLAN.md §4).
@@ -186,7 +203,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   pub async fn flush_pending_actions(&mut self) -> Result<usize, CoreError> {
     let outcome = self.flush_queue().await?;
     for (action, error) in outcome.refused {
-      if let PendingAction::CustomStatus { .. } = action {
+      if let PendingAction::CustomStatus { .. }
+      | PendingAction::Ballot { .. }
+      | PendingAction::CloseBallotBox { .. } = action
+      {
         self.background_failures.push(CoreError::Api(error));
       }
     }
@@ -424,6 +444,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         Ok(None) => return Attempt::Sent,
         Err(error) => return Attempt::Unreachable(error.into()),
       },
+      PendingAction::OpenBallotBox { .. }
+      | PendingAction::Ballot { .. }
+      | PendingAction::CloseBallotBox { .. } => {
+        match self.send_ballot_action(action).await {
+          Ok(Some(())) => Ok(()),
+          // The poll is still in the outbox: the action follows once it has its server ID.
+          Ok(None) => return Attempt::Waiting,
+          // The sender's device hasn't opened the box yet: tried again later, like server trouble.
+          Err(error) if error.error_code() == Some(&teamcraft_proto::ErrorCode::BallotBoxNotFound) => {
+            return Attempt::ServerTrouble(error);
+          },
+          Err(error) => Err(error),
+        }
+      },
       PendingAction::Presence { request } => self.api.set_presence(request).await,
       PendingAction::CustomStatus { change } => {
         let maybe_request = match change {
@@ -468,6 +502,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// What follows a refused action: the custom status shown at once goes back to the server's.
   /// Failures here are not the action's: logged only.
   async fn after_refused(&mut self, action: &PendingAction) {
+    self.after_ballot_action(action).await;
     if let PendingAction::CustomStatus { .. } = action {
       let me = self.account.user_id;
       if let Err(error) = self.refresh_presence(&[me]).await {
@@ -476,8 +511,23 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
   }
 
+  /// After a ballot action went out or was refused: the box is read again, so the screens show
+  /// the server's state (the user's own choice included).
+  async fn after_ballot_action(&mut self, action: &PendingAction) {
+    if let PendingAction::OpenBallotBox { conversation, poll }
+    | PendingAction::Ballot {
+      conversation, poll, ..
+    }
+    | PendingAction::CloseBallotBox { conversation, poll } = action
+      && let Err(error) = self.refresh_ballot_box(*conversation, *poll).await
+    {
+      tracing::debug!(%error, "ballot box not read again after a ballot action");
+    }
+  }
+
   /// What follows a sent action. Failures here are not the action's: logged only.
   async fn after_sent(&mut self, action: &PendingAction) {
+    self.after_ballot_action(action).await;
     if let PendingAction::ReadPosition { conversation, .. } = action
       && let Err(error) = self.refresh_conversation(*conversation).await
     {
@@ -503,6 +553,11 @@ impl PendingAction {
       Self::ServerPin {
         conversation, target, ..
       } => format!("pin/{conversation}/{target}"),
+      Self::OpenBallotBox { conversation, poll } => format!("ballot_box/{conversation}/{poll}"),
+      Self::Ballot {
+        conversation, poll, ..
+      } => format!("ballot/{conversation}/{poll}"),
+      Self::CloseBallotBox { conversation, poll } => format!("ballot_close/{conversation}/{poll}"),
       Self::Presence { .. } => "presence".to_owned(),
       Self::CustomStatus { .. } => "custom_status".to_owned(),
       Self::Unknown => "unknown".to_owned(),
@@ -517,6 +572,9 @@ impl PendingAction {
       Self::ReactionsSeen { .. } => "reactions_seen",
       Self::Acknowledge { .. } => "acknowledge",
       Self::ServerPin { .. } => "server_pin",
+      Self::OpenBallotBox { .. } => "open_ballot_box",
+      Self::Ballot { .. } => "ballot",
+      Self::CloseBallotBox { .. } => "close_ballot_box",
       Self::Presence { .. } => "presence",
       Self::CustomStatus { .. } => "custom_status",
       Self::Unknown => "unknown",

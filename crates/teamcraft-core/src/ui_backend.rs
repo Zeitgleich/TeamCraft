@@ -229,6 +229,8 @@ pub enum CoreCommand {
   DeleteStickerPack {
     pack: teamcraft_proto::StickerPackKey,
   },
+  /// Opening, voting in, closing or reading an anonymous poll's ballot box (e2ee.md §4.12.1).
+  Ballot(crate::client::BallotCommand),
   /// The server's pin flag (the encrypted pin message is already in the outbox).
   SetServerPin {
     conversation: ConversationId,
@@ -747,6 +749,7 @@ impl CoreCommand {
       | Self::AddBackground { .. }
       | Self::DeleteBackground { .. }
       | Self::SetServerPin { .. }
+      | Self::Ballot(_)
       | Self::Acknowledge { .. }
       | Self::MarkUnread { .. }
       | Self::MarkReadThrough { .. }
@@ -2138,18 +2141,54 @@ impl<S: LocalStore> CoreChatBackend<S> {
       group_mentions: crate::group_mentions::shown_group_mentions(&stored.content),
       custom_emoji: shown_custom_emoji(&stored.content),
       mentions_me: matches!(&stored.content, MessageContent::Text { mentions, .. } if mentions.contains(&self.me)),
-      maybe_poll: crate::polls::poll_of(stored).map(|spec| {
-        Box::new(crate::polls::tally(
-          stored,
-          spec,
-          relations.reactions_to(stored.client_message_id),
-          self.me,
-          &self.poll_moderators(stored.conversation_id),
-          self.now_ms(),
-        ))
-      }),
+      maybe_poll: crate::polls::poll_of(stored).map(|spec| Box::new(self.poll_view(stored, spec, relations))),
       maybe_sticker: shown_sticker(&stored.content),
     }
+  }
+
+  /// The poll `stored` (whose spec is `spec`) as the user sees it: a named poll counted from the
+  /// votes this device holds, an anonymous one from what it last read of its ballot box (asked for
+  /// once when it read nothing yet, e2ee.md §4.12.1).
+  fn poll_view(
+    &self,
+    stored: &StoredMessage,
+    spec: &teamcraft_proto::PollSpec,
+    relations: &Relations<'_>,
+  ) -> teamcraft_client_api::polls::PollView {
+    let moderators = self.poll_moderators(stored.conversation_id);
+    if crate::polls::anonymous_poll_of(stored).is_none() {
+      return crate::polls::tally(
+        stored,
+        spec,
+        relations.reactions_to(stored.client_message_id),
+        self.me,
+        &moderators,
+        self.now_ms(),
+      );
+    }
+    let maybe_box = self
+      .read(
+        crate::polls::stored_ballot_box(&self.store, stored.conversation_id, stored.client_message_id)
+          .map(Some),
+      )
+      .flatten();
+    // Read once when nothing was read yet, and when the closing time passed but this device
+    // hasn't seen the box closed: the ballots come with the close.
+    let is_close_unseen = spec
+      .maybe_closes_at_ms
+      .is_some_and(|closes_at| closes_at <= self.now_ms())
+      && maybe_box.as_ref().is_some_and(|record| !record.is_closed);
+    if (maybe_box.is_none() || is_close_unseen) && stored.maybe_server_id.is_some() {
+      self.request_ballot_box(stored.conversation_id, stored.client_message_id);
+    }
+    crate::polls::anonymous_tally(
+      stored,
+      spec,
+      maybe_box.as_ref(),
+      self.me,
+      &moderators,
+      self.now_ms(),
+    )
   }
 
   /// The newest rows of a conversation's feed down to `maybe_oldest` (the oldest row a list

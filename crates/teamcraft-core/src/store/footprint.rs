@@ -84,8 +84,17 @@ impl MessageMeta {
         + poll.options.capacity() * size_of::<String>()
         + poll.options.iter().map(String::len).sum::<usize>()
     });
+    let anonymous_poll = self.maybe_anonymous_poll.as_ref().map_or(0, |poll| {
+      size_of::<crate::anonymous_poll::AnonymousPoll>()
+        + poll.spec.question.len()
+        + poll.spec.options.capacity() * size_of::<String>()
+        + poll.spec.options.iter().map(String::len).sum::<usize>()
+    });
     self.maybe_reply_to.as_ref().map_or(0, ReplyRef::heap_bytes)
-      + self.maybe_forwarded.as_ref().map_or(0, Forwarded::heap_bytes)
+      + self
+        .maybe_forwarded
+        .as_ref()
+        .map_or(0, |forwarded| size_of::<Forwarded>() + forwarded.heap_bytes())
       + self.attachments.capacity() * size_of::<AttachmentRef>()
       + self
         .attachments
@@ -101,6 +110,7 @@ impl MessageMeta {
       + imported
       + source
       + poll
+      + anonymous_poll
   }
 }
 

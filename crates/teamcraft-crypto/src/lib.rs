@@ -33,6 +33,7 @@ pub mod membership;
 pub mod message;
 pub mod mls;
 pub mod org_recovery;
+pub mod poll_ballot;
 pub mod push;
 pub mod push_gateway;
 pub mod recovery_key;

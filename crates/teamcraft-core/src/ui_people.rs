@@ -11,7 +11,7 @@ use teamcraft_client_api::calls::{CallDirection, CallHistoryItem};
 use teamcraft_client_api::list_load::{ListLoad, LoadingList};
 use teamcraft_client_api::model::{ConversationId, TimestampMs, User, UserId};
 use teamcraft_client_api::privacy::PrivacySettings;
-use teamcraft_proto::{CallHistoryEntry, ListConversationMembersResponse};
+use teamcraft_proto::{CallHistoryEntry, ClientMessageId, ListConversationMembersResponse};
 
 use crate::client::devices::{OWN_DEVICES_KEY, OwnDevicesRecord};
 use crate::client::people::{
@@ -51,6 +51,9 @@ pub(crate) struct RequestLog {
   anchors: HashMap<ConversationId, i64>,
   /// Channels whose strict view was made afresh, bounded like the searches.
   stricts: HashMap<ConversationId, i64>,
+  /// Ballot boxes of anonymous polls asked for because this device read none yet, bounded like
+  /// the searches.
+  ballot_boxes: HashMap<(ConversationId, ClientMessageId), i64>,
 }
 
 /// How long a channel's anchor, verified again for the marks, isn't verified again: it fetches
@@ -312,6 +315,25 @@ impl<S: LocalStore> CoreChatBackend<S> {
       remember_search(&mut log.members, conversation, now);
       drop(log);
       self.command(CoreCommand::RefreshMembers { conversation });
+    }
+  }
+
+  /// Reads the ballot box of the anonymous poll `poll` (once per [`RETRY_AFTER_MS`]): the poll
+  /// shows and this device read nothing of it yet (e2ee.md §4.12.1).
+  pub(crate) fn request_ballot_box(&self, conversation: ConversationId, poll: ClientMessageId) {
+    let now = self.now_ms();
+    let mut log = self.requests.borrow_mut();
+    let is_due = log
+      .ballot_boxes
+      .get(&(conversation, poll))
+      .is_none_or(|requested| now - requested > RETRY_AFTER_MS);
+    if is_due {
+      remember_search(&mut log.ballot_boxes, (conversation, poll), now);
+      drop(log);
+      self.command(CoreCommand::Ballot(crate::client::BallotCommand::Refresh {
+        conversation,
+        poll,
+      }));
     }
   }
 

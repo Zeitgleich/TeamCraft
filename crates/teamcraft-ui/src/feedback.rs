@@ -234,6 +234,8 @@ pub fn failure_message_key(failure: &ActionFailure) -> &'static str {
       ErrorCode::ScheduledMessagesDisabled => "schedule-refused-off",
       ErrorCode::ScheduledMessageLimit => "schedule-refused-limit",
       ErrorCode::ScheduledTimeInvalid => "schedule-refused-past",
+      ErrorCode::PollClosed => "poll-error-closed",
+      ErrorCode::BallotBoxNotFound => "poll-error-box-missing",
       ErrorCode::CallNotFound => "error-call-not-running",
       ErrorCode::MeetingNotFound => "error-meeting-gone",
       // All `*_not_found` codes, including ones this version doesn't know yet.

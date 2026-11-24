@@ -61,6 +61,7 @@ pub mod org_backgrounds;
 pub mod org_recovery;
 pub mod permission_scheme;
 pub mod personal_data;
+pub mod poll_ballots;
 pub mod presence;
 pub mod profiles;
 pub mod provider_avatars;

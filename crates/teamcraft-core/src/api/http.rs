@@ -1590,6 +1590,64 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
       .await
   }
 
+  async fn open_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    request: &teamcraft_proto::OpenBallotBoxRequest,
+  ) -> Result<(), ApiError> {
+    self
+      .send_without_response(
+        Method::PUT,
+        &format!("/conversations/{conversation}/messages/{message}/ballot-box"),
+        Some(request),
+      )
+      .await
+  }
+
+  async fn ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    self
+      .get(&format!(
+        "/conversations/{conversation}/messages/{message}/ballot-box"
+      ))
+      .await
+  }
+
+  async fn set_ballot(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_request: Option<&teamcraft_proto::CastBallotRequest>,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    let path = format!("/conversations/{conversation}/messages/{message}/ballot-box/ballot");
+    match maybe_request {
+      Some(request) => self.send_json(Method::PUT, &path, request).await,
+      None => {
+        self
+          .send_json(Method::DELETE, &path, &serde_json::json!({}))
+          .await
+      },
+    }
+  }
+
+  async fn close_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> Result<teamcraft_proto::BallotBoxResponse, ApiError> {
+    self
+      .send_json(
+        Method::POST,
+        &format!("/conversations/{conversation}/messages/{message}/ballot-box/close"),
+        &serde_json::json!({}),
+      )
+      .await
+  }
+
   async fn set_message_pinned(
     &self,
     conversation: ConversationId,

@@ -181,6 +181,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         target,
         is_pinned,
       } => self.set_server_pin(conversation, target, is_pinned).await,
+      CoreCommand::Ballot(command) => self.ballot_command(command).await,
       CoreCommand::Acknowledge {
         conversation,
         message,

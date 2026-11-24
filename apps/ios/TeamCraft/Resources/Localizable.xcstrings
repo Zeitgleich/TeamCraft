@@ -24913,6 +24913,86 @@
         }
       }
     },
+    "poll_anonymous": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anonymous"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Anonym"
+          }
+        }
+      }
+    },
+    "poll_anonymous_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nobody in the conversation, you included, sees who voted for what. The server knows who voted, not what. Results show when the poll closes."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Niemand in der Unterhaltung, auch du nicht, sieht, wer wofür gestimmt hat. Der Server weiß, wer abgestimmt hat, aber nicht wofür. Die Ergebnisse erscheinen, wenn die Umfrage endet."
+          }
+        }
+      }
+    },
+    "poll_voters": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Who sees the votes"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wer die Stimmen sieht"
+          }
+        }
+      }
+    },
+    "poll_voters_shown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Show who voted"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zeigen, wer abgestimmt hat"
+          }
+        }
+      }
+    },
+    "poll_voters_shown_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everybody sees who chose each option."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle sehen, wer welche Option gewählt hat."
+          }
+        }
+      }
+    },
     "poll_hide_voters": {
       "localizations": {
         "en": {

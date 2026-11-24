@@ -682,6 +682,32 @@ pub trait ServerApi {
     message: MessageId,
     is_pinned: bool,
   ) -> impl Future<Output = Result<(), ApiError>>;
+  /// Opens the ballot box of the user's anonymous poll `message` (e2ee.md §4.12.1).
+  fn open_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    request: &teamcraft_proto::OpenBallotBoxRequest,
+  ) -> impl Future<Output = Result<(), ApiError>>;
+  /// The ballot box of the anonymous poll `message` as the user sees it.
+  fn ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>>;
+  /// Hands in the user's sealed ballot, replacing an earlier one, or withdraws it with `None`.
+  fn set_ballot(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+    maybe_request: Option<&teamcraft_proto::CastBallotRequest>,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>>;
+  /// Closes the ballot box of the anonymous poll `message`.
+  fn close_ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>>;
   /// Confirms having read a message that asked for acknowledgement.
   fn acknowledge_message(
     &self,

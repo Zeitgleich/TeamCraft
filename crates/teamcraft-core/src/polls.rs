@@ -22,8 +22,12 @@
 use std::collections::{BTreeSet, HashMap};
 
 use teamcraft_client_api::polls::{PollOptionView, PollView};
-use teamcraft_proto::{ClientMessageId, Id, PollLimits, PollSpec, UserId};
+use teamcraft_proto::{ClientMessageId, Id, PollLimits, PollResults, PollSpec, PollVoters, UserId};
 
+pub use crate::anonymous_poll::{
+  AnonymousPoll, BallotBoxRecord, anonymous_poll_of, ballot_scope, count_ballots, counted_ballot_box,
+  store_ballot_box, stored_ballot_box,
+};
 use crate::store::{LocalStore, MessageContent, MessageOrder, StoreError, StoredMessage};
 
 /// The poll limits in force: what the server published, or the built-in ones. See
@@ -33,14 +37,22 @@ pub fn stored_limits(store: &impl LocalStore) -> PollLimits {
 }
 
 /// The poll `message` carries, if it is one this device counts: a readable text message with a
-/// poll within the bounds every receiver applies. Anything else shows as its text.
+/// poll within the bounds every receiver applies, named (`poll`) or anonymous (`anonymous_poll`,
+/// [`anonymous_poll_of`]). Anything else shows as its text. A named poll claiming to be anonymous
+/// isn't one: it has no ballot key, and its signed votes would name their voters.
 pub fn poll_of(message: &StoredMessage) -> Option<&PollSpec> {
   if message.maybe_unreadable.is_some() {
     return None;
   }
-  match &message.content {
-    MessageContent::Text { meta, .. } => meta.maybe_poll.as_deref().filter(|spec| spec.is_receivable()),
-    _ => None,
+  let MessageContent::Text { meta, .. } = &message.content else {
+    return None;
+  };
+  match (&meta.maybe_poll, &meta.maybe_anonymous_poll) {
+    (Some(spec), _) => {
+      Some(spec.as_ref()).filter(|spec| spec.is_receivable() && spec.voters != PollVoters::Anonymous)
+    },
+    (None, Some(anonymous)) => anonymous.counted_spec(),
+    (None, None) => None,
   }
 }
 
@@ -114,6 +126,58 @@ pub fn tally<'a>(
     are_results_shown,
     maybe_closes_at_ms: spec.maybe_closes_at_ms,
     voter_count: u32::try_from(votes.len()).unwrap_or(u32::MAX),
+    is_closed,
+    is_mine: poll.sender_user_id == me,
+    can_close: poll.sender_user_id == me || moderators.contains(&me),
+  }
+}
+
+/// The anonymous poll `poll` as `me` sees it at `now_ms`, from what this device read of its box.
+/// Counts only once the box is closed; never any names.
+pub fn anonymous_tally(
+  poll: &StoredMessage,
+  spec: &PollSpec,
+  maybe_box: Option<&BallotBoxRecord>,
+  me: UserId,
+  moderators: &BTreeSet<UserId>,
+  now_ms: i64,
+) -> PollView {
+  let record = maybe_box.cloned().unwrap_or_default();
+  let is_past_closing = spec
+    .maybe_closes_at_ms
+    .is_some_and(|closes_at| closes_at <= now_ms);
+  let is_closed = record.is_closed || is_past_closing;
+  let are_results_shown = record.is_closed && record.maybe_counts.is_some();
+  let counts = record.maybe_counts.clone().unwrap_or_default();
+  let options = spec
+    .options
+    .iter()
+    .enumerate()
+    .map(|(at, text)| PollOptionView {
+      text: text.clone(),
+      count: if are_results_shown {
+        counts.get(at).copied().unwrap_or(0)
+      } else {
+        0
+      },
+      is_chosen: u32::try_from(at).is_ok_and(|at| record.my_choices.contains(&at)),
+      voters: Vec::new(),
+    })
+    .collect();
+  PollView {
+    question: spec.question.clone(),
+    options,
+    // A vote before the sender's device opened the box waits in the queue until it is open.
+    choice: spec.choice.clone(),
+    voters: PollVoters::Anonymous,
+    results: PollResults::AfterClose,
+    are_results_shown,
+    maybe_closes_at_ms: spec.maybe_closes_at_ms,
+    voter_count: if are_results_shown {
+      record.counted
+    } else {
+      record.ballot_count
+    },
     is_closed,
     is_mine: poll.sender_user_id == me,
     can_close: poll.sender_user_id == me || moderators.contains(&me),
@@ -621,6 +685,14 @@ mod tests {
       let mut message = poll(PollChoice::Single, PollVoters::Shown);
       message.content = MessageContent::Deleted;
       assert!(poll_of(&message).is_none());
+    }
+
+    #[test]
+    fn a_named_poll_claiming_to_be_anonymous_is_none() {
+      // It has no ballot key, and its signed votes would name their voters (e2ee.md §4.12.1).
+      let message = poll(PollChoice::Single, PollVoters::Anonymous);
+      assert!(poll_of(&message).is_none());
+      assert!(anonymous_poll_of(&message).is_none());
     }
   }
 

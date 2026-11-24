@@ -208,13 +208,27 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// Votes in the poll `poll` for the options at `choices`, replacing the user's earlier vote; none
-  /// withdraws it. Like a reaction, an encrypted message the conversation's devices count.
+  /// withdraws it. Like a reaction, an encrypted message the conversation's devices count; in an
+  /// anonymous poll a sealed ballot queued for its box instead (the poll's ID is returned then).
   pub async fn vote_in_poll(
     &mut self,
     conversation: ConversationId,
     poll: ClientMessageId,
     choices: Vec<u32>,
   ) -> Result<ClientMessageId, CoreError> {
+    // e2ee.md §4.12.1: never a signed vote in an anonymous poll; its ballot goes to the box.
+    if let Some(stored) = self.store.message(conversation, poll)?
+      && crate::anonymous_poll::anonymous_poll_of(&stored).is_some()
+    {
+      self
+        .queue_action(super::PendingAction::Ballot {
+          conversation,
+          poll,
+          choices,
+        })
+        .await?;
+      return Ok(poll);
+    }
     let content = MessageContent::PollVote {
       target: poll,
       choices,
@@ -230,6 +244,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     poll: ClientMessageId,
   ) -> Result<ClientMessageId, CoreError> {
+    if let Some(stored) = self.store.message(conversation, poll)?
+      && crate::anonymous_poll::anonymous_poll_of(&stored).is_some()
+    {
+      self
+        .queue_action(super::PendingAction::CloseBallotBox { conversation, poll })
+        .await?;
+      return Ok(poll);
+    }
     let id = self.enqueue(conversation, None, MessageContent::PollClose { target: poll })?;
     self.flush_outbox().await?;
     Ok(id)

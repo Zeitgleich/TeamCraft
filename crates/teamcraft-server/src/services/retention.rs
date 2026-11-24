@@ -162,6 +162,10 @@ pub async fn run_once(state: &AppState, now: OffsetDateTime) -> Result<Retention
 
   // Withdrawals a hold kept, where it was released since (data-export.md §4.2).
   report.held_deletions_applied = super::legal_hold::apply_pending_deletions(state).await?;
+  // e2ee.md §4.12.1: ballot boxes whose closing time passed close here at the latest.
+  if let Err(error) = super::poll_ballots::close_due(state, now).await {
+    warn!(%error, "closing due ballot boxes failed");
+  }
   let dropped = state.database.drop_empty_message_partitions(now).await?;
   report.partitions_dropped = dropped.len() as u64;
   state

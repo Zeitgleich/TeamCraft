@@ -802,6 +802,40 @@ impl<A: ServerApi> ServerApi for ReadOnlyApi<A> {
     self.inner.list_messages(conversation, query)
   }
 
+  fn open_ballot_box(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    _request: &teamcraft_proto::OpenBallotBoxRequest,
+  ) -> impl Future<Output = Result<(), ApiError>> {
+    self.refused("open_ballot_box")
+  }
+
+  fn ballot_box(
+    &self,
+    conversation: ConversationId,
+    message: MessageId,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>> {
+    self.inner.ballot_box(conversation, message)
+  }
+
+  fn set_ballot(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+    _maybe_request: Option<&teamcraft_proto::CastBallotRequest>,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>> {
+    self.refused("set_ballot")
+  }
+
+  fn close_ballot_box(
+    &self,
+    _conversation: ConversationId,
+    _message: MessageId,
+  ) -> impl Future<Output = Result<teamcraft_proto::BallotBoxResponse, ApiError>> {
+    self.refused("close_ballot_box")
+  }
+
   fn set_message_pinned(
     &self,
     _conversation: ConversationId,

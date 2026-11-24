@@ -11,6 +11,7 @@ mod admin_joins;
 mod attachments;
 mod attested;
 mod backgrounds;
+mod ballots;
 pub mod bug_reports;
 mod call_lines;
 mod calls;
@@ -29,6 +30,8 @@ mod enroll;
 pub mod files;
 mod first_sync;
 mod gateway;
+#[cfg(feature = "ui")]
+pub use ballots::BallotCommand;
 pub use gateway::EventTimer;
 mod group_health;
 mod groups;

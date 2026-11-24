@@ -345,6 +345,267 @@ mod older_versions {
   }
 }
 
+/// Anonymous polls (issue #2121, e2ee.md §4.12.1): ballots go sealed to the server's ballot box,
+/// never as messages, and count only once the box is closed.
+mod anonymous {
+  use teamcraft_proto::{Base64Bytes, CastBallotRequest, MessageId};
+
+  use super::*;
+
+  impl Team {
+    /// Every UI shows the poll and does what showing it asked for (reading the box).
+    async fn look(&mut self) {
+      let channel = self.channel;
+      for peer in [&mut self.alice, &mut self.bob, &mut self.carol] {
+        let ui = backend_of(peer);
+        let _ = poll_message(peer, channel);
+        run_commands(peer, &ui).await;
+      }
+      self.settle().await;
+    }
+
+    async fn alice_closes(&mut self, poll: &Message) {
+      let alice_ui = backend_of(&self.alice);
+      alice_ui.close_poll(self.channel, poll.id);
+      run_commands(&mut self.alice, &alice_ui).await;
+      self.settle().await;
+      self.look().await;
+    }
+
+    /// The poll's server ID, which the ballot box goes by.
+    fn poll_server_id(&self) -> MessageId {
+      let id = poll_id(&self.alice, self.channel);
+      self
+        .alice
+        .store
+        .message(self.channel, id)
+        .unwrap()
+        .unwrap()
+        .maybe_server_id
+        .unwrap()
+    }
+  }
+
+  #[tokio::test]
+  async fn ballots_count_once_closed_and_name_nobody() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    t.vote(Who::Bob, &poll, &[0]).await;
+    t.vote(Who::Carol, &poll, &[1]).await;
+    t.vote(Who::Bob, &poll, &[1]).await;
+    t.look().await;
+
+    let [alice, bob, carol] = t.views();
+    for view in [&alice, &bob, &carol] {
+      assert_eq!(view.voters, PollVoters::Anonymous);
+      assert_eq!(view.results, PollResults::AfterClose);
+      assert_eq!(view.voter_count, 2, "the count of ballots shows while open");
+      assert!(!view.are_results_shown);
+      assert_eq!(counts(view), [0, 0, 0]);
+      assert!(view.can_vote());
+    }
+    assert!(bob.options[1].is_chosen && !bob.options[0].is_chosen);
+    assert!(carol.options[1].is_chosen);
+    assert!(alice.options.iter().all(|option| !option.is_chosen));
+    for peer in [&t.alice, &t.bob, &t.carol] {
+      assert!(
+        !stored_kinds(peer, t.channel).contains(&"poll_vote"),
+        "no vote travels as a message naming its sender"
+      );
+    }
+
+    t.alice_closes(&poll).await;
+    let [alice, bob, carol] = t.views();
+    for view in [&alice, &bob, &carol] {
+      assert!(view.is_closed && !view.can_vote());
+      assert!(view.are_results_shown);
+      assert_eq!(counts(view), [0, 2, 0]);
+      assert_eq!(view.voter_count, 2);
+      assert!(view.options.iter().all(|option| option.voters.is_empty()));
+    }
+    assert!(
+      bob.options[1].is_chosen,
+      "the own choice stays after the server forgot it"
+    );
+  }
+
+  #[tokio::test]
+  async fn the_server_holds_sealed_ballots_without_choices_and_hands_them_out_only_closed() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    t.vote(Who::Bob, &poll, &[2]).await;
+    let server_id = t.poll_server_id();
+
+    let as_carol = t
+      .carol
+      .client
+      .api()
+      .ballot_box(t.channel, server_id)
+      .await
+      .unwrap();
+    assert_eq!(as_carol.ballot_count, 1);
+    assert!(
+      as_carol.maybe_mine.is_none() && as_carol.ballots.is_empty(),
+      "no ballot while open"
+    );
+    let as_bob = t.bob.client.api().ballot_box(t.channel, server_id).await.unwrap();
+    let mine = as_bob.maybe_mine.unwrap();
+    assert_eq!(mine.as_ref().len(), teamcraft_crypto::poll_ballot::BALLOT_LEN);
+
+    let stored = t
+      .alice
+      .client
+      .api()
+      .list_messages(t.channel, &ListMessagesQuery::default())
+      .await
+      .unwrap()
+      .messages;
+    let as_json = serde_json::to_string(&stored).unwrap();
+    for plain in [QUESTION, OPTIONS[0], "anonymous", "ballot_key", "choices"] {
+      assert!(!as_json.contains(plain), "the server saw {plain:?}");
+    }
+
+    t.alice_closes(&poll).await;
+    let closed = t
+      .carol
+      .client
+      .api()
+      .ballot_box(t.channel, server_id)
+      .await
+      .unwrap();
+    assert!(closed.is_closed);
+    assert_eq!(closed.ballots, vec![mine]);
+    let bob_after = t.bob.client.api().ballot_box(t.channel, server_id).await.unwrap();
+    assert!(
+      bob_after.maybe_mine.is_none(),
+      "closing forgets whose ballot is whose"
+    );
+  }
+
+  #[tokio::test]
+  async fn forged_and_replayed_ballots_do_not_count() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    t.vote(Who::Bob, &poll, &[0]).await;
+    let server_id = t.poll_server_id();
+    let bobs = t
+      .bob
+      .client
+      .api()
+      .ballot_box(t.channel, server_id)
+      .await
+      .unwrap()
+      .maybe_mine
+      .unwrap();
+    // A modified client of Carol's hands in a copy of Bob's ballot, then Alice one with flipped
+    // bits: the server takes both (it can't read them), nobody counts them.
+    let replay = CastBallotRequest { ballot: bobs.clone() };
+    t.carol
+      .client
+      .api()
+      .set_ballot(t.channel, server_id, Some(&replay))
+      .await
+      .unwrap();
+    let mut tampered = bobs.as_ref().to_vec();
+    tampered[30] ^= 1;
+    let forged = CastBallotRequest {
+      ballot: Base64Bytes::from(tampered),
+    };
+    t.alice
+      .client
+      .api()
+      .set_ballot(t.channel, server_id, Some(&forged))
+      .await
+      .unwrap();
+    t.settle().await;
+
+    t.alice_closes(&poll).await;
+    for view in t.views() {
+      assert_eq!(counts(&view), [1, 0, 0]);
+      assert_eq!(view.voter_count, 1, "the copy and the forgery count nowhere");
+    }
+  }
+
+  #[tokio::test]
+  async fn each_person_has_one_ballot_however_often_they_vote() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    for choice in [0, 1, 2, 1] {
+      t.vote(Who::Bob, &poll, &[choice]).await;
+    }
+    t.vote(Who::Carol, &poll, &[2]).await;
+    t.vote(Who::Carol, &poll, &[]).await;
+    t.alice_closes(&poll).await;
+    for view in t.views() {
+      assert_eq!(counts(&view), [0, 1, 0]);
+      assert_eq!(view.voter_count, 1, "a withdrawn ballot is gone");
+    }
+  }
+
+  #[tokio::test]
+  async fn a_ballot_after_closing_is_refused_and_the_user_hears_of_it() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    t.vote(Who::Bob, &poll, &[0]).await;
+    t.alice_closes(&poll).await;
+    // The app offers no vote any more; a modified client queues one anyway.
+    let target = poll_id(&t.carol, t.channel);
+    t.carol
+      .client
+      .vote_in_poll(t.channel, target, vec![1])
+      .await
+      .unwrap();
+    t.settle().await;
+    let failures = t.carol.client.take_background_failures();
+    assert!(
+      failures.iter().any(|error| error.to_string().contains("closed")),
+      "{failures:?}"
+    );
+    t.look().await;
+    for view in t.views() {
+      assert_eq!(counts(&view), [1, 0, 0]);
+    }
+  }
+
+  #[tokio::test]
+  async fn only_the_creator_closes_the_box() {
+    let mut t = team().await;
+    let poll = t.alice_polls(PollVoters::Anonymous).await;
+    t.look().await;
+    t.vote(Who::Bob, &poll, &[0]).await;
+    let target = poll_id(&t.bob, t.channel);
+    t.bob.client.close_poll(t.channel, target).await.unwrap();
+    t.settle().await;
+    t.look().await;
+    for view in t.views() {
+      assert!(!view.is_closed);
+      assert!(!view.are_results_shown);
+    }
+  }
+
+  #[tokio::test]
+  async fn the_poll_travels_where_versions_knowing_only_named_polls_show_its_text() {
+    let mut t = team().await;
+    let _ = t.alice_polls(PollVoters::Anonymous).await;
+    let id = poll_id(&t.bob, t.channel);
+    let stored = t.bob.store.message(t.channel, id).unwrap().unwrap();
+    let json = serde_json::to_value(&stored.content).unwrap();
+    assert!(json["meta"].get("poll").is_none(), "{json}");
+    assert_eq!(json["meta"]["anonymous_poll"]["voters"], "anonymous");
+    assert_eq!(json["meta"]["anonymous_poll"]["results"], "after_close");
+    assert!(json["meta"]["anonymous_poll"]["ballot_key"].is_string());
+    let MessageContent::Text { body, .. } = &stored.content else {
+      panic!("a poll is a text message");
+    };
+    assert!(body.contains(QUESTION) && body.contains("Update TeamCraft"));
+  }
+}
+
 /// The newest poll of `conversation` as `peer`'s UI shows it.
 fn poll_message(peer: &Peer, conversation: ConversationId) -> Message {
   backend_of(peer)

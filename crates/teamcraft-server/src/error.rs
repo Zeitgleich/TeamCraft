@@ -68,6 +68,9 @@ pub enum ApiError {
   /// The time of a scheduled message has passed or lies beyond the horizon.
   #[error("invalid time: {0}")]
   ScheduledTimeInvalid(String),
+  /// The anonymous poll is closed: its ballot box takes no ballot (e2ee.md §4.12.1).
+  #[error("the poll is closed")]
+  PollClosed,
   /// Compare-and-swap on a versioned object failed.
   #[error("the stored version is {current_version}, not the expected one")]
   VersionConflict { current_version: u64 },
@@ -369,6 +372,13 @@ impl ApiError {
     }
   }
 
+  pub fn ballot_box_not_found() -> Self {
+    Self::NotFound {
+      code: ErrorCode::BallotBoxNotFound,
+      what: "ballot box",
+    }
+  }
+
   pub fn scheduled_message_not_found() -> Self {
     Self::NotFound {
       code: ErrorCode::ScheduledMessageNotFound,
@@ -449,6 +459,7 @@ impl ApiError {
       | Self::LastOwner
       | Self::NotSpaceMember => StatusCode::BAD_REQUEST,
       Self::Conflict(_)
+      | Self::PollClosed
       | Self::AdminJoinRequestTooSoon
       | Self::CallDeviceLimit { .. }
       | Self::CannotDeleteSelf
@@ -530,6 +541,7 @@ impl ApiError {
       Self::KeyPackageExhausted => ErrorCode::KeyPackageExhausted,
       Self::InvalidKeyPackage(_) => ErrorCode::InvalidKeyPackage,
       Self::ScheduledMessagesDisabled => ErrorCode::ScheduledMessagesDisabled,
+      Self::PollClosed => ErrorCode::PollClosed,
       Self::ScheduledMessageLimit { .. } => ErrorCode::ScheduledMessageLimit,
       Self::ScheduledTimeInvalid(_) => ErrorCode::ScheduledTimeInvalid,
       Self::EpochConflict { .. } => ErrorCode::EpochConflict,
@@ -1021,6 +1033,12 @@ mod tests {
         ApiError::ScheduledMessagesDisabled,
         StatusCode::FORBIDDEN,
         ErrorCode::ScheduledMessagesDisabled,
+      ),
+      (ApiError::PollClosed, StatusCode::CONFLICT, ErrorCode::PollClosed),
+      (
+        ApiError::ballot_box_not_found(),
+        StatusCode::NOT_FOUND,
+        ErrorCode::BallotBoxNotFound,
       ),
       (
         ApiError::ScheduledMessageLimit { max: 3 },

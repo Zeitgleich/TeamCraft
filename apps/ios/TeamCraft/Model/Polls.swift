@@ -26,6 +26,8 @@ struct Poll: Decodable, Equatable, Sendable {
   /// Whether this version knows how to vote in it.
   var isKnownChoice: Bool { choice == "single" || choice == "multiple" }
   var areVotersShown: Bool { voters == "shown" }
+  /// Ballots go sealed to the server's ballot box; nobody's choice is named (e2ee.md §4.12.1).
+  var isAnonymous: Bool { voters == "anonymous" }
   /// The options the user chose, by position.
   var myChoices: [UInt32] { options.indices.filter { options[$0].isChosen }.map { UInt32($0) } }
   var closesAt: Date? { maybeClosesAtMs.map { Date(timeIntervalSince1970: Double($0) / 1000) } }

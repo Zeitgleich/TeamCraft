@@ -297,12 +297,12 @@ mod tests {
       text(
         " ",
         MessageMeta {
-          maybe_forwarded: Some(Forwarded {
+          maybe_forwarded: Some(Box::new(Forwarded {
             author_name: "Alice".into(),
             maybe_conversation_name: Some("planning".into()),
             sent_at_ms: 1,
             body: "lunch?".into(),
-          }),
+          })),
           maybe_source: Some(Box::new(SourceIdentity {
             maybe_id: None,
             name: "Monitoring".into(),

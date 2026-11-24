@@ -19,9 +19,18 @@ pub struct PollDraftItem {
   pub question: String,
   pub options: Vec<String>,
   pub is_multiple_choice: bool,
-  pub hides_voters: bool,
+  pub voters: PollVotersItem,
   pub results: PollResultsItem,
   pub maybe_closes_at_ms: Option<i64>,
+}
+
+/// Who sees the votes. Anonymous polls (e2ee.md §4.12.1) show counts only once closed, whatever
+/// `results` says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
+pub enum PollVotersItem {
+  Shown,
+  Hidden,
+  Anonymous,
 }
 
 /// When a poll shows its counts.
@@ -182,10 +191,10 @@ impl From<PollDraftItem> for PollDraft {
       } else {
         PollChoice::Single
       },
-      voters: if item.hides_voters {
-        PollVoters::Hidden
-      } else {
-        PollVoters::Shown
+      voters: match item.voters {
+        PollVotersItem::Shown => PollVoters::Shown,
+        PollVotersItem::Hidden => PollVoters::Hidden,
+        PollVotersItem::Anonymous => PollVoters::Anonymous,
       },
       results: match item.results {
         PollResultsItem::Always => PollResults::Always,
@@ -306,6 +315,26 @@ mod tests {
   }
 
   #[test]
+  fn an_anonymous_draft_shows_counts_only_once_closed() {
+    let mut typed = draft("Lunch?", &["Pizza", "Salad"]);
+    typed.voters = PollVotersItem::Anonymous;
+    typed.results = PollResultsItem::Always;
+    let json = poll_post_action(
+      "7".into(),
+      typed,
+      limits(),
+      "Poll".into(),
+      "Update.".into(),
+      NOW_MS,
+    )
+    .unwrap();
+    assert!(
+      json.contains(r#""voters":"anonymous","results":"after_close""#),
+      "{json}"
+    );
+  }
+
+  #[test]
   fn a_draft_with_a_problem_is_not_sent() {
     let refused = poll_post_action(
       "7".into(),
@@ -359,7 +388,7 @@ mod tests {
       question: question.to_owned(),
       options: options.iter().map(|option| (*option).to_owned()).collect(),
       is_multiple_choice: false,
-      hides_voters: false,
+      voters: PollVotersItem::Shown,
       results: PollResultsItem::Always,
       maybe_closes_at_ms: None,
     }

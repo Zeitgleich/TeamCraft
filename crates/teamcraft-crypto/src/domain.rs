@@ -98,6 +98,8 @@ pub(crate) const CALL_SIGNAL_EXPORTER: &str = "TeamCraft-v1 call signal";
 pub(crate) const CALL_SIGNAL_KEY: &str = "TeamCraft-v1 call signal key";
 /// Associated data of a sealed in-call signal (reaction, raised hand).
 pub(crate) const CALL_SIGNAL: &str = "TeamCraft-v1 call signal seal";
+/// Associated data of an anonymous poll's ballot (e2ee.md §4.12.1).
+pub(crate) const POLL_BALLOT: &str = "TeamCraft-v1 poll ballot";
 
 /// Returns `len(label) || label || body`.
 pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
@@ -114,7 +116,7 @@ pub(crate) fn labeled(label: &str, body: &[u8]) -> Vec<u8> {
 mod tests {
   use super::*;
 
-  const ALL_LABELS: [&str; 60] = [
+  const ALL_LABELS: [&str; 61] = [
     DEVICE_CERTIFICATE,
     IDENTITY_FINGERPRINT,
     MESSAGE_AAD,
@@ -175,6 +177,7 @@ mod tests {
     CALL_SIGNAL_EXPORTER,
     CALL_SIGNAL_KEY,
     CALL_SIGNAL,
+    POLL_BALLOT,
   ];
 
   #[test]

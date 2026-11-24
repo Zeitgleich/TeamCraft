@@ -1,0 +1,55 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT creator_user_id, closes_at, closed_at IS NOT NULL AS \"is_closed!\",\n           (SELECT count(*) FROM poll_ballots b\n             WHERE b.conversation_id = x.conversation_id AND b.message_id = x.message_id) AS \"ballot_count!\"\n         FROM poll_ballot_boxes x WHERE conversation_id = $1 AND message_id = $2",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "creator_user_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "poll_ballot_boxes",
+            "name": "creator_user_id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "closes_at",
+        "type_info": "Timestamptz",
+        "origin": {
+          "Table": {
+            "table": "poll_ballot_boxes",
+            "name": "closes_at"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "is_closed!",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "ballot_count!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "5a507118109996a21242ea547422b04bd15fb3af943feac723fa005d9fe60711"
+}

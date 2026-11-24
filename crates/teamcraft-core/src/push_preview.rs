@@ -918,12 +918,12 @@ mod tests {
       PreviewContent::Text("look".into())
     );
     let forwarded = MessageMeta {
-      maybe_forwarded: Some(crate::store::Forwarded {
+      maybe_forwarded: Some(Box::new(crate::store::Forwarded {
         author_name: "Alice".into(),
         maybe_conversation_name: None,
         sent_at_ms: 1,
         body: "lunch?".into(),
-      }),
+      })),
       ..MessageMeta::default()
     };
     assert_eq!(

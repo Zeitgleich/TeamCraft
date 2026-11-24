@@ -390,6 +390,14 @@ pub enum GatewayEvent {
     #[serde(rename = "thread_id", default, skip_serializing_if = "Option::is_none")]
     maybe_thread_id: Option<ThreadId>,
   },
+  /// The ballot box of an anonymous poll changed: a ballot came, was replaced or withdrawn, or the
+  /// box closed (e2ee.md §4.12.1). Sent to the conversation's members, who fetch the box.
+  BallotBoxChanged {
+    conversation_id: ConversationId,
+    message_id: MessageId,
+    ballot_count: u32,
+    is_closed: bool,
+  },
   /// A device of another member says it has a page of the conversation's notes open, closed it or
   /// moved its caret ([`GatewayClientMessage::CanvasPresence`]); only the device can read what.
   CanvasPresence {
@@ -463,6 +471,7 @@ impl GatewayEvent {
       Self::SpaceMemberAdd { .. } => "space_member_add",
       Self::SpaceMemberRemove { .. } => "space_member_remove",
       Self::TypingStart { .. } => "typing_start",
+      Self::BallotBoxChanged { .. } => "ballot_box_changed",
       Self::CanvasPresence { .. } => "canvas_presence",
       Self::PresenceUpdate { .. } => "presence_update",
       Self::Unknown => "unknown",

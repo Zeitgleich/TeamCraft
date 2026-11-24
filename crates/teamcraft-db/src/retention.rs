@@ -281,6 +281,15 @@ async fn delete_past_retention_in(
   .fetch_all(&mut **tx)
   .await?;
   let messages = message_keys.len() as u64;
+  // e2ee.md §4.12.1: an anonymous poll's ballot box goes with its message.
+  sqlx::query!(
+    r#"DELETE FROM poll_ballot_boxes b WHERE b.conversation_id = $1 AND b.message_id < $2
+       AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = b.message_id AND m.conversation_id = b.conversation_id)"#,
+    to_db(conversation),
+    to_db(cut.before),
+  )
+  .execute(&mut **tx)
+  .await?;
   sqlx::query!(
     r#"DELETE FROM message_client_ids c WHERE c.conversation_id = $1 AND c.message_id < $2
        AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.id = c.message_id AND m.conversation_id = c.conversation_id)"#,

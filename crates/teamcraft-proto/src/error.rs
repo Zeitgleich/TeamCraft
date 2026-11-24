@@ -94,6 +94,11 @@ wire_enum! {
     ScheduledMessageLimit => "scheduled_message_limit",
     /// The time has passed or lies beyond the workspace's horizon.
     ScheduledTimeInvalid => "scheduled_time_invalid",
+    /// An anonymous poll has no ballot box yet: its sender's device opens it once the poll is
+    /// sent (e2ee.md §4.12.1).
+    BallotBoxNotFound => "ballot_box_not_found",
+    /// The poll is closed: it takes no ballot any more.
+    PollClosed => "poll_closed",
     Conflict => "conflict",
     EpochConflict => "epoch_conflict",
     VersionConflict => "version_conflict",
@@ -378,6 +383,8 @@ mod tests {
       ErrorCode::ScheduledMessagesDisabled,
       ErrorCode::ScheduledMessageLimit,
       ErrorCode::ScheduledTimeInvalid,
+      ErrorCode::BallotBoxNotFound,
+      ErrorCode::PollClosed,
       ErrorCode::Conflict,
       ErrorCode::EpochConflict,
       ErrorCode::VersionConflict,

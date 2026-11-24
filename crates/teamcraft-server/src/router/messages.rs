@@ -22,6 +22,15 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
       handlers::cancel_scheduled_message_handler
     ))
     .routes(routes!(handlers::send_scheduled_message_handler))
+    .routes(routes!(
+      handlers::get_ballot_box_handler,
+      handlers::open_ballot_box_handler
+    ))
+    .routes(routes!(
+      handlers::cast_ballot_handler,
+      handlers::withdraw_ballot_handler
+    ))
+    .routes(routes!(handlers::close_ballot_box_handler))
 }
 
 /// Schemas in the document that no documented route names: query parameters.
