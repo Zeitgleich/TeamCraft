@@ -1114,9 +1114,21 @@ impl Feed {
     self.total = self.total.saturating_sub(1);
   }
 
+  /// One past the index of the last row the user sent that the core hasn't answered for; 0 when
+  /// there is none.
+  fn pending_end(&self) -> usize {
+    self
+      .rows
+      .iter()
+      .filter(|(_, row)| is_pending(row.id))
+      .map(|(index, _)| index + 1)
+      .max()
+      .unwrap_or(0)
+  }
+
   fn store(&mut self, window: MessageWindow) -> bool {
-    let mut is_changed = self.total != window.total;
-    self.total = window.total;
+    let mut is_changed = false;
+    let window_total = window.total;
     for (offset, message) in window.messages.into_iter().enumerate() {
       let index = window.start + offset;
       if self.rows.get(&index) != Some(&message) {
@@ -1136,6 +1148,10 @@ impl Feed {
         is_changed = true;
       }
     }
+    // Rows the user sent that the core hasn't answered for yet stay counted (#2364).
+    let total = window_total.max(self.pending_end());
+    is_changed |= self.total != total;
+    self.total = total;
     is_changed
   }
 
@@ -1699,7 +1715,9 @@ impl RemoteChat {
             feed.is_moving = true;
             plan.moved.push((*conversation, total));
           } else {
-            feed.total = total;
+            // A row the user sent that the core doesn't count yet stays (#2364): lowering the
+            // total under it would make the core's next count look like older history arriving.
+            feed.total = total.max(feed.pending_end());
           }
         }
       }
@@ -4784,6 +4802,24 @@ mod tests {
       assert!(!feed.push_pending(row));
       assert_eq!(feed.total, 500);
       let _ = id;
+    }
+
+    #[test]
+    fn a_count_without_the_sent_row_does_not_lower_the_total_under_it() {
+      // #2364: the core's answer lags behind (a photo is still being copied): its count must not
+      // make the next row refused as "older history arriving".
+      let mut feed = feed_with(&["a", "b"]);
+      let mut first = window(1, &["x"]).messages.remove(0);
+      first.id = pending_message_id(ClientMessageId::from_bytes([1; 16]));
+      assert!(feed.push_pending(first));
+
+      feed.apply(window(2, &["a", "b"]));
+
+      assert_eq!(feed.total, 3, "the sent row is still counted");
+      let mut second = window(1, &["y"]).messages.remove(0);
+      second.id = pending_message_id(ClientMessageId::from_bytes([2; 16]));
+      assert!(feed.push_pending(second));
+      assert_eq!(feed.total, 4);
     }
 
     #[test]

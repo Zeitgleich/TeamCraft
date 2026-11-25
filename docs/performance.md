@@ -2047,11 +2047,22 @@ the row shows with stand-ins for the files (`ChatBackend::show_before_send`) and
 once the copy is done (#2388, e2e run 45504025975; photos are sent with Numpad Enter). The slowest
 photo is 101 ms.
 
-**Open (#2364):** two texts in 20 now take about 2 s (1,954 and 2,058 ms; the other 18 are 6 to
-85 ms). The test sends a text right after each photo; the photo's message now reaches the core while
-that text is typed, where before it had arrived before the photo's row showed. The likely cause: the
-feed is refreshed for the photo's send just then, and `push_pending` doesn't add a row to a feed that
-is moving or has a gap, so the text shows only when the core's answer comes.
+The text sent right after a photo was the last outlier (#2364): two in 20 took about 2 s, and in
+another run of the same test three sends (a text and two photos) took 1.7 to 4.1 s. A trace in the page
+showed `push_pending` refusing the row: the feed was "moving" (or its rows didn't reach its total). The
+cause was a count from the core that lacked a row just sent (a photo still being copied; the text or the
+photo before it answered). The feed's total was lowered under the row, so the next count, with both rows
+in it, looked like older history arriving; the feed waited for a read, which the shell answered only
+after the copy. The total now never drops below the last row the core hasn't answered for
+(`Feed::pending_end`), and the next row shows at once. Same test, e2e run 45708264691:
+
+| What                                                          | Joined handover (#2388) | Total kept (#2364) | Budget    |
+|---------------------------------------------------------------|-------------------------|--------------------|-----------|
+| Text, Enter until the pending row is in the DOM, median / p95 | 13.0 / 2,058 ms         | 14.0 / 93.0 ms     | one frame |
+| 12 MP photo, median / p95                                     | 22.0 / 101.0 ms         | 38.0 / 147.0 ms    | one frame |
+
+The web client's `pending_echo` was not re-run: its feed code is the same, and the web job of the run
+only builds the page.
 
 Reactions and edits (#2269) read no conversation: the target is one keyed read (`find_stored`,
 `message_by_server_id`; a pending one is looked for among the outbox's rows only) and a reaction's
