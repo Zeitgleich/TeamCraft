@@ -34,7 +34,7 @@ import uniffi.teamcraft_ffi.DeviceProofKey
  */
 class DeviceKeyStore(private val vault: DeviceKeyVault, private val log: (String) -> Unit = ::logWarning) {
   /** What the core and the token requests sign with. */
-  val proofKey: DeviceProofKey = VaultProofKey(vault)
+  val proofKey: DeviceProofKey = VaultProofKey(vault, log)
 
   /**
    * The key, made on first use: in the Keystore's hardware where it makes one, otherwise in
@@ -98,32 +98,39 @@ sealed class DeviceKeyException(message: String, cause: Throwable?) : Exception(
   class Unreadable(cause: Throwable? = null) : DeviceKeyException("the device key can't be read now", cause)
 }
 
-/** The vault's key as the core signs with it, with the errors the core tells apart. */
-class VaultProofKey(private val vault: DeviceKeyVault) : DeviceProofKey {
-  override fun publicKey(): ByteArray = stored().publicPoint
+/**
+ * The vault's key as the core signs with it, with the errors the core tells apart. Called by the core
+ * through UniFFI: anything else thrown here than [DeviceProofException] is no answer the core can
+ * use, so every failure is mapped, whatever the Keystore throws (#2393).
+ */
+class VaultProofKey(
+  private val vault: DeviceKeyVault,
+  private val log: (String) -> Unit = ::logWarning,
+) : DeviceProofKey {
+  override fun publicKey(): ByteArray = answered { stored().publicPoint }
 
-  override fun sign(message: ByteArray): ByteArray {
-    val key = stored()
-    return try {
-      key.sign(message)
+  override fun sign(message: ByteArray): ByteArray = answered { stored().sign(message) }
+
+  private fun stored(): StoredDeviceKey = vault.read() ?: throw DeviceProofException.KeyLost()
+
+  /**
+   * [work]'s result, or the error the core tells apart: a key the store says is gone is lost, any
+   * other failure decides nothing about the session (a wait, or the session stays unbound).
+   */
+  private inline fun <T> answered(work: () -> T): T =
+    try {
+      work()
+    } catch (answer: DeviceProofException) {
+      throw answer
     } catch (gone: DeviceKeyException.Gone) {
       throw DeviceProofException.KeyLost()
-    } catch (failure: Exception) {
-      // The key is there and didn't sign this time: nothing about the session is decided.
+    } catch (fatal: VirtualMachineError) {
+      throw fatal
+    } catch (failure: Throwable) {
+      // Only the type: nothing else is known to be free of what the Keystore was asked.
+      log("the device key failed (${failure.javaClass.simpleName}), nothing is decided")
       throw DeviceProofException.KeyUnavailable()
     }
-  }
-
-  private fun stored(): StoredDeviceKey {
-    val maybeKey = try {
-      vault.read()
-    } catch (gone: DeviceKeyException.Gone) {
-      throw DeviceProofException.KeyLost()
-    } catch (failure: Exception) {
-      throw DeviceProofException.KeyUnavailable()
-    }
-    return maybeKey ?: throw DeviceProofException.KeyLost()
-  }
 }
 
 /**

@@ -2,10 +2,14 @@ package de.zeitgleich.teamcraft.security
 
 import de.zeitgleich.teamcraft.auth.ServerProofOffer
 import java.math.BigInteger
+import java.security.InvalidKeyException
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.KeyStoreException
+import java.security.ProviderException
 import java.security.Signature
+import java.security.UnrecoverableKeyException
 import java.security.interfaces.ECPublicKey
 import java.security.spec.ECGenParameterSpec
 import java.security.spec.ECPoint
@@ -129,14 +133,14 @@ class DeviceProofKeysTest {
     fun aKeySignsWithItsPublicHalf() {
       val vault = FakeVault()
       DeviceKeyStore(vault) {}.keyOrNew()
-      val key = VaultProofKey(vault)
+      val key = VaultProofKey(vault) {}
       assertEquals(65, key.publicKey().size)
       assertEquals(64, key.sign(MESSAGE).size)
     }
 
     @Test
     fun noKeyIsALostKey() {
-      val key = VaultProofKey(FakeVault())
+      val key = VaultProofKey(FakeVault()) {}
       assertThrows(DeviceProofException.KeyLost::class.java) { key.publicKey() }
       assertThrows(DeviceProofException.KeyLost::class.java) { key.sign(MESSAGE) }
     }
@@ -144,15 +148,15 @@ class DeviceProofKeysTest {
     @Test
     fun aKeyTheKeystoreCallsGoneIsALostKey() {
       val vault = FakeVault().apply { failure = DeviceKeyException.Gone() }
-      assertThrows(DeviceProofException.KeyLost::class.java) { VaultProofKey(vault).publicKey() }
+      assertThrows(DeviceProofException.KeyLost::class.java) { VaultProofKey(vault) {}.publicKey() }
     }
 
     @Test
     fun aStoreThatCantBeReadIsAWaitNotALoss() {
       val vault = FakeVault().apply { failure = DeviceKeyException.Unreadable() }
-      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault).publicKey() }
+      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault) {}.publicKey() }
       vault.failure = IllegalStateException("keystore restarting")
-      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault).sign(MESSAGE) }
+      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault) {}.sign(MESSAGE) }
     }
 
     @Test
@@ -160,9 +164,55 @@ class DeviceProofKeysTest {
       val vault = FakeVault()
       DeviceKeyStore(vault) {}.keyOrNew()
       vault.signFailure = DeviceKeyException.Unreadable()
-      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault).sign(MESSAGE) }
+      assertThrows(DeviceProofException.KeyUnavailable::class.java) { VaultProofKey(vault) {}.sign(MESSAGE) }
       vault.signFailure = DeviceKeyException.Gone()
-      assertThrows(DeviceProofException.KeyLost::class.java) { VaultProofKey(vault).sign(MESSAGE) }
+      assertThrows(DeviceProofException.KeyLost::class.java) { VaultProofKey(vault) {}.sign(MESSAGE) }
+    }
+
+    @Test
+    fun whateverTheKeystoreThrowsIsAnAnswerTheCoreKnows() {
+      // #2393: an exception UniFFI can't map is no answer; each one is a wait, never a crash.
+      val failures = listOf(
+        ProviderException("StrongBox refused"),
+        InvalidKeyException("keystore operation failed"),
+        KeyStoreException("keystore restarting"),
+        UnrecoverableKeyException("can't unwrap"),
+        IllegalStateException("ran on the main thread"),
+        IllegalArgumentException("not a DER sequence"),
+        ClassCastException("not an EC key"),
+        NullPointerException("no certificate"),
+        NoClassDefFoundError("android/security/KeyStoreException"),
+        ExceptionInInitializerError("a provider that failed to load"),
+      )
+      for (failure in failures) {
+        val vault = FakeVault().apply { this.failure = failure }
+        val logged = mutableListOf<String>()
+        val key = VaultProofKey(vault) { logged += it }
+        assertThrows(failure.javaClass.simpleName, DeviceProofException.KeyUnavailable::class.java) { key.publicKey() }
+        assertThrows(failure.javaClass.simpleName, DeviceProofException.KeyUnavailable::class.java) { key.sign(MESSAGE) }
+        assertTrue(logged.all { failure.javaClass.simpleName in it && failure.message.orEmpty() !in it })
+
+        vault.failure = null
+        DeviceKeyStore(vault) {}.keyOrNew()
+        vault.signFailure = failure
+        assertEquals(65, key.publicKey().size)
+        assertThrows(failure.javaClass.simpleName, DeviceProofException.KeyUnavailable::class.java) { key.sign(MESSAGE) }
+      }
+    }
+
+    @Test
+    fun aKeystoreThatRefusesHardwareKeysStillGivesTheCoreAKey() {
+      // Some Keystores refuse StrongBox and EC at runtime: the store makes a software key instead.
+      val vault = FakeVault(isHardwareRefused = true)
+      DeviceKeyStore(vault) {}.keyOrNew()
+      assertEquals(listOf("software"), vault.made)
+      assertEquals(65, VaultProofKey(vault) {}.publicKey().size)
+    }
+
+    @Test
+    fun aDyingVirtualMachineIsNotHiddenAsAWait() {
+      val vault = FakeVault().apply { failure = OutOfMemoryError() }
+      assertThrows(OutOfMemoryError::class.java) { VaultProofKey(vault) {}.publicKey() }
     }
 
     @Test
@@ -191,8 +241,8 @@ class DeviceProofKeysTest {
 
 /** A vault in memory, with software keys standing in for the Keystore's. */
 private class FakeVault(private val isHardwareRefused: Boolean = false) : DeviceKeyVault {
-  var failure: Exception? = null
-  var signFailure: Exception? = null
+  var failure: Throwable? = null
+  var signFailure: Throwable? = null
   var deletes = 0
   val made = mutableListOf<String>()
   private var maybeKey: StoredDeviceKey? = null

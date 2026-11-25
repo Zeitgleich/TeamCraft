@@ -200,8 +200,12 @@ class CoreRepository(
      */
     override fun accessToken(): AccessToken {
       UiThreadGuard.shared.check("Tokens.accessToken")
+      // The work runs on a JVM thread, not here: this is a native thread JNA attached for this
+      // callback, and JNA detaches it after any callback on it, also a nested one. A refresh calls
+      // into the core, which calls the device key back (ProviderProver): on this thread that
+      // detached it under this callback and aborted the app (#2393).
       // blocking-ok: the core calls this on its own token thread; the guard reports any other.
-      return runBlocking { tokenNow() }
+      return runBlocking(Dispatchers.IO) { tokenNow() }
     }
 
     private suspend fun tokenNow(): AccessToken {

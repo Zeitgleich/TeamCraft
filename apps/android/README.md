@@ -31,6 +31,13 @@ are single-threaded). The app hands in access tokens (`TokenProvider`, backed by
 refresh) and gets `onChange` callbacks (`EventListener`), on which screens re-read. Sync runs while
 the app is in the foreground (`ProcessLifecycleOwner`); in the background, push wakes the app.
 
+A callback the core calls on a thread of its own (`TokenProvider`, `DeviceProofKey`) runs on a
+native thread JNA attached for it, and JNA detaches that thread after every callback on it, also a
+nested one. So such a callback never calls the core synchronously on that thread when the core may
+call the app back inside that call: the nested callback would detach the thread under the outer one
+and ART aborts the app (#2393). Do the work on a JVM thread (`runBlocking(Dispatchers.IO)`), as
+`CoreRepository.Tokens` does. A callback throws only the error type UniFFI declares for it.
+
 Chat features go through a JSON bridge instead of a typed call each: `snapshot`, `messageWindow`,
 `act` and `query` exchange the same `ChatSnapshot` / `MessageWindow` / `ChatAction` / `ChatQuery` /
 `ChatAnswer` messages (teamcraft-client-api `remote`) that the desktop shell exchanges with its
