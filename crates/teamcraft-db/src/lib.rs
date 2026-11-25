@@ -75,9 +75,9 @@ mod webhook;
 mod workspace_log;
 
 pub use admin::{
-  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserRow,
-  CREATOR_DEACTIVATED_REASON, ChatRemoval, ChatRemovalEffects, Deactivation, DeactivationAudit,
-  PushDeviceCount, StorageTotals, UserStatusFilter,
+  AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow, AdminUserFilter,
+  AdminUserRow, CREATOR_DEACTIVATED_REASON, ChatRemoval, ChatRemovalEffects, Deactivation, DeactivationAudit,
+  PushDeviceCount, StorageTotals, UserKindFilter, UserStatusFilter,
 };
 pub use admin_join_request::{
   AdminJoinApproval, AdminJoinRequest, AdminJoinRequestClosing, AdminJoinRequestOutcome,

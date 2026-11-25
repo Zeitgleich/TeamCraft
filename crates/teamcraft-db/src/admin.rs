@@ -78,6 +78,27 @@ pub enum UserStatusFilter {
   All,
 }
 
+/// Which kinds of account the admin user list returns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UserKindFilter {
+  /// Members and guests.
+  People,
+  Bots,
+}
+
+/// What [`Database::admin_list_users`] lists.
+#[derive(Debug, Clone, Copy)]
+pub struct AdminUserFilter<'a> {
+  /// Part of the display name or user name, any case; empty lists everybody.
+  pub query: &'a str,
+  pub status: UserStatusFilter,
+  pub maybe_role: Option<&'a str>,
+  pub maybe_kind: Option<UserKindFilter>,
+  pub maybe_ids: Option<&'a [UserId]>,
+  pub maybe_after: Option<UserId>,
+  pub limit: i64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AdminUserRow {
   pub id: UserId,
@@ -294,18 +315,14 @@ impl Database {
       .collect()
   }
 
-  pub async fn admin_list_users(
-    &self,
-    query: &str,
-    status: UserStatusFilter,
-    maybe_role: Option<&str>,
-    maybe_ids: Option<&[UserId]>,
-    maybe_after: Option<UserId>,
-    limit: i64,
-  ) -> Result<Vec<AdminUserRow>, DbError> {
-    let pattern = like_pattern(query);
-    let maybe_ids: Option<Vec<i64>> = maybe_ids.map(|ids| ids.iter().copied().map(to_db).collect());
-    let status_text = match status {
+  /// One page of accounts, ascending by ID; one more than `limit` tells that more follow.
+  pub async fn admin_list_users(&self, filter: &AdminUserFilter<'_>) -> Result<Vec<AdminUserRow>, DbError> {
+    let pattern = like_pattern(filter.query);
+    let maybe_ids: Option<Vec<i64>> = filter
+      .maybe_ids
+      .map(|ids| ids.iter().copied().map(to_db).collect());
+    let maybe_wants_bots = filter.maybe_kind.map(|kind| kind == UserKindFilter::Bots);
+    let status_text = match filter.status {
       UserStatusFilter::Active => "active",
       UserStatusFilter::Deactivated => "deactivated",
       UserStatusFilter::All => "all",
@@ -328,13 +345,15 @@ impl Database {
            AND ($3::bigint IS NULL OR u.id > $3)
            AND ($5::text IS NULL OR u.oidc_role = $5)
            AND ($6::bigint[] IS NULL OR u.id = ANY($6))
+           AND ($7::boolean IS NULL OR (u.kind = 'bot') = $7)
          ORDER BY u.id LIMIT $4"#,
       pattern,
       status_text,
-      maybe_after.map(to_db),
-      limit + 1,
-      maybe_role,
+      filter.maybe_after.map(to_db),
+      filter.limit + 1,
+      filter.maybe_role,
       maybe_ids.as_deref(),
+      maybe_wants_bots,
     )
     .fetch_all(self.pool())
     .await?;

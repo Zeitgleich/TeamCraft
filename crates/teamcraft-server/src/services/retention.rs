@@ -320,6 +320,11 @@ pub fn effective_setting(
   to_setting(limited(effective(own, space, policy.default), policy.limit))
 }
 
+/// An object's own stored setting as the wire carries it.
+pub fn stored_setting(stored: StoredRetention) -> RetentionSetting {
+  to_setting(stored)
+}
+
 async fn target(state: &AppState, conversation: ConversationId) -> Result<RetentionTarget, ApiError> {
   state
     .database

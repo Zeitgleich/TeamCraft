@@ -34,7 +34,7 @@ use teamcraft_proto::{BackgroundId, CategoryId, HistoryPolicy, PresencePolicy, S
 
 use crate::admin::{
   AdminChannel, AdminLoad, AdminSection, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
-  DeviceInfo, PolicyBlocker, Retention, SelfJoinOutcome, SettingsTestKind,
+  DeviceInfo, PolicyBlocker, RetentionOverride, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::admin_live::AdminLive;
 use crate::auth::Authenticator;
@@ -2180,9 +2180,9 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
     }
   }
 
-  fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
+  fn set_channel_retention(&self, channel: ConversationId, own: RetentionOverride) {
     if let Some(admin) = &self.maybe_admin {
-      admin.set_channel_retention(channel, retention);
+      admin.set_channel_retention(channel, own);
     }
   }
 
@@ -2324,6 +2324,20 @@ impl<C: ChatBackend> AdminBackend for Hybrid<C> {
 
   fn admin_users_have_more(&self) -> bool {
     self.maybe_admin.as_ref().is_some_and(AdminLive::users_have_more)
+  }
+
+  fn admin_find(&self, text: String) {
+    if let Some(admin) = &self.maybe_admin {
+      admin.find(text);
+    }
+  }
+
+  fn admin_found(&self) -> teamcraft_client_api::admin::AdminFound {
+    self
+      .maybe_admin
+      .as_ref()
+      .map(AdminLive::found)
+      .unwrap_or_default()
   }
 
   fn admin_load_more_users(&self) {

@@ -26,8 +26,8 @@ use crate::actions::{
 };
 use crate::activity::ActivityFeed;
 use crate::admin::{
-  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter, Retention,
-  SelfJoinOutcome, SettingsTestKind,
+  AdminChannel, AdminLoad, AdminSpace, AdminSpaceChanges, AdminUser, AuditEntry, AuditFilter,
+  RetentionOverride, SelfJoinOutcome, SettingsTestKind,
 };
 use crate::calls::{
   ActiveCall, BackgroundEffect, BackgroundImageInfo, CallEndReason, CallHistoryItem, CallMoveOffer,
@@ -1543,7 +1543,9 @@ pub trait AdminBackend {
   /// Signs and stores a new policy version. Only owners with signing keys can. While the workspace
   /// has no signed roster the signer goes on the first one, alone.
   fn set_workspace_policy(&self, policy: WorkspacePolicy);
-  fn set_channel_retention(&self, channel: ConversationId, retention: Retention);
+  /// Sets the channel's own retention setting; an empty one follows the space and the instance
+  /// default again.
+  fn set_channel_retention(&self, channel: ConversationId, own: RetentionOverride);
   fn remove_device(&self, user: UserId, device: DeviceId);
   /// Suspends (`false`) or reactivates (`true`) an account; memberships and devices stay.
   fn set_user_active(&self, user: UserId, is_active: bool);
@@ -1607,6 +1609,13 @@ pub trait AdminBackend {
   }
   fn admin_set_user_query(&self, _query: crate::admin::AdminUserQuery) {}
   /// Whether the instance has more accounts than [`AdminBackend::admin_users`] holds.
+  /// Asks the server for people and channels whose name holds `text` (the console's search);
+  /// they arrive with the next change notification. An empty text forgets the last answer.
+  fn admin_find(&self, _text: String) {}
+  /// What [`Self::admin_find`] found so far.
+  fn admin_found(&self) -> crate::admin::AdminFound {
+    crate::admin::AdminFound::default()
+  }
   fn admin_users_have_more(&self) -> bool {
     false
   }

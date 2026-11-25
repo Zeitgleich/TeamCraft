@@ -1,7 +1,7 @@
 use leptos::prelude::*;
 use teamcraft_proto::Role;
 
-use crate::admin::{AdminUser, AdminUserQuery, DeviceInfo};
+use crate::admin::{AdminAccountKind, AdminFocus, AdminSection, AdminUser, AdminUserQuery, DeviceInfo};
 use crate::clock::{format_relative, now_ms};
 use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_guests::GuestsOverview;
@@ -19,10 +19,23 @@ use crate::state::{Overlay, use_app_state};
 /// The wait after the last key before the search asks the server.
 const SEARCH_DEBOUNCE_MS: u64 = 250;
 
+/// The Users page's lists: people (members and guests with their accounts), guests with their
+/// sponsors and expiry, and bots apart from both (issue #2360).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum UserTab {
-  Users,
+  People,
   Guests,
+  Bots,
+}
+
+impl UserTab {
+  /// The accounts the list asks the server for; the guests tab has a list of its own.
+  fn account_kind(self) -> AdminAccountKind {
+    match self {
+      UserTab::People | UserTab::Guests => AdminAccountKind::People,
+      UserTab::Bots => AdminAccountKind::Bots,
+    }
+  }
 }
 
 /// User list, devices and guests with their sponsors.
@@ -30,15 +43,30 @@ enum UserTab {
 pub fn UsersSection() -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
-  let tab = RwSignal::new(UserTab::Users);
-  let selected = RwSignal::new(None::<UserId>);
+  // Reached from the console's search: that person (or bot), found by name, with details open.
+  let maybe_focus = match state.admin_focus.get_untracked() {
+    Some(AdminFocus::Person { id, name, is_bot }) => {
+      state.admin_focus.set(None);
+      Some((id, name, is_bot))
+    },
+    _ => None,
+  };
+  let tab = RwSignal::new(match maybe_focus {
+    Some((_, _, true)) => UserTab::Bots,
+    _ => UserTab::People,
+  });
+  let selected = RwSignal::new(maybe_focus.as_ref().map(|(id, _, _)| *id));
   let now = now_ms();
   // The server lists and searches accounts page by page (issue #1241).
-  let search = RwSignal::new(state.read(|backend| backend.admin_user_query()).text);
+  let search = RwSignal::new(match maybe_focus {
+    Some((_, name, _)) => name,
+    None => state.read(|backend| backend.admin_user_query()).text,
+  });
   let debounced = use_debounced(search, SEARCH_DEBOUNCE_MS);
   Effect::new(move |_| {
     let asked = AdminUserQuery {
       text: debounced.get(),
+      kind: tab.get().account_kind(),
     };
     state.write(|backend| backend.admin_set_user_query(asked));
   });
@@ -83,14 +111,26 @@ pub fn UsersSection() -> impl IntoView {
     <div class="admin-toolbar">
       <div class="segmented" role="group" aria-label=move || i18n.t("admin-users-tabs")>
         <SlidingIndicator />
-        <button aria-pressed=move || (tab.get() == UserTab::Users).to_string() on:click=move |_| tab.set(UserTab::Users)>
-          {move || i18n.t("admin-tab-users")}
-        </button>
-        <button aria-pressed=move || (tab.get() == UserTab::Guests).to_string() on:click=move |_| tab.set(UserTab::Guests)>
-          {move || i18n.t("admin-tab-guests")}
-        </button>
+        {[(UserTab::People, "admin-tab-people"), (UserTab::Guests, "admin-tab-guests"), (UserTab::Bots, "admin-tab-bots")]
+          .into_iter()
+          .map(|(target, key)| {
+            view! {
+              <button
+                aria-pressed=move || (tab.get() == target).to_string()
+                on:click=move |_| {
+                  if tab.get_untracked() != target {
+                    selected.set(None);
+                    tab.set(target);
+                  }
+                }
+              >
+                {move || i18n.t(key)}
+              </button>
+            }
+          })
+          .collect_view()}
       </div>
-      <Show when=move || tab.get() == UserTab::Users fallback=|| ()>
+      <Show when=move || tab.get() != UserTab::Guests fallback=|| ()>
         <label class="visually-hidden" for="admin-user-search">{move || i18n.t("admin-search")}</label>
         <input
           id="admin-user-search"
@@ -105,11 +145,27 @@ pub fn UsersSection() -> impl IntoView {
         />
       </Show>
       <span class="grow"></span>
-      <button class="btn" disabled title=move || i18n.t("admin-soon")>
-        <Icon name=IconName::Plus />
-        <span>{move || if tab.get() == UserTab::Guests { i18n.t("admin-invite-guest") } else { i18n.t("admin-invite-user") }}</span>
-      </button>
+      {move || match tab.get() {
+        // Bots come from the integrations that use them: that is where they are made.
+        UserTab::Bots => view! {
+          <button type="button" class="btn" on:click=move |_| state.open_admin(AdminSection::Integrations)>
+            <Icon name=IconName::Terminal />
+            <span>{move || i18n.t("admin-bots-where")}</span>
+          </button>
+        }
+        .into_any(),
+        UserTab::People | UserTab::Guests => view! {
+          <button class="btn" disabled title=move || i18n.t("admin-soon")>
+            <Icon name=IconName::Plus />
+            <span>{move || if tab.get() == UserTab::Guests { i18n.t("admin-invite-guest") } else { i18n.t("admin-invite-user") }}</span>
+          </button>
+        }
+        .into_any(),
+      }}
     </div>
+    <Show when=move || tab.get() == UserTab::Bots fallback=|| ()>
+      <p class="muted-text small admin-list-hint">{move || i18n.t("admin-bots-hint")}</p>
+    </Show>
     <Show when=move || tab.get() == UserTab::Guests fallback=move || {
       view! {
     <div class="admin-split">
@@ -132,7 +188,7 @@ pub fn UsersSection() -> impl IntoView {
           </tbody>
         </table>
         <Show when=move || shown.get().is_empty() fallback=|| ()>
-          <p class="empty-state">{move || i18n.t("admin-empty")}</p>
+          <p class="empty-state">{move || i18n.t(if tab.get() == UserTab::Bots { "admin-bots-empty" } else { "admin-empty" })}</p>
         </Show>
         <ListMore
           has_more=Signal::derive(move || state.read(|backend| backend.admin_users_have_more()))
@@ -170,6 +226,7 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64) -> im
   let is_selected = move || selected.get() == Some(id);
   let seen = move || format_relative(entry.last_seen, now, i18n.locale().tag());
   let role = role_key(&entry.role);
+  let is_bot = entry.user.is_bot;
   let row_name = if entry.user.is_deleted {
     view! { <span class="row-name">{move || i18n.t("user-deleted-name")}</span> }.into_any()
   } else {
@@ -186,7 +243,7 @@ fn UserRow(entry: AdminUser, selected: RwSignal<Option<UserId>>, now: i64) -> im
             .then(|| view! { <span class="badge">{move || i18n.t("admin-deactivated")}</span> })}
         </button>
       </th>
-      <td><span class="badge">{move || i18n.t(role)}</span></td>
+      <td><span class="badge">{move || i18n.t(if is_bot { "admin-role-bot" } else { role })}</span></td>
       <td class="num">{entry.device_count}</td>
       <td>{seen}</td>
       <td translate="no">
@@ -207,6 +264,8 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
   let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
   let recovery_started = RwSignal::new(false);
+  // A bot has no key bag to recover: it signs in with a token, not a device.
+  let is_bot = entry.user.is_bot;
   let (_, policy) = state.read(|backend| backend.workspace_policy());
   let is_recovery_allowed = if entry.maybe_guest.is_some() {
     policy.org_recovery.is_enabled_for_guests
@@ -290,32 +349,36 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
         }
       </For>
       <Show when=move || device_count == 0 && devices.with(Vec::is_empty) fallback=|| ()>
-        <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
+        <li class="muted-text">{move || i18n.t(if is_bot { "admin-bot-no-devices" } else { "admin-no-devices" })}</li>
       </Show>
     </ul>
-    <h4 class="detail-heading">{move || i18n.t("admin-user-access")}</h4>
+    {(!is_bot || !is_active).then(|| view! { <h4 class="detail-heading">{move || i18n.t("admin-user-access")}</h4> })}
     <div class="detail-actions">
       {(!is_active).then(|| view! {
         <button class="btn" on:click=move |_| state.write(|backend| backend.set_user_active(user_id, true))>
           {move || i18n.t("admin-reactivate")}
         </button>
       })}
-      <button
-        class="btn"
-        disabled=!can_recover
-        aria-describedby="admin-recovery-hint"
-        on:click=move |_| {
-          state.write(|backend| backend.start_org_recovery(user_id));
-          recovery_started.set(true);
-        }
-      >
-        {move || i18n.t("admin-recovery-start")}
-      </button>
+      {(!is_bot).then(|| view! {
+        <button
+          class="btn"
+          disabled=!can_recover
+          aria-describedby="admin-recovery-hint"
+          on:click=move |_| {
+            state.write(|backend| backend.start_org_recovery(user_id));
+            recovery_started.set(true);
+          }
+        >
+          {move || i18n.t("admin-recovery-start")}
+        </button>
+      })}
     </div>
-    <p id="admin-recovery-hint" class="muted-text small">{move || i18n.t(recovery_hint)}</p>
-    <p class="status-line" role="status">
-      {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
-    </p>
+    {(!is_bot).then(|| view! {
+      <p id="admin-recovery-hint" class="muted-text small">{move || i18n.t(recovery_hint)}</p>
+      <p class="status-line" role="status">
+        {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
+      </p>
+    })}
     // Issue #958: what can't be taken back sits apart, and says what it does to this person before
     // the click, not after.
     <section class="danger-zone" aria-labelledby="admin-user-danger">

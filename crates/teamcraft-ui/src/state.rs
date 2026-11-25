@@ -373,6 +373,8 @@ pub struct AppState {
   pub history_reach: RwSignal<HistoryReach>,
   pub panel: RwSignal<SidePanel>,
   pub overlay: RwSignal<Overlay>,
+  /// The entry an admin console page opens with, from the console's search; the page takes it.
+  pub admin_focus: RwSignal<Option<crate::admin::AdminFocus>>,
   /// The filter of the activity list; "Threads" is one of them (#752).
   pub activity_filter: RwSignal<ActivityFilter>,
   /// Where the user was when they went to Activity or Files, restored when they go back to it.
@@ -540,6 +542,7 @@ impl AppState {
       held_unread: RwSignal::new(None),
       history_reach: RwSignal::new(HistoryReach::default()),
       panel: RwSignal::new(SidePanel::Closed),
+      admin_focus: RwSignal::new(None),
       overlay: RwSignal::new(Overlay::None),
       activity_filter: RwSignal::new(ActivityFilter::default()),
       before_destination: StoredValue::new(None),
@@ -1873,6 +1876,16 @@ impl AppState {
     self.view.set(MainView::Admin(section));
     self.panel.set(SidePanel::Closed);
     self.overlay.set(Overlay::None);
+  }
+
+  /// Opens the console page of a search hit with that entry selected.
+  pub fn open_admin_focus(&self, focus: crate::admin::AdminFocus) {
+    let section = match focus {
+      crate::admin::AdminFocus::Person { .. } => AdminSection::Users,
+      crate::admin::AdminFocus::Channel { .. } => AdminSection::Channels,
+    };
+    self.admin_focus.set(Some(focus));
+    self.open_admin(section);
   }
 
   /// Leaves the administration console and returns to the first conversation of the current space.

@@ -3,18 +3,18 @@
 use serde_json::json;
 use teamcraft_db::{
   ActiveAdminCounts, AdminConversationFilter, AdminConversationRow, AdminDeviceRow, AdminSpaceRow,
-  AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, DeactivationAudit, DeletionGuard,
-  LOCAL_ISSUER, UserDeletion, UserStatusFilter,
+  AdminUserFilter, AdminUserRow, AuditEntry, AuditQuery, ChatRemoval, ChatRemovalEffects, DeactivationAudit,
+  DeletionGuard, LOCAL_ISSUER, UserDeletion, UserKindFilter, UserStatusFilter,
 };
 use teamcraft_proto::{
   AdminConversationSummary, AdminDeviceResponse, AdminHealthResponse, AdminInstanceResponse,
-  AdminSpaceSummary, AdminUserStatus, AdminUserSummary, AuditEntryId, AuditEntryResponse, AuditExportRequest,
-  ConversationId, ConversationKind, DeactivateUserRequest, DeactivationReason, DeactivationSource, DeviceId,
-  GatewayEvent, Id, ListAdminConversationsQuery, ListAdminConversationsResponse, ListAdminDevicesResponse,
-  ListAdminSpacesResponse, ListAdminUsersQuery, ListAdminUsersResponse, ListAuditQuery, ListAuditResponse,
-  ListConversationMembersResponse, ListSpaceMembersResponse, MAX_ADMIN_IDS, Permission, PushProvider,
-  PushProviderState, PushProviderStatus, RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target,
-  UnixMillis, UserId,
+  AdminSpaceSummary, AdminUserKindFilter, AdminUserStatus, AdminUserSummary, AuditEntryId,
+  AuditEntryResponse, AuditExportRequest, ConversationId, ConversationKind, DeactivateUserRequest,
+  DeactivationReason, DeactivationSource, DeviceId, GatewayEvent, Id, ListAdminConversationsQuery,
+  ListAdminConversationsResponse, ListAdminDevicesResponse, ListAdminSpacesResponse, ListAdminUsersQuery,
+  ListAdminUsersResponse, ListAuditQuery, ListAuditResponse, ListConversationMembersResponse,
+  ListSpaceMembersResponse, MAX_ADMIN_IDS, Permission, PushProvider, PushProviderState, PushProviderStatus,
+  RetentionPolicy, SfuStatus, SpaceId, StorageStatus, Target, UnixMillis, UserId,
 };
 use time::OffsetDateTime;
 use tracing::warn;
@@ -149,20 +149,29 @@ pub async fn list_users(
     AdminUserStatus::Deactivated => UserStatusFilter::Deactivated,
     _ => UserStatusFilter::All,
   };
+  let maybe_kind = match query.maybe_kind {
+    None => None,
+    Some(AdminUserKindFilter::People) => Some(UserKindFilter::People),
+    Some(AdminUserKindFilter::Bots) => Some(UserKindFilter::Bots),
+    Some(AdminUserKindFilter::Unknown(_)) => {
+      return Err(ApiError::InvalidRequest("kind must be people or bots".into()));
+    },
+  };
   let mut rows = state
     .database
-    .admin_list_users(
-      query.query.trim(),
+    .admin_list_users(&AdminUserFilter {
+      query: query.query.trim(),
       status,
-      query
+      maybe_role: query
         .maybe_role
         .as_deref()
         .map(str::trim)
         .filter(|role| !role.is_empty()),
-      maybe_ids.as_deref(),
-      query.maybe_after,
-      i64::from(limit),
-    )
+      maybe_kind,
+      maybe_ids: maybe_ids.as_deref(),
+      maybe_after: query.maybe_after,
+      limit: i64::from(limit),
+    })
     .await?;
   let has_more = rows.len() > limit as usize;
   rows.truncate(limit as usize);
@@ -891,6 +900,8 @@ fn conversation_summary(
       row.space_retention,
       policy,
     )),
+    own_retention: super::retention::stored_setting(row.own_retention),
+    space_retention: super::retention::stored_setting(row.space_retention),
     maybe_inactivity: super::inactivity::status_of(inactivity, row),
   }
 }

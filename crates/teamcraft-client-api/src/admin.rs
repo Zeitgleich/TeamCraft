@@ -54,15 +54,32 @@ impl AdminChannelQuery {
 pub struct AdminUserQuery {
   /// Part of the display name or user name, any case.
   pub text: String,
+  pub kind: AdminAccountKind,
+}
+
+/// Which kinds of account a user list holds: the Users page keeps people apart from bots.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AdminAccountKind {
+  #[default]
+  All,
+  /// Members and guests.
+  People,
+  Bots,
 }
 
 impl AdminUserQuery {
   /// Whether `user` is one the query lists; for backends without a server to ask.
   pub fn matches(&self, user: &AdminUser) -> bool {
     let needle = self.text.trim().to_lowercase();
-    needle.is_empty()
+    let is_named = needle.is_empty()
       || user.user.display_name.to_lowercase().contains(&needle)
-      || user.user.username.to_lowercase().contains(&needle)
+      || user.user.username.to_lowercase().contains(&needle);
+    is_named
+      && match self.kind {
+        AdminAccountKind::All => true,
+        AdminAccountKind::People => !user.user.is_bot,
+        AdminAccountKind::Bots => user.user.is_bot,
+      }
   }
 }
 
@@ -72,6 +89,61 @@ pub struct Retention {
   pub maybe_days: Option<u32>,
   pub maybe_max_messages: Option<u32>,
   pub keeps_pinned: bool,
+}
+
+/// What the console's search found besides its pages (issue #2360): people and channels whose
+/// name holds the typed text, a few of each, asked of the server.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AdminFound {
+  /// The text these are for; the answer to an older text is dropped.
+  pub text: String,
+  pub people: Vec<AdminUser>,
+  pub channels: Vec<AdminChannel>,
+  /// The server hasn't answered `text` yet.
+  pub is_searching: bool,
+}
+
+/// What a console page opens with when it is reached from a search hit: that entry selected, the
+/// page's list searched for its name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdminFocus {
+  Person { id: UserId, name: String, is_bot: bool },
+  Channel { id: ConversationId, name: String },
+}
+
+/// A channel's or a space's own retention setting: each limit it sets; `None` follows the level
+/// above (the space, then the instance default).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct RetentionOverride {
+  pub maybe_days: Option<u32>,
+  pub maybe_max_messages: Option<u32>,
+}
+
+impl RetentionOverride {
+  /// Sets no limit of its own: everything follows the level above.
+  pub fn is_empty(&self) -> bool {
+    self.maybe_days.is_none() && self.maybe_max_messages.is_none()
+  }
+
+  /// This setting with what it leaves open taken from `above` (the space, the instance default).
+  pub fn or(self, above: RetentionOverride) -> RetentionOverride {
+    RetentionOverride {
+      maybe_days: self.maybe_days.or(above.maybe_days),
+      maybe_max_messages: self.maybe_max_messages.or(above.maybe_max_messages),
+    }
+  }
+}
+
+impl From<teamcraft_proto::RetentionSetting> for RetentionOverride {
+  /// A message count beyond `u32` can't be entered in the console and is left to the level above.
+  fn from(setting: teamcraft_proto::RetentionSetting) -> Self {
+    Self {
+      maybe_days: setting.maybe_max_age_days,
+      maybe_max_messages: setting
+        .maybe_max_messages
+        .and_then(|count| u32::try_from(count).ok()),
+    }
+  }
 }
 
 /// A channel as admins see it, including private ones.
@@ -88,7 +160,12 @@ pub struct AdminChannel {
   pub last_activity: TimestampMs,
   pub message_count: u64,
   pub storage_bytes: u64,
+  /// What applies: the channel's own setting, else its space's, else the instance default.
   pub retention: Retention,
+  /// The channel's own setting, which the Retention page changes and resets.
+  pub own_retention: RetentionOverride,
+  /// Its space's setting, which applies where the channel sets nothing of its own.
+  pub space_retention: RetentionOverride,
   pub history: HistoryPolicy,
   pub is_archived: bool,
   /// Where the channel stands in the inactivity policy (issue #212); `None`: nothing to say.
@@ -1078,6 +1155,32 @@ mod tests {
   }
 
   #[test]
+  fn an_own_retention_setting_takes_what_it_leaves_open_from_above() {
+    let own = RetentionOverride {
+      maybe_days: Some(30),
+      maybe_max_messages: None,
+    };
+    let above = RetentionOverride {
+      maybe_days: Some(365),
+      maybe_max_messages: Some(1_000),
+    };
+    assert_eq!(
+      own.or(above),
+      RetentionOverride {
+        maybe_days: Some(30),
+        maybe_max_messages: Some(1_000)
+      }
+    );
+    assert!(RetentionOverride::default().is_empty());
+    assert!(!own.is_empty());
+    let huge = teamcraft_proto::RetentionSetting {
+      maybe_max_age_days: None,
+      maybe_max_messages: Some(u64::MAX),
+    };
+    assert!(RetentionOverride::from(huge).is_empty());
+  }
+
+  #[test]
   fn a_channel_query_matches_names_of_channel_and_space_and_the_quick_filters() {
     use crate::model::Id;
     const NOW: i64 = 100 * 86_400_000;
@@ -1097,6 +1200,8 @@ mod tests {
         maybe_max_messages: None,
         keeps_pinned: true,
       },
+      own_retention: RetentionOverride::default(),
+      space_retention: RetentionOverride::default(),
       history: HistoryPolicy::FromJoin,
       is_archived: false,
       maybe_inactivity: None,

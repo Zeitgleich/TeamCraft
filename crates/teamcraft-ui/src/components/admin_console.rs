@@ -1,6 +1,6 @@
 use leptos::prelude::*;
 
-use crate::admin::{AdminGroup, AdminSection};
+use crate::admin::{AdminChannel, AdminFocus, AdminGroup, AdminSection, AdminUser};
 use crate::components::admin_announcement::AnnouncementSection;
 use crate::components::admin_audit::AuditSection;
 use crate::components::admin_backgrounds::BackgroundsSection;
@@ -28,7 +28,7 @@ use crate::components::icons::{Icon, IconName};
 use crate::components::roster_banner::RosterBanner;
 use crate::history::back_or_home;
 use crate::i18n::use_i18n;
-use crate::reactive::use_interval_while_visible;
+use crate::reactive::{use_debounced, use_interval_while_visible};
 use crate::state::use_app_state;
 
 /// How often the console reloads the data of the open section while it is open and the page is
@@ -36,6 +36,11 @@ use crate::state::use_app_state;
 /// Only that section's lists are read (a few requests), never the whole console: the address's rate
 /// limit is shared with every colleague behind it (issue #1217, docs/performance.md "Admin console").
 pub(crate) const REFRESH_MS: u64 = 30_000;
+/// The wait after the last key before the console's search asks the server for people and
+/// channels.
+const FIND_DEBOUNCE_MS: u64 = 250;
+/// Fewer letters match too much to be worth a request.
+const FIND_MIN_CHARS: usize = 2;
 
 /// Administration inside the normal client. Everything here is metadata: admins can manage rooms
 /// without reading them (admin.md §2).
@@ -125,6 +130,28 @@ fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
       .collect::<Vec<_>>()
   });
 
+  // People and channels by name (issue #2360), asked of the server once typing pauses.
+  let debounced = use_debounced(query, FIND_DEBOUNCE_MS);
+  Effect::new(move |_| {
+    let text = debounced.get();
+    let asked = if text.trim().chars().count() >= FIND_MIN_CHARS {
+      text
+    } else {
+      String::new()
+    };
+    state.write(|backend| backend.admin_find(asked));
+  });
+  on_cleanup(move || {
+    // The next page starts with an empty field: the last answer goes with it.
+    state.try_write(|backend| backend.admin_find(String::new()));
+  });
+  let found = Memo::new(move |_| state.read(|backend| backend.admin_found()));
+  let is_finding = move || query.with(|text| text.trim().chars().count() >= FIND_MIN_CHARS);
+  let open_focus = move |focus: AdminFocus| {
+    query.set(String::new());
+    state.open_admin_focus(focus);
+  };
+
   let nav_item = move |target: AdminSection| {
     view! {
       <li hidden=move || !matches.with(|found| found.contains(&target))>
@@ -181,7 +208,7 @@ fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
   });
 
   view! {
-    <nav class="admin-nav" aria-label=move || i18n.t("admin-nav-label")>
+    <nav class="admin-nav" class:is-finding=move || !query.with(String::is_empty) aria-label=move || i18n.t("admin-nav-label")>
       <button type="button" class="admin-back" on:click=move |_| back_or_home(state)>
         <Icon name=IconName::ChevronRight class="flip" />
         <span>{move || i18n.t("admin-back")}</span>
@@ -204,6 +231,9 @@ fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
                 if let Some(first) = matches.with_untracked(|found| found.first().copied()) {
                   ev.prevent_default();
                   state.open_admin(first);
+                } else if let Some(focus) = found.with_untracked(first_focus) {
+                  ev.prevent_default();
+                  open_focus(focus);
                 }
               },
               "Escape" if !query.with_untracked(String::is_empty) => {
@@ -217,7 +247,17 @@ fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
       </label>
       <div class="admin-nav-groups">
         {AdminGroup::ALL.into_iter().map(nav_group).collect_view()}
-        <Show when=move || matches.with(Vec::is_empty) fallback=|| ()>
+        <Show when=is_finding fallback=|| ()>
+          <FoundEntries found=found on_open=Callback::new(open_focus) />
+        </Show>
+        <Show
+          when=move || {
+            matches.with(Vec::is_empty)
+              && (!is_finding()
+                || found.with(|found| !found.is_searching && found.people.is_empty() && found.channels.is_empty()))
+          }
+          fallback=|| ()
+        >
           <p class="muted-text small admin-nav-empty" role="status">{move || i18n.t("admin-nav-no-match")}</p>
         </Show>
       </div>
@@ -253,6 +293,105 @@ fn AdminNav(section: AdminSection, alerts: Memo<usize>) -> impl IntoView {
       </label>
     </nav>
   }
+}
+
+/// The people and channels the console's search found, under the pages it found: one click opens
+/// the entry on its page.
+#[component]
+fn FoundEntries(found: Memo<crate::admin::AdminFound>, on_open: Callback<AdminFocus>) -> impl IntoView {
+  let i18n = use_i18n();
+  let people = Memo::new(move |_| found.with(|found| found.people.clone()));
+  let channels = Memo::new(move |_| found.with(|found| found.channels.clone()));
+  view! {
+    <Show when=move || found.with(|found| found.is_searching) fallback=|| ()>
+      <p class="muted-text small admin-nav-empty" role="status">{move || i18n.t("admin-nav-finding")}</p>
+    </Show>
+    <Show when=move || people.with(|list| !list.is_empty()) fallback=|| ()>
+      <div class="admin-nav-group">
+        <h2 class="admin-nav-heading" id="admin-nav-found-people">{move || i18n.t("admin-nav-found-people")}</h2>
+        <ul aria-labelledby="admin-nav-found-people">
+          <For each=move || people.get() key=|entry: &AdminUser| entry.user.id let:entry>
+            <li>{person_entry(i18n, entry, on_open)}</li>
+          </For>
+        </ul>
+      </div>
+    </Show>
+    <Show when=move || channels.with(|list| !list.is_empty()) fallback=|| ()>
+      <div class="admin-nav-group">
+        <h2 class="admin-nav-heading" id="admin-nav-found-channels">{move || i18n.t("admin-nav-found-channels")}</h2>
+        <ul aria-labelledby="admin-nav-found-channels">
+          <For each=move || channels.get() key=|channel: &AdminChannel| channel.id let:channel>
+            <li>{channel_entry(channel, on_open)}</li>
+          </For>
+        </ul>
+      </div>
+    </Show>
+  }
+}
+
+fn person_entry(i18n: crate::i18n::I18n, entry: AdminUser, on_open: Callback<AdminFocus>) -> impl IntoView {
+  let detail_key = if entry.user.is_bot {
+    "admin-role-bot"
+  } else if entry.user.is_guest {
+    "admin-role-guest"
+  } else if !entry.is_active {
+    "admin-deactivated"
+  } else {
+    "admin-nav-found-person"
+  };
+  let focus = AdminFocus::Person {
+    id: entry.user.id,
+    name: entry.user.display_name.clone(),
+    is_bot: entry.user.is_bot,
+  };
+  view! {
+    <button type="button" class="admin-nav-item admin-nav-found" on:click=move |_| on_open.run(focus.clone())>
+      <Icon name=if entry.user.is_bot { IconName::Terminal } else { IconName::User } />
+      <span class="admin-nav-found-text">
+        <span translate="no">{entry.user.display_name.clone()}</span>
+        <span class="muted-text small">{move || i18n.t(detail_key)}</span>
+      </span>
+    </button>
+  }
+}
+
+fn channel_entry(channel: AdminChannel, on_open: Callback<AdminFocus>) -> impl IntoView {
+  let focus = AdminFocus::Channel {
+    id: channel.id,
+    name: channel.name.clone(),
+  };
+  let icon = if channel.kind == crate::model::ConversationKind::Private {
+    IconName::Lock
+  } else {
+    IconName::Hash
+  };
+  view! {
+    <button type="button" class="admin-nav-item admin-nav-found" on:click=move |_| on_open.run(focus.clone())>
+      <Icon name=icon />
+      <span class="admin-nav-found-text">
+        <span translate="no">{channel.name.clone()}</span>
+        <span class="muted-text small" translate="no">{channel.space_name.clone()}</span>
+      </span>
+    </button>
+  }
+}
+
+/// The search hit Enter opens when no page matches: the first person, else the first channel.
+fn first_focus(found: &crate::admin::AdminFound) -> Option<AdminFocus> {
+  found
+    .people
+    .first()
+    .map(|entry| AdminFocus::Person {
+      id: entry.user.id,
+      name: entry.user.display_name.clone(),
+      is_bot: entry.user.is_bot,
+    })
+    .or_else(|| {
+      found.channels.first().map(|channel| AdminFocus::Channel {
+        id: channel.id,
+        name: channel.name.clone(),
+      })
+    })
 }
 
 fn group_label(i18n: crate::i18n::I18n, group: AdminGroup) -> String {

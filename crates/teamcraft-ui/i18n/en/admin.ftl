@@ -4,9 +4,13 @@
 ## Administration
 admin-title = Administration
 admin-nav-label = Administration sections
-admin-nav-search = Find a setting
-admin-nav-search-placeholder = Find a setting
-admin-nav-no-match = No page matches. Try another word, such as “mail” or “guests”.
+admin-nav-search = Find a setting, person or channel
+admin-nav-search-placeholder = Find a setting, person or channel
+admin-nav-no-match = Nothing found. Try another word, such as “mail” or “guests”, or part of a name.
+admin-nav-finding = Looking for people and channels…
+admin-nav-found-people = Matching people
+admin-nav-found-channels = Matching channels
+admin-nav-found-person = Person
 admin-group-overview = Overview
 admin-group-people = People
 admin-group-conversations = Conversations
@@ -128,7 +132,13 @@ admin-join-disabled = The security policy does not allow admins to join private 
 admin-users-title = Users and guests
 admin-users-subtitle = Accounts, devices and external guests.
 admin-users-tabs = Account type
-admin-tab-users = Users
+admin-tab-people = People
+admin-tab-bots = Bots
+admin-role-bot = Bot
+admin-bot-no-devices = None: a bot signs in with its token.
+admin-bots-hint = Automated accounts of integrations and the notetaker. They sign in with a token, not a device, and act only where they were added.
+admin-bots-where = Integrations
+admin-bots-empty = No bots yet. Integrations and the notetaker create them.
 admin-tab-guests = Guests
 admin-invite-user = Create user
 admin-invite-guest = Invite guest
@@ -413,7 +423,7 @@ policy-updates-invalid-version = Enter a version like 1.2.3 or 1.2.3-rc.1.
 policy-updates-invalid-url = Enter an address that starts with https://.
 policy-updates-defaults = Back to the defaults
 admin-retention-title = Retention
-admin-retention-subtitle = Keep the last N days and/or N messages, whichever is stricter. Channel owners can choose less, up to { $days } days.
+admin-retention-subtitle = How long each channel keeps its messages. A channel without a setting of its own follows its space and the instance default; when both a number of days and a number of messages apply, the stricter one wins.
 admin-retention-limited = Keep only the last
 admin-retention-unit-days = { $count ->
     [one] day
@@ -427,6 +437,39 @@ admin-retention-choice-days = { $channel }: how long to keep messages
 admin-retention-choice-messages = { $channel }: how many messages to keep
 admin-retention-error-days = Enter a whole number of days from 1 to { $max }.
 admin-retention-error-messages = Enter a whole number of messages from 1 to { $max }.
+admin-retention-default-title = Instance default
+admin-retention-default = Channels without their own setting keep
+admin-retention-limit = Channel owners may keep at most
+admin-retention-no-limit = No limit
+admin-retention-no-limit-short = no limit
+admin-retention-pinned = Pinned messages
+admin-retention-pinned-kept = Kept, whatever retention deletes
+admin-retention-pinned-deleted = Deleted like every other message
+admin-retention-default-hint = The default and the limit are part of the signed workspace policy. A space can set its own; channels follow it.
+admin-retention-read-only = Only admins who may change channel properties can change retention here.
+admin-retention-follow-default = Default ({ $value })
+admin-retention-follow-space = Space ({ $value })
+admin-retention-follow-plain = Default
+admin-retention-own = Own setting
+admin-retention-changed = Not saved
+admin-retention-reset = Use default
+admin-retention-select = Select { $channel }
+admin-retention-select-all = Select every channel in the list
+admin-retention-selected = { $count ->
+    [one] 1 channel selected
+   *[other] { $count } channels selected
+  }
+admin-retention-bulk-label = Change the selected channels
+admin-retention-bulk-days = Selected channels: how long to keep messages
+admin-retention-bulk-messages = Selected channels: how many messages to keep
+admin-retention-bulk-apply = Set for selected
+admin-retention-bulk-reset = Back to default
+admin-retention-bulk-clear = Clear selection
+admin-retention-save = { $count ->
+    [0] Save
+    [one] Save 1 channel
+   *[other] Save { $count } channels
+  }
 admin-list-cut = This list is cut: the console shows the first 1000 entries, and the instance has more.
 admin-error-rate-limited = The server received too many requests from this network address. The console pauses and tries again shortly.
 admin-error-read-failed = Some data could not be loaded. The console tries again shortly.
@@ -528,9 +571,27 @@ permissions-roles-space_admin = Space admins
 permissions-roles-channel_admin = Channel admins
 permissions-roles-admin = Admins
 permissions-roles-owner = Owners
-admin-moderation = Channel moderation
-admin-moderation-hint = Take permissions away from members and guests of this channel. Allowed means the scheme decides.
-admin-moderation-allowed = Allowed
+admin-moderation = What people may do here
+admin-moderation-hint = Turn something off to take it away from the members or guests of this channel. What stays on follows the permission settings; channel admins keep everything.
+admin-moderation-action = Action
+admin-moderation-on = On
+admin-moderation-off = Off
+admin-moderation-members-may = Members: { $action }
+admin-moderation-guests-may = Guests: { $action }
+admin-moderation-read-only = Only admins who may change the workspace settings can change this.
+admin-retention-source-own = { $value } (own setting)
+admin-retention-source-space = { $value } (from the space)
+admin-retention-source-default = { $value } (instance default)
+admin-guests-count = { $count ->
+    [0] None
+    [one] 1 guest
+   *[other] { $count } guests
+  }
+admin-messages-count = { $count ->
+    [0] None yet
+    [one] 1 message
+   *[other] { $count } messages
+  }
 admin-assign = Assign
 admin-assign-owner-hint = This channel has no owner. Choose one of its members; you do not need to be a member yourself.
 admin-owner-candidate = New owner

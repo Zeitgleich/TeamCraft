@@ -99,10 +99,23 @@ pub struct AdminConversationSummary {
   /// older servers.
   #[serde(rename = "retention", default, skip_serializing_if = "Option::is_none")]
   pub maybe_retention: Option<RetentionSetting>,
+  /// The channel's own retention setting (unset fields follow its space and the workspace
+  /// default): the `own` value of `GET /conversations/{id}/retention`. The console marks channels
+  /// with their own setting and resets them. Absent (empty) from older servers.
+  #[serde(default, skip_serializing_if = "is_unset")]
+  pub own_retention: RetentionSetting,
+  /// The retention setting of the channel's space (unset fields follow the workspace default).
+  /// Absent (empty) from older servers.
+  #[serde(default, skip_serializing_if = "is_unset")]
+  pub space_retention: RetentionSetting,
   /// Where the channel stands in the inactivity policy (issue #212); absent while there is nothing
   /// to say, and from older servers.
   #[serde(rename = "inactivity", default, skip_serializing_if = "Option::is_none")]
   pub maybe_inactivity: Option<crate::ChannelInactivityStatus>,
+}
+
+fn is_unset(setting: &RetentionSetting) -> bool {
+  *setting == RetentionSetting::default()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -134,6 +147,16 @@ wire_enum! {
   }
 }
 
+wire_enum! {
+  /// Which kinds of account a user search returns.
+  pub enum AdminUserKindFilter {
+    /// People: members and guests.
+    People => "people",
+    /// Automated accounts (integration bridge, notetaker).
+    Bots => "bots",
+  }
+}
+
 /// Query of `GET /api/v1/admin/users`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
 #[into_params(parameter_in = Query)]
@@ -147,6 +170,9 @@ pub struct ListAdminUsersQuery {
   /// every account.
   #[serde(rename = "role", default, skip_serializing_if = "Option::is_none")]
   pub maybe_role: Option<String>,
+  /// Only people or only bots; every kind when absent.
+  #[serde(rename = "kind", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_kind: Option<AdminUserKindFilter>,
   /// Only these accounts: IDs separated by commas, at most [`MAX_ADMIN_IDS`].
   #[serde(rename = "ids", default, skip_serializing_if = "Option::is_none")]
   pub maybe_ids: Option<String>,

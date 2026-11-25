@@ -4,9 +4,13 @@
 ## Administration
 admin-title = Administration
 admin-nav-label = Bereiche der Administration
-admin-nav-search = Einstellung finden
-admin-nav-search-placeholder = Einstellung finden
-admin-nav-no-match = Keine Seite passt. Versuche ein anderes Wort, etwa „Mail“ oder „Gäste“.
+admin-nav-search = Einstellung, Person oder Kanal finden
+admin-nav-search-placeholder = Einstellung, Person oder Kanal finden
+admin-nav-no-match = Nichts gefunden. Versuch ein anderes Wort, etwa „Mail“ oder „Gäste“, oder einen Teil eines Namens.
+admin-nav-finding = Personen und Kanäle werden gesucht …
+admin-nav-found-people = Passende Personen
+admin-nav-found-channels = Passende Kanäle
+admin-nav-found-person = Person
 admin-group-overview = Übersicht
 admin-group-people = Personen
 admin-group-conversations = Unterhaltungen
@@ -128,7 +132,13 @@ admin-join-disabled = Die Sicherheitsrichtlinie erlaubt Admins nicht, privaten K
 admin-users-title = Nutzer und Gäste
 admin-users-subtitle = Konten, Geräte und externe Gäste.
 admin-users-tabs = Kontotyp
-admin-tab-users = Nutzer
+admin-tab-people = Personen
+admin-tab-bots = Bots
+admin-role-bot = Bot
+admin-bot-no-devices = Keine: ein Bot meldet sich mit seinem Token an.
+admin-bots-hint = Automatische Konten von Integrationen und dem KI-Notetaker. Sie melden sich mit einem Token an, nicht mit einem Gerät, und handeln nur, wo sie hinzugefügt wurden.
+admin-bots-where = Integrationen
+admin-bots-empty = Noch keine Bots. Integrationen und der KI-Notetaker legen sie an.
 admin-tab-guests = Gäste
 admin-invite-user = Nutzer anlegen
 admin-invite-guest = Gast einladen
@@ -413,7 +423,7 @@ policy-updates-invalid-version = Gib eine Version wie 1.2.3 oder 1.2.3-rc.1 ein.
 policy-updates-invalid-url = Gib eine Adresse ein, die mit https:// beginnt.
 policy-updates-defaults = Auf die Standardwerte zurücksetzen
 admin-retention-title = Aufbewahrung
-admin-retention-subtitle = Die letzten N Tage und/oder N Nachrichten behalten, je nachdem, was strenger ist. Kanaleigentümer können weniger wählen, bis zu { $days } Tagen.
+admin-retention-subtitle = Wie lange jeder Kanal seine Nachrichten behält. Ein Kanal ohne eigene Einstellung folgt seinem Bereich und der Vorgabe der Instanz; gelten Tage und Anzahl zugleich, entscheidet die strengere.
 admin-retention-limited = Nur die letzten behalten
 admin-retention-unit-days = { $count ->
     [one] Tag
@@ -427,6 +437,39 @@ admin-retention-choice-days = { $channel }: wie lange Nachrichten behalten werde
 admin-retention-choice-messages = { $channel }: wie viele Nachrichten behalten werden
 admin-retention-error-days = Gib eine ganze Zahl von Tagen von 1 bis { $max } ein.
 admin-retention-error-messages = Gib eine ganze Zahl von Nachrichten von 1 bis { $max } ein.
+admin-retention-default-title = Vorgabe der Instanz
+admin-retention-default = Kanäle ohne eigene Einstellung behalten
+admin-retention-limit = Kanaleigentümer behalten höchstens
+admin-retention-no-limit = Keine Grenze
+admin-retention-no-limit-short = keine Grenze
+admin-retention-pinned = Angeheftete Nachrichten
+admin-retention-pinned-kept = Bleiben, was die Aufbewahrung auch löscht
+admin-retention-pinned-deleted = Werden wie alle anderen gelöscht
+admin-retention-default-hint = Vorgabe und Grenze gehören zur signierten Richtlinie des Arbeitsbereichs. Ein Bereich kann eine eigene setzen; seine Kanäle folgen ihr.
+admin-retention-read-only = Nur Admins, die Kanaleigenschaften ändern dürfen, können hier die Aufbewahrung ändern.
+admin-retention-follow-default = Vorgabe ({ $value })
+admin-retention-follow-space = Bereich ({ $value })
+admin-retention-follow-plain = Vorgabe
+admin-retention-own = Eigene Einstellung
+admin-retention-changed = Nicht gespeichert
+admin-retention-reset = Vorgabe nutzen
+admin-retention-select = { $channel } auswählen
+admin-retention-select-all = Alle Kanäle der Liste auswählen
+admin-retention-selected = { $count ->
+    [one] 1 Kanal ausgewählt
+   *[other] { $count } Kanäle ausgewählt
+  }
+admin-retention-bulk-label = Ausgewählte Kanäle ändern
+admin-retention-bulk-days = Ausgewählte Kanäle: wie lange Nachrichten behalten werden
+admin-retention-bulk-messages = Ausgewählte Kanäle: wie viele Nachrichten behalten werden
+admin-retention-bulk-apply = Für Auswahl setzen
+admin-retention-bulk-reset = Zurück zur Vorgabe
+admin-retention-bulk-clear = Auswahl aufheben
+admin-retention-save = { $count ->
+    [0] Speichern
+    [one] 1 Kanal speichern
+   *[other] { $count } Kanäle speichern
+  }
 admin-list-cut = Diese Liste ist abgeschnitten: Die Konsole zeigt die ersten 1000 Einträge, die Instanz hat mehr.
 admin-error-rate-limited = Der Server hat zu viele Anfragen von dieser Netzwerkadresse erhalten. Die Konsole pausiert und versucht es gleich erneut.
 admin-error-read-failed = Einige Daten konnten nicht geladen werden. Die Konsole versucht es gleich erneut.
@@ -528,9 +571,27 @@ permissions-roles-space_admin = Bereichsadmins
 permissions-roles-channel_admin = Kanaladmins
 permissions-roles-admin = Admins
 permissions-roles-owner = Eigentümer
-admin-moderation = Kanalmoderation
-admin-moderation-hint = Entzieht Mitgliedern und Gästen dieses Kanals Berechtigungen. Erlaubt heißt: das Schema entscheidet.
-admin-moderation-allowed = Erlaubt
+admin-moderation = Was Personen hier dürfen
+admin-moderation-hint = Schalte etwas aus, um es den Mitgliedern oder Gästen dieses Kanals zu nehmen. Was an bleibt, folgt den Berechtigungen; Kanal-Admins behalten alles.
+admin-moderation-action = Aktion
+admin-moderation-on = An
+admin-moderation-off = Aus
+admin-moderation-members-may = Mitglieder: { $action }
+admin-moderation-guests-may = Gäste: { $action }
+admin-moderation-read-only = Nur Admins, die die Einstellungen des Arbeitsbereichs ändern dürfen, können das ändern.
+admin-retention-source-own = { $value } (eigene Einstellung)
+admin-retention-source-space = { $value } (vom Bereich)
+admin-retention-source-default = { $value } (Vorgabe der Instanz)
+admin-guests-count = { $count ->
+    [0] Keine
+    [one] 1 Gast
+   *[other] { $count } Gäste
+  }
+admin-messages-count = { $count ->
+    [0] Noch keine
+    [one] 1 Nachricht
+   *[other] { $count } Nachrichten
+  }
 admin-assign = Zuweisen
 admin-assign-owner-hint = Dieser Kanal hat keinen Eigentümer. Wähle eines seiner Mitglieder; du musst selbst kein Mitglied sein.
 admin-owner-candidate = Neuer Eigentümer
