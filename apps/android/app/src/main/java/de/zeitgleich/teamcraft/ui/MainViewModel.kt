@@ -98,8 +98,14 @@ import de.zeitgleich.teamcraft.server.transportErrorText
 import uniffi.teamcraft_ffi.AccountState
 import uniffi.teamcraft_ffi.AddPeopleOutcome
 import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
+import uniffi.teamcraft_ffi.CanvasBlockItem
+import uniffi.teamcraft_ffi.CanvasEdit
+import uniffi.teamcraft_ffi.CanvasEditOutcome
+import uniffi.teamcraft_ffi.CanvasPageEditor
 import uniffi.teamcraft_ffi.CanvasPageItem
 import uniffi.teamcraft_ffi.CanvasPresenceItem
+import uniffi.teamcraft_ffi.CanvasVersionItem
+import uniffi.teamcraft_ffi.CanvasVersionKey
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CheckedServer
@@ -1002,6 +1008,34 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
   fun leaveCanvasPage(conversationId: String, maybePageId: String?, isShared: Boolean) = viewModelScope.launch {
     readChat { leaveCanvasPage(conversationId, maybePageId, isShared) }
   }
+
+  /** The page an editor shows, with its own edits not sent yet (#2361); `null` when the core can't answer. */
+  suspend fun canvasEditorPage(editor: CanvasPageEditor): CanvasPageItem? = readChat { canvasEditorPage(editor) }
+
+  /** Makes an edit on the page; `null` when it failed, which the user is told. */
+  suspend fun canvasEdit(editor: CanvasPageEditor, edit: CanvasEdit): CanvasEditOutcome? {
+    var maybeOutcome: CanvasEditOutcome? = null
+    reportFailure { maybeOutcome = withContext(Dispatchers.Default) { chat.canvasEdit(editor, edit) } }
+    return maybeOutcome
+  }
+
+  /** Sends the edits waiting in the editor (#2361); a failure is told. */
+  suspend fun flushCanvasEdits(editor: CanvasPageEditor) {
+    reportFailure { withContext(Dispatchers.Default) { chat.flushCanvasEdits(editor) } }
+  }
+
+  /** The page is left: the editor's waiting edits go out and the core lets go of it; a failure is told. */
+  suspend fun closeCanvasEditor(editor: CanvasPageEditor) {
+    reportFailure { withContext(Dispatchers.Default) { chat.closeCanvasEditor(editor) } }
+  }
+
+  /** A page's version history, newest first (#2361); `null` when the core can't answer. */
+  suspend fun canvasVersions(conversationId: String, maybePageId: String?): List<CanvasVersionItem>? =
+    readChat { canvasVersions(conversationId, maybePageId) }
+
+  /** The page as it was at [version], read-only; `null` when it's gone or the core can't answer. */
+  suspend fun canvasVersionPage(conversationId: String, maybePageId: String?, version: CanvasVersionKey): List<CanvasBlockItem>? =
+    readChat { canvasVersionPage(conversationId, maybePageId, version) }
 
   /** The members section opened: the members and signed roles are read afresh, as on desktop and web. */
   fun refreshChannelMembers(conversationId: String) = viewModelScope.launch {

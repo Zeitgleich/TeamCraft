@@ -211,6 +211,8 @@ pub(crate) struct Reads {
   /// When the page of notes the app shows says it is open (`crate::canvas`): asked on the main
   /// read thread only.
   pub(crate) canvas_pacers: crate::canvas::PagePacers,
+  /// The phone's page editors (issue #2361); used on the actions' thread only.
+  pub(crate) canvas_editors: crate::canvas_edit::CanvasEditors,
 }
 
 /// The enrolled account as the read thread has it.
@@ -708,6 +710,7 @@ fn spawn_lane(
         maybe_closing: None,
         maybe_cache_writes,
         canvas_pacers: crate::canvas::PagePacers::default(),
+        canvas_editors: crate::canvas_edit::CanvasEditors::default(),
       };
       loop {
         let job = match jobs.try_recv() {

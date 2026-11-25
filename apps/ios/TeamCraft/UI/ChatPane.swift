@@ -55,7 +55,7 @@ struct ChatPane: View {
   @State private var isShowingFilters = false
   /// A channel's members with their roles (#1262); DMs and group DMs have no roles.
   @State private var isShowingMembers = false
-  /// A channel's shared notes, read-only on the phone (#1456).
+  /// The conversation's shared notes (#1456), edited on the phone too (#2361).
   @State private var isShowingNotes = false
   /// The notes were opened from a mention in them (#2361): on its page, at the mention.
   @State private var maybeNotesRequest: OpenedNotes?
@@ -1466,8 +1466,12 @@ struct ChatPane: View {
         ConversationMuteMenu(conversationId: conversation.id)
         Button("notify_filters_title", systemImage: "bell.badge") { isShowingFilters = true }
         Button("files_title", systemImage: "folder") { isShowingFiles = true }
-        if conversation.kind == .public || conversation.kind == .private {
+        // Shared notes (#1456): channels, DMs, group DMs and meeting chats (#2361); not a log channel
+        // or the notes to self.
+        if conversation.kind != .integration && !conversation.isNotesToSelf {
           Button("channel_notes_title", systemImage: "doc.text") { isShowingNotes = true }
+        }
+        if conversation.kind == .public || conversation.kind == .private {
           Button("members_title", systemImage: "person.2") { isShowingMembers = true }
         }
       } label: {

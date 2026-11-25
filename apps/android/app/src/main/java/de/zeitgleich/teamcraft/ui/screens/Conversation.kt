@@ -763,13 +763,15 @@ private fun ConversationMenu(
   // A channel's members with their roles (#1262); DMs and group DMs have no roles.
   val isChannel = maybeConversation?.kind == "Public" || maybeConversation?.kind == "Private"
   var isShowingMembers by remember { mutableStateOf(false) }
-  // A channel's shared notes, read-only on the phone (#1456).
+  // The shared notes (#1456): channels, DMs, group DMs and meeting chats (#2361); not a log channel
+  // or the notes to self.
+  val hasNotes = maybeConversation?.let { it.kind != "Integration" && !it.isNotesToSelf } == true
   var isShowingNotes by remember { mutableStateOf(false) }
   // Opened from a mention in them (#2361): on its page, at the mention.
   var maybeNotesRequest by remember { mutableStateOf<NotesRequest?>(null) }
   val maybePendingNotes by NotesToOpen.pending.collectAsState()
-  LaunchedEffect(maybePendingNotes, isChannel) {
-    val request = maybePendingNotes?.takeIf { it.conversationId == conversationId && isChannel } ?: return@LaunchedEffect
+  LaunchedEffect(maybePendingNotes, hasNotes) {
+    val request = maybePendingNotes?.takeIf { it.conversationId == conversationId && hasNotes } ?: return@LaunchedEffect
     NotesToOpen.pending.value = null
     maybeNotesRequest = request
     isShowingNotes = true
@@ -835,11 +837,13 @@ private fun ConversationMenu(
       isOpen = false
       isShowingBookmarks = true
     })
-    if (isChannel) {
+    if (hasNotes) {
       DropdownMenuItem(text = { Text(stringResource(R.string.channel_notes_title)) }, onClick = {
         isOpen = false
         isShowingNotes = true
       })
+    }
+    if (isChannel) {
       DropdownMenuItem(text = { Text(stringResource(R.string.members_title)) }, onClick = {
         isOpen = false
         isShowingMembers = true

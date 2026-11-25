@@ -4981,7 +4981,7 @@ from the join on once they are a guest, and gets the import's keys if the import
 
 ### 4.11 A channel's shared notes (issue #1221)
 
-A channel of a space has pages of notes (the "Notes" tab of its header: headings, paragraphs,
+A channel of a space (and, since issue #2361, a DM, a group DM and a meeting's chat, below) has pages of notes (the "Notes" tab of its header: headings, paragraphs,
 quotes, code blocks, bulleted and numbered lists, checklists and files of the channel, with bold,
 italic, struck-through and inline code text and links) that its members edit together: the first
 page, and further pages they add (issue #1456). It is end-to-end
@@ -5219,14 +5219,14 @@ doesn't learn that the message is a page edit, nor which page or where on it.
 
 A receiving device believes the list inside the signed ciphertext, never the server's. A page edit
 that names the user (not their own, not a snapshot, on a page ID that keeps the rules) notifies as
-"Anna mentioned you in the notes" with the channel as the title: by the push preview on the phones
+"Anna mentioned you in the notes" with the conversation as the title: by the push preview on the phones
 and the web (`PreviewGap::MentionedInNotes`, never the page's text), and on desktop and web from the
 device's record of such edits (`canvas::page_mentions`, the newest 50 in the encrypted store),
 under the policy of a message that mentions the user (mutes, quiet hours, do-not-disturb, level). A
 tap opens the notes on that page, scrolled to the user's first mention. For everybody else a page
 edit stays hidden, as before. It doesn't count towards the channel's unread mentions yet.
 
-The phones show the page read-only, without a caret, and take part in presence all the same: while
+The phones show the page without a caret, and take part in presence all the same: while
 a page is shown and the app is in the foreground, the app asks the core every 10 s and whenever
 something changed (`teamcraft-ffi::canvas`, `canvas_presence`). The core answers who else has the
 page open and who edited it lately, the same line as above with avatars and names, and says "open"
@@ -5236,11 +5236,10 @@ closing the sheet or going to the background says "closed" (`leave_canvas_page`)
 sealed word over the same frame, so nothing about the protocol or what the server learns changes,
 and "Show when I'm typing" covers it on the phones too.
 
-**On the phones (issue #1456).** Android and iOS show a channel's pages read-only (the channel's
-menu, "Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document
-(`CanvasDoc`) and hands the apps the blocks, their formatted runs, numbers of numbered items and file
-references, and the list of further pages; the apps carry no CRDT of their own and send no edits
-(only the words about who has a page open, above), so nothing about the protocol changes. A link reaches the apps only as a web address, and the apps check
+**On the phones (issues #1456, #2361).** Android and iOS show a conversation's pages (its menu,
+"Notes"): `teamcraft-ffi::canvas` reads the core's updates with the same document (`CanvasDoc`) and
+hands the apps the blocks, their formatted runs, numbers of numbered items and file references, and
+the list of further pages; the apps carry no CRDT of their own. A link reaches the apps only as a web address, and the apps check
 it once more with the rule for messages. A file block opens from the channel's files the device
 holds, like the desktop's, or says that the file isn't there. While a page is open the app reads the
 channel's older history a page at a time, at most 20 per opening, as the editor does. A phone
@@ -5249,9 +5248,45 @@ page counts as unlisted and shares the 50 places above: the store stays bounded,
 made-up page IDs can push out a real page that nobody edited lately, as on a device whose editor
 never read the list.
 
-**Not in this step** (issue #1245 and its follow-up): mentions, pages for DMs and meetings, renaming the first page, dropping a deleted
+**Editing on the phones (issue #2361).** The phones edit a page with the editor desktop and web run,
+not one of their own: the rules every editor follows moved into
+`teamcraft-client-api::canvas::PageEditor` (the own edits not sent yet, the edits of a burst of
+typing merged into one update after 600 ms without typing and at most 2 s after the first, a
+snapshot every 50th update by the rules above, compaction beyond 32 updates with the history of what
+it merged, mentions) together with the typing rules (a prefix choosing a paragraph's kind, Enter,
+Backspace at a block's start), and the desktop and web editor uses them from there. The app holds a
+`CanvasPageEditor` per page it shows and hands it each edit (`teamcraft-ffi::canvas_edit`,
+`canvas_edit`): typing in a block, Enter, Backspace at the start, a block's kind or check mark,
+adding, moving and removing a block, undo and redo of the editor's own edits, restoring a version.
+The editor itself lives on the core's thread for actions (its undo log can't move between
+threads); at most 8 are kept, and one the app didn't close sends its waiting edits when it is let
+go. The app calls `flush_canvas_edits` once typing paused, when it leaves the page and when it
+goes to the background. A phone's text field holds the user's typing while the edit is on its way:
+each edit names the text it started from, and the core makes the change from that text on the
+block as it is (`CanvasDoc::type_onto`), so another member's typing in the same block meanwhile
+stays and the change lands where its place moved to. Where the user may not post (or the
+conversation is archived), the phone shows the page read-only and the core makes no edit.
+
+The phones show the version history as desktop and web do (`canvas_versions`,
+`canvas_version_page`): the versions this device holds, per author and stretch of editing, a
+version read-only, and "Restore this version" as one ordinary edit on top. What the phones send is
+what desktop and web send: `canvas` messages through the outbox. Nothing about the protocol or what
+the server learns changes. The phones don't offer the mention picker, formatting, adding or
+renaming pages or adding a file yet; they keep what others wrote of each (an edit next to
+formatted text leaves its formatting in place, as described above for clients that don't show it).
+
+**DMs, group DMs and meeting chats (issue #2361).** Their notes are the channel's notes in every
+respect above: the edits are hidden `canvas` messages of the conversation, encrypted with its
+content key and signed like its messages, who may edit is who may post there (in a meeting's chat
+that includes guests who may post), and the history rules of §4.3 decide which edits a later member
+reads. The server never treated page edits by the conversation's kind (they are ordinary messages
+to it), so nothing changes there, nor in what it learns. A mention notifies only members of the
+conversation, as before. The notes to self and integration channels (logs) have no pages: nobody
+shares the first, and the second is written by machines.
+
+**Not in this step** (issue #2361): renaming the first page, dropping a deleted
 page's updates from the store, uploading a file straight into a page, the notetaker writing its summary onto the meeting's page, "Pin to page", search
-over pages, editing and the version history on the phones, a snapshot when a member joins, stopping the history read at the newest
+over pages, mentions, formatting and page management on the phones, a snapshot when a member joins, stopping the history read at the newest
 snapshot, and not waking phones for page edits: today a page edit is a message like a reaction, so
 a phone of a member whose level is "all" gets a push for it (docs/notifications.md, "Push routing").
 

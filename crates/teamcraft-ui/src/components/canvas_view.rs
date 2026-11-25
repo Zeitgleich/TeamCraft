@@ -4,7 +4,8 @@
 //!
 //! The page is a Yjs document ([`CanvasDoc`]) that this view keeps while it is open; the core keeps
 //! only the updates. Each edit applies here at once and goes to the core a moment later, merged
-//! with the edits made meanwhile ([`FLUSH_IDLE`], at most [`FLUSH_MAX_WAIT_MS`] after the first),
+//! with the edits made meanwhile ([`FLUSH_IDLE_MS`], at most two seconds after the first; the rules
+//! every editor shares, the phones' too, are `teamcraft_client_api::canvas::PageEditor`),
 //! which encrypts it as a hidden message of the channel. Updates of other members come back through
 //! the core and are merged in with the caret kept where it was. On the web this view is a wasm
 //! chunk of its own (`areas::canvas`), so the CRDT loads with the first page that opens.
@@ -26,7 +27,6 @@
 //! the focus) or with Ctrl or Cmd+Shift+Up and Down ([`canvas_move`]); a file of the channel shows
 //! in a block of its own ([`canvas_file`]).
 
-use std::collections::BTreeSet;
 use std::time::Duration;
 
 use leptos::html;
@@ -34,9 +34,9 @@ use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::FileInfo;
 use teamcraft_client_api::canvas::{
-  Block, BlockKind, CanvasDoc, CanvasState, CanvasVersion, EDITING_WINDOW_MS, FileRef, InlineMark, TextStyle,
-  byte_offset, caret_after_change, compaction, editors_since, is_page_link, merge_updates, numbered_position,
-  page_at, typed_range, versions,
+  Block, BlockKind, COMPACT_ABOVE, CanvasDoc, CanvasState, CanvasVersion, EDITING_WINDOW_MS, FLUSH_IDLE_MS,
+  FileRef, InlineMark, Outgoing, PageEditor as Editor, TextStyle, Typed, byte_offset, caret_after_change,
+  compaction, editors_since, is_page_link, numbered_position, page_at, typed_range, versions,
 };
 use teamcraft_client_api::model::CanvasPeer;
 use teamcraft_client_api::model::OlderHistory;
@@ -60,16 +60,6 @@ use crate::i18n::{I18n, use_i18n};
 use crate::model::{ConversationId, User, UserId};
 use crate::state::{AppState, use_app_state};
 
-/// How long typing pauses before the edits go out.
-const FLUSH_IDLE: Duration = Duration::from_millis(600);
-/// The longest an edit waits while typing goes on.
-const FLUSH_MAX_WAIT_MS: f64 = 2_000.0;
-/// Updates since the last snapshot after which an edit is sent as the whole page instead.
-const SNAPSHOT_EVERY: u32 = 50;
-/// The largest snapshot sent: with base64 and encryption well below the server's 1 MiB message.
-const MAX_SNAPSHOT_BYTES: usize = 512 * 1024;
-/// Updates the core holds beyond which the view hands it their merge.
-const COMPACT_ABOVE: usize = 32;
 /// Pages of older history read per opening, so the page holds the edits from before this device.
 const MAX_HISTORY_PAGES: u32 = 20;
 /// How often that line is looked at again.
@@ -81,91 +71,6 @@ const MAX_MENTION_CANDIDATES: usize = 8;
 /// How far the pointer moves on a block's handle before the block follows it, in CSS pixels: a
 /// press that stays put is no drag.
 const DRAG_THRESHOLD_PX: f64 = 4.0;
-
-/// The page as this view edits it.
-struct Editor {
-  page: CanvasDoc,
-  /// Own updates the core doesn't hold yet.
-  unsent: Vec<Vec<u8>>,
-  /// When the first of them was made (`Date.now()`).
-  maybe_unsent_since: Option<f64>,
-  /// Members mentioned with the picker since the last edit went out (issue #2361): those still on
-  /// the page are notified with it. A mention undone, redone or restored is never in here.
-  picked_mentions: BTreeSet<UserId>,
-}
-
-/// What goes to the core: an update, whether it is the whole page, and whom it notifies.
-struct Outgoing {
-  update: Vec<u8>,
-  is_snapshot: bool,
-  mentions: Vec<UserId>,
-}
-
-impl Editor {
-  fn new(maybe_page: Option<&CanvasPageId>) -> Self {
-    Self {
-      page: CanvasDoc::for_page(maybe_page),
-      unsent: Vec::new(),
-      maybe_unsent_since: None,
-      picked_mentions: BTreeSet::new(),
-    }
-  }
-
-  /// Brings the page up to the core's updates and the own ones not sent yet.
-  fn sync(&mut self, stored: &CanvasState) -> Vec<Block> {
-    let mut all: Vec<&[u8]> = stored.updates.iter().map(AsRef::as_ref).collect();
-    all.extend(self.unsent.iter().map(Vec::as_slice));
-    if let Err(error) = self.page.sync(&all) {
-      tracing::warn!(%error, "a page update was not applied");
-    }
-    self.page.blocks()
-  }
-
-  /// What goes to the core: the edits since the last time merged, or the whole page when a
-  /// snapshot is due and this device holds the history it needs. An edit that mentions somebody is
-  /// never a snapshot, which would notify nobody: the snapshot waits for the next edit.
-  fn outgoing(&mut self, stored: &CanvasState, holds_history: bool) -> Option<Outgoing> {
-    if self.unsent.is_empty() {
-      return None;
-    }
-    let unsent = std::mem::take(&mut self.unsent);
-    self.maybe_unsent_since = None;
-    let picked = std::mem::take(&mut self.picked_mentions);
-    let mentions: Vec<UserId> = if picked.is_empty() {
-      Vec::new()
-    } else {
-      picked
-        .intersection(&self.page.mentioned_users())
-        .copied()
-        .collect()
-    };
-    let is_due = stored.updates_since_snapshot.saturating_add(1) >= SNAPSHOT_EVERY;
-    if holds_history && is_due && mentions.is_empty() {
-      let mut all: Vec<&[u8]> = stored.updates.iter().map(AsRef::as_ref).collect();
-      all.extend(unsent.iter().map(Vec::as_slice));
-      if let Ok(Some(whole)) = teamcraft_client_api::canvas::snapshot(&all)
-        && whole.len() <= MAX_SNAPSHOT_BYTES
-      {
-        return Some(Outgoing {
-          update: whole,
-          is_snapshot: true,
-          mentions,
-        });
-      }
-    }
-    match merge_updates(&unsent) {
-      Ok(merged) => Some(Outgoing {
-        update: merged,
-        is_snapshot: false,
-        mentions,
-      }),
-      Err(error) => {
-        tracing::warn!(%error, "own page edits could not be merged");
-        None
-      },
-    }
-  }
-}
 
 /// Everything the page's handlers share; all handles, so it is `Copy`.
 #[derive(Clone, Copy)]
@@ -1130,15 +1035,9 @@ impl Canvas {
     if !self.can_edit.get_untracked() {
       return;
     }
-    let next = self.editor.try_update_value(|editor| {
-      let updates = change(&mut editor.page);
-      if updates.is_empty() {
-        return None;
-      }
-      editor.unsent.extend(updates);
-      editor.maybe_unsent_since.get_or_insert_with(js_sys::Date::now);
-      Some(editor.page.blocks())
-    });
+    let next = self
+      .editor
+      .try_update_value(|editor| editor.edit(now_ms(), change).then(|| editor.page.blocks()));
     if let Some(Some(next)) = next {
       self.blocks.set(next);
       self.note_undo_state();
@@ -1368,20 +1267,9 @@ impl Canvas {
     // "# ", "- ", "1. ", "> " or "[] " typed at the start of a paragraph choose its kind.
     if !self.is_composing.get_value()
       && self.kind_of(&id) == Some(BlockKind::Paragraph)
-      && let Some((new_kind, prefix_len)) = BlockKind::from_prefix(&value)
+      && BlockKind::from_prefix(&value).is_some()
     {
-      let rest = value[prefix_len..].to_owned();
-      let is_checked = value.starts_with("[x] ");
-      self.edit(|page| {
-        [
-          page.set_kind(&id, new_kind),
-          page.set_text(&id, &rest),
-          is_checked.then(|| page.set_checked(&id, true)).flatten(),
-        ]
-        .into_iter()
-        .flatten()
-        .collect()
-      });
+      self.edit(|page| page.apply_prefix(&id, &value).unwrap_or_default());
       return;
     }
     let pending = self.take_pending();
@@ -1569,7 +1457,7 @@ impl Canvas {
     ));
     let _ = self
       .editor
-      .try_update_value(|editor| editor.picked_mentions.insert(user.id));
+      .try_update_value(|editor| editor.pick_mention(user.id));
     self.edit(|page| {
       page
         .insert_mention(&pick.block, pick.start, pick.end, user.id, &user.display_name)
@@ -1650,7 +1538,7 @@ impl Canvas {
       }
       return;
     }
-    self.split(id, &text, caret);
+    self.split(id, caret);
   }
 
   fn insert_at(self, id: &str, text: &str, caret: Caret, inserted: &str) {
@@ -1752,72 +1640,58 @@ impl Canvas {
 
   /// Enter: the text after the caret becomes a new block of the same list or quote (a paragraph
   /// after anything else); Enter in an empty one ends it.
-  fn split(self, id: &str, text: &str, caret: Caret) {
-    let Some(kind) = self.kind_of(id) else {
-      return;
-    };
+  fn split(self, id: &str, caret: Caret) {
     let id = id.to_owned();
-    if kind.continues_on_enter() && text.is_empty() {
-      self.edit(|page| page.set_kind(&id, BlockKind::Paragraph).into_iter().collect());
-      return;
-    }
-    let next_kind = if kind.continues_on_enter() {
-      kind
-    } else {
-      BlockKind::Paragraph
-    };
-    let mut maybe_new = None;
-    self.edit(
-      |page| match page.split_block(&id, caret.start, caret.end, next_kind) {
-        Some((new_id, update)) => {
-          maybe_new = Some(new_id);
-          vec![update]
+    let mut maybe_focus = None;
+    self.edit(|page| {
+      let Typed {
+        updates,
+        maybe_focus: focus,
+      } = page.enter(&id, caret.start, caret.end);
+      maybe_focus = focus;
+      updates
+    });
+    if let Some(focus) = maybe_focus {
+      focus_block_later(
+        focus.block,
+        Caret {
+          start: focus.caret,
+          end: focus.caret,
         },
-        None => Vec::new(),
-      },
-    );
-    if let Some(new_id) = maybe_new {
-      focus_block_later(new_id, Caret { start: 0, end: 0 });
+      );
     }
   }
 
   /// Backspace at the start: a list item, quote or heading becomes a paragraph first, a paragraph
   /// joins the block above. Returns whether it did something.
   fn join_with_previous(self, id: &str) -> bool {
-    let id = id.to_owned();
-    let (maybe_kind, maybe_previous) = self.blocks.with_untracked(|blocks| {
-      let index = blocks.iter().position(|block| block.id == id);
-      (
-        index.map(|index| blocks[index].kind),
-        index
-          .and_then(|index| index.checked_sub(1))
-          .map(|index| blocks[index].clone()),
-      )
-    });
-    match (maybe_kind, maybe_previous) {
-      // Text doesn't join a file: the file block above takes the focus.
-      (Some(_), Some(previous)) if previous.kind.is_embed() => {
-        focus_block_later(previous.id, Caret { start: 0, end: 0 });
-        true
-      },
-      (Some(kind), _) if kind != BlockKind::Paragraph => {
-        self.edit(|page| page.set_kind(&id, BlockKind::Paragraph).into_iter().collect());
-        true
-      },
-      (Some(_), Some(previous)) => {
-        let caret = utf16_len(&previous.text);
-        self.edit(|page| page.join_blocks(&previous.id, &id).into_iter().collect());
-        focus_block_later(
-          previous.id,
-          Caret {
-            start: caret,
-            end: caret,
-          },
-        );
-        true
-      },
-      _ => false,
+    if !self.can_edit.get_untracked() {
+      return false;
     }
+    let id = id.to_owned();
+    let mut maybe_typed = None;
+    self.edit(|page| {
+      let typed = page.backspace_at_start(&id);
+      let updates = typed
+        .as_ref()
+        .map(|typed| typed.updates.clone())
+        .unwrap_or_default();
+      maybe_typed = typed;
+      updates
+    });
+    let Some(typed) = maybe_typed else {
+      return false;
+    };
+    if let Some(focus) = typed.maybe_focus {
+      focus_block_later(
+        focus.block,
+        Caret {
+          start: focus.caret,
+          end: focus.caret,
+        },
+      );
+    }
+    true
   }
 
   fn focus_neighbour(self, id: &str, step: isize) {
@@ -1882,15 +1756,15 @@ impl Canvas {
     if let Some(Some(running)) = self.timer.try_get_value() {
       running.clear();
     }
-    let since = self
+    let has_waited = self
       .editor
-      .try_with_value(|editor| editor.maybe_unsent_since)
-      .flatten();
-    if since.is_some_and(|since| js_sys::Date::now() - since >= FLUSH_MAX_WAIT_MS) {
+      .try_with_value(|editor| editor.has_waited_enough(now_ms()))
+      .unwrap_or(false);
+    if has_waited {
       self.flush();
       return;
     }
-    match set_timeout_with_handle(move || self.flush(), FLUSH_IDLE) {
+    match set_timeout_with_handle(move || self.flush(), Duration::from_millis(FLUSH_IDLE_MS.into())) {
       Ok(started) => {
         let _ = self.timer.try_set_value(Some(started));
       },
@@ -2281,6 +2155,11 @@ fn utf16_len(text: &str) -> u32 {
   u32::try_from(text.encode_utf16().count()).unwrap_or(u32::MAX)
 }
 
+/// The time the editor's waits count in: the browser's clock (wasm has no system clock).
+fn now_ms() -> i64 {
+  js_sys::Date::now() as i64
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -2371,75 +2250,5 @@ mod tests {
     assert_eq!(link_range(&linked, Caret { start: 8, end: 8 }), Some((4, 8)));
     assert_eq!(link_range(&linked, Caret { start: 2, end: 2 }), None);
     assert_eq!(link_range(&linked, Caret { start: 1, end: 2 }), Some((1, 2)));
-  }
-
-  #[test]
-  fn edits_go_out_merged_and_a_snapshot_when_due() {
-    let mut editor = Editor::new(None);
-    let (id, first) = editor.page.insert_block(None, BlockKind::Paragraph, "a");
-    let second = editor.page.set_text(&id, "ab").unwrap();
-    editor.unsent = vec![first, second];
-    let stored = CanvasState::default();
-    let Outgoing {
-      update: merged,
-      is_snapshot,
-      ..
-    } = editor.outgoing(&stored, true).unwrap();
-    assert!(!is_snapshot);
-    assert!(editor.unsent.is_empty());
-    let page = CanvasDoc::from_updates(std::slice::from_ref(&merged)).unwrap();
-    assert_eq!(page.blocks()[0].text, "ab");
-    assert!(editor.outgoing(&stored, true).is_none(), "nothing waits");
-
-    let third = editor.page.set_text(&id, "abc").unwrap();
-    editor.unsent = vec![third];
-    let due = CanvasState {
-      revision: 1,
-      updates: vec![merged.into()],
-      updates_since_snapshot: SNAPSHOT_EVERY,
-      ..CanvasState::default()
-    };
-    let whole = editor.outgoing(&due, true).unwrap();
-    assert!(whole.is_snapshot);
-    assert_eq!(
-      CanvasDoc::from_updates(&[whole.update]).unwrap().blocks()[0].text,
-      "abc"
-    );
-
-    // Without the history it needs, a device sends no snapshot.
-    let fourth = editor.page.set_text(&id, "abcd").unwrap();
-    editor.unsent = vec![fourth];
-    assert!(!editor.outgoing(&due, false).unwrap().is_snapshot);
-  }
-
-  #[test]
-  fn a_mention_goes_out_once_with_its_edit_never_as_a_snapshot() {
-    let user = |raw: u64| teamcraft_client_api::model::id_from_raw::<UserId>(raw);
-    let mut editor = Editor::new(None);
-    let (id, first) = editor.page.insert_block(None, BlockKind::Paragraph, "@a @b");
-    let anna = editor.page.insert_mention(&id, 0, 2, user(7), "Anna").unwrap();
-    let text = editor.page.blocks()[0].text.clone();
-    let at = utf16_len(&text) - 2;
-    let ben = editor
-      .page
-      .insert_mention(&id, at, at + 2, user(8), "Ben")
-      .unwrap();
-    editor.picked_mentions.extend([user(7), user(8)]);
-    // Ben's mention is gone again before the edit goes out: only Anna is told.
-    let (start, end) = editor.page.blocks()[0]
-      .mention_before(utf16_len(&editor.page.blocks()[0].text) - 1)
-      .unwrap();
-    let gone = editor.page.remove_text(&id, start, end).unwrap();
-    editor.unsent = vec![first, anna, ben, gone];
-    let due = CanvasState {
-      updates_since_snapshot: SNAPSHOT_EVERY,
-      ..CanvasState::default()
-    };
-    let out = editor.outgoing(&due, true).unwrap();
-    assert!(!out.is_snapshot, "the snapshot waits");
-    assert_eq!(out.mentions, vec![user(7)]);
-    // The next edit names nobody, though Anna is still on the page.
-    editor.unsent = vec![editor.page.set_text(&id, "x").unwrap()];
-    assert!(editor.outgoing(&due, true).unwrap().mentions.is_empty());
   }
 }

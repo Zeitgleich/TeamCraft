@@ -25985,22 +25985,6 @@
         }
       }
     },
-    "channel_notes_read_only_phone": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Everyone in the channel shares these notes; they are end-to-end encrypted like its messages. On the phone you can read them; edit them on the desktop app or the web."
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Alle im Kanal teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten. Auf dem Handy kannst du sie lesen; bearbeiten kannst du sie in der Desktop-App oder im Web."
-          }
-        }
-      }
-    },
     "channel_notes_empty_title": {
       "localizations": {
         "en": {
@@ -26022,13 +26006,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Members who may post here can write notes for the whole channel on the desktop app or the web."
+            "value": "Nobody has written notes here yet."
           }
         },
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mitglieder, die hier schreiben dürfen, können in der Desktop-App oder im Web Notizen für den ganzen Kanal anlegen."
+            "value": "Hier hat noch niemand Notizen geschrieben."
           }
         }
       }
@@ -27745,6 +27729,454 @@
           "stringUnit": {
             "state": "translated",
             "value": "%@, nicht aufgenommen"
+          }
+        }
+      }
+    },
+    "channel_notes_shared": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everyone in this conversation shares these notes; they are end-to-end encrypted like its messages. Tap a block to write in it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle in dieser Unterhaltung teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie ihre Nachrichten. Tippe auf einen Block, um darin zu schreiben."
+          }
+        }
+      }
+    },
+    "channel_notes_read_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Everyone in this conversation shares these notes; they are end-to-end encrypted like its messages. Only people who may post here can edit them."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Alle in dieser Unterhaltung teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie ihre Nachrichten. Bearbeiten kann sie nur, wer hier schreiben darf."
+          }
+        }
+      }
+    },
+    "channel_notes_empty_editable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a block to start. Everyone in this conversation sees and edits these notes."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Füge einen Block hinzu, um anzufangen. Alle in dieser Unterhaltung sehen und bearbeiten diese Notizen."
+          }
+        }
+      }
+    },
+    "channel_notes_add_block": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a block"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Block hinzufügen"
+          }
+        }
+      }
+    },
+    "channel_notes_undo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Undo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Rückgängig"
+          }
+        }
+      }
+    },
+    "channel_notes_redo": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Redo"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Wiederholen"
+          }
+        }
+      }
+    },
+    "channel_notes_history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Version history"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Versionsverlauf"
+          }
+        }
+      }
+    },
+    "channel_notes_done": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Done"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fertig"
+          }
+        }
+      }
+    },
+    "channel_notes_edit_block": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Edit"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bearbeiten"
+          }
+        }
+      }
+    },
+    "channel_notes_empty_block": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Empty block"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Leerer Block"
+          }
+        }
+      }
+    },
+    "channel_notes_block_actions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Block options"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Block-Optionen"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_paragraph": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Text"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_heading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Heading 1"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Überschrift 1"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_heading2": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Heading 2"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Überschrift 2"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_heading3": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Heading 3"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Überschrift 3"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_bullet": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bulleted list"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Aufzählung"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_numbered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Numbered list"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nummerierte Liste"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_check": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checklist"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checkliste"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_quote": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Quote"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Zitat"
+          }
+        }
+      }
+    },
+    "channel_notes_kind_code": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Code"
+          }
+        }
+      }
+    },
+    "channel_notes_move_up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Move up"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nach oben"
+          }
+        }
+      }
+    },
+    "channel_notes_move_down": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Move down"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Nach unten"
+          }
+        }
+      }
+    },
+    "channel_notes_delete_block": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete block"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Block löschen"
+          }
+        }
+      }
+    },
+    "channel_notes_history_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
+    "channel_notes_history_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The versions of this page as this device holds them. Restoring one makes the page that version again as a new change; nothing is lost."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Versionen dieser Seite, wie dieses Gerät sie hat. Wiederherstellen macht die Seite wieder zu dieser Version, als neue Änderung; nichts geht verloren."
+          }
+        }
+      }
+    },
+    "channel_notes_history_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No versions on this device yet."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Noch keine Versionen auf diesem Gerät."
+          }
+        }
+      }
+    },
+    "channel_notes_history_restore": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Restore this version"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Version wiederherstellen"
+          }
+        }
+      }
+    },
+    "channel_notes_history_gone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This version is no longer on this device."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Diese Version ist nicht mehr auf diesem Gerät."
           }
         }
       }

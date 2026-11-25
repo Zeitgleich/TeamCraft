@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A channel's shared notes, read-only on the phone (#1456, e2ee.md §4.11). -->
+<!-- A conversation's shared notes on the phone (#1456, #2361, e2ee.md §4.11). -->
 <resources>
   <string name="channel_notes_title">Notizen</string>
   <string name="channel_notes_pages">Seiten</string>
   <string name="channel_notes_page_untitled">Ohne Titel</string>
-  <string name="channel_notes_read_only_phone">Alle im Kanal teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie seine Nachrichten. Auf dem Handy kannst du sie lesen; bearbeiten kannst du sie in der Desktop-App oder im Web.</string>
   <string name="channel_notes_empty_title">Noch keine Notizen</string>
-  <string name="channel_notes_empty">Mitglieder, die hier schreiben dürfen, können in der Desktop-App oder im Web Notizen für den ganzen Kanal anlegen.</string>
+  <string name="channel_notes_empty">Hier hat noch niemand Notizen geschrieben.</string>
   <string name="channel_notes_loading_history">Frühere Änderungen werden geladen …</string>
   <string name="channel_notes_history_failed">Einige frühere Änderungen konnten noch nicht geladen werden.</string>
   <string name="channel_notes_incomplete">Einige Änderungen an diesen Notizen sind noch nicht auf diesem Gerät.</string>
@@ -17,6 +16,36 @@
   <string name="channel_notes_file_downloading">Wird heruntergeladen …</string>
   <string name="channel_notes_checked">Erledigt</string>
   <string name="channel_notes_unchecked">Nicht erledigt</string>
+  <string name="channel_notes_shared">Alle in dieser Unterhaltung teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie ihre Nachrichten. Tippe auf einen Block, um darin zu schreiben.</string>
+  <string name="channel_notes_read_only">Alle in dieser Unterhaltung teilen diese Notizen; sie sind Ende-zu-Ende-verschlüsselt wie ihre Nachrichten. Bearbeiten kann sie nur, wer hier schreiben darf.</string>
+  <string name="channel_notes_empty_editable">Füge einen Block hinzu, um anzufangen. Alle in dieser Unterhaltung sehen und bearbeiten diese Notizen.</string>
+  <string name="channel_notes_add_block">Block hinzufügen</string>
+  <string name="channel_notes_undo">Rückgängig</string>
+  <string name="channel_notes_redo">Wiederholen</string>
+  <string name="channel_notes_history">Versionsverlauf</string>
+  <string name="channel_notes_done">Fertig</string>
+  <string name="channel_notes_edit_block">Bearbeiten</string>
+  <string name="channel_notes_empty_block">Leerer Block</string>
+  <string name="channel_notes_block_actions">Block-Optionen</string>
+  <string name="channel_notes_kind_paragraph">Text</string>
+  <string name="channel_notes_kind_heading">Überschrift 1</string>
+  <string name="channel_notes_kind_heading2">Überschrift 2</string>
+  <string name="channel_notes_kind_heading3">Überschrift 3</string>
+  <string name="channel_notes_kind_bullet">Aufzählung</string>
+  <string name="channel_notes_kind_numbered">Nummerierte Liste</string>
+  <string name="channel_notes_kind_check">Checkliste</string>
+  <string name="channel_notes_kind_quote">Zitat</string>
+  <string name="channel_notes_kind_code">Code</string>
+  <string name="channel_notes_move_up">Nach oben</string>
+  <string name="channel_notes_move_down">Nach unten</string>
+  <string name="channel_notes_delete_block">Block löschen</string>
+  <string name="channel_notes_history_someone">Jemand</string>
+  <string name="channel_notes_history_all">Alle Versionen</string>
+  <string name="channel_notes_history_close">Zurück zur Seite</string>
+  <string name="channel_notes_history_hint">Die Versionen dieser Seite, wie dieses Gerät sie hat. Wiederherstellen macht die Seite wieder zu dieser Version, als neue Änderung; nichts geht verloren.</string>
+  <string name="channel_notes_history_empty">Noch keine Versionen auf diesem Gerät.</string>
+  <string name="channel_notes_history_restore">Diese Version wiederherstellen</string>
+  <string name="channel_notes_history_gone">Diese Version ist nicht mehr auf diesem Gerät.</string>
   <!-- Who else has the page open now, and who edited it lately without having it open; names joined by commas. -->
   <plurals name="channel_notes_open_by">
     <item quantity="one">%1$s hat diese Seite offen</item>

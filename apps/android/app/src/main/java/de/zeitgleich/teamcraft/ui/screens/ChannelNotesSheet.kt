@@ -21,6 +21,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -28,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -81,6 +84,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import uniffi.teamcraft_ffi.CanvasBlockItem
 import uniffi.teamcraft_ffi.CanvasBlockKind
+import uniffi.teamcraft_ffi.CanvasEdit
 import uniffi.teamcraft_ffi.CanvasPageItem
 import uniffi.teamcraft_ffi.CanvasPresenceItem
 import uniffi.teamcraft_ffi.CanvasRunItem
@@ -100,10 +104,12 @@ private val PRESENCE_AVATAR_SIZE = 24.dp
 private const val CODE_BACKGROUND_ALPHA = 0.06f
 
 /**
- * A channel's shared notes, read-only (#1456, e2ee.md §4.11): the page as desktop and web show it,
- * built by the core from the updates this device holds. Editing stays on desktop and web for now;
- * the note under the title says so. While the sheet is open the channel's older history is read a
- * page at a time, since the page's edits are messages in it.
+ * A conversation's shared notes (#1456, e2ee.md §4.11): the page as desktop and web show it, built by
+ * the core from the updates this device holds, and edited here as there (#2361): tap a block to type
+ * in it, Enter makes the next block, the block's menu changes its kind, moves or removes it; undo,
+ * redo and the version history sit above the page. Who may not post reads it. While the sheet is
+ * open the conversation's older history is read a page at a time, since the page's edits are
+ * messages in it.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -120,9 +126,14 @@ fun ChannelNotesSheet(
   var isSeekingMention by remember(conversationId) { mutableStateOf(maybeRequest != null) }
   val listState = rememberLazyListState()
   var maybePage by remember(conversationId) { mutableStateOf<CanvasPageItem?>(null) }
-  LaunchedEffect(conversationId, maybePageId, changes) {
-    maybePage = viewModel.canvasPage(conversationId, maybePageId) ?: maybePage
+  val editing = rememberNotesEditing(viewModel, conversationId, maybePageId) { maybePage = it }
+  LaunchedEffect(conversationId, maybePageId, changes, editing) {
+    val read = editing.maybeEditor?.let { viewModel.canvasEditorPage(it) } ?: viewModel.canvasPage(conversationId, maybePageId)
+    maybePage = read ?: maybePage
+    // A page deleted meanwhile falls back to the first one, which then gets an editor of its own.
+    if (read != null && read.maybePageId != maybePageId) maybePageId = read.maybePageId
   }
+  var isShowingHistory by rememberSaveable(conversationId, maybePageId) { mutableStateOf(false) }
   var serverHistory by remember(conversationId) { mutableStateOf(ServerHistory.COMPLETE) }
   var historyPages by remember(conversationId) { mutableIntStateOf(0) }
   LaunchedEffect(conversationId, changes) {
@@ -146,6 +157,23 @@ fun ChannelNotesSheet(
   }
   ModalBottomSheet(onDismissRequest = onDismiss, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
     val page = maybePage
+    if (isShowingHistory) {
+      NotesHistory(
+        viewModel,
+        conversationId,
+        maybePageId,
+        changes,
+        files.maybeValue.orEmpty(),
+        maybeMeId,
+        canRestore = page?.canEdit == true,
+        onRestore = { version ->
+          editing.edit(CanvasEdit.Restore(version))
+          isShowingHistory = false
+        },
+        onClose = { isShowingHistory = false },
+      )
+      return@ModalBottomSheet
+    }
     LazyColumn(
       // Full height: a page is read, and switching pages doesn't make the sheet jump.
       Modifier.fillMaxSize().padding(horizontal = Spacing.l).padding(bottom = Spacing.xxl),
@@ -153,10 +181,13 @@ fun ChannelNotesSheet(
       verticalArrangement = Arrangement.spacedBy(Spacing.s),
     ) {
       item {
-        Text(
-          stringResource(R.string.channel_notes_title),
-          style = MaterialTheme.typography.titleMedium,
-          modifier = Modifier.semantics { heading() },
+        NotesTitleRow(
+          canEdit = page?.canEdit == true,
+          editing = editing,
+          onHistory = {
+            editing.stopEditing()
+            isShowingHistory = true
+          },
         )
       }
       presence?.takeIf { it.openBy.isNotEmpty() || it.editing.isNotEmpty() }?.let { shown ->
@@ -169,15 +200,29 @@ fun ChannelNotesSheet(
       if (page.pages.isNotEmpty()) {
         item { PageChips(page, onPick = { maybePageId = it }) }
       }
-      item { NotesHint(stringResource(R.string.channel_notes_read_only_phone)) }
+      item {
+        NotesHint(stringResource(if (page.canEdit) R.string.channel_notes_shared else R.string.channel_notes_read_only))
+      }
       notesStatus(page, serverHistory)?.let { status -> item { NotesHint(stringResource(status), isStatus = true) } }
       if (page.isUnreadable) return@LazyColumn
       if (page.blocks.isEmpty()) {
-        item { EmptyNotes() }
-        return@LazyColumn
+        item { EmptyNotes(page.canEdit) }
       }
       items(page.blocks, key = { it.id }) { block ->
-        NotesBlock(block, files.maybeValue.orEmpty(), maybeMeId, onOpenFile = { file -> openOrDownload(viewModel, file, context) })
+        val onOpenFile: (FileInfo) -> Unit = { file -> openOrDownload(viewModel, file, context) }
+        if (page.canEdit) {
+          EditableNotesBlock(block, page.blocks, editing, files.maybeValue.orEmpty(), maybeMeId, onOpenFile)
+        } else {
+          NotesBlock(block, files.maybeValue.orEmpty(), maybeMeId, onOpenFile = onOpenFile)
+        }
+      }
+      if (page.canEdit) {
+        item(key = "add") {
+          TextButton(onClick = { editing.edit(CanvasEdit.AddBlock(page.blocks.lastOrNull()?.id, CanvasBlockKind.PARAGRAPH)) }) {
+            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.padding(end = Spacing.xs))
+            Text(stringResource(R.string.channel_notes_add_block))
+          }
+        }
       }
     }
   }
@@ -294,11 +339,11 @@ private fun PageChips(page: CanvasPageItem, onPick: (String?) -> Unit) {
 }
 
 @Composable
-private fun EmptyNotes() {
+private fun EmptyNotes(canEdit: Boolean) {
   Column(Modifier.fillMaxWidth().padding(vertical = Spacing.xl), horizontalAlignment = Alignment.CenterHorizontally) {
     Text(stringResource(R.string.channel_notes_empty_title), style = MaterialTheme.typography.titleSmall)
     Text(
-      stringResource(R.string.channel_notes_empty),
+      stringResource(if (canEdit) R.string.channel_notes_empty_editable else R.string.channel_notes_empty),
       style = MaterialTheme.typography.bodyMedium,
       color = MaterialTheme.colorScheme.onSurfaceVariant,
       textAlign = TextAlign.Center,
@@ -309,15 +354,15 @@ private fun EmptyNotes() {
 
 /** One block: its marker (bullet, number, check box, quote bar) and its formatted text. */
 @Composable
-private fun NotesBlock(block: CanvasBlockItem, files: List<FileInfo>, maybeMeId: String?, onOpenFile: (FileInfo) -> Unit) {
+internal fun NotesBlock(block: CanvasBlockItem, files: List<FileInfo>, maybeMeId: String?, onOpenFile: (FileInfo) -> Unit) {
   CompositionLocalProvider(LocalNotesMeId provides maybeMeId) { NotesBlockContent(block, files, onOpenFile) }
 }
 
 /** The user's ID, so mentions of them stand out (#2361). */
-private val LocalNotesMeId = staticCompositionLocalOf<String?> { null }
+internal val LocalNotesMeId = staticCompositionLocalOf<String?> { null }
 
 @Composable
-private fun NotesBlockContent(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
+internal fun NotesBlockContent(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
   val scheme = MaterialTheme.colorScheme
   val typography = MaterialTheme.typography
   when (block.kind) {
@@ -337,7 +382,13 @@ private fun NotesBlockContent(block: CanvasBlockItem, files: List<FileInfo>, onO
         .horizontalScroll(rememberScrollState())
         .padding(Spacing.m),
     ) {
-      Text(block.runs.joinToString("") { it.text }, style = typography.bodyMedium.copy(fontFamily = FontFamily.Monospace), softWrap = false)
+      val style = typography.bodyMedium.copy(fontFamily = FontFamily.Monospace)
+      val maybeEditing = LocalBlockEditing.current
+      if (maybeEditing != null) {
+        maybeEditing.text(block, style, Modifier)
+      } else {
+        Text(block.runs.joinToString("") { it.text }, style = style, softWrap = false)
+      }
     }
     CanvasBlockKind.FILE -> FileRow(block, files, onOpenFile)
     CanvasBlockKind.PARAGRAPH -> BlockText(block, typography.bodyLarge)
@@ -345,7 +396,7 @@ private fun NotesBlockContent(block: CanvasBlockItem, files: List<FileInfo>, onO
 }
 
 @Composable
-private fun MarkedRow(marker: String, content: @Composable () -> Unit) {
+internal fun MarkedRow(marker: String, content: @Composable () -> Unit) {
   Row {
     Text(
       marker,
@@ -357,17 +408,20 @@ private fun MarkedRow(marker: String, content: @Composable () -> Unit) {
   }
 }
 
-/** A checklist item: the box shows the mark (read-only here), a done item's text is muted. */
+/** A checklist item: the box shows the mark (and changes it where the page can be edited), a done item's text is muted. */
 @Composable
 private fun CheckRow(block: CanvasBlockItem) {
   val scheme = MaterialTheme.colorScheme
   val state = stringResource(if (block.isChecked) R.string.channel_notes_checked else R.string.channel_notes_unchecked)
+  val maybeEditing = LocalBlockEditing.current
   Row(verticalAlignment = Alignment.Top) {
-    // Read-only here: no change handler, so it shows the mark and takes no taps.
+    // Read-only without editing: no change handler, so it shows the mark and takes no taps.
     Checkbox(
       checked = block.isChecked,
-      onCheckedChange = null,
-      modifier = Modifier.padding(end = Spacing.s).size(20.dp).semantics { contentDescription = state },
+      onCheckedChange = maybeEditing?.let { editing -> { isChecked -> editing.onCheck(block, isChecked) } },
+      // A box that takes taps keeps its full touch target.
+      modifier = Modifier.padding(end = Spacing.s).then(if (maybeEditing == null) Modifier.size(20.dp) else Modifier)
+        .semantics { contentDescription = state },
     )
     val style = MaterialTheme.typography.bodyLarge
     BlockText(block, if (block.isChecked) style.copy(color = scheme.onSurfaceVariant) else style)
@@ -379,7 +433,7 @@ private fun CheckRow(block: CanvasBlockItem) {
  * channel's files, or named as missing when this device holds no such message.
  */
 @Composable
-private fun FileRow(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
+internal fun FileRow(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (FileInfo) -> Unit) {
   val scheme = MaterialTheme.colorScheme
   val maybeFile = block.maybeFile?.let { ref -> files.firstOrNull { it.fileId == ref.fileId && it.message == ref.messageId } }
   val name = maybeFile?.fileName ?: block.runs.joinToString("") { it.text }
@@ -403,9 +457,20 @@ private fun FileRow(block: CanvasBlockItem, files: List<FileInfo>, onOpenFile: (
   }
 }
 
-/** A block's text with its formatting; web links open in the browser. */
+/** A block's text: typed into where the page can be edited ([LocalBlockEditing]), otherwise shown formatted. */
 @Composable
 private fun BlockText(block: CanvasBlockItem, style: TextStyle, modifier: Modifier = Modifier) {
+  val maybeEditing = LocalBlockEditing.current
+  if (maybeEditing != null) {
+    maybeEditing.text(block, style, modifier)
+  } else {
+    FormattedBlockText(block, style, modifier)
+  }
+}
+
+/** A block's text with its formatting; web links open in the browser. */
+@Composable
+internal fun FormattedBlockText(block: CanvasBlockItem, style: TextStyle, modifier: Modifier = Modifier) {
   val context = LocalContext.current
   val linkColor = MaterialTheme.colorScheme.primary
   val codeBackground = MaterialTheme.colorScheme.onSurface.copy(alpha = CODE_BACKGROUND_ALPHA)
@@ -462,7 +527,7 @@ private fun annotated(
   }
 
 @Composable
-private fun NotesHint(text: String, isStatus: Boolean = false) {
+internal fun NotesHint(text: String, isStatus: Boolean = false) {
   Text(
     text,
     style = MaterialTheme.typography.bodySmall,

@@ -15,6 +15,7 @@ mod blocking;
 mod bridge;
 mod calls;
 mod canvas;
+mod canvas_edit;
 mod channel_anchor;
 mod channel_roles;
 mod coalesced;

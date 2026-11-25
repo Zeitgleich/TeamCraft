@@ -11,7 +11,8 @@ use std::collections::{BTreeSet, HashMap};
 
 use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::canvas::{
-  Block, BlockKind, CanvasDoc, CanvasState, EDITING_WINDOW_MS, TextStyle, editors_since, numbered_position,
+  Block, BlockKind, CanvasDoc, CanvasState, EDITING_WINDOW_MS, PageEditor, TextStyle, editors_since,
+  numbered_position,
 };
 use teamcraft_client_api::model::{CanvasPeer, CanvasPresenceNote};
 use teamcraft_client_api::remote::ChatAction;
@@ -44,6 +45,10 @@ pub struct CanvasPageItem {
   pub is_incomplete: bool,
   /// The page's updates couldn't be read: the app says so instead of showing an empty page.
   pub is_unreadable: bool,
+  /// Whether the user may edit it (issue #2361): where they may post, not in an archived
+  /// conversation, and only a page this core keeps apart. Otherwise the app shows it read-only.
+  #[uniffi(default = false)]
+  pub can_edit: bool,
 }
 
 /// A further page as the first page lists it.
@@ -128,7 +133,7 @@ pub(crate) struct PagePacers {
 }
 
 /// A page of a conversation's notes: `None` is the first page.
-type PageKey = (ConversationId, Option<CanvasPageId>);
+pub(crate) type PageKey = (ConversationId, Option<CanvasPageId>);
 
 /// A file of the channel as a page names it. The page holds no key and no copy: the app shows it
 /// from the message it was sent with (its conversation's files), and only if it holds that message.
@@ -270,7 +275,10 @@ fn presence_of(
 }
 
 /// The conversation and page the app names; a page ID beyond the rules is refused.
-fn page_key(conversation_id: &str, maybe_page_id: Option<&str>) -> Result<PageKey, TeamCraftError> {
+pub(crate) fn page_key(
+  conversation_id: &str,
+  maybe_page_id: Option<&str>,
+) -> Result<PageKey, TeamCraftError> {
   let conversation: ConversationId = parse_id(conversation_id)?;
   let maybe_page = maybe_page_id
     .map(|id| CanvasPageId::parse(id).ok_or_else(|| TeamCraftError::InvalidInput("not a page ID".into())))
@@ -300,6 +308,30 @@ fn read_page(
   maybe_page_id: Option<&str>,
 ) -> Result<CanvasPageItem, TeamCraftError> {
   let conversation: ConversationId = parse_id(conversation_id)?;
+  let mut item = read_page_of(reads, conversation, maybe_page_id, None)?;
+  item.can_edit = !item.is_unreadable && may_edit(reads, conversation)?;
+  Ok(item)
+}
+
+/// Whether the user may edit the notes of `conversation`: where they may post and it isn't
+/// archived (e2ee.md §4.11, "Who may edit"; the core refuses the others' edits as well).
+pub(crate) fn may_edit(reads: &Reads, conversation: ConversationId) -> Result<bool, TeamCraftError> {
+  let backend = reads.backend()?;
+  Ok(
+    backend
+      .conversation(conversation)
+      .is_some_and(|found| found.can_post && !found.is_archived),
+  )
+}
+
+/// A page of the notes of `conversation`; `maybe_editor`, the phone's editor of that page, shows it
+/// with the own edits not sent yet (issue #2361).
+pub(crate) fn read_page_of(
+  reads: &Reads,
+  conversation: ConversationId,
+  maybe_page_id: Option<&str>,
+  maybe_editor: Option<&mut PageEditor>,
+) -> Result<CanvasPageItem, TeamCraftError> {
   let backend = reads.backend()?;
   let first = backend.canvas(conversation, None);
   let Ok(first_doc) = CanvasDoc::from_updates(&first.updates) else {
@@ -319,12 +351,23 @@ fn read_page(
     })
     .collect();
   let Some(page) = maybe_page else {
+    // An editor of a page no longer listed doesn't show it: the app opens the first page instead.
+    if maybe_page_id.is_none()
+      && let Some(editor) = maybe_editor
+    {
+      editor.sync_if_changed(&first);
+      return Ok(page_item(None, entries, &editor.page));
+    }
     return Ok(page_item(None, entries, &first_doc));
   };
   let stored = backend.canvas(conversation, Some(&page));
   // A core from before further pages answers with the first page; it never is one here.
   if stored.maybe_page.as_ref() != Some(&page) {
     return Ok(page_item(None, entries, &first_doc));
+  }
+  if let Some(editor) = maybe_editor {
+    editor.sync_if_changed(&stored);
+    return Ok(page_item(Some(&page), entries, &editor.page));
   }
   match CanvasDoc::from_page_updates(Some(&page), &stored.updates) {
     Ok(doc) => Ok(page_item(Some(&page), entries, &doc)),
@@ -338,7 +381,7 @@ fn read_page(
   }
 }
 
-fn page_item(
+pub(crate) fn page_item(
   maybe_page: Option<&CanvasPageId>,
   pages: Vec<CanvasPageEntryItem>,
   doc: &CanvasDoc,
@@ -349,11 +392,12 @@ fn page_item(
     blocks: block_items(&doc.blocks()),
     is_incomplete: doc.has_missing(),
     is_unreadable: false,
+    can_edit: false,
   }
 }
 
 /// The blocks as the app shows them, numbered lists counted as on desktop and web.
-fn block_items(blocks: &[Block]) -> Vec<CanvasBlockItem> {
+pub(crate) fn block_items(blocks: &[Block]) -> Vec<CanvasBlockItem> {
   blocks
     .iter()
     .enumerate()
@@ -391,13 +435,14 @@ fn runs_of(block: &Block) -> Vec<CanvasRunItem> {
 }
 
 impl CanvasPageItem {
-  fn unreadable(maybe_page: Option<&CanvasPageId>) -> Self {
+  pub(crate) fn unreadable(maybe_page: Option<&CanvasPageId>) -> Self {
     Self {
       maybe_page_id: maybe_page.map(ToString::to_string),
       pages: Vec::new(),
       blocks: Vec::new(),
       is_incomplete: false,
       is_unreadable: true,
+      can_edit: false,
     }
   }
 }
