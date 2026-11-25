@@ -2,6 +2,7 @@ use leptos::html;
 use leptos::prelude::*;
 use wasm_bindgen::JsCast;
 
+use futures_util::FutureExt;
 use teamcraft_client_api::actions::{
   FileSource, MessagePriority, OutgoingFile, OutgoingLinkPreview, OutgoingMessage,
 };
@@ -39,8 +40,8 @@ use crate::emoji_catalog::{self, SkinTone};
 use crate::emoji_support;
 use crate::feedback::PendingAction;
 use crate::i18n::use_i18n;
-use crate::keys::t_with_shortcuts;
-use crate::large_files::{self, LargeFile};
+use crate::keys::{is_enter, t_with_shortcuts};
+use crate::large_files::{self, Handover, Handovers, LargeFile};
 use crate::markdown;
 use crate::media_formats::{displayable_type, essence, is_svg, media_type_for, needs_app_thumbnail};
 use crate::media_layout::{APP_THUMBNAIL_SIDE, thumbnail_type};
@@ -108,6 +109,20 @@ struct PendingFile {
 enum FileContent {
   Read(Vec<u8>),
   Large(LargeFile),
+  /// Still being read (its thumbnail, a HEIC photo as JPEG): the chip shows at once, so a send
+  /// right away takes the file, as a large one (#2387).
+  Reading(web_sys::File),
+}
+
+impl FileContent {
+  /// The file as the core is handed it when it isn't read into memory.
+  fn large_file(&self) -> Option<LargeFile> {
+    match self {
+      Self::Read(_) => None,
+      Self::Large(file) => Some(file.clone()),
+      Self::Reading(file) => Some(LargeFile::Picked(file.clone())),
+    }
+  }
 }
 
 /// Largest picture read whole only for the chip's thumbnail; bigger ones go without.
@@ -511,6 +526,8 @@ pub fn Composer(
   // composer closes and on the user's other devices. One removed here leaves the draft; one sent
   // was taken by its message. `gone_ids` keeps both from showing again while the core catches up.
   let gone_ids = StoredValue::new(Vec::<String>::new());
+  // A large file is handed over once; a send before that is done joins it (#2364).
+  let handovers = StoredValue::new_local(Handovers::default());
   let attach_to_draft = move |file: PendingFile| {
     if let Some(upload) = draft_upload(&file) {
       state.write(|backend| {
@@ -526,8 +543,13 @@ pub fn Composer(
     let FileContent::Large(picked) = file.content.clone() else {
       return;
     };
+    let Some(handover) =
+      handovers.try_update_value(|running| running.join(&file.draft_id, || large_files::hand_over(picked)))
+    else {
+      return;
+    };
     leptos::task::spawn_local(async move {
-      let source = match large_files::source_of(&picked).await {
+      let source = match handover.await {
         Ok(source) => source,
         // Sent as before then: the send hands the file over itself.
         Err(error) => return tracing::warn!(%error, "a large file could not be handed over for the draft"),
@@ -564,6 +586,7 @@ pub fn Composer(
       .iter()
       .filter(|id| !current.iter().any(|file| &file.draft_id == *id))
     {
+      handovers.update_value(|running| running.forget(id));
       if !gone_ids.with_value(|gone| gone.contains(id)) {
         gone_ids.update_value(|gone| gone.push(id.clone()));
         state.write(|backend| backend.remove_draft_file(conversation, maybe_thread, id));
@@ -796,14 +819,24 @@ pub fn Composer(
     for file in local {
       if let Some(upload) = draft_upload(&file) {
         files.push(upload);
-      } else if let FileContent::Large(picked) = file.content {
+      } else if let Some(picked) = file.content.large_file() {
+        let start = || large_files::hand_over(picked.clone());
+        let handover = match handovers.try_update_value(|running| running.take(&file.draft_id, start)) {
+          Some(handover) => handover,
+          None => large_files::hand_over(picked.clone()).shared(),
+        };
         large.push((
-          file.name,
-          file.media_type,
-          picked,
-          file.maybe_thumbnail,
-          file.maybe_duration_ms,
-          file.draft_id,
+          OutgoingFile {
+            file_name: file.name,
+            media_type: file.media_type,
+            source: large_files::stand_in(&picked),
+            maybe_thumbnail: file.maybe_thumbnail,
+            maybe_duration_ms: file.maybe_duration_ms,
+            maybe_waveform: None,
+            maybe_draft_id: Some(file.draft_id),
+            maybe_motion: None,
+          },
+          handover,
         ));
       }
     }
@@ -841,30 +874,18 @@ pub fn Composer(
     if large.is_empty() {
       state.write(|backend| backend.send_message(message));
     } else {
-      // Large files are handed to the core first (staged or registered); the message follows.
+      // Large files are handed to the core first (staged or registered), joining the draft's
+      // handover where one runs (#2364). The row shows now, with stand-ins for them; the message
+      // follows once they are handed over.
+      let (stand_ins, handovers): (Vec<OutgoingFile>, Vec<Handover>) = large.into_iter().unzip();
+      message.files.extend(stand_ins);
+      state.write(|backend| backend.show_before_send(&mut message));
       leptos::task::spawn_local(async move {
-        for (file_name, media_type, picked, maybe_thumbnail, maybe_duration_ms, draft_id) in large {
-          match large_files::source_of(&picked).await {
-            Ok(source) => message.files.push(OutgoingFile {
-              file_name,
-              media_type,
-              source,
-              maybe_thumbnail,
-              maybe_duration_ms,
-              maybe_waveform: None,
-              maybe_draft_id: Some(draft_id),
-              maybe_motion: None,
-            }),
-            Err(error) => {
-              tracing::warn!(%error, "a large file could not be handed to the core");
-              let text = i18n.t_with("composer-file-unstaged", &[("name", &file_name)]);
-              upload_error.set_if_alive(Some(text));
-            },
-          }
-        }
-        if !message.files.is_empty() || !message.body.trim().is_empty() {
-          state.try_write(|backend| backend.send_message(message));
-        }
+        send_after_handover(state, message, handovers, |file_name| {
+          let text = i18n.t_with("composer-file-unstaged", &[("name", file_name)]);
+          upload_error.set_if_alive(Some(text));
+        })
+        .await;
       });
     }
     clear_editor();
@@ -1306,15 +1327,20 @@ pub fn Composer(
     if ev.is_composing() || ev.key_code() == IME_KEY_CODE {
       return;
     }
+    // The keypad's Enter is Enter, with the same modifiers (#2387).
+    let key = match is_enter(&ev.key(), &ev.code()) {
+      true => "Enter".to_owned(),
+      false => ev.key(),
+    };
     if has_just_composed.get_value() {
-      if ev.key() == "Enter" {
+      if key == "Enter" {
         ev.prevent_default();
       }
       return;
     }
     let listed = suggestions.with_untracked(Vec::len);
     if listed > 0 {
-      match ev.key().as_str() {
+      match key.as_str() {
         "ArrowDown" => {
           ev.prevent_default();
           selected_suggestion.update(|at| *at = (*at + 1) % listed);
@@ -1332,7 +1358,7 @@ pub fn Composer(
               .is_some_and(|item| item.is_exact)
           });
           // A fully typed command is sent, not completed.
-          if !(is_exact && ev.key() == "Enter") {
+          if !(is_exact && key == "Enter") {
             ev.prevent_default();
             accept_suggestion(selected_suggestion.get_untracked());
             return;
@@ -1352,7 +1378,7 @@ pub fn Composer(
       return;
     }
     let has_modifier = ev.shift_key() || ev.alt_key() || ev.ctrl_key() || ev.meta_key();
-    if ev.key() == "ArrowUp"
+    if key == "ArrowUp"
       && !has_modifier
       && is_empty.get_untracked()
       && !has_files_untracked()
@@ -1362,13 +1388,13 @@ pub fn Composer(
       return;
     }
     // Esc closes a notice first.
-    if ev.key() == "Escape" && !has_modifier && notice.with_untracked(Option::is_some) {
+    if key == "Escape" && !has_modifier && notice.with_untracked(Option::is_some) {
       close_notice(NoticeEvent::Escape);
       return;
     }
     // Esc in the empty composer of a conversation marks it read, as in the feed (#321); a reply
     // being quoted is cancelled first.
-    if ev.key() == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
+    if key == "Escape" && !has_modifier && maybe_thread.is_none() && is_empty.get_untracked() {
       if state.reply_target.get_untracked().is_some() {
         state.reply_target.set(None);
         return;
@@ -1376,7 +1402,7 @@ pub fn Composer(
       state.mark_conversation_read(conversation);
       return;
     }
-    if ev.key() == "ArrowDown"
+    if key == "ArrowDown"
       && !has_modifier
       && let Some(element) = editor.get_untracked()
       && composer_editor::leave_last_block(&element)
@@ -1385,7 +1411,7 @@ pub fn Composer(
       after_edit();
       return;
     }
-    if ev.key() == "Backspace"
+    if key == "Backspace"
       && !has_modifier
       && let Some(element) = editor.get_untracked()
       && composer_editor::leave_block_at_start(&element)
@@ -1394,7 +1420,7 @@ pub fn Composer(
       after_edit();
       return;
     }
-    if ev.key() == "Tab"
+    if key == "Tab"
       && !(ev.alt_key() || ev.ctrl_key() || ev.meta_key())
       && let Some(element) = editor.get_untracked()
       && composer_editor::move_between_cells(&element, ev.shift_key())
@@ -1403,7 +1429,7 @@ pub fn Composer(
       after_edit();
       return;
     }
-    if ev.key() != "Enter" {
+    if key != "Enter" {
       return;
     }
     ev.prevent_default();
@@ -1478,6 +1504,22 @@ pub fn Composer(
         continue;
       }
       upload_error.set(None);
+      // The chip shows at once, so a send right away takes the file along (#2387); what is read
+      // below (thumbnail, poster, a HEIC photo as JPEG) replaces it when it is ready.
+      let draft_id = new_draft_id();
+      let media_type = media_type_for(&file.name(), &file.type_());
+      attachments.update(|list| {
+        list.push(PendingFile {
+          name: file.name(),
+          maybe_preview_url: chip_preview_url(&file, &media_type, None),
+          media_type,
+          content: FileContent::Reading(file.clone()),
+          maybe_thumbnail: None,
+          maybe_duration_ms: None,
+          draft_id: draft_id.clone(),
+          maybe_staged: None,
+        });
+      });
       leptos::task::spawn_local(async move {
         // A HEIC photo goes as JPEG where the webview decodes it (#1588), unless the JPEG is over
         // the limit; otherwise as it is.
@@ -1523,6 +1565,7 @@ pub fn Composer(
               (false, Some(bytes)) => FileContent::Read(bytes),
               _ => FileContent::Large(LargeFile::Picked(file.clone())),
             };
+            let read_id = draft_id.clone();
             let read = PendingFile {
               name: file.name(),
               media_type,
@@ -1530,18 +1573,28 @@ pub fn Composer(
               maybe_preview_url,
               maybe_thumbnail,
               maybe_duration_ms,
-              draft_id: new_draft_id(),
+              draft_id,
               maybe_staged: None,
             };
-            if let Some(PendingFile {
-              maybe_preview_url: Some(url),
-              ..
-            }) = add_read_file(attachments, read)
-            {
-              drop(web_sys::Url::revoke_object_url(&url));
+            match replace_read_file(attachments, read) {
+              // Now it goes up with the draft (#1220), or is handed over for it.
+              None => {
+                let maybe_read = attachments
+                  .try_with_untracked(|list| list.iter().find(|file| file.draft_id == read_id).cloned())
+                  .flatten();
+                if let Some(read) = maybe_read {
+                  attach_to_draft(read);
+                }
+              },
+              Some(PendingFile {
+                maybe_preview_url: Some(url),
+                ..
+              }) => drop(web_sys::Url::revoke_object_url(&url)),
+              Some(_) => {},
             }
           },
           Err(_) => {
+            attachments.try_update(|list| list.retain(|waiting| waiting.draft_id != draft_id));
             let text = i18n.t_with("composer-file-unreadable", &[("name", &file.name())]);
             // The composer may be gone by now; see `add_read_file`.
             upload_error.set_if_alive(Some(text));
@@ -1571,11 +1624,21 @@ pub fn Composer(
   // composer outside one has its own, for the files the desktop shell reads after a drop.
   let drop_zone = use_context::<DroppedFiles>().unwrap_or_default();
   let DroppedFiles(dropped, dropped_in_shell) = drop_zone;
+  // A drop leaves the focus where it was (the feed, the sidebar): the composer takes it, so Enter
+  // sends what was just dropped (#2387).
+  let focus_after_drop = move || {
+    if composer_focus::is_fine_pointer()
+      && let Some(element) = editor.get_untracked()
+    {
+      drop(element.focus());
+    }
+  };
   Effect::new(move |_| {
     let files = dropped.get();
     if !files.is_empty() {
       dropped.set(Vec::new());
       add_files(files);
+      focus_after_drop();
     }
   });
   Effect::new(move |_| {
@@ -1583,6 +1646,7 @@ pub fn Composer(
     if !files.is_empty() {
       dropped_in_shell.set(Vec::new());
       attachments.update(|list| list.extend(files.into_iter().map(pending_file_in_shell)));
+      focus_after_drop();
     }
   });
   // What another app shared and the user sent here (`share_into`): it waits in the composer, like
@@ -1614,7 +1678,10 @@ pub fn Composer(
     // Files the webview handed over as addresses only come from the desktop shell, or an error says
     // why not; they are never pasted in as text.
     match take_drop(&transfer, Some(drop_zone), state, i18n) {
-      DropContent::Files(files) => add_files(files),
+      DropContent::Files(files) => {
+        add_files(files);
+        focus_after_drop();
+      },
       DropContent::FromShell | DropContent::Unreadable => {},
       DropContent::NoFiles => {
         if let (Ok(text), Some(element)) = (transfer.get_data("text/plain"), editor.get_untracked())
@@ -2435,9 +2502,6 @@ pub fn with_scheme(url: &str) -> String {
   }
 }
 
-/// Adds a file that was read in the background. The composer may be gone by then (another
-/// conversation was opened while a big file was read): its signals are disposed, and writing them
-/// would panic and abort the whole wasm app (issue #316). Returns the file when nobody took it.
 /// Pictures the editor can open (#1354): read into memory, in a format the browser decodes, and no
 /// animation (cropping a GIF would keep only its first frame).
 fn is_editable_picture(file: &PendingFile) -> bool {
@@ -2466,9 +2530,19 @@ fn object_url_of(bytes: &[u8], media_type: &str) -> Option<String> {
   web_sys::Url::create_object_url_with_blob(&blob).ok()
 }
 
-fn add_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> Option<PendingFile> {
+/// Puts a file that was read in the background in place of its chip. The composer may be gone by
+/// then (another conversation was opened while a big file was read): its signals are disposed, and
+/// writing them would panic and abort the whole wasm app (issue #316). Returns the file when its
+/// chip is gone: removed, sent meanwhile, or the composer closed.
+fn replace_read_file(attachments: RwSignal<Vec<PendingFile>>, file: PendingFile) -> Option<PendingFile> {
   let mut maybe_file = Some(file);
-  attachments.try_update(|list| list.extend(maybe_file.take()));
+  attachments.try_update(|list| {
+    let Some(file) = maybe_file.take() else { return };
+    match list.iter_mut().find(|waiting| waiting.draft_id == file.draft_id) {
+      Some(waiting) => *waiting = file,
+      None => maybe_file = Some(file),
+    }
+  });
   maybe_file
 }
 
@@ -2519,13 +2593,47 @@ fn thumbnail_data_url(bytes: &[u8]) -> String {
   )
 }
 
+/// Sends `message` once its large files are handed over: `handovers` belong to the last of its
+/// files, in order, which are stand-ins until then. A file that can't be handed over is left out
+/// and `report`ed by name; a message left with nothing to send is taken back from the feed.
+async fn send_after_handover(
+  state: AppState,
+  mut message: OutgoingMessage,
+  handovers: Vec<Handover>,
+  report: impl Fn(&str),
+) {
+  let first = message.files.len().saturating_sub(handovers.len());
+  let mut failed = Vec::new();
+  for ((index, file), handover) in message.files.iter_mut().enumerate().skip(first).zip(handovers) {
+    match handover.await {
+      Ok(source) => file.source = source,
+      Err(error) => {
+        tracing::warn!(%error, "a large file could not be handed to the core");
+        report(&file.file_name);
+        failed.push(index);
+      },
+    }
+  }
+  let mut index = 0;
+  message.files.retain(|_| {
+    let is_kept = !failed.contains(&index);
+    index += 1;
+    is_kept
+  });
+  if message.files.is_empty() && message.body.trim().is_empty() {
+    state.try_write(|backend| backend.withdraw_before_send(&message));
+  } else {
+    state.try_write(|backend| backend.send_message(message));
+  }
+}
+
 /// What the core reads a file of the draft from, as it is attached (`None`: a large file that is
 /// handed over first).
 fn draft_upload(file: &PendingFile) -> Option<OutgoingFile> {
   let source = match (&file.content, &file.maybe_staged) {
     (FileContent::Read(bytes), _) => FileSource::Bytes { bytes: bytes.clone() },
     (FileContent::Large(_), Some(staged)) => staged.clone(),
-    (FileContent::Large(_), None) => return None,
+    (FileContent::Large(_), None) | (FileContent::Reading(_), _) => return None,
   };
   Some(OutgoingFile {
     file_name: file.name.clone(),
@@ -2604,16 +2712,33 @@ mod tests {
   #[test]
   fn a_file_read_after_the_composer_closed_is_handed_back_without_a_panic() {
     let owner = Owner::new();
-    let attachments = owner.with(|| RwSignal::new(Vec::<PendingFile>::new()));
-    assert_eq!(add_read_file(attachments, file("open.txt")), None);
-    assert_eq!(attachments.get_untracked().len(), 1);
+    let attachments = owner.with(|| RwSignal::new(vec![reading("open.txt"), reading("late.txt")]));
+    assert_eq!(replace_read_file(attachments, file("open.txt")), None);
+    assert_eq!(
+      attachments.get_untracked()[0],
+      file("open.txt"),
+      "the read file takes its chip's place"
+    );
+    assert_eq!(attachments.get_untracked().len(), 2);
 
     owner.cleanup();
     assert_eq!(
-      add_read_file(attachments, file("late.txt")),
+      replace_read_file(attachments, file("late.txt")),
       Some(file("late.txt")),
       "a disposed list is not written"
     );
+  }
+
+  #[test]
+  fn a_file_read_after_its_chip_went_is_handed_back() {
+    let owner = Owner::new();
+    let attachments = owner.with(|| RwSignal::new(vec![reading("kept.txt")]));
+    // Sent or removed while it was read: no chip comes back.
+    assert_eq!(
+      replace_read_file(attachments, file("sent.txt")),
+      Some(file("sent.txt"))
+    );
+    assert_eq!(attachments.get_untracked(), vec![reading("kept.txt")]);
   }
 
   #[test]
@@ -2716,6 +2841,19 @@ mod tests {
       maybe_duration_ms: None,
       draft_id: name.into(),
       maybe_staged: None,
+    }
+  }
+
+  /// `name` as its chip shows it while it is read: the browser's file stays out of native tests,
+  /// so only the ID and name matter.
+  fn reading(name: &str) -> PendingFile {
+    PendingFile {
+      content: FileContent::Large(LargeFile::InShell(ShellFile {
+        id: 0,
+        name: name.into(),
+        size_bytes: 1,
+      })),
+      ..file(name)
     }
   }
 }

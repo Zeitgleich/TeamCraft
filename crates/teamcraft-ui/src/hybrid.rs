@@ -547,6 +547,14 @@ impl<C: ChatBackend + 'static> ChatBackend for Hybrid<C> {
     self.chat.send_message(message);
   }
 
+  fn show_before_send(&self, message: &mut OutgoingMessage) {
+    self.chat.show_before_send(message);
+  }
+
+  fn withdraw_before_send(&self, message: &OutgoingMessage) {
+    self.chat.withdraw_before_send(message);
+  }
+
   fn message_extras(&self, conversation: ConversationId, messages: &[MessageId]) -> Vec<MessageExtras> {
     self.chat.message_extras(conversation, messages)
   }

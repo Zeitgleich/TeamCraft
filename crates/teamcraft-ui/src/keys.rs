@@ -131,7 +131,7 @@ impl Shortcut {
       Key::Down => ev.key() == "ArrowDown",
       Key::Left => ev.key() == "ArrowLeft",
       Key::Right => ev.key() == "ArrowRight",
-      Key::Enter => ev.key() == "Enter",
+      Key::Enter => is_enter(&ev.key(), &ev.code()),
       Key::Escape => ev.key() == "Escape",
     }
   }
@@ -249,6 +249,13 @@ pub fn ShortcutList(shortcuts: Vec<Shortcut>) -> impl IntoView {
 /// The shortcut for running text on the current platform and language.
 pub fn shortcut_text(shortcut: &Shortcut, locale: Locale) -> String {
   shortcut.text(Platform::current(), locale)
+}
+
+/// Whether a key event is Enter: the main key or the keypad's. Browsers name both `Enter`, but
+/// some keyboard layouts and input stacks (WebKitGTK with NumLock off, remote desktops) report the
+/// keypad's by its code only, which made Numpad Enter miss the send (#2387).
+pub fn is_enter(key: &str, code: &str) -> bool {
+  key == "Enter" || code == "NumpadEnter"
 }
 
 /// Translates a message whose text names shortcuts: `{ $send }` (Ctrl+Enter), `{ $newline }`
@@ -417,6 +424,16 @@ mod tests {
 
   mod detection {
     use super::*;
+
+    #[test]
+    fn treats_the_keypad_enter_as_enter() {
+      assert!(is_enter("Enter", "Enter"));
+      assert!(is_enter("Enter", "NumpadEnter"));
+      assert!(is_enter("", "NumpadEnter"));
+      assert!(is_enter("Unidentified", "NumpadEnter"));
+      assert!(!is_enter("a", "KeyA"));
+      assert!(!is_enter("Tab", "Tab"));
+    }
 
     #[test]
     fn recognises_apple_platform_names() {
