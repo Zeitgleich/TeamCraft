@@ -33,6 +33,7 @@ use futures_util::future::{Either, pending, poll_immediate, select};
 use futures_util::{FutureExt, StreamExt};
 use leptos::wasm_split::SplitLoaderError;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::calls::{BackgroundEffect, OrgBackgrounds};
@@ -804,6 +805,40 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
       let maybe_meeting: Option<teamcraft_proto::MeetingId> = field(&args, "meeting")?;
       to_value(ask(|reply| Request::ProbeTicket(maybe_meeting, reply)).await??)
     },
+    "core_open_stream" => {
+      let (conversation, message, file_id) = (
+        field(&args, "conversation")?,
+        field(&args, "message")?,
+        field(&args, "file_id")?,
+      );
+      let opened = ask(|reply| Request::OpenStream {
+        conversation,
+        message,
+        file_id,
+        reply,
+      })
+      .await??;
+      Ok(Value::String(opened.token.as_str().to_owned()))
+    },
+    "core_read_stream" => {
+      let token: String = field(&args, "token")?;
+      let token = MediaStreamToken::parse(&token).ok_or("not a stream's token")?;
+      let start: u64 = field(&args, "start")?;
+      let part = ask(|reply| Request::ReadStream { token, start, reply }).await??;
+      to_value(StreamPartJson {
+        bytes: teamcraft_proto::Base64Bytes::new(part.bytes.expose_secret().to_vec()),
+        start: part.start,
+        total: part.total_bytes,
+        media_type: part.media_type.to_owned(),
+      })
+    },
+    "core_close_stream" => {
+      let token: String = field(&args, "token")?;
+      if let Some(token) = MediaStreamToken::parse(&token) {
+        drop(send(Request::CloseStream(token)));
+      }
+      Ok(Value::Null)
+    },
     "core_background_picture" => {
       let effect: BackgroundEffect = field(&args, "effect")?;
       let picture = ask(|reply| Request::BackgroundPicture(effect, reply)).await??;
@@ -1140,19 +1175,33 @@ async fn ask_attachment(
   .await?
 }
 
-/// Opens a video of a message to play while it streams (#200). Only the tab that runs the core
-/// streams, and only while the service worker controls the page (it answers the player's requests
-/// with what this page reads, `sw.js`); anywhere else the caller opens the file whole.
+/// Opens a video of a message to play while it streams (#200); its token. Only the tab that runs
+/// the core (or its worker, #2397) streams, and only while the service worker controls the page
+/// (it answers the player's requests with what this page reads, `sw.js`); anywhere else the caller
+/// opens the file whole.
 pub async fn open_media_stream(
   conversation: ConversationId,
   message: MessageId,
   file_id: String,
-) -> Result<OpenedStream, String> {
-  if current_link().is_some() {
+) -> Result<MediaStreamToken, String> {
+  let maybe_worker = worker_link();
+  if maybe_worker.is_none() && current_link().is_some() {
     return Err("only the tab that runs the core streams".to_owned());
   }
   if !does_worker_stream().await {
     return Err("no service worker that streams controls the page".to_owned());
+  }
+  if let Some(link) = maybe_worker {
+    let answer = link
+      .call(
+        "core_open_stream",
+        serde_json::json!({ "conversation": conversation, "message": message, "file_id": file_id }),
+      )
+      .await?;
+    return answer
+      .as_str()
+      .and_then(MediaStreamToken::parse)
+      .ok_or_else(|| "unreadable answer of core_open_stream".to_owned());
   }
   ask(|reply| Request::OpenStream {
     conversation,
@@ -1161,6 +1210,7 @@ pub async fn open_media_stream(
     reply,
   })
   .await?
+  .map(|opened| opened.token)
 }
 
 /// Whether the worker that controls the page answers streams: an older one lets the request
@@ -1191,8 +1241,64 @@ async fn does_worker_stream() -> bool {
 
 /// Closes a stream the page no longer plays.
 pub fn close_media_stream(token: MediaStreamToken) {
+  if let Some(link) = worker_link() {
+    wasm_bindgen_futures::spawn_local(async move {
+      // A core that stopped has no streams left to close.
+      let _ = link
+        .call(
+          "core_close_stream",
+          serde_json::json!({ "token": token.as_str() }),
+        )
+        .await;
+    });
+    return;
+  }
   // A core that stopped has no streams left to close.
   drop(send(Request::CloseStream(token)));
+}
+
+/// A streamed read as the worker answers `core_read_stream` (#2397).
+#[derive(Serialize, Deserialize)]
+struct StreamPartJson {
+  bytes: teamcraft_proto::Base64Bytes,
+  start: u64,
+  total: u64,
+  media_type: String,
+}
+
+/// One read of a stream as the page answers the service worker with it.
+struct ReadPart {
+  bytes: SecretBytes,
+  start: u64,
+  total: u64,
+  media_type: String,
+}
+
+/// One read of a stream, from this page's core or its worker's.
+async fn read_media_stream(token: MediaStreamToken, start: u64) -> Result<ReadPart, String> {
+  if let Some(link) = worker_link() {
+    let answer = link
+      .call(
+        "core_read_stream",
+        serde_json::json!({ "token": token.as_str(), "start": start }),
+      )
+      .await?;
+    let part: StreamPartJson =
+      serde_json::from_value(answer).map_err(|error| format!("unreadable streamed read: {error}"))?;
+    return Ok(ReadPart {
+      bytes: SecretBytes::new(part.bytes.into_vec()),
+      start: part.start,
+      total: part.total,
+      media_type: part.media_type,
+    });
+  }
+  let part = ask(|reply| Request::ReadStream { token, start, reply }).await??;
+  Ok(ReadPart {
+    bytes: part.bytes,
+    start: part.start,
+    total: part.total_bytes,
+    media_type: part.media_type.to_owned(),
+  })
 }
 
 /// Answers the service worker's read of a stream (`media_read`, from the player's range request)
@@ -1216,11 +1322,7 @@ fn answer_media_read(event: &web_sys::MessageEvent) {
   wasm_bindgen_futures::spawn_local(async move {
     // Invariant: a JavaScript number the worker parsed from a header is a whole offset.
     let start = start as u64;
-    let answer = match ask(|reply| Request::ReadStream { token, start, reply }).await {
-      Ok(answer) => answer,
-      Err(error) => Err(error),
-    };
-    match answer {
+    match read_media_stream(token, start).await {
       Ok(part) => {
         let reply = js_sys::Object::new();
         let bytes = js_sys::Uint8Array::from(part.bytes.expose_secret());
@@ -1231,7 +1333,7 @@ fn answer_media_read(event: &web_sys::MessageEvent) {
         };
         set("bytes", &buffer);
         set("start", &(part.start as f64).into());
-        set("total", &(part.total_bytes as f64).into());
+        set("total", &(part.total as f64).into());
         set("type", &part.media_type.into());
         // The buffer moves to the worker: no second copy of the plaintext stays in the page.
         let transfer = js_sys::Array::of1(&buffer);

@@ -253,12 +253,10 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
   let mut since_commit = 0usize;
   loop {
     let started_ms = js_sys::Date::now();
-    let done_before = build.records_done();
     let step = store.step_catalog_build_of(&mut build, step_records)?;
-    let done = build.records_done().saturating_sub(done_before);
-    since_commit += done;
-    // A step short of what it asked for read the last records: commit now, as the last batch did.
-    let is_at_end = done < step_records;
+    since_commit += step_records;
+    // The step that read the last records commits and reports, as the last batch did.
+    let is_at_end = step == BuildStep::Advanced && !store.has_more_to_build(&build)?;
     step_records = next_build_step(step_records, js_sys::Date::now() - started_ms);
     if step != BuildStep::Complete && since_commit < CATALOG_BATCH && !is_at_end {
       crate::platform::yield_now().await;
