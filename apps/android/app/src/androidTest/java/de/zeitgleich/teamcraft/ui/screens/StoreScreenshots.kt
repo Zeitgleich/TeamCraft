@@ -174,7 +174,6 @@ class StoreScreenshots {
         onLongPress = {},
       ),
       maybeSelectionBar = null,
-      onSearch = {},
       onAccount = {},
       onNavigate = {},
     )

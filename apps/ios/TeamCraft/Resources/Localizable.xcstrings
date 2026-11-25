@@ -17041,22 +17041,6 @@
         }
       }
     },
-    "quick_drafts_none": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "No drafts"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Keine Entwürfe"
-          }
-        }
-      }
-    },
     "quick_drafts_count %lld": {
       "localizations": {
         "en": {
@@ -17093,22 +17077,6 @@
                 }
               }
             }
-          }
-        }
-      }
-    },
-    "quick_scheduled_none": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nothing scheduled"
-          }
-        },
-        "de": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Nichts geplant"
           }
         }
       }

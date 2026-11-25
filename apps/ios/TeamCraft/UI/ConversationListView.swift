@@ -17,7 +17,9 @@ struct ConversationListView: View {
   @State private var selection: String?
   @State private var isShowingDrafts = false
   @State private var query = ""
-  @State private var searchFocusRequest = 0
+  /// The search field shows (#2389): opened by a pull down at the list's top or the header's button.
+  @State private var isSearchOpen = false
+  @State private var pull = PullToSearch()
   @State private var hits: [SearchHit] = []
   @State private var isShowingSettings = false
   @State private var isShowingDirectory = false
@@ -93,8 +95,8 @@ struct ConversationListView: View {
         // header doesn't stand off as a band and the presence rings match it.
         .scrollContentBackground(.hidden)
         .background { Color(.systemBackground).ignoresSafeArea() }
-        // The header, the one search field and the chips stay put above the list (#1786): one line
-        // on every tab, so nothing jumps when switching.
+        // The header and the chips stay put above the list (#1786): one line on every tab, so nothing
+        // jumps when switching. The one search field shows only while searching (#2389).
         .safeAreaInset(edge: .top, spacing: 0) {
           VStack(spacing: 0) {
             header
@@ -103,10 +105,14 @@ struct ConversationListView: View {
             SyncingLine(isCatchingUp: conversations.contains(where: \.isCatchingUp))
             if let progress = maybeFirstSync { FirstSyncBar(progress: progress) }
             NotificationPromptCard()
-            if !conversations.isEmpty || isSearching {
-              ChatSearchField(text: $query, hasFilters: !filters.isEmpty, onFilters: { isShowingFilters = true }, focusRequest: searchFocusRequest)
-                .padding(.horizontal, 16)
-                .padding(.bottom, isFilterShown && !isSearching ? 0 : 8)
+            if isSearchOpen || isSearching {
+              ChatSearchField(
+                text: $query, hasFilters: !filters.isEmpty, onFilters: { isShowingFilters = true },
+                focusesOnAppear: isSearchOpen, onCancel: closeSearch
+              )
+              .padding(.horizontal, 16)
+              .padding(.bottom, isFilterShown && !isSearching ? 0 : 8)
+              .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.95, anchor: .top)))
             }
             if isFilterShown && !isSearching && !conversations.isEmpty {
               FilterChipRow(
@@ -234,6 +240,7 @@ struct ConversationListView: View {
       let next = tab.opening(selected, isList: isList)
       if next != shownTab { tab = next }
       if !query.isEmpty { query = "" }
+      isSearchOpen = false
     }
     // Why an action on a request to join didn't go through, also for the open channel's banner;
     // the channel browser shows its own.
@@ -255,6 +262,7 @@ struct ConversationListView: View {
       if isAsked {
         model.isMeetingsTabAsked = false
         query = ""
+        isSearchOpen = false
         tab = .meetings
         if sizeClass == .compact { selection = nil }
       }
@@ -273,7 +281,7 @@ struct ConversationListView: View {
       QuickActions.shared.pending = nil
       switch action {
       case .newMessage: maybeBrowseTab = .people
-      case .search: searchFocusRequest += 1
+      case .search: openSearch()
       }
     }
     // A recent conversation of the icon's menu (#2061): opened once the list has it, dropped if it is gone.
@@ -378,6 +386,16 @@ struct ConversationListView: View {
           .accessibilityAddTraits(.isHeader)
       }
       Spacer(minLength: 8)
+      // The same search a pull down opens (#2389), and VoiceOver's way to it.
+      Button(action: openSearch) {
+        Image(systemName: "magnifyingglass")
+          .font(.app(.title3))
+          .foregroundStyle(Theme.accent)
+          .frame(minWidth: 44, minHeight: 44)
+          .contentShape(Rectangle())
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(Text("search_title"))
       if let space = maybeHeaderSpace {
         // The selected space's views, browsing and actions, next to its name (#1526).
         Menu {
@@ -448,18 +466,30 @@ struct ConversationListView: View {
     .listStyle(.plain)
   }
 
+  /// A pull down at the top opens the search (#2389); the connection catches up by itself.
   private var conversationList: some View {
-    conversationListBody.refreshesConnection()
+    conversationListBody.pullsToSearch(pull, isEnabled: !isSearchOpen && !isSearching, onOpen: openSearch)
+  }
+
+  private func openSearch() {
+    withAnimation(Motion.spring(reduceMotion)) { isSearchOpen = true }
+  }
+
+  private func closeSearch() {
+    filters = SearchFilters()
+    withAnimation(Motion.spring(reduceMotion)) { isSearchOpen = false }
   }
 
   private var conversationListBody: some View {
     List(selection: $selection) {
+      if showsChannels && hasQuickAccess { quickAccessChips }
       if showsChannels {
-        quickAccessCards
         ScheduledAttentionSection()
         GuestNoticeSection()
       }
       if shownTab == .activity {
+        // Drafts and recent messages, also while there is no draft for the chip above (#2389).
+        Button("drafts_title", systemImage: "pencil.line") { isShowingDrafts = true }
         // Admins asking to join a channel the user owns: they wait for a decision (#799).
         JoinRequestSection()
         if shownSections.isEmpty && model.joinRequests.isEmpty {
@@ -709,33 +739,36 @@ struct ConversationListView: View {
     return isList && creatable.count == 1 ? creatable.first : nil
   }
 
-  /// The quick-access cards on top of the Channels tab (#1488): drafts and scheduled messages, each
-  /// with a one-line status from state the list has anyway (#1466); a card with something waiting
-  /// is tinted. Meetings are a tab of their own (#1786).
-  private var quickAccessCards: some View {
-    let draftCount = conversations.filter { $0.maybeDraftPreview != nil }.count
-    return ScrollView(.horizontal, showsIndicators: false) {
+  private var draftCount: Int { conversations.filter { $0.maybeDraftPreview != nil }.count }
+
+  private var hasQuickAccess: Bool {
+    draftCount > 0 || (model.maybeScheduledCount ?? 0) > 0 || model.scheduledAttentionCount > 0
+  }
+
+  /// Drafts and scheduled messages on top of the Channels tab (#1488) as small chips with their
+  /// counts, only while they hold something (#2389): no card saying there is nothing.
+  private var quickAccessChips: some View {
+    ScrollView(.horizontal, showsIndicators: false) {
       HStack(spacing: 8) {
-        QuickAccessCard(
-          symbol: "pencil.line", title: "home_entry_drafts",
-          status: draftCount > 0 ? "quick_drafts_count \(draftCount)" : "quick_drafts_none",
-          isHighlighted: draftCount > 0
-        ) { isShowingDrafts = true }
-        if let scheduled = model.maybeScheduledCount {
-          let needsAttention = model.scheduledAttentionCount > 0
-          NavigationLink { ScheduledMessagesView() } label: {
-            QuickAccessCardLabel(
-              symbol: "clock", title: "home_entry_scheduled",
-              status: needsAttention
-                ? "quick_scheduled_attention" : scheduled > 0 ? "quick_scheduled_count \(scheduled)" : "quick_scheduled_none",
-              isHighlighted: needsAttention || scheduled > 0)
+        if draftCount > 0 {
+          Button { isShowingDrafts = true } label: {
+            QuickAccessChip(symbol: "pencil.line", title: "home_entry_drafts", count: draftCount, isHighlighted: false)
           }
           .buttonStyle(.plain)
+          .accessibilityValue(Text("quick_drafts_count \(draftCount)"))
+        }
+        let scheduled = model.maybeScheduledCount ?? 0
+        let needsAttention = model.scheduledAttentionCount > 0
+        if scheduled > 0 || needsAttention {
+          NavigationLink { ScheduledMessagesView() } label: {
+            QuickAccessChip(symbol: "clock", title: "home_entry_scheduled", count: scheduled, isHighlighted: needsAttention)
+          }
+          .buttonStyle(.plain)
+          .accessibilityValue(needsAttention ? Text("quick_scheduled_attention") : Text("quick_scheduled_count \(scheduled)"))
         }
       }
-      .padding(.vertical, 4)
     }
-    .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+    .listRowInsets(EdgeInsets(top: 0, leading: 16, bottom: 0, trailing: 16))
     .listRowBackground(Color.clear)
     .listRowSeparator(.hidden)
   }
@@ -1044,7 +1077,7 @@ struct ConversationListView: View {
   /// conversation with unread messages. Real buttons, so the iPad's shortcut overlay lists them.
   private var keyboardShortcuts: some View {
     Group {
-      Button("shortcut_search") { searchFocusRequest += 1 }
+      Button("shortcut_search") { openSearch() }
         .keyboardShortcut("k", modifiers: .command)
       Button("shortcut_next_unread") {
         if let next = UnreadShortcut.next(in: conversations.map { ($0.id, $0.unreadCount) }, after: selection) {
@@ -1506,45 +1539,30 @@ struct FirstSyncBar: View {
   }
 }
 
-/// A quick-access card on top of Home (#1488): icon, title and a one-line status.
-private struct QuickAccessCard: View {
+/// A quick-access chip on top of the Channels tab (#2389): icon, title and count.
+private struct QuickAccessChip: View {
   let symbol: String
   let title: LocalizedStringKey
-  let status: LocalizedStringKey
-  let isHighlighted: Bool
-  let action: () -> Void
-
-  var body: some View {
-    Button(action: action) {
-      QuickAccessCardLabel(symbol: symbol, title: title, status: status, isHighlighted: isHighlighted)
-    }
-    .buttonStyle(.plain)
-  }
-}
-
-private struct QuickAccessCardLabel: View {
-  let symbol: String
-  let title: LocalizedStringKey
-  let status: LocalizedStringKey
+  let count: Int
   let isHighlighted: Bool
 
   var body: some View {
-    VStack(alignment: .leading, spacing: 4) {
-      Image(systemName: symbol).font(.app(.body).weight(.semibold))
-      Text(title).font(.app(.subheadline).weight(.semibold)).lineLimit(1)
-      Text(status)
-        .font(.app(.caption))
-        .fontWeight(isHighlighted ? .semibold : .regular)
-        .foregroundStyle(isHighlighted ? Theme.accent : Theme.textMuted)
-        .lineLimit(1)
+    HStack(spacing: 6) {
+      Image(systemName: symbol).accessibilityHidden(true)
+      Text(title)
+      if count > 0 {
+        Text(verbatim: "\(count)").monospacedDigit().accessibilityHidden(true)
+      }
     }
-    .frame(width: 132, alignment: .leading)
-    .padding(12)
-    .background(
-      // On the plain list (#1786) a fill, not the grouped list's card colour.
-      isHighlighted ? Theme.accentSoft : Color(.tertiarySystemFill),
-      in: .rect(cornerRadius: 16))
-    .contentShape(.rect(cornerRadius: 16))
+    .font(.app(.subheadline).weight(.semibold))
+    .lineLimit(1)
+    .foregroundStyle(isHighlighted ? Theme.accent : Theme.text)
+    .padding(.horizontal, 14)
+    .frame(minHeight: 32)
+    .background(isHighlighted ? Theme.accentSoft : Color(.tertiarySystemFill), in: .capsule)
+    // The visible chip is smaller; the hit area is 44 pt high.
+    .padding(.vertical, 6)
+    .contentShape(Rectangle())
     .accessibilityElement(children: .combine)
   }
 }

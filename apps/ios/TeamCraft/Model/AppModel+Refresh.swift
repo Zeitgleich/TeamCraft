@@ -23,19 +23,3 @@ extension AppModel {
     return isUp
   }
 }
-
-/// `refreshable` that forces a reconnect and catch-up, and says when it didn't work.
-private struct RefreshesConnection: ViewModifier {
-  @Environment(AppModel.self) private var model
-  @State private var isFailed = false
-
-  func body(content: Content) -> some View {
-    content
-      .refreshable { isFailed = !(await model.refreshConnection()) }
-      .alert("refresh_failed", isPresented: $isFailed) { Button("done", role: .cancel) {} }
-  }
-}
-
-extension View {
-  func refreshesConnection() -> some View { modifier(RefreshesConnection()) }
-}

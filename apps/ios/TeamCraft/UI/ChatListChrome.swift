@@ -7,8 +7,10 @@ struct ChatSearchField: View {
   @Binding var text: String
   let hasFilters: Bool
   let onFilters: () -> Void
-  /// Counts up to put the cursor in the field (the app icon's "Search", #2061).
-  var focusRequest = 0
+  /// Opened on purpose (a pull, the header's button, the app icon's "Search"): the cursor goes in
+  /// at once and Cancel shows until the search is closed (#2389, #2061).
+  var focusesOnAppear = false
+  var onCancel: () -> Void = {}
 
   @FocusState private var isFocused: Bool
 
@@ -48,17 +50,18 @@ struct ChatSearchField: View {
       .padding(.leading, 12)
       .frame(minHeight: 44)
       .background(Color(.tertiarySystemFill), in: .capsule)
-      if isFocused || !text.isEmpty {
+      if isFocused || !text.isEmpty || focusesOnAppear {
         Button("cancel") {
           text = ""
           isFocused = false
+          onCancel()
         }
         .frame(minHeight: 44)
         .transition(Motion.slide(from: .trailing, reduceMotion))
       }
     }
     .animation(Motion.base(reduceMotion), value: isFocused)
-    .onChange(of: focusRequest) { _, _ in isFocused = true }
+    .task { if focusesOnAppear { isFocused = true } }
   }
 }
 

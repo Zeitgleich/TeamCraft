@@ -61,6 +61,16 @@ class MainScreenScreenshots {
     }
   }
 
+  /**
+   * Holds the filled DMs on screen for a while (`-e hold true`), so a pull to search (#2389) can be
+   * driven with `adb shell input swipe` and recorded with `screenrecord`.
+   */
+  @Test
+  fun holdForRecording() {
+    assumeTrue(InstrumentationRegistry.getArguments().getString("hold") == "true")
+    shoot("hold", isDark = false, CONVERSATIONS, previews(), ChatTab.Direct, holdMillis = 40_000)
+  }
+
   private fun shoot(
     name: String,
     isDark: Boolean,
@@ -71,6 +81,7 @@ class MainScreenScreenshots {
     grouping: ChatListGrouping = ChatListGrouping.Mixed,
     maybeSpace: String? = null,
     isSwitching: Boolean = false,
+    holdMillis: Long = 0,
   ) {
     val instrumentation = InstrumentationRegistry.getInstrumentation()
     ActivityScenario.launch(MainActivity::class.java).use { scenario ->
@@ -103,7 +114,6 @@ class MainScreenScreenshots {
                 ),
                 maybeSelectionBar = null,
                 quickAccess = QuickAccess(draftCount = 1, maybeScheduledCount = 2),
-                onSearch = {},
                 onAccount = {},
                 onNavigate = {},
               )
@@ -118,6 +128,8 @@ class MainScreenScreenshots {
       instrumentation.waitForIdleSync()
       // Not timing a result: lets the first frames (fonts, ripples) settle before the picture.
       Thread.sleep(1_500)
+      // Only for recordings by hand: nothing here is timed.
+      if (holdMillis > 0) Thread.sleep(holdMillis)
       val bitmap = instrumentation.uiAutomation.takeScreenshot()
       val directory = File(instrumentation.targetContext.getExternalFilesDir(null), "screenshots").apply { mkdirs() }
       File(directory, "$name.png").outputStream().use { bitmap.compress(Bitmap.CompressFormat.PNG, 100, it) }

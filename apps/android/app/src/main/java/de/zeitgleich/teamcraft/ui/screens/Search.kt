@@ -67,8 +67,8 @@ import de.zeitgleich.teamcraft.core.SearchHit
 private const val TYPING_PAUSE_MS = 250L
 
 @Composable
-fun SearchScreen(viewModel: MainViewModel, onOpen: (SearchHit) -> Unit, onBack: () -> Unit) {
-  var query by rememberSaveable { mutableStateOf("") }
+fun SearchScreen(viewModel: MainViewModel, onOpen: (SearchHit) -> Unit, onBack: () -> Unit, initialQuery: String = "") {
+  var query by rememberSaveable { mutableStateOf(initialQuery) }
   var read by remember { mutableStateOf<Read<List<SearchHit>>>(Read.Loaded(emptyList())) }
   var attempt by remember { mutableIntStateOf(0) }
   var snapshot by remember { mutableStateOf<ChatSnapshot?>(null) }
