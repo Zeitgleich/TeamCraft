@@ -181,6 +181,12 @@ jobs:
       # Linked with debug info and symbols; "Split off the debug file" strips the executable before
       # it is packaged.
       CARGO_PROFILE_RELEASE_STRIP: none
+      # One codegen unit per crate: 14 % less mapped code and data (128.3 -> 110.4 MB on x86_64),
+      # and with it the executable's share of the app's memory (docs/performance.md, #2384). Fat LTO
+      # saved no more (109.4 MB) but linked with 19.6 GB and again for 20 minutes after the UI
+      # bundle arrives; this compiles about 2.5 minutes longer and peaks at 10.4 GB, within the
+      # runners' 16 GB. Linux only until macOS and Windows are measured (their runners differ).
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 1
     # Rust, the system packages and the Tauri CLI are in the CI image (containers/ci.Containerfile).
     container:
       image: ghcr.io/zeitgleich/teamcraft-ci@sha256:24fe71e069885c93b38cc6997f8005fb06b94e501dde7a07ce39c04c46d03e40
@@ -239,6 +245,11 @@ jobs:
       - name: Split off the debug file
         if: ${{ !inputs.warm-cache }}
         run: scripts/debug-files.sh split target/release/teamcraft-desktop target/debug-files
+      # The shipped executable against its size budget (x86_64; aarch64 is printed): its code is
+      # mapped into the app's memory (docs/performance.md, #2384).
+      - name: Executable size
+        if: ${{ !inputs.warm-cache }}
+        run: scripts/check-desktop-size.py target/release/teamcraft-desktop
       - name: Build packages
         if: ${{ !inputs.warm-cache }}
         working-directory: apps/desktop
