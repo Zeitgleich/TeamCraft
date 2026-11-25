@@ -187,7 +187,7 @@ impl IndexedDbRecords {
   /// See [`IndexedDbStore::flush`].
   pub(super) async fn flush(&self) -> Result<(), StoreError> {
     let inner = &self.inner;
-    seal_in_slices(&Rc::downgrade(inner)).await;
+    seal_in_slices(&Rc::downgrade(inner), true).await;
     inner.issue_batch(true);
     let maybe_due = inner.writes.borrow().last_batch_due();
     while !inner.writes.borrow().is_closed {
@@ -206,7 +206,7 @@ impl IndexedDbRecords {
         break;
       }
       // Written meanwhile, with nothing running: no need to wait for the batch timer.
-      seal_in_slices(&Rc::downgrade(inner)).await;
+      seal_in_slices(&Rc::downgrade(inner), true).await;
       inner.issue_queued();
     }
     inner.writes.borrow().failure()
@@ -214,7 +214,8 @@ impl IndexedDbRecords {
 
   /// See [`IndexedDbStore::write_now`].
   pub(super) fn write_now(&self) {
-    self.inner.issue_queued();
+    // As a flush: also what a catalog build holds back ([`Writes::is_held`]).
+    self.inner.issue_batch(true);
   }
 
   /// See [`IndexedDbStore::write_revision`].
@@ -244,6 +245,7 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
   let Some(mut build) = store.start_catalog_build()? else {
     return Ok(());
   };
+  let _held = records(store).map(HeldWrites::new);
   let mut step_records = FIRST_BUILD_STEP;
   let mut since_commit = 0usize;
   let mut maybe_shown: Option<u8> = None;
@@ -278,6 +280,27 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
         return Err(StoreError::InUse);
       }
     }
+  }
+}
+
+/// Holds the store's writes back from the batch timer while it lives ([`Writes::is_held`]); a flush
+/// still takes them.
+struct HeldWrites<'a> {
+  records: &'a IndexedDbRecords,
+}
+
+impl<'a> HeldWrites<'a> {
+  fn new(records: &'a IndexedDbRecords) -> Self {
+    records.inner.writes.borrow_mut().is_held = true;
+    Self { records }
+  }
+}
+
+impl Drop for HeldWrites<'_> {
+  fn drop(&mut self) {
+    self.records.inner.writes.borrow_mut().is_held = false;
+    // What waited goes out now, as it would have without the hold.
+    issue_soon(Rc::downgrade(&self.records.inner));
   }
 }
 
@@ -604,7 +627,7 @@ fn issue_soon(inner: Weak<Inner>) {
 }
 
 async fn issue_sealed(inner: &Weak<Inner>) {
-  seal_in_slices(inner).await;
+  seal_in_slices(inner, false).await;
   if let Some(inner) = inner.upgrade() {
     inner.issue_queued();
   }
@@ -612,12 +635,16 @@ async fn issue_sealed(inner: &Weak<Inner>) {
 
 /// Seals the queued writes a slice of [`SEAL_SLICE_MS`] at a time, handing the thread back between
 /// two (issue #2397): sealing a catalog build's batch at once held the page's only thread for
-/// seconds. Ends early if the store is gone.
-async fn seal_in_slices(inner: &Weak<Inner>) {
+/// seconds. Ends early if the store is gone, or, unless for a flush (`is_flush`), while its writes
+/// are held ([`Writes::is_held`]): they would be sealed for nothing.
+async fn seal_in_slices(inner: &Weak<Inner>, is_flush: bool) {
   loop {
     let Some(strong) = inner.upgrade() else {
       return;
     };
+    if !is_flush && strong.writes.borrow().is_held {
+      return;
+    }
     let started_ms = js_sys::Date::now();
     let is_left = strong
       .writes

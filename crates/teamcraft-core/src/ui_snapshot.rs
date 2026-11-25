@@ -6,7 +6,7 @@
 //! differ from what it read last ([`SnapshotChanges`]). A new message costs one conversation's
 //! re-read and an answer with one entry; a presence event one person's entry and the live state.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::live::LiveSnapshot;
@@ -109,6 +109,47 @@ impl SnapshotCache {
     maybe_since: Option<SnapshotCursor>,
   ) -> SnapshotChanges {
     self.refresh(backend, changes, security);
+    self.answer(backend, maybe_since)
+  }
+
+  /// [`Self::changes_since`] for a host whose only thread is the UI's (web): a read of every
+  /// conversation's entry (the first one, or after a change of everything) hands the thread back
+  /// whenever it ran for `slice` ([`crate::platform::yield_now`]). On a large workspace whose
+  /// counts must be read again (a rebuilt catalog) that read held the page for seconds (issue
+  /// #2397). The caller must not let another refresh of this cache in until it returns; what the
+  /// store writes meanwhile is in the next `changes`.
+  pub async fn changes_since_sliced<S: LocalStore>(
+    &mut self,
+    backend: &CoreChatBackend<S>,
+    changes: StoreChanges,
+    security: impl FnOnce() -> Option<SecuritySnapshot>,
+    maybe_since: Option<SnapshotCursor>,
+    slice: std::time::Duration,
+  ) -> SnapshotChanges {
+    let maybe_fresh = if self.needs_full_read(&changes) {
+      let mut read = FullRead::begin(backend, self.revision + 1);
+      let slice_ms = i64::try_from(slice.as_millis()).unwrap_or(i64::MAX);
+      let mut slice_began_ms = backend.now_ms();
+      while read.step(backend) {
+        if backend.now_ms().saturating_sub(slice_began_ms) >= slice_ms {
+          crate::platform::yield_now().await;
+          slice_began_ms = backend.now_ms();
+        }
+      }
+      Some(read.finish(backend))
+    } else {
+      None
+    };
+    self.refresh_with(backend, changes, security, maybe_fresh);
+    self.answer(backend, maybe_since)
+  }
+
+  /// What differs for a reader at `maybe_since`, from the parts as they are.
+  fn answer<S: LocalStore>(
+    &self,
+    backend: &CoreChatBackend<S>,
+    maybe_since: Option<SnapshotCursor>,
+  ) -> SnapshotChanges {
     let (epoch, revision) = (self.epoch, self.revision);
     let Some(parts) = &self.maybe_parts else {
       return SnapshotChanges::default();
@@ -150,6 +191,26 @@ impl SnapshotCache {
     changes: StoreChanges,
     security: impl FnOnce() -> Option<SecuritySnapshot>,
   ) {
+    let maybe_fresh = self
+      .needs_full_read(&changes)
+      .then(|| Parts::read(backend, self.revision + 1));
+    self.refresh_with(backend, changes, security, maybe_fresh);
+  }
+
+  /// Whether taking `changes` reads every conversation's entry: the first time, or everything
+  /// changed.
+  fn needs_full_read(&self, changes: &StoreChanges) -> bool {
+    self.maybe_parts.is_none() || changes.is_everything
+  }
+
+  /// [`Self::refresh`] with the full read it needs (`maybe_fresh`, read at the next revision).
+  fn refresh_with<S: LocalStore>(
+    &mut self,
+    backend: &CoreChatBackend<S>,
+    changes: StoreChanges,
+    security: impl FnOnce() -> Option<SecuritySnapshot>,
+    maybe_fresh: Option<Parts>,
+  ) {
     let _step = crate::timing::step("snapshot_refresh");
     let next = self.revision + 1;
     if changes.is_foreign {
@@ -166,11 +227,11 @@ impl SnapshotCache {
     } else {
       None
     };
-    let mut is_changed = match &mut self.maybe_parts {
-      Some(parts) if !changes.is_everything => parts.update(backend, &changes, next),
-      Some(parts) => parts.replace_with(Parts::read(backend, next), changes.is_live, next),
-      None => {
-        self.maybe_parts = Some(Parts::read(backend, next));
+    let mut is_changed = match (&mut self.maybe_parts, maybe_fresh) {
+      (Some(parts), Some(fresh)) => parts.replace_with(fresh, changes.is_live, next),
+      (Some(parts), None) => parts.update(backend, &changes, next),
+      (None, maybe_fresh) => {
+        self.maybe_parts = Some(maybe_fresh.unwrap_or_else(|| Parts::read(backend, next)));
         true
       },
     };
@@ -194,44 +255,9 @@ impl SnapshotCache {
 impl Parts {
   /// Everything but the security part (the host's), read at `revision`.
   fn read<S: LocalStore>(backend: &CoreChatBackend<S>, revision: u64) -> Self {
-    let _step = crate::timing::step("snapshot_read_full");
-    let shared = Shared::read(backend, backend.summaries());
-    let spaces = backend.spaces();
-    let responses = backend.conversations_raw();
-    let order = order_of(&spaces, &responses);
-    let by_id: BTreeMap<ConversationId, &ConversationResponse> =
-      responses.iter().map(|response| (response.id, response)).collect();
-    let mut mute_ends = BTreeMap::new();
-    let conversations = order
-      .iter()
-      .filter_map(|id| by_id.get(id))
-      .map(|response| {
-        if let Some(end) = backend.mute_end(response) {
-          mute_ends.insert(response.id, end);
-        }
-        (
-          response.id,
-          Revised::new(part_of(backend, response, &shared), revision),
-        )
-      })
-      .collect();
-    let users = shared
-      .users
-      .values()
-      .map(|summary| (summary.id, Revised::new(backend.to_user(summary), revision)))
-      .collect();
-    Self {
-      me: Revised::new(backend.me(), revision),
-      users,
-      user_ids_at: revision,
-      spaces: Revised::new(spaces, revision),
-      conversations,
-      feeds: BTreeMap::new(),
-      order: Revised::new(order, revision),
-      security: Revised::new(SecuritySnapshot::default(), revision),
-      live_at: revision,
-      mute_ends,
-    }
+    let mut read = FullRead::begin(backend, revision);
+    while read.step(backend) {}
+    read.finish(backend)
   }
 
   /// Takes a full re-read, keeping the revision of every part that came out the same. The security
@@ -423,6 +449,84 @@ impl Parts {
       maybe_order: is_newer(self.order.at).then(|| self.order.value.clone()),
       maybe_security: is_newer(self.security.at).then(|| self.security.value.clone()),
       ..SnapshotChanges::default()
+    }
+  }
+}
+
+/// A read of every conversation's entry ([`Parts::read`]), one conversation per [`Self::step`], so
+/// a host can hand its thread back in between ([`SnapshotCache::changes_since_sliced`]).
+struct FullRead {
+  _step: Option<crate::timing::Step>,
+  revision: u64,
+  shared: Shared,
+  spaces: Vec<Space>,
+  order: Vec<ConversationId>,
+  /// The conversations still to read, in the order they are listed.
+  remaining: VecDeque<ConversationResponse>,
+  conversations: BTreeMap<ConversationId, Revised<ConversationChange>>,
+  mute_ends: BTreeMap<ConversationId, i64>,
+  me: User,
+}
+
+impl FullRead {
+  fn begin<S: LocalStore>(backend: &CoreChatBackend<S>, revision: u64) -> Self {
+    let step = crate::timing::step("snapshot_read_full");
+    let shared = Shared::read(backend, backend.summaries());
+    let spaces = backend.spaces();
+    let responses = backend.conversations_raw();
+    let order = order_of(&spaces, &responses);
+    let mut by_id: BTreeMap<ConversationId, ConversationResponse> = responses
+      .into_iter()
+      .map(|response| (response.id, response))
+      .collect();
+    let remaining = order.iter().filter_map(|id| by_id.remove(id)).collect();
+    Self {
+      _step: step,
+      revision,
+      shared,
+      spaces,
+      order,
+      remaining,
+      conversations: BTreeMap::new(),
+      mute_ends: BTreeMap::new(),
+      me: backend.me(),
+    }
+  }
+
+  /// Reads the next conversation's entry; false once none is left.
+  fn step<S: LocalStore>(&mut self, backend: &CoreChatBackend<S>) -> bool {
+    let Some(response) = self.remaining.pop_front() else {
+      return false;
+    };
+    if let Some(end) = backend.mute_end(&response) {
+      self.mute_ends.insert(response.id, end);
+    }
+    let part = part_of(backend, &response, &self.shared);
+    self
+      .conversations
+      .insert(response.id, Revised::new(part, self.revision));
+    !self.remaining.is_empty()
+  }
+
+  fn finish<S: LocalStore>(self, backend: &CoreChatBackend<S>) -> Parts {
+    let revision = self.revision;
+    let users = self
+      .shared
+      .users
+      .values()
+      .map(|summary| (summary.id, Revised::new(backend.to_user(summary), revision)))
+      .collect();
+    Parts {
+      me: Revised::new(self.me, revision),
+      users,
+      user_ids_at: revision,
+      spaces: Revised::new(self.spaces, revision),
+      conversations: self.conversations,
+      feeds: BTreeMap::new(),
+      order: Revised::new(self.order, revision),
+      security: Revised::new(SecuritySnapshot::default(), revision),
+      live_at: revision,
+      mute_ends: self.mute_ends,
     }
   }
 }
