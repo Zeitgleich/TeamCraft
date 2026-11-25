@@ -65,7 +65,32 @@ const CARD_BRAND = '.auth-brand';
 const BRAND_TILE = '.auth-tile-brand';
 const BRAND_TILE_MS = 420;
 
+// The warning in the browser's developer console against self-XSS: someone who pastes a stranger's
+// script here gives it their session and their (encrypted) messages' keys. English only: it is for
+// people who open the console, not UI text.
+const CONSOLE_WARNING_TITLE_STYLE = 'color: #2f6bff; font-size: 56px; font-weight: 800; line-height: 1.2;';
+const CONSOLE_WARNING_DANGER_STYLE = 'color: #e5232e; font-size: 18px; font-weight: 700;';
+const CONSOLE_WARNING_TEXT_STYLE = 'font-size: 15px;';
+
+function warnAgainstPastingCode() {
+  try {
+    console.log('%cStop!', CONSOLE_WARNING_TITLE_STYLE);
+    console.log(
+      '%cIf someone told you to copy and paste something here, you are almost certainly being scammed.',
+      CONSOLE_WARNING_TEXT_STYLE,
+    );
+    console.log(
+      '%cPasting anything in here can give attackers access to your TeamCraft account and your messages.',
+      CONSOLE_WARNING_DANGER_STYLE,
+    );
+    console.log('%cUnless you understand exactly what you are doing, close this window and stay safe.', CONSOLE_WARNING_TEXT_STYLE);
+  } catch {
+    // No console to write to (a locked-down embedder): nothing to warn.
+  }
+}
+
 export default function loader() {
+  warnAgainstPastingCode();
   const root = document.getElementById('tc-loader');
   if (root) resumeIfLeft(root);
   return {
