@@ -600,6 +600,8 @@ jobs:
         run: scripts/check-async-signals.py
       - name: Mobile apps mark every blocking call, the UI thread never waits (issue #2184)
         run: scripts/check-ui-thread-blocking.py
+      - name: iOS views keep their modifier chains short, a too deep view type overflows the stack (issue #2392)
+        run: scripts/check-swiftui-chains.py
       - name: Icon buttons show a tooltip, not only an aria-label (issue #2019)
         run: scripts/check-icon-tooltips.py
       - name: No track() on a memo nothing else reads, it never wakes its effect (issue #1203)
