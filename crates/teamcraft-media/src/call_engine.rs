@@ -125,6 +125,9 @@ const DAVE_TRANSITION_TIMEOUT: Duration = Duration::from_secs(5);
 /// SFU allows a joiner whose proposals stalled once: two commit deadlines (10 s each), the members
 /// coming back in between (up to 10 s) and the execution (2 s).
 const ENCRYPTION_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// After a key binding that couldn't be signed elsewhere ([`CallEngine::key_binding_signed`]),
+/// joining again may be tried once this passed.
+const KEY_BINDING_RETRY: Duration = Duration::from_secs(5);
 /// How long after a lost connection this device still asks to carry on in the DAVE group it held
 /// (e2ee.md §8, "Short reconnects"). The SFU's grace is shorter; this bounds the window even
 /// against an SFU that would stretch it.
@@ -211,6 +214,9 @@ pub struct CallEngine {
   maybe_pending_transition: Option<PendingTransition>,
   /// The current DAVE session sent its key package and waits to be added to the group.
   has_sent_key_package: bool,
+  /// The current DAVE session's key package, held back until its binding is signed elsewhere
+  /// ([`CallKeyAuthenticator::signs_later`]).
+  maybe_unsigned_key_package: Option<UnsignedKeyPackage>,
   /// Since when this device waits for secured media with others in the call
   /// ([`ENCRYPTION_SETUP_TIMEOUT`]); set on the first timer tick of the wait.
   maybe_securing_since: Option<Instant>,
@@ -500,6 +506,13 @@ pub enum CallEngineEvent {
   EncryptionFailed {
     retry_after: Duration,
   },
+  /// This device's DAVE key needs its binding to the device, which is signed elsewhere
+  /// ([`CallKeyAuthenticator::signs_later`]): the host signs it and hands it in with
+  /// [`CallEngine::key_binding_signed`]; the key package waits for it.
+  KeyBindingWanted {
+    call_id: CallId,
+    dave_public_key: Vec<u8>,
+  },
   /// A decrypted audio frame for the jitter buffer (one per sender and origin).
   AudioFrame {
     sender: DeviceId,
@@ -757,6 +770,12 @@ struct PendingTransition {
   maybe_deadline: Option<Instant>,
 }
 
+/// A DAVE key package waiting for the binding of its key ([`CallEngine::key_binding_signed`]).
+struct UnsignedKeyPackage {
+  key_package: Vec<u8>,
+  dave_public_key: Vec<u8>,
+}
+
 /// What the SFU's `joined` says about the call when this device comes back.
 struct RejoinedState {
   participants: Vec<CallParticipant>,
@@ -895,6 +914,7 @@ impl CallEngine {
       maybe_dave: None,
       maybe_pending_transition: None,
       has_sent_key_package: false,
+      maybe_unsigned_key_package: None,
       maybe_securing_since: None,
       has_reported_encryption_failure: false,
       earlier_dave_stats: DaveFrameStats::default(),
@@ -3872,18 +3892,53 @@ impl CallEngine {
     dave.set_external_sender(package)?;
     let key_package = dave.create_key_package()?;
     let dave_public_key = dave.signature_public_key().to_vec();
-    let maybe_key_binding = match (&self.maybe_authenticator, self.call_id()) {
+    let maybe_key_binding = match (self.maybe_authenticator.clone(), self.call_id()) {
+      (Some(authenticator), Some(call_id)) if authenticator.signs_later() => {
+        self.maybe_unsigned_key_package = Some(UnsignedKeyPackage {
+          key_package,
+          dave_public_key: dave_public_key.clone(),
+        });
+        self.event(CallEngineEvent::KeyBindingWanted {
+          call_id,
+          dave_public_key,
+        });
+        return Ok(());
+      },
       (Some(authenticator), Some(call_id)) => {
         Some(Base64Bytes::new(authenticator.sign(call_id, &dave_public_key)?))
       },
       _ => None,
     };
+    self.send_key_package(key_package, maybe_key_binding);
+    Ok(())
+  }
+
+  /// Hands in the binding [`CallEngineEvent::KeyBindingWanted`] asked for: the key package that
+  /// waits for it goes out. A binding of a key the current DAVE session doesn't have (the SFU
+  /// started the group over meanwhile, which asked for another one) is dropped. A binding that
+  /// couldn't be signed leaves this device out of the call's encryption, as when the SFU refuses it.
+  pub fn key_binding_signed(&mut self, dave_public_key: &[u8], signed: Result<Vec<u8>, CallKeyError>) {
+    let Some(waiting) = self
+      .maybe_unsigned_key_package
+      .take_if(|waiting| waiting.dave_public_key == dave_public_key)
+    else {
+      return;
+    };
+    match signed {
+      Ok(binding) => self.send_key_package(waiting.key_package, Some(Base64Bytes::new(binding))),
+      Err(error) => {
+        warn!(%error, "this device's call key couldn't be bound to it");
+        self.report_encryption_failure(KEY_BINDING_RETRY);
+      },
+    }
+  }
+
+  fn send_key_package(&mut self, key_package: Vec<u8>, maybe_key_binding: Option<Base64Bytes>) {
     self.signal(CallClientMessage::DaveKeyPackage {
       key_package: Base64Bytes::new(key_package),
       maybe_key_binding,
     });
     self.has_sent_key_package = true;
-    Ok(())
   }
 
   /// Tells the UI once per DAVE session that this device can't get media keys.
@@ -4181,6 +4236,7 @@ impl CallEngine {
     }
     self.maybe_pending_transition = None;
     self.has_sent_key_package = false;
+    self.maybe_unsigned_key_package = None;
     self.maybe_securing_since = None;
     self.has_reported_encryption_failure = false;
     if self.maybe_dave.is_some() {
@@ -10735,6 +10791,133 @@ mod tests {
     };
     bob.handle_signal(event(3, welcome), now).unwrap();
     (alice, bob)
+  }
+
+  /// The device key signs elsewhere (a browser whose core runs in a worker, #2397): the key
+  /// package waits for its binding, which the host hands in later.
+  mod key_binding_signed_later {
+    use super::*;
+
+    #[test]
+    fn the_key_package_goes_out_once_its_binding_is_handed_in() {
+      let now = Instant::now();
+      let mut engine = joined_engine(
+        1,
+        &[2],
+        &DaveExternalSender::new().unwrap(),
+        Some(&signs_later(1)),
+        now,
+      );
+      let outputs = drain(&mut engine);
+      assert!(!has_key_package(&outputs), "the package waits for its binding");
+      let (call_id, dave_public_key) = wanted_binding(&outputs);
+      let binding = authenticators(&[1])[&1].sign(call_id, &dave_public_key).unwrap();
+      engine.key_binding_signed(&dave_public_key, Ok(binding.clone()));
+      let (key_package, maybe_binding) = key_package_of(&mut engine);
+      assert!(!key_package.is_empty());
+      assert_eq!(maybe_binding, Some(binding));
+    }
+
+    #[test]
+    fn a_binding_of_a_key_the_session_no_longer_has_is_dropped() {
+      let now = Instant::now();
+      let mut engine = joined_engine(
+        1,
+        &[2],
+        &DaveExternalSender::new().unwrap(),
+        Some(&signs_later(1)),
+        now,
+      );
+      let (_, first_key) = wanted_binding(&drain(&mut engine));
+      // The SFU starts the group over: a fresh session with a fresh key.
+      let package = Base64Bytes::new(DaveExternalSender::new().unwrap().package().unwrap());
+      engine
+        .handle_signal(event(3, CallEvent::DaveExternalSender { package }), now)
+        .unwrap();
+      let (call_id, second_key) = wanted_binding(&drain(&mut engine));
+      assert_ne!(first_key, second_key);
+      engine.key_binding_signed(&first_key, Ok(vec![1, 2, 3]));
+      assert!(
+        !has_key_package(&drain(&mut engine)),
+        "a stale binding sends nothing"
+      );
+      let binding = authenticators(&[1])[&1].sign(call_id, &second_key).unwrap();
+      engine.key_binding_signed(&second_key, Ok(binding));
+      assert!(key_package_of(&mut engine).1.is_some());
+    }
+
+    #[test]
+    fn a_binding_that_could_not_be_signed_is_an_encryption_failure() {
+      let now = Instant::now();
+      let mut engine = joined_engine(
+        1,
+        &[2],
+        &DaveExternalSender::new().unwrap(),
+        Some(&signs_later(1)),
+        now,
+      );
+      let (_, dave_public_key) = wanted_binding(&drain(&mut engine));
+      engine.key_binding_signed(
+        &dave_public_key,
+        Err(CallKeyError::Remote("the worker is gone".into())),
+      );
+      let outputs = drain(&mut engine);
+      assert!(!has_key_package(&outputs));
+      assert!(outputs.iter().any(|output| matches!(
+        output,
+        EngineOutput::Event(CallEngineEvent::EncryptionFailed { .. })
+      )));
+    }
+
+    /// Signs nothing itself: verifies like the device's own authenticator.
+    #[derive(Debug)]
+    struct SignsLater(Arc<dyn CallKeyAuthenticator>);
+
+    impl CallKeyAuthenticator for SignsLater {
+      fn signs_later(&self) -> bool {
+        true
+      }
+
+      fn sign(&self, _call_id: CallId, _dave_public_key: &[u8]) -> Result<Vec<u8>, CallKeyError> {
+        Err(CallKeyError::Remote("signs later".into()))
+      }
+
+      fn verify(
+        &self,
+        call_id: CallId,
+        device_id: DeviceId,
+        binding: &[u8],
+        role: BindingRole,
+      ) -> Result<Vec<u8>, CallKeyError> {
+        self.0.verify(call_id, device_id, binding, role)
+      }
+    }
+
+    fn signs_later(id: i64) -> Arc<dyn CallKeyAuthenticator> {
+      Arc::new(SignsLater(authenticators(&[id])[&id].clone()))
+    }
+
+    fn has_key_package(outputs: &[EngineOutput]) -> bool {
+      outputs.iter().any(|output| {
+        matches!(
+          output,
+          EngineOutput::Signal(CallClientMessage::DaveKeyPackage { .. })
+        )
+      })
+    }
+
+    fn wanted_binding(outputs: &[EngineOutput]) -> (CallId, Vec<u8>) {
+      outputs
+        .iter()
+        .find_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::KeyBindingWanted {
+            call_id,
+            dave_public_key,
+          }) => Some((*call_id, dave_public_key.clone())),
+          _ => None,
+        })
+        .expect("the engine asks for the binding")
+    }
   }
 
   /// An engine that joined (events 1 and 2: joined, external sender) with `others` present.

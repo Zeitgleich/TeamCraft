@@ -84,6 +84,7 @@ use wasm_bindgen::JsCast;
 
 use crate::auth::{AuthError, Authenticator};
 use crate::core_worker::{self, StartFailure, WorkerEvent, WorkerLink, WorkerStart};
+use crate::core_worker_messages;
 use crate::remote_backend::{CoreRead, CoreReadAnswer};
 use crate::settings::{load_string, store_string};
 use crate::start_timing::{self, Part};
@@ -514,30 +515,141 @@ fn session_storage_get(key: &str) -> Option<String> {
     .and_then(|storage| storage.get_item(key).ok().flatten())
 }
 
-/// Whether the core runs in this tab (not in another tab this one follows). Calls need it: the
-/// device key that signs a call's keys stays with the core.
+/// Whether the core runs in this tab or in this tab's worker (not in another tab this one
+/// follows). Calls need it: the device key that signs a call's keys stays with the core.
 pub fn runs_here() -> bool {
-  RUNNING.with(|running| matches!(running.borrow().as_ref(), Some(Running::Owner { .. })))
+  RUNNING.with(|running| {
+    matches!(
+      running.borrow().as_ref(),
+      Some(Running::Owner { .. } | Running::Worker { .. })
+    )
+  })
 }
 
-/// A join token, the signer and the verified devices for the conversation's call (e2ee.md §8).
-/// Only in the tab that runs the core.
-pub async fn prepare_call(conversation: ConversationId) -> Result<CallPreparation, String> {
-  ask(|reply| Request::PrepareCall(conversation, reply)).await?
+/// What joining a conversation's call needs on the page (e2ee.md §8): the join token, the call's
+/// verified devices and, with the core in this tab, its signer. With the core in the worker the
+/// device key stays there and the worker signs ([`sign_call_key`], #2397).
+pub struct PreparedCall {
+  pub join: teamcraft_proto::CallJoinTokenResponse,
+  pub user_id: UserId,
+  pub device_id: teamcraft_proto::DeviceId,
+  pub maybe_signer: Option<teamcraft_core::CallKeySigner>,
+  pub devices: Vec<VerifiedDevice>,
+}
+
+/// A join token, the signer (where the core runs in this tab) and the verified devices for the
+/// conversation's call. Only in the tab that runs the core or its worker.
+pub async fn prepare_call(conversation: ConversationId) -> Result<PreparedCall, String> {
+  if let Some(link) = worker_link() {
+    let answer = link
+      .call(
+        "core_prepare_call",
+        serde_json::json!({ "conversation": conversation }),
+      )
+      .await?;
+    let prepared: core_worker_messages::PreparedCallJson =
+      serde_json::from_value(answer).map_err(|error| format!("unreadable call preparation: {error}"))?;
+    return Ok(PreparedCall {
+      join: prepared.join,
+      user_id: prepared.user_id,
+      device_id: prepared.device_id,
+      maybe_signer: None,
+      devices: checked_devices(&prepared.devices)?,
+    });
+  }
+  let prepared = ask(|reply| Request::PrepareCall(conversation, reply)).await??;
+  Ok(PreparedCall {
+    join: prepared.join,
+    user_id: prepared.user_id,
+    device_id: prepared.device_id,
+    maybe_signer: Some(prepared.signer),
+    devices: prepared.devices,
+  })
+}
+
+/// Signs this device's DAVE key binding for `call_id` in the core's worker, with the signer its
+/// `core_prepare_call` for `conversation` kept (e2ee.md §8, #2397); the binding's bytes.
+pub async fn sign_call_key(
+  conversation: ConversationId,
+  call_id: teamcraft_proto::CallId,
+  dave_public_key: &[u8],
+) -> Result<Vec<u8>, String> {
+  let link = worker_link().ok_or("the core doesn't run in this tab's worker")?;
+  let answer = link
+    .call(
+      "core_sign_call_key",
+      serde_json::json!({
+        "conversation": conversation,
+        "call_id": call_id,
+        "key": teamcraft_proto::Base64Bytes::new(dave_public_key.to_vec()),
+      }),
+    )
+    .await?;
+  let binding: teamcraft_proto::Base64Bytes =
+    serde_json::from_value(answer).map_err(|error| format!("unreadable call key binding: {error}"))?;
+  Ok(binding.into_vec())
+}
+
+/// Whether the core runs in this tab's worker: the page's calls have the worker sign.
+pub fn core_in_worker() -> bool {
+  worker_link().is_some()
 }
 
 /// A ticket for measuring the link to the SFU before joining (#1959): on the pre-join screen, or
-/// in `maybe_meeting`'s lobby. Only in the tab that runs the core.
+/// in `maybe_meeting`'s lobby. Only in the tab that runs the core or its worker.
 pub async fn probe_ticket(
   maybe_meeting: Option<teamcraft_proto::MeetingId>,
 ) -> Result<teamcraft_proto::CallProbeTicketResponse, String> {
+  if let Some(link) = worker_link() {
+    let answer = link
+      .call(
+        "core_probe_ticket",
+        serde_json::json!({ "meeting": maybe_meeting }),
+      )
+      .await?;
+    return serde_json::from_value(answer).map_err(|error| format!("unreadable probe ticket: {error}"));
+  }
   ask(|reply| Request::ProbeTicket(maybe_meeting, reply)).await?
 }
 
 /// The running call's verified devices afresh, after catching up the conversation's group: a
-/// device added during the call joins it (e2ee.md §8.2). Only in the tab that runs the core.
+/// device added during the call joins it (e2ee.md §8.2). Only in the tab that runs the core or its
+/// worker.
 pub async fn call_devices(conversation: ConversationId) -> Result<Vec<VerifiedDevice>, String> {
+  if let Some(link) = worker_link() {
+    let answer = link
+      .call(
+        "core_call_devices",
+        serde_json::json!({ "conversation": conversation }),
+      )
+      .await?;
+    let devices: Vec<teamcraft_proto::Base64Bytes> =
+      serde_json::from_value(answer).map_err(|error| format!("unreadable call devices: {error}"))?;
+    return checked_devices(&devices);
+  }
   ask(|reply| Request::CallDevices(conversation, reply)).await?
+}
+
+/// The devices the core in the worker verified ([`VerifiedDevice::from_checked_bytes`]): the
+/// worker's channel is written by this page's own core only.
+fn checked_devices(devices: &[teamcraft_proto::Base64Bytes]) -> Result<Vec<VerifiedDevice>, String> {
+  devices
+    .iter()
+    .map(|device| VerifiedDevice::from_checked_bytes(device.as_slice()).map_err(|error| error.to_string()))
+    .collect()
+}
+
+/// [`VerifiedDevice::to_checked_bytes`] of each, for the page ([`checked_devices`]).
+fn devices_for_page(devices: &[VerifiedDevice]) -> Result<Vec<teamcraft_proto::Base64Bytes>, String> {
+  devices
+    .iter()
+    .map(|device| {
+      device
+        .to_checked_bytes()
+        .map(teamcraft_proto::Base64Bytes::new)
+        .map_err(|error| error.to_string())
+    })
+    .collect()
 }
 
 /// Whether the workspace requires an organization background behind the camera image for this
@@ -549,8 +661,8 @@ pub async fn requires_org_background() -> bool {
 /// The organization's call backgrounds and their rule for this user; unknown restricts nothing,
 /// as on desktop.
 pub async fn org_backgrounds() -> OrgBackgrounds {
-  match ask(|reply| Request::Query(ChatQuery::OrgBackgrounds, reply)).await {
-    Ok(Ok(ChatAnswer::OrgBackgrounds { backgrounds })) => backgrounds,
+  match query(ChatQuery::OrgBackgrounds).await {
+    Ok(ChatAnswer::OrgBackgrounds { backgrounds }) => backgrounds,
     _ => OrgBackgrounds::default(),
   }
 }
@@ -558,6 +670,14 @@ pub async fn org_backgrounds() -> OrgBackgrounds {
 /// The picture file behind the camera for `effect` (#439): the user's own, decrypted, or the
 /// organization's, hash-checked. Only in the tab that runs the core.
 pub async fn background_picture(effect: BackgroundEffect) -> Result<Vec<u8>, String> {
+  if let Some(link) = worker_link() {
+    let answer = link
+      .call("core_background_picture", serde_json::json!({ "effect": effect }))
+      .await?;
+    let picture: teamcraft_proto::Base64Bytes =
+      serde_json::from_value(answer).map_err(|error| format!("unreadable background picture: {error}"))?;
+    return Ok(picture.into_vec());
+  }
   ask(|reply| Request::BackgroundPicture(effect, reply)).await?
 }
 
@@ -595,6 +715,14 @@ pub async fn call(command: &str, args: Value) -> Result<Value, String> {
       }
       stop();
       Ok(Value::Null)
+    },
+    // The page's calls hear it here; the core in the worker hears it there (#2397).
+    "core_network_changed" if worker_link().is_some() => {
+      crate::web_calls::network_changed();
+      match current_link() {
+        Some(link) => link.call(command, args).await,
+        None => serve(command, args).await,
+      }
     },
     _ => match current_link() {
       Some(link) => link.call(command, args).await,
@@ -637,8 +765,58 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
       close_in_worker().await;
       Ok(Value::Null)
     },
+    "core_prepare_call" => {
+      let conversation: ConversationId = field(&args, "conversation")?;
+      let prepared = ask(|reply| Request::PrepareCall(conversation, reply)).await??;
+      let answer = core_worker_messages::PreparedCallJson {
+        join: prepared.join,
+        user_id: prepared.user_id,
+        device_id: prepared.device_id,
+        devices: devices_for_page(&prepared.devices)?,
+      };
+      // The device key stays here; the page asks for each binding (`core_sign_call_key`).
+      WORKER_CALL_SIGNERS.with(|signers| {
+        signers.borrow_mut().insert(
+          conversation,
+          Arc::new(crate::web_calls::CoreSigner(prepared.signer)),
+        );
+      });
+      to_value(answer)
+    },
+    "core_sign_call_key" => {
+      let conversation: ConversationId = field(&args, "conversation")?;
+      let call_id: teamcraft_proto::CallId = field(&args, "call_id")?;
+      let key: teamcraft_proto::Base64Bytes = field(&args, "key")?;
+      let signer = WORKER_CALL_SIGNERS
+        .with(|signers| signers.borrow().get(&conversation).cloned())
+        .ok_or("no call of this conversation was prepared")?;
+      let binding = crate::web_calls::sign_binding(signer, call_id, key.as_slice())?;
+      to_value(teamcraft_proto::Base64Bytes::new(binding))
+    },
+    "core_call_devices" => {
+      let conversation: ConversationId = field(&args, "conversation")?;
+      let devices = ask(|reply| Request::CallDevices(conversation, reply)).await??;
+      to_value(devices_for_page(&devices)?)
+    },
+    "core_probe_ticket" => {
+      let maybe_meeting: Option<teamcraft_proto::MeetingId> = field(&args, "meeting")?;
+      to_value(ask(|reply| Request::ProbeTicket(maybe_meeting, reply)).await??)
+    },
+    "core_background_picture" => {
+      let effect: BackgroundEffect = field(&args, "effect")?;
+      let picture = ask(|reply| Request::BackgroundPicture(effect, reply)).await??;
+      to_value(teamcraft_proto::Base64Bytes::new(picture))
+    },
     _ => serve(command, args).await,
   }
+}
+
+thread_local! {
+  /// The signers of the calls the page of this worker prepared, by conversation: the device key
+  /// stays in the worker (`core_sign_call_key`, #2397). One per conversation, replaced by the
+  /// next preparation; they hold the key as the core does.
+  static WORKER_CALL_SIGNERS: RefCell<std::collections::HashMap<ConversationId, Arc<dyn teamcraft_media::call_auth::CallBindingSigner>>> =
+    RefCell::new(std::collections::HashMap::new());
 }
 
 /// Runs a command on this tab's core.
@@ -2481,9 +2659,11 @@ impl Core {
     );
     self.catch_up_focus = client.catch_up_focus();
     let mut client = client;
-    // Calls ring and show their roster in the tab that runs the core; not from its worker, whose
-    // page has no calls yet (`core_worker`).
-    if !core_worker::is_worker() {
+    // Calls ring and show their roster in the tab that runs the core; from its worker, the page
+    // that started the worker runs them (#2397).
+    if core_worker::is_worker() {
+      client.set_call_event_sink(Box::new(core_worker::forward_call_event));
+    } else {
       client.set_call_event_sink(Box::new(crate::web_calls::on_gateway_event));
     }
     // The loop reads what a catch-up leaves, slowly, a page now and then while the page is in view

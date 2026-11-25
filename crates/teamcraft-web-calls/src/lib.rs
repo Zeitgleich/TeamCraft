@@ -125,6 +125,10 @@ struct Callbacks {
   /// A ticket for measuring the link before the call (`page_calls`, #1959). A page from before it
   /// gives none: the call measures at the join then.
   maybe_probe_ticket: Option<Function>,
+  /// Signs this device's DAVE key binding where the device key is, answering a promise: a page
+  /// whose client core runs in a worker (#2397). Given, the engine asks for the binding instead of
+  /// signing through `sign` ([`CallKeyAuthenticator::signs_later`]).
+  maybe_sign_later: Option<Function>,
 }
 
 /// The link's measurement before the call (#1959).
@@ -250,6 +254,11 @@ enum Control {
     is_allowed: bool,
   },
   NetworkChanged,
+  /// The binding of this device's DAVE key the page signed (`sign_later`, #2397).
+  KeyBindingSigned {
+    dave_public_key: Vec<u8>,
+    signed: Result<Vec<u8>, CallKeyError>,
+  },
   VideoStats(oneshot::Sender<Option<VideoStatsReport>>),
   /// Time for the call's telemetry to sample the video stats ([`STATS_SAMPLE_INTERVAL`]).
   TelemetrySample,
@@ -260,7 +269,10 @@ enum Control {
 
 /// Signs and verifies call key bindings in the page, which holds the device key (e2ee.md §8).
 #[derive(Debug)]
-struct PageAuthenticator;
+struct PageAuthenticator {
+  /// The page signs asynchronously (`sign_later`).
+  signs_later: bool,
+}
 
 /// Fresh join tokens from the page's client core, for rejoining after a lost connection.
 struct PageTickets;
@@ -287,6 +299,7 @@ pub fn start(callbacks: JsValue) -> Result<(), JsValue> {
     maybe_background_picture: function(&callbacks, "background_picture").ok(),
     maybe_roster: function(&callbacks, "roster").ok(),
     maybe_probe_ticket: function(&callbacks, "probe_ticket").ok(),
+    maybe_sign_later: function(&callbacks, "sign_later").ok(),
   };
   let on_device_change = Closure::<dyn FnMut()>::new(|| {
     if let Ok(host) = host() {
@@ -647,7 +660,9 @@ impl Host {
       source: AudioSource::Microphone(microphone),
       sink: AudioSink::Speakers(speakers),
       maybe_trusted_roster: Some(prepared.trusted_devices),
-      maybe_authenticator: Some(Arc::new(PageAuthenticator)),
+      maybe_authenticator: Some(Arc::new(PageAuthenticator {
+        signs_later: self.callbacks.maybe_sign_later.is_some(),
+      })),
       jitter: JitterBufferConfig::default(),
       resilience: ResilienceConfig::browser(),
       maybe_ticket_source: Some(Rc::new(PageTickets)),
@@ -1725,6 +1740,44 @@ impl Host {
     answer.await.unwrap_or(Ok(()))
   }
 
+  /// Has the page sign this device's DAVE key binding (`sign_later`) and hands the binding to the
+  /// call once it is signed; the call's events go on meanwhile.
+  fn sign_later(&self, call_id: CallId, dave_public_key: Vec<u8>) {
+    let Some(sign_later) = self.callbacks.maybe_sign_later.clone() else {
+      return;
+    };
+    let Some(controls) = self
+      .maybe_media
+      .borrow()
+      .as_ref()
+      .map(|media| media.controls.clone())
+    else {
+      return;
+    };
+    spawn_local(async move {
+      let signed = async {
+        let promise: Promise = sign_later
+          .call2(
+            &JsValue::NULL,
+            &json_value(&call_id)?,
+            &Uint8Array::from(dave_public_key.as_slice()),
+          )
+          .and_then(JsCast::dyn_into)
+          .map_err(|error| remote_error(&js_text(&error)))?;
+        let answer = JsFuture::from(promise)
+          .await
+          .map_err(|error| remote_error(&js_text(&error)))?;
+        bytes(answer)
+      }
+      .await;
+      // A closed channel means the call ended meanwhile.
+      let _ = controls.unbounded_send(Control::KeyBindingSigned {
+        dave_public_key,
+        signed,
+      });
+    });
+  }
+
   fn control(&self, control: Control) {
     if let Some(media) = self.maybe_media.borrow().as_ref() {
       // A closed channel means the call just ended; nothing left to change.
@@ -1741,6 +1794,14 @@ impl Host {
   }
 
   fn on_engine_event(&self, roster: &mut CallRoster, event: CallEngineEvent) {
+    if let CallEngineEvent::KeyBindingWanted {
+      call_id,
+      dave_public_key,
+    } = &event
+    {
+      self.sign_later(*call_id, dave_public_key.clone());
+      return;
+    }
     if matches!(event, CallEngineEvent::OwnVideoNotDecodableByAll) {
       self.report(&ActionFailure::new(
         FailureKind::Call(CallFailure::VideoNotDecodableByAll),
@@ -2030,12 +2091,20 @@ async fn apply(call: &WebCall, control: Control) {
     Control::StartRecordingNow => call.start_recording_now(),
     Control::AnswerRecording { recorder, is_allowed } => call.answer_recording(recorder, is_allowed),
     Control::NetworkChanged => call.network_changed(),
+    Control::KeyBindingSigned {
+      dave_public_key,
+      signed,
+    } => call.key_binding_signed(dave_public_key, signed),
     Control::VideoStats(done) => drop(done.send(call.video_stats().await)),
     Control::TelemetrySample | Control::Leave | Control::HangUp => {},
   }
 }
 
 impl CallKeyAuthenticator for PageAuthenticator {
+  fn signs_later(&self) -> bool {
+    self.signs_later
+  }
+
   fn sign(&self, call_id: CallId, dave_public_key: &[u8]) -> Result<Vec<u8>, CallKeyError> {
     let host = host().map_err(|_| remote_error("the page is gone"))?;
     let answer = host

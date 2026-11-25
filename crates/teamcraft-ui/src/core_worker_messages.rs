@@ -4,7 +4,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teamcraft_client_api::failure::FailureKind;
-use teamcraft_proto::{ErrorCode, UserId};
+use teamcraft_proto::{Base64Bytes, CallJoinTokenResponse, DeviceId, ErrorCode, GatewayEvent, UserId};
 
 /// Messages to the worker (JSON strings; both ends are the same build).
 #[derive(Debug, Serialize, Deserialize)]
@@ -64,6 +64,22 @@ pub(crate) enum ToPage {
   },
   StoreReady,
   WantsIdToken,
+  /// A call event of the gateway (start, update, end, ring) for the page's calls (#2397).
+  CallEvent {
+    event: Box<GatewayEvent>,
+  },
+}
+
+/// What the page's calls get of `core_prepare_call` from a core in the worker (e2ee.md §8,
+/// #2397): the join token and the call's verified devices, not the signer: the device key stays
+/// in the worker, which signs the call key bindings itself (`core_sign_call_key`).
+#[derive(Debug, Serialize, Deserialize)]
+pub(crate) struct PreparedCallJson {
+  pub(crate) join: CallJoinTokenResponse,
+  pub(crate) user_id: UserId,
+  pub(crate) device_id: DeviceId,
+  /// [`teamcraft_crypto::identity::VerifiedDevice::to_checked_bytes`] of each.
+  pub(crate) devices: Vec<Base64Bytes>,
 }
 
 /// [`FailureKind`] as far as the core's background commands report it.

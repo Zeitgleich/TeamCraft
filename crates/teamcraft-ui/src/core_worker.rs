@@ -322,6 +322,8 @@ impl WorkerLink {
       })),
       ToPage::StoreReady => (self.on_event)(WorkerEvent::StoreReady),
       ToPage::WantsIdToken => (self.on_event)(WorkerEvent::WantsIdToken),
+      // The page runs the calls; its core's worker hears the gateway (#2397).
+      ToPage::CallEvent { event } => crate::web_calls::on_gateway_event(&event),
     }
   }
 
@@ -548,6 +550,13 @@ pub(crate) fn was_store_ready() -> bool {
 /// In the worker: whether the page is in view.
 pub(crate) fn is_page_visible() -> bool {
   IS_VISIBLE.with(Cell::get)
+}
+
+/// In the worker: a call event of the gateway for the page's calls (#2397).
+pub(crate) fn forward_call_event(event: &teamcraft_proto::GatewayEvent) {
+  post_to_page(&ToPage::CallEvent {
+    event: Box::new(event.clone()),
+  });
 }
 
 /// In the worker: the core wants a new ID token.
