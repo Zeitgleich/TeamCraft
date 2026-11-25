@@ -67,7 +67,8 @@ async function launchOnce() {
     chrome.kill();
     await exited;
     process.off("exit", killChrome);
-    rmSync(profile, { recursive: true, force: true });
+    // Chrome may still be writing into the profile as it exits: retry instead of failing ENOTEMPTY.
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   };
   try {
     const target = await pageTarget(profile, () => spawnError ?? (chrome.exitCode !== null ? new Error(`Chrome exited with code ${chrome.exitCode}`) : null));
