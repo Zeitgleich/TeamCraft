@@ -13,6 +13,7 @@ mod app_link;
 mod beside_engine;
 mod blocking;
 mod bridge;
+mod call_captions;
 mod calls;
 mod canvas;
 mod canvas_edit;

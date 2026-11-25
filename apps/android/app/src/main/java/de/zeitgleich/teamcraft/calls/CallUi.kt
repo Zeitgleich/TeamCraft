@@ -419,6 +419,8 @@ internal class CallUiActions(
   val maybeOnHand: ((Boolean) -> Unit)? = null,
   /** Answers a person's recordings that ask for consent (#2115): their user ID, and whether allowed. */
   val maybeOnRecordingAnswer: ((String, Boolean) -> Unit)? = null,
+  /** Turns live captions on this phone on or off (#215); `null` where it can't recognize on the device. */
+  val maybeOnCaptions: ((Boolean) -> Unit)? = null,
 )
 
 /** The room the header and the bottom (notices and controls) take, so the stage keeps clear of them. */
@@ -499,6 +501,8 @@ internal fun InCallContent(
           StatusHint(ui.maybeState)
           EncryptionFailureBanner(ui.maybeState, actions.onRetryEncryption, actions.onHangUp)
           banner()
+          // Live captions (#215), recognized on this phone; above the controls, never over a name.
+          ui.maybeState?.takeIf { it.isCaptionsOn }?.let { state -> CaptionsPanel(state.captions, ui.names) }
         }
         AnimatedVisibility(
           visible = ui.areControlsShown,
@@ -1438,7 +1442,14 @@ private fun ControlRow(ui: CallUiState, actions: CallUiActions, isChatInBar: Boo
     }
     if (maybeOnChat != null && isChatInBar) ChatButton(ui.chat, maybeOnChat)
     val maybeMenuChat = ui.chat.takeIf { maybeOnChat != null && !isChatInBar }
-    MoreButton(state?.isDeafened == true, ui.isSharingScreen, actions, maybeMenuChat, state?.isHandRaised == true)
+    MoreButton(
+      state?.isDeafened == true,
+      ui.isSharingScreen,
+      actions,
+      maybeMenuChat,
+      state?.isHandRaised == true,
+      state?.isCaptionsOn == true,
+    )
     HangUpButton(actions.onHangUp, actions.maybeOnEndForEveryone)
   }
 }
@@ -1580,10 +1591,11 @@ private fun MoreButton(
   actions: CallUiActions,
   maybeChat: CallChatBadge?,
   isHandRaised: Boolean,
+  isCaptionsOn: Boolean,
 ) {
   var isMenuOpen by remember { mutableStateOf(false) }
   var isReactionPickerOpen by remember { mutableStateOf(false) }
-  val entries = menuEntries(isDeafened, isSharingScreen, actions, maybeChat, isHandRaised) { isReactionPickerOpen = true }
+  val entries = menuEntries(isDeafened, isSharingScreen, actions, maybeChat, isHandRaised, isCaptionsOn) { isReactionPickerOpen = true }
   Box {
     FilledTonalIconButton(
       onClick = {
@@ -1640,6 +1652,7 @@ private fun menuEntries(
   actions: CallUiActions,
   maybeChat: CallChatBadge?,
   isHandRaised: Boolean,
+  isCaptionsOn: Boolean,
   onReactions: () -> Unit,
 ): List<MenuEntry> = buildList {
   val maybeOnChat = actions.maybeOnChat
@@ -1657,6 +1670,15 @@ private fun menuEntries(
         text = stringResource(if (isHandRaised) R.string.call_hand_lower else R.string.call_hand_raise),
         icon = CallIcons.Hand,
       ) { onHand(!isHandRaised) },
+    )
+  }
+  // Recognized on this phone only; nobody else is told (#215).
+  actions.maybeOnCaptions?.let { onCaptions ->
+    add(
+      MenuEntry(
+        text = stringResource(if (isCaptionsOn) R.string.call_captions_off else R.string.call_captions),
+        icon = CallIcons.ClosedCaption,
+      ) { onCaptions(!isCaptionsOn) },
     )
   }
   if (isSharingScreen) {

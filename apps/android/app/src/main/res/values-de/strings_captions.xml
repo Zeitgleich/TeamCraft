@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Live captions of calls, recognized on this phone only (#215, e2ee.md §8.6). -->
+<resources>
+  <string name="call_captions">Untertitel</string>
+  <string name="call_captions_off">Untertitel ausschalten</string>
+  <string name="call_captions_only_here">Untertitel · nur auf diesem Gerät</string>
+  <string name="call_captions_listening">Untertitel erscheinen hier, sobald jemand spricht.</string>
+  <string name="call_captions_someone">Jemand</string>
+  <string name="call_captions_announce">%1$s: %2$s</string>
+  <string name="call_captions_language_missing">Für Untertitel braucht dieses Telefon die Spracherkennung für %1$s. Android lädt sie gerade; versuche es noch einmal, sobald sie da ist.</string>
+  <string name="call_captions_language_unsupported">Dieses Telefon kann %1$s nicht auf dem Gerät erkennen, daher bleiben die Untertitel aus.</string>
+  <string name="call_captions_overloaded">Untertitel ausgeschaltet: Dieses Telefon ist zu ausgelastet, um mit dem Gesprochenen Schritt zu halten. Der Anruf läuft weiter.</string>
+  <string name="call_captions_failed">Untertitel ausgeschaltet: Die Spracherkennung auf diesem Telefon funktioniert nicht mehr. Versuche es später noch einmal.</string>
+</resources>

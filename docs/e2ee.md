@@ -7882,13 +7882,24 @@ service or to the others, and nobody in the call is told (there is nothing to te
 learns nothing it didn't hear). This is the opposite of the notetaker (§8.2), which takes the audio
 out of the encryption on purpose.
 
-- **Where:** the desktop app so far (Linux, macOS, Windows). The browser and the mobile apps show no
-  captions button yet; the mobile apps will use the system's recognizer in on-device mode only, and
-  the browser a WebAssembly build, each in its own step of #215.
-- **Engine:** whisper.cpp through `whisper-rs` (`teamcraft_media::captions_whisper`), on the CPU,
-  behind the `SpeechRecognizer` trait (a fake in tests). Its log is silenced, never forwarded: a debug
-  build of whisper.cpp prints tokens, and recognized text must never reach a log or a crash report.
-- **Model:** whisper.cpp's multilingual base model, quantized (`ggml-base-q5_1.bin`, 57 MiB, MIT),
+- **Where:** the desktop app (Linux, macOS, Windows), Android 13+ and iOS. The browser shows no
+  captions button yet (a WebAssembly build is its own step of #215).
+- **Engine, desktop:** whisper.cpp through `whisper-rs` (`teamcraft_media::captions_whisper`), on the
+  CPU, behind the `SpeechRecognizer` trait (a fake in tests). Its log is silenced, never forwarded: a
+  debug build of whisper.cpp prints tokens, and recognized text must never reach a log or a crash
+  report.
+- **Engine, phones:** the system's speech recognizer **in on-device mode only**, behind the same
+  trait (`teamcraft-ffi` `call_captions`, the app's `CaptionRecognizer`): Android's
+  `SpeechRecognizer.createOnDeviceSpeechRecognizer`, fed the call's audio through a pipe
+  (`EXTRA_AUDIO_SOURCE`, Android 13+) instead of the microphone; iOS's `SFSpeechRecognizer` with
+  `requiresOnDeviceRecognition`, fed the audio as buffers. A phone whose recognizer can't run on
+  the device, or doesn't know the app's language there, shows no captions button or says why:
+  recognition in the cloud is never used. The language is the app's; a language pack Android
+  supports but hasn't installed is downloaded by Android (its own pack, nothing of the call). The
+  apps never log the text. The sentence cutting, the bounded queue and the overload rule are the
+  desktop's (`teamcraft_media::captions`); the sentence so far is recognized every 3 s rather than
+  2 s, since each piece is a session of the system recognizer.
+- **Model (desktop):** whisper.cpp's multilingual base model, quantized (`ggml-base-q5_1.bin`, 57 MiB, MIT),
   not shipped with the app. The first press of "Captions" asks before downloading it (size, and that
   nothing leaves the computer). The download is pinned to a commit of the model repository and checked
   against a pinned SHA-256 (`teamcraft_media::caption_model`) when it is written and again whenever it

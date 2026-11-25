@@ -45,6 +45,10 @@ struct ActiveCall: Identifiable, Equatable {
   /// The others' latest reactions (#2324), oldest first: the screen floats each one above the
   /// last id it showed.
   var reactions: [CallReactionInfo] = []
+  /// Live captions on this device are on (#215): the captions panel shows.
+  var isCaptionsOn = false
+  /// Their latest lines, oldest first; a line not final yet is replaced by the same id. Only here.
+  var captions: [CaptionLineInfo] = []
   /// The code participants compare to rule out a man in the middle (once secured).
   var maybePrivacyCode: String?
   /// Put on hold from the system's call UI: nothing is sent or played.
@@ -158,6 +162,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   private(set) var isMoving = false
   /// Why following a move failed (the call stays where it is).
   private(set) var maybeMoveFailure: AppFailure?
+  /// Why captions are off although the user turned them on (#215): the call screen says so once.
+  private(set) var maybeCaptionsNote: LocalizedStringResource?
   /// "Add notetaker" runs (asking it in, or moving the call into a room with it).
   private(set) var isAddingNotetaker = false
   /// The notetaker was asked in: the screen says it is coming until it is there, for a while.
@@ -176,6 +182,8 @@ final class CallManager: NSObject, @unchecked Sendable {
   @ObservationIgnored private let controller = CXCallController()
   @ObservationIgnored private var maybeRegistry: PKPushRegistry?
   @ObservationIgnored private var maybeSession: CallSession?
+  /// The last state's reason captions stopped by themselves, to say a new one once (#215).
+  @ObservationIgnored private var lastCaptionsStop: CaptionsStop?
   @ObservationIgnored private var maybePendingAction: CXAction?
   @ObservationIgnored private var wantsJoin = false
   @ObservationIgnored private var isAudioActive = false
@@ -266,6 +274,33 @@ final class CallManager: NSObject, @unchecked Sendable {
   /// Raises or lowers this device's hand for everybody else in the call (#2324).
   func setHandRaised(_ isRaised: Bool) {
     maybeSession?.setHandRaised(isRaised: isRaised)
+  }
+
+  /// Turns live captions on or off (#215, e2ee.md §8.6): the others' voices as this iPhone plays
+  /// them go to `SFSpeechRecognizer` on the device only, in the app's language; the text shows on
+  /// the call screen. Nothing is sent anywhere, and nobody in the call is told.
+  @MainActor
+  func setCaptions(_ isOn: Bool) async {
+    guard let session = maybeSession else { return }
+    guard isOn else {
+      session.stopCaptions()
+      return
+    }
+    guard await CallCaptions.authorize() else {
+      maybeCaptionsNote = "call_captions_denied"
+      return
+    }
+    // The call may have ended or moved while the system asked.
+    guard maybeSession === session else { return }
+    guard let recognizer = OnDeviceCaptionRecognizer(locale: CallCaptions.locale) else {
+      maybeCaptionsNote = "call_captions_language_unsupported"
+      return
+    }
+    session.startCaptions(recognizer: recognizer)
+  }
+
+  func dismissCaptionsNote() {
+    maybeCaptionsNote = nil
   }
 
   /// Answers a person's recordings of the call that ask for consent (#2115): this device's voice
@@ -701,6 +736,7 @@ final class CallManager: NSObject, @unchecked Sendable {
       self.isCameraOn = false
       self.wantsVideoStart = false
       self.maybeSession = nil
+      self.lastCaptionsStop = nil
       self.wantsJoin = false
       self.isAudioActive = false
       self.maybeAnnouncedMove = nil
@@ -922,6 +958,13 @@ extension CallManager: CallListener {
       call.raisedHandUserIds = state.raisedHandUserIds
       call.isHandRaised = state.isHandRaised
       call.reactions = state.reactions
+      // Captions went off by themselves: said once (the core clears it when they start again).
+      if self.lastCaptionsStop == nil, let stop = state.maybeCaptionsStop {
+        self.maybeCaptionsNote = Self.note(for: stop)
+      }
+      self.lastCaptionsStop = state.maybeCaptionsStop
+      call.isCaptionsOn = state.isCaptionsOn
+      call.captions = state.captions
       if hasNewPeople { Task { @MainActor in self.names = await AppModel.shared.displayNames() } }
       call.maybePrivacyCode = state.maybePrivacyCode
       call.isOnLimitedNetwork = state.isOnLimitedNetwork
@@ -999,6 +1042,14 @@ extension CallManager: CallListener {
     case .removedByHost: return "call_removed_by_host"
     case .endedByHost: return "call_ended_by_host"
     default: return nil
+    }
+  }
+
+  /// Why captions went off by themselves (#215).
+  private static func note(for stop: CaptionsStop) -> LocalizedStringResource {
+    switch stop {
+    case .overloaded: return "call_captions_overloaded"
+    case .failed: return "call_captions_failed"
     }
   }
 }

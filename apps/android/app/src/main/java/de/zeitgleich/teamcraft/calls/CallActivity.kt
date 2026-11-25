@@ -644,6 +644,8 @@ private fun CallScreen(
   val hasVideo = tracks.isNotEmpty()
   var areControlsShown by rememberSaveable { mutableStateOf(true) }
   var interactions by remember { mutableIntStateOf(0) }
+  // Live captions only where this phone recognizes speech on the device (#215); asked once.
+  val areCaptionsOffered = remember { calls.areCaptionsOffered }
   // The user's own latest reaction, floated over the stage as pressed (#2324).
   var ownReaction by remember { mutableStateOf<OwnReaction?>(null) }
   // WCAG 2.2.1: with TalkBack or Switch Access the controls stay (the recommended timeout is then
@@ -752,6 +754,7 @@ private fun CallScreen(
       },
       maybeOnHand = { calls.setHandRaised(it) },
       maybeOnRecordingAnswer = { recorder, isAllowed -> calls.answerRecording(recorder, isAllowed) },
+      maybeOnCaptions = if (isConnected && areCaptionsOffered) ({ calls.setCaptions(it) }) else null,
     ),
     banner = {
       // Picture-in-picture shows the stage only.

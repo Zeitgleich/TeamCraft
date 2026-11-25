@@ -7,6 +7,7 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.media.projection.MediaProjection
 import android.net.Uri
+import android.os.Build
 import android.os.SystemClock
 import android.telecom.DisconnectCause
 import android.util.Log
@@ -19,6 +20,7 @@ import androidx.core.telecom.CallsManager
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ProcessLifecycleOwner
 import java.nio.ByteBuffer
+import java.util.Locale
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -43,6 +45,7 @@ import uniffi.teamcraft_ffi.ConversationKind
 import uniffi.teamcraft_ffi.CallSession
 import uniffi.teamcraft_ffi.JoinProgress
 import uniffi.teamcraft_ffi.CallStateInfo
+import uniffi.teamcraft_ffi.CaptionsStop
 import uniffi.teamcraft_ffi.CameraFrame
 import uniffi.teamcraft_ffi.IncomingCallInfo
 import uniffi.teamcraft_ffi.TeamCraftException
@@ -112,6 +115,8 @@ class CallController(
   @Volatile private var maybeScreenCapture: ScreenCapture? = null
   /** The ongoing-call service keeps the camera alive (it sends). */
   @Volatile private var isCameraKeptAlive = false
+  /** The on-device recognizer of live captions while they are on (#215); Android 13+ only. */
+  @Volatile private var maybeCaptionRecognizer: AutoCloseable? = null
 
   /** "Add people" and following a move of the call into a meeting room. */
   val moves = CallMoves(
@@ -356,6 +361,68 @@ class CallController(
   /** Raises or lowers the hand for everybody else in the call (#2324). */
   fun setHandRaised(isRaised: Boolean) {
     maybeSession?.setHandRaised(isRaised)
+  }
+
+  /**
+   * Live captions on this phone can be offered (#215): Android 13+ with an on-device recognizer.
+   * Without one there is no button; recognition in the cloud is never used.
+   */
+  val areCaptionsOffered: Boolean get() = areCaptionsOffered(context)
+
+  /**
+   * Turns live captions on or off (#215, e2ee.md §8.6): the others' voices as this phone plays
+   * them go to the system's on-device recognizer, in the app's language; the text shows on the
+   * call screen only. Nothing is sent anywhere, and nobody in the call is told. A language the
+   * recognizer has to download first is asked of Android, and the user hears to try again.
+   */
+  fun setCaptions(isOn: Boolean) {
+    val session = maybeSession ?: return
+    if (!isOn) {
+      session.stopCaptions()
+      closeCaptions()
+      return
+    }
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !areCaptionsOffered) return
+    scope.launch {
+      val locale = Locale.getDefault()
+      when (checkCaptionLanguage(context, locale)) {
+        CaptionLanguageSupport.READY -> {
+          // The call may have ended or moved while the languages were asked.
+          if (maybeSession !== session) return@launch
+          closeCaptions()
+          val recognizer = OnDeviceCaptionRecognizer(context, locale)
+          maybeCaptionRecognizer = AutoCloseable { recognizer.close() }
+          session.startCaptions(recognizer)
+        }
+        CaptionLanguageSupport.DOWNLOADING -> toast(context.getString(R.string.call_captions_language_missing, locale.displayLanguage))
+        CaptionLanguageSupport.UNSUPPORTED -> toast(context.getString(R.string.call_captions_language_unsupported, locale.displayLanguage))
+      }
+    }
+  }
+
+  /** The recognizer goes once captions are off, by the user or by themselves, or the call ended. */
+  private fun closeCaptions() {
+    maybeCaptionRecognizer?.close()
+    maybeCaptionRecognizer = null
+  }
+
+  /** Captions went off by themselves: the user hears why. */
+  private fun onCaptionsStopped(stop: CaptionsStop) {
+    closeCaptions()
+    toast(
+      context.getString(
+        when (stop) {
+          CaptionsStop.OVERLOADED -> R.string.call_captions_overloaded
+          CaptionsStop.FAILED -> R.string.call_captions_failed
+        },
+      ),
+    )
+  }
+
+  private fun toast(text: String) {
+    ContextCompat.getMainExecutor(context).execute {
+      Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+    }
   }
 
   /**
@@ -985,6 +1052,7 @@ class CallController(
   private fun leave() {
     // Before the session closes: the capture tells the engine first.
     stopScreenShare()
+    closeCaptions()
     takeSession()?.let { session ->
       session.leave()
       session.close()
@@ -1028,8 +1096,12 @@ class CallController(
         maybeRetry.complete(Unit)
         return
       }
-      val wasSharing = this@CallController.state.value?.isSharingScreen == true
+      val previous = this@CallController.state.value
+      val wasSharing = previous?.isSharingScreen == true
       this@CallController.state.value = state
+      if (previous?.maybeCaptionsStop == null) state.maybeCaptionsStop?.let(::onCaptionsStopped)
+      // Off with the session that had them (ended, rejoined or moved into a meeting room).
+      if (previous?.isCaptionsOn == true && !state.isCaptionsOn) closeCaptions()
       when (state.phase) {
         CallPhase.CONNECTED -> if (connectedAt.value == null) connectedAt.value = SystemClock.elapsedRealtime()
         CallPhase.ENDED -> connectedAt.value = null

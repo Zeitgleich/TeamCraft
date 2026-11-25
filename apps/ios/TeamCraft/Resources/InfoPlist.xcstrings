@@ -96,6 +96,22 @@
           }
         }
       }
+    },
+    "NSSpeechRecognitionUsageDescription": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft turns what others say in a call into captions, on this iPhone only: neither the audio nor the text leaves it."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "TeamCraft macht aus dem, was andere in einem Anruf sagen, Untertitel – nur auf diesem iPhone: Weder Ton noch Text verlassen es."
+          }
+        }
+      }
     }
   },
   "version": "1.0"
