@@ -68,13 +68,12 @@ pub fn end_of_local_week(ts: TimestampMs) -> TimestampMs {
 pub fn format_time(ts: TimestampMs, locale: &str) -> String {
   #[cfg(target_arch = "wasm32")]
   {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
-    let options = js_sys::Object::new();
-    for (key, value) in [("hour", "2-digit"), ("minute", "2-digit")] {
-      // Setting a plain data property on a fresh object cannot fail.
-      let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
-    }
-    String::from(date.to_locale_time_string_with_options(locale, &options))
+    formatted(
+      ts,
+      locale,
+      Format::Time,
+      &[("hour", "2-digit"), ("minute", "2-digit")],
+    )
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
@@ -88,15 +87,14 @@ pub fn format_time(ts: TimestampMs, locale: &str) -> String {
 pub fn format_time_seconds(ts: TimestampMs, locale: &str) -> String {
   #[cfg(target_arch = "wasm32")]
   {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
-    let options = js_sys::Object::new();
     // The locale decides 12 or 24 hours, as for `format_time` (#702). No `hour12` option: set as
     // the string "false" it is truthy and forced a 12-hour clock with AM/PM on every locale.
-    for (key, value) in [("hour", "2-digit"), ("minute", "2-digit"), ("second", "2-digit")] {
-      // Setting a plain data property on a fresh object cannot fail.
-      let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
-    }
-    String::from(date.to_locale_time_string_with_options(locale, &options))
+    formatted(
+      ts,
+      locale,
+      Format::TimeSeconds,
+      &[("hour", "2-digit"), ("minute", "2-digit"), ("second", "2-digit")],
+    )
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
@@ -122,17 +120,17 @@ fn format_date_at(ts: TimestampMs, now: TimestampMs, locale: &str) -> String {
   let has_year = shows_year(ts, now);
   #[cfg(target_arch = "wasm32")]
   {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
-    let options = js_sys::Object::new();
-    let year = has_year.then_some(("year", "numeric"));
-    for (key, value) in [("weekday", "long"), ("month", "long"), ("day", "numeric")]
-      .into_iter()
-      .chain(year)
-    {
-      // Setting a plain data property on a fresh object cannot fail.
-      let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
+    const DAY: [(&str, &str); 3] = [("weekday", "long"), ("month", "long"), ("day", "numeric")];
+    if has_year {
+      formatted(
+        ts,
+        locale,
+        Format::DateWithYear,
+        &[DAY[0], DAY[1], DAY[2], ("year", "numeric")],
+      )
+    } else {
+      formatted(ts, locale, Format::Date, &DAY)
     }
-    String::from(date.to_locale_date_string(locale, &options))
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
@@ -193,19 +191,62 @@ fn format_relative_in(ts: TimestampMs, now: TimestampMs, locale: &str, style: &s
 pub fn format_date_time(ts: TimestampMs, locale: &str) -> String {
   #[cfg(target_arch = "wasm32")]
   {
-    let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
-    let options = js_sys::Object::new();
-    for (key, value) in [("dateStyle", "medium"), ("timeStyle", "short")] {
-      // Setting a plain data property on a fresh object cannot fail.
-      let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
-    }
-    date.to_locale_string(locale, &options).into()
+    formatted(
+      ts,
+      locale,
+      Format::DateTime,
+      &[("dateStyle", "medium"), ("timeStyle", "short")],
+    )
   }
   #[cfg(not(target_arch = "wasm32"))]
   {
     let _ = locale;
     format!("{} {}", ts.div_euclid(MS_PER_DAY), format_time(ts, "en"))
   }
+}
+
+/// The formats of this module, each one `Intl.DateTimeFormat` per locale ([`formatted`]).
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Format {
+  Time,
+  TimeSeconds,
+  Date,
+  DateWithYear,
+  DateTime,
+}
+
+/// `ts` in `format` for `locale`, with `options` making the format the first time. A format is
+/// made once per locale and kept: `toLocaleTimeString` and its kin make a new one on every call,
+/// which a message list paid for every row it built (#2397).
+#[cfg(target_arch = "wasm32")]
+fn formatted(ts: TimestampMs, locale: &str, format: Format, options: &[(&str, &str)]) -> String {
+  use std::cell::RefCell;
+  use std::collections::HashMap;
+
+  thread_local! {
+    static FORMATS: RefCell<HashMap<(Format, String), js_sys::Intl::DateTimeFormat>> =
+      RefCell::new(HashMap::new());
+  }
+  let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ts as f64));
+  FORMATS.with(|formats| {
+    let mut formats = formats.borrow_mut();
+    let formatter = formats.entry((format, locale.to_owned())).or_insert_with(|| {
+      let made = js_sys::Object::new();
+      for (key, value) in options {
+        // Setting a plain data property on a fresh object cannot fail.
+        let _ = js_sys::Reflect::set(&made, &(*key).into(), &(*value).into());
+      }
+      let locales = js_sys::Array::of1(&locale.into());
+      js_sys::Intl::DateTimeFormat::new(&locales, &made)
+    });
+    formatter
+      .format()
+      .call1(&wasm_bindgen::JsValue::NULL, &date)
+      .ok()
+      .and_then(|text| text.as_string())
+      .unwrap_or_default()
+  })
 }
 
 /// Picks the largest unit that keeps the number small: (-5, "minute"), (3, "day").
