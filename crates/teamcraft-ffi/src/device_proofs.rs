@@ -255,12 +255,30 @@ impl DeviceKeyProofs {
 }
 
 fn foreign_signer(key: Arc<dyn DeviceProofKey>) -> Result<Arc<ForeignSigner>, DeviceProofError> {
-  let point = key.public_key()?;
+  let point = public_key_off_thread(&key)?;
   let public = DpopPublicKey::from_uncompressed_point(&point).map_err(|error| {
     tracing::warn!(%error, "the app's key has no usable public half");
     DeviceProofError::KeyUnavailable
   })?;
   Ok(Arc::new(ForeignSigner { key, public }))
+}
+
+/// Reads the key's public half on a thread of its own, as [`ForeignSigner::sign`] signs. The caller
+/// may itself be inside a call of the app's (Android: the token callback on the core's token thread),
+/// and JNA detaches a thread it attached after every callback on it, also a nested one: a nested call
+/// back into the app on that thread aborts the process (#2393). A fresh thread has nothing above it.
+fn public_key_off_thread(key: &Arc<dyn DeviceProofKey>) -> Result<Vec<u8>, DeviceProofError> {
+  std::thread::scope(|scope| {
+    std::thread::Builder::new()
+      .name("teamcraft-dpop".into())
+      .spawn_scoped(scope, || key.public_key())
+      .map_err(|_| DeviceProofError::KeyUnavailable)?
+      .join()
+      .unwrap_or_else(|_| {
+        tracing::warn!("reading the app's key panicked");
+        Err(DeviceProofError::KeyUnavailable)
+      })
+  })
 }
 
 /// The key `access_token` is bound to (`cnf.jkt`), read from the token without checking it: whether
@@ -483,6 +501,79 @@ mod tests {
           .err(),
         Some(DpopProofError::Signer(_))
       ));
+    }
+  }
+
+  mod reading_the_public_half {
+    use super::*;
+
+    /// Notes the thread the app's key is read on.
+    struct Recorded {
+      inner: Arc<StandInKey>,
+      maybe_reader: Mutex<Option<std::thread::ThreadId>>,
+    }
+
+    impl DeviceProofKey for Recorded {
+      fn public_key(&self) -> Result<Vec<u8>, DeviceProofError> {
+        *self.maybe_reader.lock().unwrap() = Some(std::thread::current().id());
+        self.inner.public_key()
+      }
+      fn sign(&self, message: Vec<u8>) -> Result<Vec<u8>, DeviceProofError> {
+        self.inner.sign(message)
+      }
+    }
+
+    #[test]
+    fn the_key_is_read_on_a_thread_of_its_own_not_the_callers() {
+      // #2393: the caller may be inside a callback of the app's, where a nested one aborts.
+      let key = Arc::new(Recorded {
+        inner: StandInKey::new(),
+        maybe_reader: Mutex::default(),
+      });
+      let prover = ProviderProver::new(key.clone()).unwrap();
+      let reader = key.maybe_reader.lock().unwrap().unwrap();
+      assert_ne!(reader, std::thread::current().id());
+      assert_eq!(prover.thumbprint(), key.inner.thumbprint().as_str());
+    }
+
+    #[test]
+    fn a_key_that_fails_or_panics_is_an_error_not_a_crash() {
+      for failure in [DeviceProofError::KeyUnavailable, DeviceProofError::KeyLost] {
+        let key = StandInKey::new();
+        key.fail_with(failure.clone());
+        assert_eq!(ProviderProver::new(key).err(), Some(failure));
+      }
+
+      struct Panics;
+      impl DeviceProofKey for Panics {
+        fn public_key(&self) -> Result<Vec<u8>, DeviceProofError> {
+          panic!("the store broke")
+        }
+        fn sign(&self, _: Vec<u8>) -> Result<Vec<u8>, DeviceProofError> {
+          panic!("the store broke")
+        }
+      }
+      assert_eq!(
+        ProviderProver::new(Arc::new(Panics)).err(),
+        Some(DeviceProofError::KeyUnavailable)
+      );
+    }
+
+    #[test]
+    fn a_public_half_that_is_no_point_is_unavailable() {
+      struct Garbage;
+      impl DeviceProofKey for Garbage {
+        fn public_key(&self) -> Result<Vec<u8>, DeviceProofError> {
+          Ok(vec![4, 1, 2])
+        }
+        fn sign(&self, _: Vec<u8>) -> Result<Vec<u8>, DeviceProofError> {
+          Ok(vec![])
+        }
+      }
+      assert_eq!(
+        ProviderProver::new(Arc::new(Garbage)).err(),
+        Some(DeviceProofError::KeyUnavailable)
+      );
     }
   }
 
