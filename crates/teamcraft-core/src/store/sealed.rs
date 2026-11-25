@@ -332,7 +332,7 @@ pub(crate) enum BuildStep {
 
 impl CatalogBuild {
   /// The records the build has gone through so far.
-  #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
   pub(crate) fn records_done(&self) -> usize {
     self.opened + self.skipped
   }
