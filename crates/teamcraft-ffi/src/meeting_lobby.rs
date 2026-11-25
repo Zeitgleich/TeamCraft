@@ -13,7 +13,7 @@ use teamcraft_client_api::backend::ChatBackend as _;
 use teamcraft_client_api::meeting_hosts::{MeetingRole, role_of, should_offer_handover};
 use teamcraft_client_api::meeting_invitees::GUEST_ACCESS_GRACE_MS;
 use teamcraft_core::meeting_lobby::{LobbyAdmission, SignedMembership};
-use teamcraft_proto::{ConversationId, ListLobbyResponse, LobbyEntry, MeetingResponse, UserId};
+use teamcraft_proto::{ConversationId, ListLobbyResponse, LobbyEntry, MeetingId, MeetingResponse, UserId};
 
 use crate::bridge::from_json;
 use crate::engine::{Engine, parse_id};
@@ -156,8 +156,19 @@ impl Engine {
     meeting: &MeetingResponse,
     entry: LobbyEntry,
   ) -> Result<(), TeamCraftError> {
-    let path = format!("/meetings/{}/lobby/{}/admit", meeting.id, entry.user.id);
-    self.api_request("POST", &path, None).await?;
+    self
+      .api_request("POST", &admit_path(meeting.id, entry.user.id), None)
+      .await?;
+    self.let_in_admitted(meeting, entry).await
+  }
+
+  /// The second half of [`Self::admit_from_lobby`], once the server took the admission: lets the
+  /// person's devices into the meeting chat's encryption from this device.
+  pub(crate) async fn let_in_admitted(
+    &mut self,
+    meeting: &MeetingResponse,
+    entry: LobbyEntry,
+  ) -> Result<(), TeamCraftError> {
     // The meeting's end as the server lists it; the core caps a guest's access by the organizer's
     // signed admitters (#1873).
     let (chat, until) = (meeting.conversation_id, meeting.ends_at.0 + GUEST_ACCESS_GRACE_MS);
@@ -213,9 +224,18 @@ impl Engine {
     &self,
     meeting: &MeetingResponse,
   ) -> Result<ListLobbyResponse, TeamCraftError> {
-    let path = format!("/meetings/{}/lobby", meeting.id);
-    from_json(&self.api_request("GET", &path, None).await?)
+    from_json(&self.api_request("GET", &lobby_path(meeting.id), None).await?)
   }
+}
+
+/// The server's admission of `user` waiting in the lobby of `meeting` (`POST`).
+pub(crate) fn admit_path(meeting: MeetingId, user: UserId) -> String {
+  format!("/meetings/{meeting}/lobby/{user}/admit")
+}
+
+/// The lobby of `meeting` (`GET`, a `ListLobbyResponse`).
+pub(crate) fn lobby_path(meeting: MeetingId) -> String {
+  format!("/meetings/{meeting}/lobby")
 }
 
 /// What the signed roster says of a waiting person, from the backend's answer.

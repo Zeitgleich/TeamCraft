@@ -8,8 +8,25 @@ import { join } from "node:path";
 
 const CHROME = process.env.CHROME || "google-chrome";
 
+const START_ATTEMPTS = 2;
+const START_TIMEOUT_MS = 30_000;
+
 /** Starts Chrome and returns a page session; await `close()` at the end. */
 export async function launch() {
+  let lastError;
+  for (let attempt = 1; attempt <= START_ATTEMPTS; attempt++) {
+    try {
+      return await launchOnce();
+    } catch (error) {
+      lastError = error;
+      // Chrome's own stderr is in the message, so a real failure stays visible.
+      console.error(`Chrome start attempt ${attempt}/${START_ATTEMPTS} failed: ${error.message}`);
+    }
+  }
+  throw lastError;
+}
+
+async function launchOnce() {
   const profile = mkdtempSync(join(tmpdir(), "teamcraft-shots-"));
   const chrome = spawn(CHROME, [
     "--headless=new",
@@ -20,6 +37,8 @@ export async function launch() {
     "--no-first-run",
     // CI runners (Ubuntu 24.04) refuse Chrome's user-namespace sandbox; the page is our own demo build.
     ...(process.env.CHROME_NO_SANDBOX ? ["--no-sandbox"] : []),
+    // The runner's /dev/shm is small; a full one crashes Chrome at start.
+    "--disable-dev-shm-usage",
     "--hide-scrollbars",
     "--force-color-profile=srgb",
     "--lang=en-US",
@@ -27,30 +46,52 @@ export async function launch() {
     "about:blank",
     // On Linux Chrome takes its languages (navigator.languages, which picks the app's) from the
     // environment, not from --lang: a German desktop got German screenshots.
-  ], { stdio: "ignore", env: { ...process.env, LANG: "en_US.UTF-8", LANGUAGE: "en_US" } });
+  ], { stdio: ["ignore", "ignore", "pipe"], env: { ...process.env, LANG: "en_US.UTF-8", LANGUAGE: "en_US" } });
+  let stderr = "";
+  chrome.stderr.on("data", (chunk) => {
+    stderr = (stderr + chunk).slice(-8000);
+  });
+  let spawnError = null;
+  // A Chrome that never spawned emits `error` and no `exit`.
+  const exited = new Promise((resolve) => {
+    chrome.once("exit", resolve);
+    chrome.once("error", (error) => {
+      spawnError = error;
+      resolve();
+    });
+  });
   // Don't leave a headless Chrome behind when the script ends without `close()` (an error).
   const killChrome = () => chrome.kill();
   process.once("exit", killChrome);
-  const target = await pageTarget(profile);
-  const page = new Page(new WebSocket(target.webSocketDebuggerUrl));
-  await page.opened;
-  await page.send("Page.enable");
-  await page.send("Runtime.enable");
-  const exited = new Promise((resolve) => chrome.once("exit", resolve));
-  page.close = async () => {
-    page.socket.close();
+  const cleanup = async () => {
     chrome.kill();
     await exited;
     process.off("exit", killChrome);
-    // Chrome's child processes (a page's workers writing their storage) can outlive the main
-    // one for a moment, adding files while the profile is removed.
-    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    // Chrome may still be writing into the profile as it exits: retry instead of failing ENOTEMPTY.
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 });
   };
-  return page;
+  try {
+    const target = await pageTarget(profile, () => spawnError ?? (chrome.exitCode !== null ? new Error(`Chrome exited with code ${chrome.exitCode}`) : null));
+    const page = new Page(new WebSocket(target.webSocketDebuggerUrl));
+    await page.opened;
+    await page.send("Page.enable");
+    await page.send("Runtime.enable");
+    page.close = async () => {
+      page.socket.close();
+      await cleanup();
+    };
+    return page;
+  } catch (error) {
+    await cleanup().catch(() => {});
+    throw new Error(`${error.message}\nChrome stderr:\n${stderr.trim() || "(empty)"}`);
+  }
 }
 
-async function pageTarget(profile) {
-  for (let attempt = 0; attempt < 100; attempt++) {
+async function pageTarget(profile, failure) {
+  const deadline = Date.now() + START_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const died = failure();
+    if (died) throw died;
     try {
       const port = readFileSync(join(profile, "DevToolsActivePort"), "utf8").split("\n")[0];
       const targets = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
@@ -61,7 +102,7 @@ async function pageTarget(profile) {
     }
     await delay(100);
   }
-  throw new Error("Chrome did not start (set CHROME=/path/to/chrome)");
+  throw new Error(`Chrome did not start within ${START_TIMEOUT_MS / 1000} s (set CHROME=/path/to/chrome)`);
 }
 
 class Page {

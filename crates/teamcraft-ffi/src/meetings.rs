@@ -8,7 +8,7 @@
 //! Robustness (robustness.md): a create or "Meet now" carries the form's request key, so a retry
 //! after a lost answer makes no second meeting. An edit that takes people off notes them before the
 //! save is sent ([`PENDING_EDITS_KEY`]): if the answer is lost or the app dies before the group
-//! changed, the next [`Engine::meeting_upkeep`] finishes it from the list. The chat setup itself
+//! changed, the next [`Engine::apply_meeting_list`] finishes it from the list. The chat setup itself
 //! notes its progress in the core and is finished on a later sync when cut short.
 
 use std::collections::HashMap;
@@ -572,21 +572,16 @@ impl Engine {
 
   /// The organizer's upkeep, as desktop runs it with every meeting list: the signed admitters of
   /// the user's meetings that run or start within a day are compared (at most every ten minutes
-  /// per meeting), and edits whose chat change is still owed are finished. Returns the list it read
-  /// (`GET /meetings`, JSON), so the app shows what the upkeep worked on.
-  pub(crate) async fn meeting_upkeep(&mut self) -> Result<String, TeamCraftError> {
-    Ok(self.meeting_upkeep_list().await?.0)
-  }
-
-  /// [`Self::meeting_upkeep`] with the list it read, parsed, for the lobbies read beside it.
-  pub(crate) async fn meeting_upkeep_list(
+  /// per meeting), and edits whose chat change is still owed are finished. `json` is the list
+  /// (`GET /meetings`, [`meeting_list_path`]) as read beside the engine (#2401): this only applies
+  /// it, so the engine is never held while the list loads. Returns the meetings, parsed.
+  pub(crate) async fn apply_meeting_list(
     &mut self,
-  ) -> Result<(String, Vec<MeetingResponse>), TeamCraftError> {
+    json: &str,
+  ) -> Result<Vec<MeetingResponse>, TeamCraftError> {
     let me = self.backend()?.me().id;
     let now = SystemClock.now_ms();
-    let path = format!("/meetings?from={}&limit={LIST_LIMIT}", now - LIST_LOOKBACK_MS);
-    let json = self.api_request("GET", &path, None).await?;
-    let list: ListMeetingsResponse = from_json(&json)?;
+    let list: ListMeetingsResponse = from_json(json)?;
     let mut commands = Vec::new();
     // Handed a meeting since the last list (#1720): its hosts and admitters are signed with this
     // user's key right away, whenever it starts, so links made from now on find them (#2258).
@@ -626,7 +621,7 @@ impl Engine {
     if kept != edits {
       self.store_pending_edits(&kept)?;
     }
-    Ok((json, list.meetings))
+    Ok(list.meetings)
   }
 
   /// The meeting's link to hand out: the server's address with the organizer's key fingerprint as
@@ -807,6 +802,11 @@ impl Engine {
 }
 
 /// The admitters statement of `meeting` as the organizer's device signs it after a save.
+/// The user's meeting list as the upkeep reads it at `now`: from an hour ago.
+pub(crate) fn meeting_list_path(now: i64) -> String {
+  format!("/meetings?from={}&limit={LIST_LIMIT}", now - LIST_LOOKBACK_MS)
+}
+
 fn sync_admitters(meeting: &MeetingResponse) -> CoreCommand {
   CoreCommand::SyncMeetingAdmitters {
     meeting: meeting.id,

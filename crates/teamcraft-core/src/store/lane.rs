@@ -89,6 +89,12 @@ impl LaneStore {
   /// where the write still happens rather than losing what it keeps.
   fn check_may_write(&self) {
     if self.is_read_only {
+      // The panic log names only this line (issue #2391): debug builds name the writer too.
+      #[cfg(debug_assertions)]
+      tracing::error!(
+        backtrace = %std::backtrace::Backtrace::force_capture(),
+        "a read-only lane wrote to the store"
+      );
       debug_assert!(false, "a read-only lane wrote to the store");
       tracing::warn!("a read-only lane wrote to the store");
     }

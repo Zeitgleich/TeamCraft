@@ -1,6 +1,6 @@
 //! The meeting watch of the phone apps (#2258), as desktop runs it beside its meeting reminders
 //! (`teamcraft-ui`'s `watch_meetings`): while the app runs, the user's meeting list is read once
-//! per foreground and again whenever the meetings change ([`Engine::meeting_watch`]). Each read
+//! per foreground and again whenever the meetings change ([`TeamCraft::watch_meetings`]). Each read
 //! keeps the organizer's upkeep current (admitters, owed edits, the hosts and admitters of a
 //! meeting just handed to the user), and lets in, by itself, whoever knocked with the meeting link
 //! where this device may (docs/meetings.md, "Lobby", step 9; e2ee.md §4.6, "Meeting guests"):
@@ -13,8 +13,13 @@
 //! Who qualifies is the core's one rule (`teamcraft_core::meeting_lobby::admits_by_itself`, which
 //! desktop uses too): only somebody who came with the meeting link, with a device whose key they
 //! reported, and a member only by the signed roster. The admitting itself is a host's "Admit"
-//! ([`Engine::admit_from_lobby`]). The app says each admission with a "Remove" action
-//! ([`crate::TeamCraft::remove_link_arrival`]).
+//! ([`Engine::admit_from_lobby`], here in its two halves). The app says each admission with a
+//! "Remove" action ([`crate::TeamCraft::remove_link_arrival`]).
+//!
+//! Robustness (#2401): every request of a run goes beside the engine with a bound on its time, so
+//! a slow or dead network never holds the engine (`start`, `stop` and every action wait behind
+//! it); runs that overlap share one list request ([`crate::coalesced`]); an admission is claimed
+//! on the engine before it is sent, so two runs never admit the same person twice.
 
 use std::collections::HashSet;
 
@@ -25,11 +30,12 @@ use teamcraft_core::client::{admits_link_arrivals, is_open_by_own_record};
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::meeting_lobby::admits_by_itself;
 use teamcraft_core::ui_backend::CoreCommand;
-use teamcraft_proto::{ConversationId, MeetingId, MeetingResponse, UserId};
+use teamcraft_proto::{ConversationId, ListLobbyResponse, LobbyEntry, MeetingId, MeetingResponse, UserId};
 
+use crate::TeamCraft;
 use crate::engine::{Engine, parse_id};
 use crate::error::TeamCraftError;
-use crate::meeting_lobby::signed_membership;
+use crate::meeting_lobby::{admit_path, signed_membership};
 
 /// Somebody this device let into a meeting by itself: the app says so, with "Remove".
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -68,13 +74,88 @@ impl MeetingWatchState {
   }
 }
 
-impl Engine {
+impl TeamCraft {
   /// One run of the meeting watch (see the module): the organizer's upkeep on a fresh list, then
   /// the lobbies of the meetings this device may let people of the link into. Returns who was let
   /// in by this run. A lobby that can't be read or an admission that fails is left for the next
   /// run (the next knock or meeting change, or the next foreground).
-  pub(crate) async fn meeting_watch(&mut self) -> Result<Vec<LinkArrival>, TeamCraftError> {
-    let (_, meetings) = self.meeting_upkeep_list().await?;
+  ///
+  /// The list, the lobbies and the server's half of an admission are requests beside the engine
+  /// ([`TeamCraft::request_beside_engine`], #2401): the engine is taken only to apply what came
+  /// back, so a slow network holds up nothing else the app asks of it.
+  pub(crate) async fn watch_meetings(&self) -> Result<Vec<LinkArrival>, TeamCraftError> {
+    let json = self.meeting_list_json().await?;
+    let doors = self
+      .call(move |engine| Box::pin(async move { engine.open_doors_of(&json).await }))
+      .await?;
+    let mut arrivals = Vec::new();
+    for meeting in doors {
+      let lobby = match self.lobby_beside_engine(meeting.id).await {
+        Ok(lobby) => lobby,
+        Err(error) => {
+          tracing::debug!(meeting_id = %meeting.id, %error, "a meeting's lobby could not be read");
+          continue;
+        },
+      };
+      let claimed = {
+        let meeting = meeting.clone();
+        self
+          .call(move |engine| Box::pin(async move { engine.claim_link_arrivals(&meeting, lobby) }))
+          .await?
+      };
+      for entry in claimed {
+        if let Some(arrival) = self.admit_link_arrival(&meeting, entry).await? {
+          arrivals.push(arrival);
+        }
+      }
+    }
+    Ok(arrivals)
+  }
+
+  /// Lets `entry`, claimed by this run, into `meeting`: the server's admission beside the engine,
+  /// then its encryption group from the engine. A failure gives the claim back for the next run.
+  async fn admit_link_arrival(
+    &self,
+    meeting: &MeetingResponse,
+    entry: LobbyEntry,
+  ) -> Result<Option<LinkArrival>, TeamCraftError> {
+    let user = entry.user.id;
+    let arrival = LinkArrival {
+      meeting_id: meeting.id.to_string(),
+      meeting_title: meeting.title.clone(),
+      conversation_id: meeting.conversation_id.to_string(),
+      user_id: user.to_string(),
+      display_name: entry.user.display_name.clone(),
+    };
+    let admitted = self
+      .request_beside_engine("POST".into(), admit_path(meeting.id, user), None)
+      .await;
+    let meeting = meeting.clone();
+    let let_in = self
+      .call(move |engine| {
+        Box::pin(async move {
+          let result = match admitted {
+            Ok(_) => engine.let_in_admitted(&meeting, entry).await,
+            Err(error) => Err(error),
+          };
+          if let Err(error) = &result {
+            tracing::warn!(meeting_id = %meeting.id, %error, "could not let in somebody who came with the meeting link");
+            engine.meeting_watch.started.remove(&(meeting.id, user));
+          }
+          Ok(result.is_ok())
+        })
+      })
+      .await?;
+    Ok(let_in.then_some(arrival))
+  }
+}
+
+impl Engine {
+  /// Applies the meeting list `json` ([`Engine::apply_meeting_list`]) and answers the meetings
+  /// whose lobby this device lets people of the link into now. Admissions of meetings no longer
+  /// among them are forgotten.
+  pub(crate) async fn open_doors_of(&mut self, json: &str) -> Result<Vec<MeetingResponse>, TeamCraftError> {
+    let meetings = self.apply_meeting_list(json).await?;
     let me = self.backend()?.me().id;
     let now = SystemClock.now_ms();
     let candidates = admitting_candidates(meetings, me, self.calls().active_conversation(), now);
@@ -83,14 +164,31 @@ impl Engine {
       .meeting_watch
       .started
       .retain(|(meeting, _)| live.contains(meeting));
-    let mut arrivals = Vec::new();
+    let mut doors = Vec::new();
     for meeting in candidates {
-      if !self.lets_link_arrivals_in(&meeting, me, now)? {
-        continue;
+      if self.lets_link_arrivals_in(&meeting, me, now)? {
+        doors.push(meeting);
       }
-      arrivals.extend(self.admit_link_arrivals_of(&meeting).await?);
     }
-    Ok(arrivals)
+    Ok(doors)
+  }
+
+  /// Who in `lobby` of `meeting` qualifies (the core's `admits_by_itself`) and isn't let in by
+  /// this device already: each is claimed, so an overlapping run doesn't admit them twice.
+  pub(crate) fn claim_link_arrivals(
+    &mut self,
+    meeting: &MeetingResponse,
+    lobby: ListLobbyResponse,
+  ) -> Result<Vec<LobbyEntry>, TeamCraftError> {
+    let mut claimed = Vec::new();
+    for entry in lobby.entries {
+      let user = entry.user.id;
+      let membership = signed_membership(self.backend()?.is_signed_member(user));
+      if admits_by_itself(true, &entry, membership) && self.meeting_watch.started.insert((meeting.id, user)) {
+        claimed.push(entry);
+      }
+    }
+    Ok(claimed)
   }
 
   /// "Remove" on an admission by itself: takes `user_id` out of the meeting chat
@@ -105,15 +203,6 @@ impl Engine {
     self
       .run_commands(vec![CoreCommand::RemoveMember { conversation, user }])
       .await
-  }
-
-  /// Tells the server this app lets guests of the meeting link in by itself (#987), so guests of
-  /// the user's meetings aren't told the organizer's app needs an update.
-  pub(crate) async fn mark_admitter(&self) -> Result<(), TeamCraftError> {
-    self
-      .api_request("PUT", "/meetings/admitter", Some("{}".to_owned()))
-      .await
-      .map(drop)
   }
 
   /// Whether this device lets people of the link into `meeting` by itself now: the organizer's own
@@ -132,45 +221,6 @@ impl Engine {
     let chat = meeting.conversation_id;
     self.backend()?.check_meeting_admission(chat);
     Ok(admits_link_arrivals(&self.store, chat, now))
-  }
-
-  /// Lets in whoever waits in the lobby of `meeting` and qualifies (the core's
-  /// `admits_by_itself`), each once.
-  async fn admit_link_arrivals_of(
-    &mut self,
-    meeting: &MeetingResponse,
-  ) -> Result<Vec<LinkArrival>, TeamCraftError> {
-    let lobby = match self.lobby_of(meeting).await {
-      Ok(lobby) => lobby,
-      Err(error) => {
-        tracing::debug!(meeting_id = %meeting.id, %error, "a meeting's lobby could not be read");
-        return Ok(Vec::new());
-      },
-    };
-    let mut arrivals = Vec::new();
-    for entry in lobby.entries {
-      let user = entry.user.id;
-      let membership = signed_membership(self.backend()?.is_signed_member(user));
-      if !admits_by_itself(true, &entry, membership) || !self.meeting_watch.started.insert((meeting.id, user))
-      {
-        continue;
-      }
-      let display_name = entry.user.display_name.clone();
-      match self.admit_from_lobby(meeting, entry).await {
-        Ok(()) => arrivals.push(LinkArrival {
-          meeting_id: meeting.id.to_string(),
-          meeting_title: meeting.title.clone(),
-          conversation_id: meeting.conversation_id.to_string(),
-          user_id: user.to_string(),
-          display_name,
-        }),
-        Err(error) => {
-          tracing::warn!(meeting_id = %meeting.id, %error, "could not let in somebody who came with the meeting link");
-          self.meeting_watch.started.remove(&(meeting.id, user));
-        },
-      }
-    }
-    Ok(arrivals)
   }
 }
 

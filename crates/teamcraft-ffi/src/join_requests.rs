@@ -23,11 +23,11 @@ use teamcraft_proto::{ErrorCode, HistoryPolicy};
 use crate::TeamCraft;
 use crate::engine::{Engine, parse_id};
 use crate::error::TeamCraftError;
-use crate::reads::Reads;
+use crate::reads::{ReadQueue, Reads};
 
 /// Where this device remembers which requests it notified about (`JoinRequestAlerts` as JSON), so
 /// a restart doesn't notify again. Device-local state next to the sync cursors; no screen reads it.
-const ALERTS_KEY: &str = "admin_join_alerts";
+pub(crate) const ALERTS_KEY: &str = "admin_join_alerts";
 
 /// An admin's request to join a private channel the user owns, waiting for a decision.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
@@ -123,7 +123,7 @@ impl TeamCraft {
   /// The requests to notify about and the notifications to withdraw since the last call; this
   /// device remembers what it notified about. Call it on changes while the app runs.
   pub async fn join_request_alerts(&self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
-    self.read(|reads| reads.join_request_alerts()).await
+    self.read_queue()?.join_request_alerts().await
   }
 
   /// This admin asks the owners of the private channel to let them in ("Ask to join"); asking
@@ -210,24 +210,55 @@ impl Reads {
     Ok(join_request_items(&requests, channel_name))
   }
 
-  pub(crate) fn join_request_alerts(&self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
+  /// What changed since the last call, and the record to keep when it differs from the stored one.
+  fn seen_alerts(&self) -> Result<AlertsSeen, TeamCraftError> {
     let backend = self.backend()?;
     let requests = backend.join_requests();
-    let store = &self.store;
-    let maybe_saved = store
+    let maybe_saved = self
+      .store
       .get(Table::SyncState, ALERTS_KEY)?
       .map(|bytes| String::from_utf8_lossy(&bytes).into_owned());
     let mut alerts = maybe_saved
       .as_deref()
       .map(JoinRequestAlerts::from_json)
       .unwrap_or_default();
+    // No record is the empty one: a device that never had a request writes nothing.
+    let saved = maybe_saved.unwrap_or_else(|| JoinRequestAlerts::default().to_json());
     let channel_name = |conversation| backend.conversation(conversation).map(|channel| channel.name);
     let changes = alert_changes(&mut alerts, &requests, channel_name);
     let updated = alerts.to_json();
-    if maybe_saved.as_deref() != Some(updated.as_str()) {
-      store.put(Table::SyncState, ALERTS_KEY, updated.as_bytes())?;
+    Ok(AlertsSeen {
+      changes,
+      maybe_record: (updated != saved).then_some(updated),
+    })
+  }
+}
+
+/// [`Reads::seen_alerts`]: the changes, and the new record to keep, if any.
+struct AlertsSeen {
+  changes: JoinRequestAlertChanges,
+  maybe_record: Option<String>,
+}
+
+impl ReadQueue {
+  /// [`TeamCraft::join_request_alerts`]. The apps ask on every change, and mostly nothing changed:
+  /// that is read on the read thread, which never writes (issue #2391, the assertion of #2232). A
+  /// change is decided again and kept in one group on the actions' thread, so two calls in a row
+  /// can't both notify about the same request.
+  pub(crate) async fn join_request_alerts(&self) -> Result<JoinRequestAlertChanges, TeamCraftError> {
+    let seen = self.read(|reads| reads.seen_alerts()).await?;
+    if seen.maybe_record.is_none() {
+      return Ok(seen.changes);
     }
-    Ok(changes)
+    self
+      .keep(|reads| {
+        let seen = reads.seen_alerts()?;
+        if let Some(record) = &seen.maybe_record {
+          reads.store.put(Table::SyncState, ALERTS_KEY, record.as_bytes())?;
+        }
+        Ok(seen.changes)
+      })
+      .await
   }
 }
 
