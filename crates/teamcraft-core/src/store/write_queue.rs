@@ -46,6 +46,8 @@ pub(crate) struct Writes {
   open: HashMap<String, OpenWrite>,
   /// Keys whose latest write waits for the next batch, each once.
   queued: Vec<String>,
+  /// How far [`Self::seal_ahead`] went through `queued`.
+  sealed_ahead: usize,
   queued_bytes: usize,
   /// A batch timer is running.
   pub(crate) is_scheduled: bool,
@@ -82,6 +84,7 @@ impl Default for Writes {
       next_sequence: 0,
       open: HashMap::new(),
       queued: Vec::new(),
+      sealed_ahead: 0,
       queued_bytes: 0,
       is_scheduled: false,
       next_batch: 0,
@@ -319,11 +322,39 @@ impl Writes {
     !self.queued.is_empty()
   }
 
+  /// Seals queued writes ahead of their batch, in queue order, while `has_time` says the caller's
+  /// slice of the thread lasts (asked before each one); returns whether any is left to seal. Issuing
+  /// a batch seals what waited for it in one go: a catalog build's batch spent seconds there on the
+  /// browser's only thread (issue #2397). A write sealed here and replaced before its batch was
+  /// sealed in vain, which is why only a store about to issue a batch calls this. One that doesn't
+  /// seal stays as it is: its batch fails over it as before.
+  pub(crate) fn seal_ahead(&mut self, mut has_time: impl FnMut() -> bool) -> bool {
+    while let Some(key) = self.queued.get(self.sealed_ahead) {
+      let Some(write) = self.open.get_mut(key) else {
+        self.sealed_ahead += 1;
+        continue;
+      };
+      if write.state == WriteState::Queued
+        && let Some(RecordValue::Unsealed(seal)) = &write.maybe_value
+      {
+        if !has_time() {
+          return true;
+        }
+        if let Ok(sealed) = seal() {
+          write.maybe_value = Some(RecordValue::Sealed(sealed));
+        }
+      }
+      self.sealed_ahead += 1;
+    }
+    false
+  }
+
   /// The keys of the next batch; the queue starts over.
   fn take_queued(&mut self) -> Vec<String> {
     self.is_scheduled = false;
     self.is_retry_scheduled = false;
     self.queued_bytes = 0;
+    self.sealed_ahead = 0;
     std::mem::take(&mut self.queued)
   }
 
@@ -516,6 +547,63 @@ mod tests {
     assert_eq!(keys, vec!["mls".to_string()]);
     assert!(matches!(writes.issue("mls"), Ok(Some(Issue::Put { sealed, .. })) if sealed == b"third"));
     assert_eq!(seals.get(), 1);
+  }
+
+  mod seal_ahead {
+    use super::*;
+
+    #[test]
+    fn seals_in_slices_and_the_batch_takes_the_sealed_bytes() {
+      let mut writes = Writes::default();
+      let seals = Rc::new(Cell::new(0));
+      for key in ["a", "b", "c"] {
+        writes.queue(key.into(), Some(lazy(&seals, key.as_bytes())), 1);
+      }
+      writes.queue("gone".into(), None, 0);
+      // A slice with time for one seal.
+      let mut left = 1;
+      let has_time = |left: &mut i32| {
+        *left -= 1;
+        *left >= 0
+      };
+      assert!(writes.seal_ahead(|| has_time(&mut left)));
+      assert_eq!(seals.get(), 1);
+      // The rest; the delete has nothing to seal.
+      assert!(!writes.seal_ahead(|| true));
+      assert_eq!(seals.get(), 3);
+      let keys = writes.take_queued();
+      for key in ["a", "b", "c"] {
+        assert!(matches!(writes.issue(key), Ok(Some(Issue::Put { sealed, .. })) if sealed == key.as_bytes()));
+      }
+      assert!(matches!(writes.issue("gone"), Ok(Some(Issue::Delete { .. }))));
+      assert_eq!(keys.len(), 4);
+      // Issuing sealed nothing more.
+      assert_eq!(seals.get(), 3);
+    }
+
+    #[test]
+    fn a_write_replaced_after_its_seal_is_sealed_again_with_its_batch() {
+      let mut writes = Writes::default();
+      let seals = Rc::new(Cell::new(0));
+      writes.queue("node".into(), Some(lazy(&seals, b"first")), 1);
+      assert!(!writes.seal_ahead(|| true));
+      writes.queue("node".into(), Some(lazy(&seals, b"second")), 1);
+      writes.take_queued();
+      assert!(matches!(writes.issue("node"), Ok(Some(Issue::Put { sealed, .. })) if sealed == b"second"));
+      assert_eq!(seals.get(), 2);
+    }
+
+    #[test]
+    fn the_next_batch_starts_from_its_first_write() {
+      let mut writes = Writes::default();
+      let seals = Rc::new(Cell::new(0));
+      writes.queue("a".into(), Some(lazy(&seals, b"a")), 1);
+      assert!(!writes.seal_ahead(|| true));
+      writes.take_queued();
+      writes.queue("b".into(), Some(lazy(&seals, b"b")), 1);
+      assert!(!writes.seal_ahead(|| true));
+      assert_eq!(seals.get(), 2);
+    }
   }
 
   #[test]

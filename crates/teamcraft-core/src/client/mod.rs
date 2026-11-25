@@ -537,9 +537,11 @@ pub enum HistoryReading {
   OnDemand,
 }
 
-/// [`ClientSettings::maybe_thread_turn`] of the web app: below the 50 ms of a "long task", so the
-/// UI's input waits for at most one turn plus its own work.
-pub const THREAD_TURN: std::time::Duration = std::time::Duration::from_millis(30);
+/// [`ClientSettings::maybe_thread_turn`] of the web app: about half a frame, so the UI's input and
+/// a paint wait for at most one turn plus its own work (issue #2397: at 30 ms the UI's own reads
+/// after a wake pushed most turns over the 50 ms of a "long task"). Handing the thread back costs
+/// well under a millisecond ([`crate::platform::yield_now`]).
+pub const THREAD_TURN: std::time::Duration = std::time::Duration::from_millis(8);
 
 /// [`ClientSettings::catch_up_message_pages`] of the apps that show holes: 200 messages at the
 /// default page size, which is more than most conversations get in a day, and four round trips.

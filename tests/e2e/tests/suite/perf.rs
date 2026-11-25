@@ -17,6 +17,9 @@
 //! Every run writes its numbers to `target/e2e-artifacts/perf-<scale>.json`, and prints the idle CPU
 //! per kind of browser process. `PERF_SECOND_IDLE=1` watches a second idle period of the same length
 //! afterwards (after a large catch-up the browser stays busy for a few minutes, docs/performance.md).
+//! `PERF_PROFILE=catch_up,catalog` records a CPU profile of those phases (`perf-<phase>.cpuprofile`
+//! with the page's long tasks beside it, `perf-<phase>.long-tasks.json`; `scripts/long-task-profile.py`
+//! names the functions that ran in them).
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -817,10 +820,16 @@ async fn come_back_to_many_conversations(
     .ok()
     .and_then(|value| value.parse().ok())
     .unwrap_or(CATCH_UP_CPU_SLOWDOWN);
+  // PERF_CATCH_UP_AFTER_BUILD=1: the update that rebuilds the catalog comes with the absence, as
+  // when someone opens the app after weeks (issue #2397): the build first, then the catch-up.
+  if std::env::var("PERF_CATCH_UP_AFTER_BUILD").is_ok_and(|value| value == "1") {
+    forget_catalog_state(page).await;
+  }
   page
     .execute(SetCpuThrottlingRateParams::new(slowdown))
     .await
     .unwrap();
+  let is_profiling = start_profile(page, "catch_up").await;
   let started = Instant::now();
   let log = watch_catch_up_log(page, started).await;
   page
@@ -838,6 +847,9 @@ async fn come_back_to_many_conversations(
   report.catch_up_switch_ms_p95 = percentile(&times, 95);
   report.catch_up_switch_ms_max = times.last().copied().unwrap_or(0.0);
   report.seconds_catch_up_until_done = wait_until_done(page).await.duration_since(started).as_secs_f64();
+  if is_profiling {
+    stop_profile(page, "catch_up").await;
+  }
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
   report.catch_up_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
   report.catch_up_long_task_total_ms = long_tasks[1].as_f64().unwrap_or(0.0);
@@ -1069,6 +1081,7 @@ async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> R
 async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report) {
   let channel = &seeded.first_space_channels[1].0;
   forget_catalog_state(page).await;
+  let is_profiling = start_profile(page, "catalog").await;
   let started = Instant::now();
   page
     .evaluate(format!("location.href = '{WEB_ORIGIN}/?backend=server'"))
@@ -1077,6 +1090,11 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
   let mut percents = std::collections::BTreeSet::new();
   wait_long_while_watching_build(page, channel, &mut percents).await;
   report.seconds_catalog_build_to_channel_list = started.elapsed().as_secs_f64();
+  if is_profiling {
+    // Ten seconds of what runs once the list shows, too.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    stop_profile(page, "catalog").await;
+  }
   report.catalog_build_progress_steps = percents.len() as f64;
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
   report.catalog_build_long_task_count = long_tasks[0].as_f64().unwrap_or(0.0);
@@ -1138,6 +1156,33 @@ async fn measure_catalog_build(page: &Page, seeded: &Seeded, report: &mut Report
   }
   wait_long_for_text(page, channel).await;
   report.seconds_catalog_resume_to_channel_list = started.elapsed().as_secs_f64();
+}
+
+/// Starts a CPU profile of the page's process if `PERF_PROFILE` names `phase`.
+async fn start_profile(page: &Page, phase: &str) -> bool {
+  let is_wanted =
+    std::env::var("PERF_PROFILE").is_ok_and(|phases| phases.split(',').any(|wanted| wanted.trim() == phase));
+  if is_wanted {
+    page.execute(ProfilerEnableParams::default()).await.unwrap();
+    page.execute(SetSamplingIntervalParams::new(1000)).await.unwrap();
+    page.execute(ProfilerStartParams::default()).await.unwrap();
+  }
+  is_wanted
+}
+
+/// Writes the profile [`start_profile`] began, and the long tasks of the page now shown, with the
+/// page's clock at the profile's end (its timestamps are another clock's microseconds).
+async fn stop_profile(page: &Page, phase: &str) {
+  let page_now_ms = evaluate_value(page, "performance.now()".into()).await;
+  let profile = page.execute(ProfilerStopParams::default()).await.unwrap();
+  let tasks = evaluate_value(page, "window.__longTaskList || []".into()).await;
+  let _ = std::fs::create_dir_all(artifact_dir());
+  let path = artifact_dir().join(format!("perf-{phase}.cpuprofile"));
+  std::fs::write(&path, serde_json::to_vec(&profile.result.profile).unwrap()).unwrap();
+  let beside = serde_json::json!({ "page_now_ms_at_end": page_now_ms, "long_tasks": tasks });
+  let tasks_path = artifact_dir().join(format!("perf-{phase}.long-tasks.json"));
+  std::fs::write(&tasks_path, serde_json::to_vec(&beside).unwrap()).unwrap();
+  eprintln!("{phase} profile: {}", path.display());
 }
 
 /// The page's tasks over 50 ms so far, as `start+duration` in milliseconds.
