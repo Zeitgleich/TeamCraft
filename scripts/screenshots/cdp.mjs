@@ -42,7 +42,9 @@ export async function launch() {
     chrome.kill();
     await exited;
     process.off("exit", killChrome);
-    rmSync(profile, { recursive: true, force: true });
+    // Chrome's child processes (a page's workers writing their storage) can outlive the main
+    // one for a moment, adding files while the profile is removed.
+    rmSync(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   };
   return page;
 }
