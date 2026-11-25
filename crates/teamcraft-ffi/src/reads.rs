@@ -2037,6 +2037,104 @@ mod tests {
       files.finish();
     }
 
+    /// Issue #2391: what the apps read when they start runs on the read threads without writing;
+    /// before, the debug apps failed this assertion within seconds of every start. A read that
+    /// writes fails here as the thread's job panics, which its caller hears as a stopped engine.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn the_reads_of_a_start_never_write() {
+      let files = FileLanes::open();
+      files
+        .queue
+        .know_account(parse_id("7").unwrap(), "fingerprint".into());
+      let queue = &files.queue;
+      wrote_nothing(
+        "ready_account",
+        queue.read(|reads| Ok(reads.ready_account())).await,
+      );
+      wrote_nothing(
+        "link_requests",
+        queue.read(|reads| Ok(reads.link_requests())).await,
+      );
+      wrote_nothing("first_sync", queue.read(|reads| reads.first_sync()).await);
+      wrote_nothing("key_catch_up", queue.read(|reads| reads.key_catch_up()).await);
+      wrote_nothing("pending_work", queue.read(|reads| reads.pending_work()).await);
+      wrote_nothing(
+        "push_diagnostics",
+        queue.read(|reads| reads.push_diagnostics()).await,
+      );
+      wrote_nothing(
+        "mention_settings",
+        queue.read(|reads| Ok(reads.mention_settings())).await,
+      );
+      wrote_nothing(
+        "notification_content",
+        queue.read(|reads| Ok(reads.notification_content())).await,
+      );
+      wrote_nothing(
+        "segment_prefetch",
+        queue.read(|reads| reads.segment_prefetch()).await,
+      );
+      wrote_nothing("sticker_packs", queue.read(|reads| reads.sticker_packs()).await);
+      wrote_nothing("join_requests", queue.read(|reads| reads.join_requests()).await);
+      wrote_nothing("join_request_alerts", queue.join_request_alerts().await);
+      wrote_nothing("conversations", queue.conversations().await);
+      wrote_nothing("snapshot_json", queue.read(|reads| reads.snapshot_json()).await);
+      // A device that never had a request keeps no record of one.
+      assert_eq!(
+        files
+          .engine
+          .get(Table::SyncState, crate::join_requests::ALERTS_KEY)
+          .unwrap(),
+        None
+      );
+      files.finish();
+    }
+
+    /// Issue #2391: the join request notifications this device remembers change on the actions'
+    /// thread, not the read thread the app asks on; the next call finds nothing new.
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn a_request_alert_that_went_is_withdrawn_off_the_read_threads() {
+      let files = FileLanes::open();
+      files
+        .queue
+        .know_account(parse_id("7").unwrap(), "fingerprint".into());
+      // Notified about earlier; the request is gone now (no request is listed in this store).
+      let notified = teamcraft_client_api::activity::JoinRequest {
+        conversation: id_from_raw(50),
+        user: id_from_raw(2),
+        user_name: "Admin 2".into(),
+        maybe_username: None,
+        requested_at: 100,
+        expires_at: 1_100,
+        standing: teamcraft_client_api::activity::JoinRequestStanding::Approvable,
+      };
+      let mut alerts = teamcraft_client_api::join_request_alerts::JoinRequestAlerts::default();
+      alerts.update(std::slice::from_ref(&notified));
+      let key = crate::join_requests::ALERTS_KEY;
+      files
+        .engine
+        .put(Table::SyncState, key, alerts.to_json().as_bytes())
+        .unwrap();
+
+      let changes = files.queue.join_request_alerts().await.unwrap();
+      assert_eq!(
+        changes.gone_tags,
+        [teamcraft_client_api::join_request_alerts::tag(&notified)
+          .as_str()
+          .to_owned()]
+      );
+      let empty = teamcraft_client_api::join_request_alerts::JoinRequestAlerts::default().to_json();
+      assert_eq!(
+        files.engine.get(Table::SyncState, key).unwrap().as_deref(),
+        Some(empty.as_bytes())
+      );
+      let again = files.queue.join_request_alerts().await.unwrap();
+      assert!(again.new.is_empty() && again.gone_tags.is_empty());
+      files.finish();
+    }
+
     /// Issue #2225: an action told the app of its change (`EventListener::on_change`, JNI on
     /// Android) while it still held the store's writer. One such call hung for 7.2 s on 1.0.41, and
     /// a read that wrote, every read behind it and the engine's next group of writes waited with
@@ -2149,6 +2247,15 @@ mod tests {
         drop(self.engine);
         std::fs::remove_dir_all(&self.directory).unwrap();
       }
+    }
+
+    /// A read whose thread panicked (a write on a read-only lane in debug builds) answers that the
+    /// engine stopped; other errors of an empty store are fine here.
+    fn wrote_nothing<T>(what: &str, result: Result<T, TeamCraftError>) {
+      assert!(
+        !matches!(result, Err(TeamCraftError::EngineStopped)),
+        "{what} wrote on a read thread"
+      );
     }
 
     fn rand_suffix() -> u64 {
