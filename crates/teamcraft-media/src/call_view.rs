@@ -336,7 +336,6 @@ impl CallRoster {
     true
   }
 
-  /// This device's share ended: neither it nor its sound shows any more.
   /// A line of this device's live captions (#215): the speaker's sentence so far replaces its
   /// earlier text, a new sentence adds a line, the oldest go beyond [`MAX_CAPTION_LINES`]. A final
   /// sentence with no words takes its line away. `false` (nothing to show) while captions are off
@@ -352,31 +351,7 @@ impl CallRoster {
     let Some(user) = self.users_by_device.get(&caption.speaker).copied() else {
       return false;
     };
-    let maybe_line = captions.lines.iter().position(|line| line.id == caption.sentence);
-    match (maybe_line, caption.text.is_empty()) {
-      (Some(index), true) => {
-        captions.lines.remove(index);
-      },
-      (Some(index), false) => {
-        let line = &mut captions.lines[index];
-        line.text = caption.text;
-        line.is_final = caption.is_final;
-      },
-      (None, true) => return false,
-      (None, false) => {
-        if captions.lines.len() >= MAX_CAPTION_LINES {
-          captions.lines.remove(0);
-        }
-        captions.lines.push(CaptionLine {
-          id: caption.sentence,
-          user,
-          text: caption.text,
-          is_final: caption.is_final,
-          at: now_ms(),
-        });
-      },
-    }
-    true
+    apply_caption_line(&mut captions.lines, user, caption)
   }
 
   fn end_own_screen(&mut self, active: &mut ActiveCall) {
@@ -596,6 +571,38 @@ fn least_consent(a: RecordingConsentState, b: RecordingConsentState) -> Recordin
     (Allowed, _) | (_, Allowed) => Allowed,
     (NotAsked, NotAsked) => NotAsked,
   }
+}
+
+/// Puts one recognized sentence of `user` into the captions' `lines` (#215): the sentence so far
+/// replaces its earlier text, a new sentence adds a line, the oldest go beyond
+/// [`MAX_CAPTION_LINES`], and a final sentence with no words takes its line away. `false` when
+/// nothing changed. Shared by the desktop's call view and the mobile apps' call state.
+pub fn apply_caption_line(lines: &mut Vec<CaptionLine>, user: UserId, caption: CaptionText) -> bool {
+  let maybe_line = lines.iter().position(|line| line.id == caption.sentence);
+  match (maybe_line, caption.text.is_empty()) {
+    (Some(index), true) => {
+      lines.remove(index);
+    },
+    (Some(index), false) => {
+      let line = &mut lines[index];
+      line.text = caption.text;
+      line.is_final = caption.is_final;
+    },
+    (None, true) => return false,
+    (None, false) => {
+      if lines.len() >= MAX_CAPTION_LINES {
+        lines.remove(0);
+      }
+      lines.push(CaptionLine {
+        id: caption.sentence,
+        user,
+        text: caption.text,
+        is_final: caption.is_final,
+        at: now_ms(),
+      });
+    },
+  }
+  true
 }
 
 /// One recognized sentence (or its part so far) of this device's live captions, by device: the

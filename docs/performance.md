@@ -3106,6 +3106,15 @@ plus whisper's state: the bench's whole process peaks at 155 MiB; it is freed wh
 laptops on battery, macOS and Windows (whisper.cpp uses the same CPU code there; on macOS it adds the
 Accelerate framework).
 
+### Live captions on the phones (issue #215)
+
+Android 13+ and iOS hand each sentence of the others' speech to the system's on-device recognizer
+(e2ee.md §8.6). The cost is the system recognizer's, one session per piece: the finished sentence,
+and while someone speaks the part so far every 3 s when the recognizer has time. Not measured yet
+(no Android 13+ phone with an on-device recognizer on the test bench, no iPhone here); the overload
+rule is the desktop's: when the recognizer falls behind, captions turn off with a message and the
+call goes on. Zero cost while off.
+
 ### Android (first numbers)
 
 Release Rust core, debug Kotlin build (`assembleLibreDebug`), API 35 emulator (the Pixel 10 / API 37

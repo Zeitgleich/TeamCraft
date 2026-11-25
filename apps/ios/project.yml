@@ -150,6 +150,8 @@ targets:
         ITSAppUsesNonExemptEncryption: false
         NSMicrophoneUsageDescription: "TeamCraft uses the microphone for calls and for voice messages you record."
         NSCameraUsageDescription: "TeamCraft uses the camera for video calls, for photos you send and to scan the code of a new device you link."
+        # Live captions of calls (#215): SFSpeechRecognizer with requiresOnDeviceRecognition only.
+        NSSpeechRecognitionUsageDescription: "TeamCraft turns what others say in a call into captions, on this iPhone only: neither the audio nor the text leaves it."
         NSPhotoLibraryAddUsageDescription: "TeamCraft saves pictures and videos you choose to your photo library."
         NSFaceIDUsageDescription: "TeamCraft uses Face ID to unlock the app when the app lock is on."
         # A 1:1 call's direct path (#127): devices on the same network, and the router's port mapping.

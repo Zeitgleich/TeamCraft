@@ -30,6 +30,7 @@ use teamcraft_media::call_native::{
 };
 use teamcraft_media::call_recording_notice::Recorder;
 use teamcraft_media::call_resilience::{CallTransport, JoinTicket, JoinTicketError, ResilienceConfig};
+use teamcraft_media::captions::CaptionUpdate;
 use teamcraft_media::datagram::SimulcastLayer;
 use teamcraft_media::fallback_link::{FallbackSocket, fallback_opener};
 use teamcraft_media::link_probe::{LinkProbeTarget, PriorLink};
@@ -48,6 +49,7 @@ use teamcraft_proto::{
 use tokio::sync::{mpsc, oneshot, watch};
 use tracing::{debug, info, warn};
 
+use crate::call_captions::{self, CaptionLineInfo, CaptionRecognizer, CaptionRun, CaptionsStop};
 use crate::engine::Job;
 
 use crate::error::TeamCraftError;
@@ -376,6 +378,16 @@ pub struct CallStateInfo {
   /// floats each one whose id is above the last it showed, and says it to screen readers.
   #[uniffi(default = [])]
   pub reactions: Vec<CallReactionInfo>,
+  /// Live captions on this device are on (#215): the captions panel shows.
+  #[uniffi(default = false)]
+  pub is_captions_on: bool,
+  /// Their latest lines, oldest first, at most a dozen; a line not final yet is replaced by the same
+  /// `id` as the speaker goes on. Only on this device: nothing of it is sent anywhere.
+  #[uniffi(default = [])]
+  pub captions: Vec<CaptionLineInfo>,
+  /// Captions went off by themselves, and why: the app says so once. Cleared when they start again.
+  #[uniffi(default = None)]
+  pub maybe_captions_stop: Option<CaptionsStop>,
   /// The code participants compare to rule out a man in the middle (once secured).
   pub maybe_privacy_code: Option<String>,
   /// Why the call ended (with [`CallPhase::Ended`]).
@@ -501,6 +513,9 @@ enum Control {
   WatchEncodedVideo(MediaStreamId),
   UnwatchEncodedVideo(MediaStreamId),
   SetStatusSounds(CallStatusSounds),
+  /// Live captions on this device with the app's on-device recognizer (#215), or off.
+  StartCaptions(Arc<dyn CaptionRecognizer>),
+  StopCaptions,
   Leave,
 }
 
@@ -670,6 +685,19 @@ impl CallSession {
   }
 
   /// Leaves the call; the listener gets the ended state.
+  /// Turns live captions on (#215): the others' voices, as this device plays them, go to
+  /// `recognizer` (the system's, in on-device mode only) on a thread of their own, and the text
+  /// shows in [`CallStateInfo::captions`]. Nothing is sent anywhere, and nobody is told. Off at
+  /// the start of every call; a second start replaces the recognizer.
+  pub fn start_captions(&self, recognizer: Arc<dyn CaptionRecognizer>) {
+    self.send(Control::StartCaptions(recognizer));
+  }
+
+  /// Turns live captions off; their lines are gone.
+  pub fn stop_captions(&self) {
+    self.send(Control::StopCaptions);
+  }
+
   pub fn leave(&self) {
     self.send(Control::Leave);
   }
@@ -880,6 +908,9 @@ pub(crate) async fn join(
     raised_hand_user_ids: Vec::new(),
     is_hand_raised: false,
     reactions: Vec::new(),
+    is_captions_on: false,
+    captions: Vec::new(),
+    maybe_captions_stop: None,
     maybe_privacy_code: None,
     maybe_end_reason: None,
     maybe_encryption_retry_after_secs: None,
@@ -990,6 +1021,8 @@ async fn run_call(
   let mut video = RemoteVideo::default();
   let mut encoded = EncodedVideoBridge::default();
   let mut audio = AudioControls::default();
+  // Live captions while they are on (#215); dropping the run stops its worker.
+  let mut maybe_captions: Option<CaptionRun> = None;
   loop {
     tokio::select! {
       maybe_control = controls.recv() => match maybe_control {
@@ -1000,6 +1033,14 @@ async fn run_call(
           call.set_muted(audio.is_silent());
         },
         Some(Control::SetStatusSounds(sounds)) => call.set_status_cues(status_cues(sounds)),
+        Some(Control::StartCaptions(recognizer)) => {
+          start_captions(&call, recognizer, &mut maybe_captions, state);
+          context.hub.report(state.clone());
+        },
+        Some(Control::StopCaptions) => {
+          stop_captions(&call, &mut maybe_captions, state, None);
+          context.hub.report(state.clone());
+        },
         Some(Control::SetHeld(is_held)) => {
           audio.is_held = is_held;
           call.set_muted(audio.is_silent());
@@ -1012,6 +1053,11 @@ async fn run_call(
           apply_control(&call, control, context, state, &video).await;
           context.hub.report(state.clone());
         },
+      },
+      maybe_update = call_captions::next_update(&mut maybe_captions) => {
+        if on_caption(&call, &roster, maybe_update, &mut maybe_captions, state) {
+          context.hub.report(state.clone());
+        }
       },
       // The same signal the gateway reconnects on: the call checks its path or rejoins at once.
       Some(()) = network.next() => call.network_changed(),
@@ -1069,6 +1115,70 @@ async fn run_call(
   state.phase = CallPhase::Ended;
   state.maybe_end_reason = Some(reason);
   context.hub.report(state.clone());
+}
+
+/// Starts live captions with the app's recognizer (#215); a thread that can't start says so as a
+/// failure, like a recognizer that fails.
+fn start_captions(
+  call: &NativeCall,
+  recognizer: Arc<dyn CaptionRecognizer>,
+  maybe_captions: &mut Option<CaptionRun>,
+  state: &mut CallStateInfo,
+) {
+  // The running worker (if any) stops before the new one takes the tap.
+  *maybe_captions = None;
+  match CaptionRun::start(recognizer) {
+    Ok((run, tap)) => {
+      *maybe_captions = Some(run);
+      call.set_captions(Some(tap));
+      state.is_captions_on = true;
+      state.captions.clear();
+      state.maybe_captions_stop = None;
+    },
+    Err(error) => {
+      warn!(%error, "captions didn't start");
+      stop_captions(call, maybe_captions, state, Some(CaptionsStop::Failed));
+    },
+  }
+}
+
+/// Captions off: asked for (`maybe_stop` `None`), or by themselves and why.
+fn stop_captions(
+  call: &NativeCall,
+  maybe_captions: &mut Option<CaptionRun>,
+  state: &mut CallStateInfo,
+  maybe_stop: Option<CaptionsStop>,
+) {
+  *maybe_captions = None;
+  call.set_captions(None);
+  state.is_captions_on = false;
+  state.captions.clear();
+  state.maybe_captions_stop = maybe_stop;
+}
+
+/// A caption update: new text goes into the lines, an end of the worker turns captions off and
+/// says why. `true` when the state changed.
+fn on_caption(
+  call: &NativeCall,
+  roster: &BTreeMap<DeviceId, UserId>,
+  maybe_update: Option<CaptionUpdate>,
+  maybe_captions: &mut Option<CaptionRun>,
+  state: &mut CallStateInfo,
+) -> bool {
+  match (maybe_update, maybe_captions.as_mut()) {
+    (Some(update @ CaptionUpdate::Text { .. }), Some(run)) => {
+      let has_changed = run.apply(roster, update);
+      if has_changed {
+        state.captions = run.lines();
+      }
+      has_changed
+    },
+    (maybe_update, _) => {
+      let stop = call_captions::stop_reason(maybe_update.as_ref());
+      stop_captions(call, maybe_captions, state, Some(stop));
+      true
+    },
+  }
 }
 
 /// Why a call that broke off couldn't be resumed (issue #427): with the chat server still
@@ -1158,6 +1268,8 @@ async fn apply_control(
     | Control::WatchEncodedVideo(_)
     | Control::UnwatchEncodedVideo(_)
     | Control::SetStatusSounds(_)
+    | Control::StartCaptions(_)
+    | Control::StopCaptions
     | Control::Leave => {},
   }
 }
@@ -1861,6 +1973,9 @@ fn ended(conversation: ConversationId, reason: CallEndReason) -> CallStateInfo {
     raised_hand_user_ids: Vec::new(),
     is_hand_raised: false,
     reactions: Vec::new(),
+    is_captions_on: false,
+    captions: Vec::new(),
+    maybe_captions_stop: None,
     maybe_privacy_code: None,
     maybe_end_reason: Some(reason),
     maybe_encryption_retry_after_secs: None,

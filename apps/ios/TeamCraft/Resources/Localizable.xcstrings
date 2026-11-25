@@ -27373,6 +27373,166 @@
         }
       }
     },
+    "call_captions": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel"
+          }
+        }
+      }
+    },
+    "call_captions_off": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn off captions"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel ausschalten"
+          }
+        }
+      }
+    },
+    "call_captions_only_here": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions · only on this device"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel · nur auf diesem Gerät"
+          }
+        }
+      }
+    },
+    "call_captions_listening": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions appear here when someone speaks."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel erscheinen hier, sobald jemand spricht."
+          }
+        }
+      }
+    },
+    "call_captions_someone": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Someone"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jemand"
+          }
+        }
+      }
+    },
+    "call_captions_announce %@ %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%1$@: %2$@"
+          }
+        }
+      }
+    },
+    "call_captions_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions need speech recognition. You can allow it in Settings › TeamCraft."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel brauchen die Spracherkennung. Du kannst sie unter Einstellungen › TeamCraft erlauben."
+          }
+        }
+      }
+    },
+    "call_captions_language_unsupported": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This iPhone can’t recognize its language on the device, so captions are off."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Dieses iPhone kann seine Sprache nicht auf dem Gerät erkennen, daher bleiben die Untertitel aus."
+          }
+        }
+      }
+    },
+    "call_captions_overloaded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions turned off: this iPhone is too busy to keep up with the speech. The call goes on."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel ausgeschaltet: Dieses iPhone ist zu ausgelastet, um mit dem Gesprochenen Schritt zu halten. Der Anruf läuft weiter."
+          }
+        }
+      }
+    },
+    "call_captions_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Captions turned off: speech recognition on this iPhone stopped working. Try again later."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Untertitel ausgeschaltet: Die Spracherkennung auf diesem iPhone funktioniert nicht mehr. Versuche es später noch einmal."
+          }
+        }
+      }
+    },
     "call_hand_raised_value": {
       "localizations": {
         "en": {

@@ -19,6 +19,8 @@ struct CallScreen: View {
 
   /// The call is in a DM or group DM.
   @State private var canAddPeople = false
+  /// This iPhone recognizes the app's language on the device (#215): only then a captions button.
+  @State private var areCaptionsSupported = false
   @State private var isAddingPeople = false
   /// The notetaker of the verified policy in this call; read again when somebody comes or goes.
   @State private var maybeNotetaker: NotetakerCallInfo?
@@ -210,6 +212,7 @@ struct CallScreen: View {
       rosterAnnouncer.note(RosterChange(before: old, now: new), names: model.calls.names, say: { announce($0) })
     }
     .onAppear { maybeLastReactionId = call.reactions.last?.id ?? 0 }
+    .modifier(CaptionsAnnouncements(calls: model.calls, lines: call.captions, isSupported: $areCaptionsSupported))
     .onChange(of: call.reactions.last?.id) { showNewReactions() }
     .onChange(of: call.raisedHandUserIds) { old, new in
       let raised = new.filter { !old.contains($0) }
@@ -614,6 +617,8 @@ struct CallScreen: View {
         }
         notetakerBanner
         if let offer = model.calls.maybeMoveOffer { moveBanner(offer) }
+        // Live captions (#215), recognized on this iPhone; above the controls, never over a name.
+        if call.isCaptionsOn { CaptionsPanel(lines: call.captions, names: model.calls.names) }
       }
       .padding(.horizontal, 16)
       if areControlsShown { controlBar.transition(chromeTransition(edge: .bottom)) }
@@ -844,6 +849,7 @@ struct CallScreen: View {
             Label("call_reactions", systemImage: "face.smiling")
           }
           handItem
+          if isCaptionsOffered { captionsItem }
           if isAddingPeopleOffered {
             Button("call_add_people", systemImage: "person.badge.plus") { interact { isAddingPeople = true } }
           }
@@ -956,7 +962,22 @@ struct CallScreen: View {
 
   /// How many of "Add people", "Add notetaker", "Hosts" and "Lobby" the bar offers.
   private var extraControls: Int {
-    [isAddingPeopleOffered, isNotetakerControlShown, isHostsOffered, isLobbyOffered].filter { $0 }.count
+    [isAddingPeopleOffered, isNotetakerControlShown, isHostsOffered, isLobbyOffered, isCaptionsOffered]
+      .filter { $0 }.count
+  }
+
+  /// Live captions (#215) only where this iPhone recognizes its language on the device, while
+  /// connected (or already on, to turn them off).
+  private var isCaptionsOffered: Bool {
+    (call.phase == .connected && areCaptionsSupported) || call.isCaptionsOn
+  }
+
+  /// "Captions" or "Turn off captions": recognized on this iPhone only; nobody else is told.
+  private var captionsItem: some View {
+    let title: LocalizedStringKey = call.isCaptionsOn ? "call_captions_off" : "call_captions"
+    return Button(title, systemImage: call.isCaptionsOn ? "captions.bubble.fill" : "captions.bubble") {
+      interact { Task { await model.calls.setCaptions(!call.isCaptionsOn) } }
+    }
   }
 
   /// The lobby while connected: only its hosts get one from the core (#1859).
