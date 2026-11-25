@@ -1357,6 +1357,16 @@ impl<S: LocalStore> CoreChatBackend<S> {
     self.read(records::list_json(&self.store, Table::Conversations))
   }
 
+  /// One conversation as stored: one record, where [`Self::conversations_raw`] decodes all of them
+  /// (a find in the whole list ran on every read of a page of rows, issue #2397).
+  pub(crate) fn conversation_raw(&self, conversation: ConversationId) -> Option<ConversationResponse> {
+    self.read(records::get_json(
+      &self.store,
+      Table::Conversations,
+      &conversation.to_string(),
+    ))
+  }
+
   pub(crate) fn members(&self, conversation: ConversationId) -> Vec<UserId> {
     let maybe: Option<ListConversationMembersResponse> = self.read(records::get_json(
       &self.store,
@@ -1370,10 +1380,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
 
   /// The members of a conversation whose receipts show as ticks (a DM, #635); `None` elsewhere.
   pub(crate) fn tick_members(&self, conversation: ConversationId) -> Option<Vec<UserId>> {
-    let response = self
-      .conversations_raw()
-      .into_iter()
-      .find(|response| response.id == conversation)?;
+    let response = self.conversation_raw(conversation)?;
     (ReadIndicator::of(view_kind(&response)) == ReadIndicator::Ticks).then(|| self.members(conversation))
   }
 
@@ -2798,10 +2805,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
     let users = self.summaries();
     let preferences = self.mention_preferences();
     self
-      .conversations_raw()
-      .iter()
-      .find(|conversation| conversation.id == id)
-      .map(|conversation| self.to_conversation(conversation, &users, &preferences))
+      .conversation_raw(id)
+      .map(|conversation| self.to_conversation(&conversation, &users, &preferences))
   }
 
   fn undecrypted_count(&self, conversation: ConversationId) -> usize {
@@ -4621,9 +4626,8 @@ impl<S: LocalStore> ChatBackend for CoreChatBackend<S> {
 
   fn has_external_people(&self, conversation: ConversationId) -> bool {
     self
-      .conversations_raw()
-      .iter()
-      .any(|response| response.id == conversation && response.contains_guests)
+      .conversation_raw(conversation)
+      .is_some_and(|response| response.contains_guests)
   }
 }
 

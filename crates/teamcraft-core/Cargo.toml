@@ -161,7 +161,10 @@ web-sys = { version = "0.3.83", features = [
   "IdbRequest",
   "IdbTransaction",
   "IdbTransactionMode",
+  # Handing the thread back without a timer's clamp: src/platform.rs `yield_now` (#2397).
+  "MessageChannel",
   "MessageEvent",
+  "MessagePort",
   "Navigator",
   "Notification",
   "NotificationEvent",
