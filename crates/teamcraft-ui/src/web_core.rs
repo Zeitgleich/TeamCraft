@@ -795,6 +795,30 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
       close_in_worker().await;
       Ok(Value::Null)
     },
+    // Only a page whose core runs here asks these: in the `tabs` module, like the JSON of the
+    // chat, so a guest's download doesn't carry them (#2397).
+    "core_prepare_call"
+    | "core_sign_call_key"
+    | "core_call_devices"
+    | "core_probe_ticket"
+    | "core_open_stream"
+    | "core_read_stream"
+    | "core_close_stream"
+    | "core_background_picture" => {
+      crate::areas::serve_worker_page_command(command.to_owned(), args)
+        .await
+        .map_err(|error| error.to_string())?
+        .await
+    },
+    _ => serve(command, args).await,
+  }
+}
+
+/// The commands of the page of this worker for its calls and streams (`serve_page_of_worker`),
+/// in the `tabs` module (`areas::serve_worker_page_command`).
+pub(crate) async fn serve_worker_page_command(command: String, args: Value) -> Result<Value, String> {
+  let command = command.as_str();
+  match command {
     "core_prepare_call" => {
       let conversation: ConversationId = field(&args, "conversation")?;
       let prepared = ask(|reply| Request::PrepareCall(conversation, reply)).await??;
@@ -873,7 +897,7 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
       let picture = ask(|reply| Request::BackgroundPicture(effect, reply)).await??;
       to_value(teamcraft_proto::Base64Bytes::new(picture))
     },
-    _ => serve(command, args).await,
+    _ => Err(format!("unknown command {command}")),
   }
 }
 
