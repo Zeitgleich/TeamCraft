@@ -331,6 +331,12 @@ pub(crate) enum BuildStep {
 }
 
 impl CatalogBuild {
+  /// The records the build has gone through so far.
+  #[cfg_attr(not(any(target_arch = "wasm32", test)), allow(dead_code))]
+  pub(crate) fn records_done(&self) -> usize {
+    self.opened + self.skipped
+  }
+
   /// How far the build is, 0 to 99. Records are walked in ID order and their IDs are pseudorandom,
   /// so the place in the ID space says how far: no count needed, it never moves back while the
   /// build adds its own records, and a build that goes on after a reload goes on from there.

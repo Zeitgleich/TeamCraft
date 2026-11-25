@@ -248,37 +248,36 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
   let _held = records(store).map(HeldWrites::new);
   let mut step_records = FIRST_BUILD_STEP;
   let mut since_commit = 0usize;
-  let mut maybe_shown: Option<u8> = None;
   loop {
     let started_ms = js_sys::Date::now();
+    let done_before = build.records_done();
     let step = store.step_catalog_build_of(&mut build, step_records)?;
-    since_commit += step_records;
+    let done = build.records_done().saturating_sub(done_before);
+    since_commit += done;
+    // A step short of what it asked for read the last records: commit now, as the last batch did.
+    let is_at_end = done < step_records;
     step_records = next_build_step(step_records, js_sys::Date::now() - started_ms);
-    if step == BuildStep::Complete || since_commit >= CATALOG_BATCH {
-      since_commit = 0;
-      let flushed = match records(store) {
-        Some(records) => records.flush().await,
-        None => Ok(()),
-      };
-      match flushed {
-        Err(StoreError::QuotaExceeded) => {
-          tracing::warn!("no space for the local store's catalog; it stays in memory for now");
-        },
-        flushed => flushed?,
-      }
-    } else {
+    if step != BuildStep::Complete && since_commit < CATALOG_BATCH && !is_at_end {
       crate::platform::yield_now().await;
+      continue;
+    }
+    since_commit = 0;
+    let flushed = match records(store) {
+      Some(records) => records.flush().await,
+      None => Ok(()),
+    };
+    match flushed {
+      Err(StoreError::QuotaExceeded) => {
+        tracing::warn!("no space for the local store's catalog; it stays in memory for now");
+      },
+      flushed => flushed?,
     }
     if step == BuildStep::Complete {
       return Ok(());
     }
-    // Told when the percentage moves, not after every step of a few milliseconds.
-    let percent = build.percent();
-    if maybe_shown != Some(percent) {
-      maybe_shown = Some(percent);
-      if on_progress(percent).is_break() {
-        return Err(StoreError::InUse);
-      }
+    // After a commit, as before the steps: a build stopped here goes on from what it wrote.
+    if on_progress(build.percent()).is_break() {
+      return Err(StoreError::InUse);
     }
   }
 }
