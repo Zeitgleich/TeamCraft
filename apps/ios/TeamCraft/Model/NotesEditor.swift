@@ -1,5 +1,5 @@
-import Foundation
 import Observation
+import SwiftUI
 
 /// Editing a page of the notes on the phone (issue #2361, e2ee.md §4.11): the core's editor of the
 /// page (the one desktop and web run) and the block the user types in. Every edit goes to the core in
@@ -17,7 +17,7 @@ final class NotesEditor {
   /// Edits handed to the core whose answer hasn't come: a page read meanwhile may not have them yet.
   private(set) var inFlight = 0
   /// Why the last edit failed, shown under the page until the next one goes through.
-  private(set) var maybeFailure: String?
+  private(set) var maybeFailure: LocalizedStringKey?
   /// The page after each edit.
   var onPage: (CanvasPageItem) -> Void = { _ in }
 
@@ -88,7 +88,7 @@ final class NotesEditor {
     maybeFlush = Task { [weak self] in
       try? await Task.sleep(for: .milliseconds(Int(afterMs)))
       guard !Task.isCancelled, let self else { return }
-      enqueue { [self] in await flush(editor) }
+      self.enqueue { [self] in await self.flush(editor) }
     }
   }
 

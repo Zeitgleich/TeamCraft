@@ -146,7 +146,7 @@ struct ChannelNotesView: View {
     note(page.canEdit ? "channel_notes_shared" : "channel_notes_read_only")
     if let key = ChannelNotes.statusKey(page, history: history) { note(key, isStatus: true) }
     if let failure = maybeEditor?.maybeFailure {
-      Text(verbatim: failure).font(.app(.footnote)).foregroundStyle(Theme.danger)
+      Text(failure).font(.app(.footnote)).foregroundStyle(Theme.danger)
         .accessibilityAddTraits(.updatesFrequently)
     }
     if !page.isUnreadable {
