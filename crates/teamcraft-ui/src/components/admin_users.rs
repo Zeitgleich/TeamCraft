@@ -164,7 +164,7 @@ pub fn UsersSection() -> impl IntoView {
       }}
     </div>
     <Show when=move || tab.get() == UserTab::Bots fallback=|| ()>
-      <p class="muted-text small">{move || i18n.t("admin-bots-hint")}</p>
+      <p class="muted-text small admin-list-hint">{move || i18n.t("admin-bots-hint")}</p>
     </Show>
     <Show when=move || tab.get() == UserTab::Guests fallback=move || {
       view! {
@@ -264,6 +264,8 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
   let by_id = items_by_key(devices.into(), |device: &DeviceInfo| device.id);
   let pending_device = RwSignal::new(None::<DeviceId>);
   let recovery_started = RwSignal::new(false);
+  // A bot has no key bag to recover: it signs in with a token, not a device.
+  let is_bot = entry.user.is_bot;
   let (_, policy) = state.read(|backend| backend.workspace_policy());
   let is_recovery_allowed = if entry.maybe_guest.is_some() {
     policy.org_recovery.is_enabled_for_guests
@@ -347,32 +349,36 @@ fn UserDetail(entry: AdminUser, devices: Memo<Vec<DeviceInfo>>, now: i64) -> imp
         }
       </For>
       <Show when=move || device_count == 0 && devices.with(Vec::is_empty) fallback=|| ()>
-        <li class="muted-text">{move || i18n.t("admin-no-devices")}</li>
+        <li class="muted-text">{move || i18n.t(if is_bot { "admin-bot-no-devices" } else { "admin-no-devices" })}</li>
       </Show>
     </ul>
-    <h4 class="detail-heading">{move || i18n.t("admin-user-access")}</h4>
+    {(!is_bot || !is_active).then(|| view! { <h4 class="detail-heading">{move || i18n.t("admin-user-access")}</h4> })}
     <div class="detail-actions">
       {(!is_active).then(|| view! {
         <button class="btn" on:click=move |_| state.write(|backend| backend.set_user_active(user_id, true))>
           {move || i18n.t("admin-reactivate")}
         </button>
       })}
-      <button
-        class="btn"
-        disabled=!can_recover
-        aria-describedby="admin-recovery-hint"
-        on:click=move |_| {
-          state.write(|backend| backend.start_org_recovery(user_id));
-          recovery_started.set(true);
-        }
-      >
-        {move || i18n.t("admin-recovery-start")}
-      </button>
+      {(!is_bot).then(|| view! {
+        <button
+          class="btn"
+          disabled=!can_recover
+          aria-describedby="admin-recovery-hint"
+          on:click=move |_| {
+            state.write(|backend| backend.start_org_recovery(user_id));
+            recovery_started.set(true);
+          }
+        >
+          {move || i18n.t("admin-recovery-start")}
+        </button>
+      })}
     </div>
-    <p id="admin-recovery-hint" class="muted-text small">{move || i18n.t(recovery_hint)}</p>
-    <p class="status-line" role="status">
-      {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
-    </p>
+    {(!is_bot).then(|| view! {
+      <p id="admin-recovery-hint" class="muted-text small">{move || i18n.t(recovery_hint)}</p>
+      <p class="status-line" role="status">
+        {move || recovery_started.get().then(|| i18n.t("admin-recovery-started"))}
+      </p>
+    })}
     // Issue #958: what can't be taken back sits apart, and says what it does to this person before
     // the click, not after.
     <section class="danger-zone" aria-labelledby="admin-user-danger">

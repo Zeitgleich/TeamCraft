@@ -71,6 +71,21 @@ pub fn can_in_workspace_now(state: AppState, permission: &Permission) -> bool {
   can_in_workspace(&scheme, &state.read(|backend| backend.my_role()), permission)
 }
 
+/// Whether the user holds a channel permission in every channel by the instance role alone, as in
+/// a private channel they are not in: what the admin console may change about any channel.
+pub fn can_in_any_channel_now(state: AppState, permission: &Permission) -> bool {
+  let scheme = scheme_of(&state.read(|backend| backend.permission_scheme(None)));
+  let actor = RoleActor {
+    instance_role: state.read(|backend| backend.my_role()),
+    is_space_admin: false,
+    maybe_own_role: None,
+    visibility: ConversationVisibility::Private,
+    is_archived: false,
+    maybe_granted: None,
+  };
+  can_in_channel(&scheme, &actor, permission)
+}
+
 /// The space with what the user may do in it, if the user is in it.
 pub fn space_of(state: AppState, space: SpaceId) -> Option<Space> {
   state

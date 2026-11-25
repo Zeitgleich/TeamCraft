@@ -367,7 +367,8 @@
 
 .meta-list {
   display: grid;
-  grid-template-columns: auto 1fr;
+  /* The value keeps its line where it fits; the label wraps first in a narrow pane. */
+  grid-template-columns: minmax(6em, 1fr) minmax(0, max-content);
   gap: 6px 14px;
   margin: 14px 0;
 }
@@ -467,6 +468,29 @@
   margin: 0;
 }
 
+/* A line about the list below it (who may change it, what it holds). */
+.admin-list-hint {
+  margin: 0 0 10px;
+}
+
+/* The number and its unit never part. */
+.retention-number {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.retention-limit select {
+  width: auto;
+  max-width: 100%;
+}
+
+.retention-limit select:disabled,
+.retention-limit input:disabled {
+  opacity: 0.6;
+}
+
 /* Retention (#2360): the instance default first, as a quiet card that says what channels follow. */
 .retention-default {
   max-width: 560px;
@@ -508,6 +532,15 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 8px 16px;
+}
+
+.retention-bulk-field::before {
+  content: attr(data-label);
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+  font-weight: var(--weight-semibold);
 }
 
 .retention-table .select-col {

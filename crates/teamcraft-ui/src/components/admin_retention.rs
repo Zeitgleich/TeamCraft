@@ -8,7 +8,7 @@ use leptos::prelude::*;
 use teamcraft_proto::{Permission, RetentionPolicy};
 
 use crate::admin::{AdminChannel, AdminChannelFilter, AdminChannelQuery, RetentionOverride};
-use crate::channel_access::can_in_workspace_now;
+use crate::channel_access::can_in_any_channel_now;
 use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_legal_hold::LegalHoldPanel;
 use crate::components::admin_save::{SaveBar, use_save_tracker};
@@ -54,8 +54,9 @@ pub fn RetentionSection() -> impl IntoView {
   });
   let policy = Memo::new(move |_| state.read(|backend| backend.workspace_policy()).1.retention);
   let limits = Signal::derive(move || Limits::of_policy(policy.get()));
-  // Changing a channel's retention is a channel property: admins hold it by the instance scheme.
-  let can_edit = Memo::new(move |_| can_in_workspace_now(state, &Permission::ManageChannelProperties));
+  // Changing a channel's retention is a channel property: admins hold it by their instance role,
+  // also in channels they aren't in.
+  let can_edit = Memo::new(move |_| can_in_any_channel_now(state, &Permission::ManageChannelProperties));
   let page = RetentionPage::new();
   let tracker = use_save_tracker();
   let errors = FormErrors::new();
@@ -121,7 +122,7 @@ pub fn RetentionSection() -> impl IntoView {
           on:input=move |ev| query.set(event_target_value(&ev))
         />
       </div>
-      <Show when=move || can_edit.get() fallback=move || view! { <p class="muted-text small">{move || i18n.t("admin-retention-read-only")}</p> }>
+      <Show when=move || can_edit.get() fallback=move || view! { <p class="muted-text small admin-list-hint">{move || i18n.t("admin-retention-read-only")}</p> }>
         <BulkBar page=page channels=channels limits=limits />
       </Show>
       <div class="table-wrap">
@@ -252,6 +253,7 @@ fn BulkBar(page: RetentionPage, channels: Memo<Vec<AdminChannel>>, limits: Signa
       <div id=BULK_ID class="retention-bulk" role="group" aria-label=move || i18n.t("admin-retention-bulk-label")>
         <p class="retention-bulk-count" role="status">{move || i18n.t_count("admin-retention-selected", selected_count())}</p>
         <div class="retention-bulk-fields">
+          <div class="retention-bulk-field" data-label=move || i18n.t("retention-days")>
           <LimitInput
             draft=draft
             set_draft=set_draft
@@ -262,6 +264,8 @@ fn BulkBar(page: RetentionPage, channels: Memo<Vec<AdminChannel>>, limits: Signa
             choice_label=Signal::derive(move || i18n.t("admin-retention-bulk-days"))
             max=Signal::derive(move || limits.get().max_days)
           />
+          </div>
+          <div class="retention-bulk-field" data-label=move || i18n.t("retention-messages")>
           <LimitInput
             draft=draft
             set_draft=set_draft
@@ -272,11 +276,12 @@ fn BulkBar(page: RetentionPage, channels: Memo<Vec<AdminChannel>>, limits: Signa
             choice_label=Signal::derive(move || i18n.t("admin-retention-bulk-messages"))
             max=Signal::derive(move || limits.get().max_messages)
           />
+          </div>
         </div>
         <div class="retention-bulk-actions">
           <button type="button" class="btn btn-small" on:click=move |_| apply.run(())>{move || i18n.t("admin-retention-bulk-apply")}</button>
           <button type="button" class="btn btn-small" on:click=move |_| reset.run(())>{move || i18n.t("admin-retention-bulk-reset")}</button>
-          <button type="button" class="btn btn-small btn-quiet" on:click=move |_| page.selected.set(HashSet::new())>
+          <button type="button" class="btn btn-small" on:click=move |_| page.selected.set(HashSet::new())>
             {move || i18n.t("admin-retention-bulk-clear")}
           </button>
         </div>
@@ -314,12 +319,7 @@ fn RetentionRow(
     let value = limit_text(i18n, limit, limit.of(above()));
     i18n.t_with(source, &[("value", &value)])
   };
-  let is_own = move || {
-    draft
-      .get()
-      .parsed(limits.get())
-      .is_none_or(|own| !own.is_empty())
-  };
+  let is_own = move || draft.get().parsed(limits.get()).is_none_or(|own| !own.is_empty());
   let is_changed = move || page.is_changed(id, limits.get());
   let is_selected = move || page.selected.with(|selected| selected.contains(&id));
 
@@ -352,7 +352,7 @@ fn RetentionRow(
           </Show>
         </span>
       </th>
-      <td>
+      <td class="retention-cell" data-label=move || i18n.t("retention-days")>
         <LimitInput
           draft=draft
           set_draft=set_draft
@@ -368,7 +368,7 @@ fn RetentionRow(
           is_disabled=Signal::derive(move || !can_edit.get())
         />
       </td>
-      <td>
+      <td class="retention-cell" data-label=move || i18n.t("retention-messages")>
         <LimitInput
           draft=draft
           set_draft=set_draft
@@ -388,7 +388,7 @@ fn RetentionRow(
         <Show when=move || can_edit.get() && is_own() fallback=|| ()>
           <button
             type="button"
-            class="btn btn-small btn-quiet"
+            class="btn btn-small"
             on:click=move |_| page.stage(id, OwnDraft::with(stored, RetentionOverride::default()))
           >
             {move || i18n.t("admin-retention-reset")}
@@ -444,6 +444,7 @@ fn LimitInput(
         <option value=FOLLOW selected=move || !field().is_own>{move || follow_label.get()}</option>
         <option value=OWN selected=move || field().is_own>{move || i18n.t("admin-retention-limited")}</option>
       </select>
+      <span class="retention-number">
       <input
         id=input_id.clone()
         class="input narrow"
@@ -462,6 +463,7 @@ fn LimitInput(
         }
       />
       <span class="muted-text small">{unit}</span>
+      </span>
       <FieldError errors=errors field=input_id />
     </div>
   }
