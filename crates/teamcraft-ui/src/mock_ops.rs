@@ -11,17 +11,17 @@ use teamcraft_proto::{
   HealthCheckResponse, HealthCheckStatus, HeldDeactivationResponse, HistoryPolicy, OidcSyncBrakeSettings,
   OidcSyncMode, OidcSyncOutcome, OidcSyncRunResponse, OidcSyncState, OverrideEffect, Permission,
   PermissionScheme, PermissionSchemeResponse, PlannedDeactivationResponse, PushProvider, PushProviderState,
-  PushProviderStatus, Role, RuntimeSettingsKey, RuntimeSettingsResponse, RuntimeSettingsSection,
-  SchemeChange, SchemeOverride, SchemeRole, SchemeRoleResponse, SendTestMailRequest, SessionPolicy,
-  SetAnnouncementRequest, SettingsTestResponse, SfuStatus, StorageStatus, TestPushOutcome, UnixMillis,
-  UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
+  PushProviderStatus, RetentionPolicy, RetentionSetting, Role, RuntimeSettingsKey, RuntimeSettingsResponse,
+  RuntimeSettingsSection, SchemeChange, SchemeOverride, SchemeRole, SchemeRoleResponse, SendTestMailRequest,
+  SessionPolicy, SetAnnouncementRequest, SettingsTestResponse, SfuStatus, StorageStatus, TestPushOutcome,
+  UnixMillis, UpdateBrandRequest, UpdateCalendarSettingsRequest, UpdateMailSettingsRequest, WorkspacePolicy,
 };
 
 use super::{MockBackend, dm_first, id_from_raw};
 use crate::admin::{
   AdminChannel, AdminSpace, AdminUser, AuditAction, AuditEntry, AuditFilter, DeviceInfo, DevicePushStatus,
-  DeviceVerification, GuestInfo, OwnerRosterStatus, OwnerSigning, Retention, SelfJoinOutcome,
-  SettingsTestKind,
+  DeviceVerification, GuestInfo, OwnerRosterStatus, OwnerSigning, Retention, RetentionOverride,
+  SelfJoinOutcome, SettingsTestKind,
 };
 use crate::backend::{AdminBackend, CallBackend, SecurityBackend};
 use crate::calls::{HuddleInfo, MediaDevice, MediaDevices, Participant};
@@ -49,6 +49,8 @@ pub(super) struct OpsState {
   users: Vec<AdminUser>,
   channel_query: teamcraft_client_api::admin::AdminChannelQuery,
   user_query: teamcraft_client_api::admin::AdminUserQuery,
+  /// What the console's search asked for last.
+  find_text: String,
   audit: Vec<AuditEntry>,
   next_audit_id: u64,
   acknowledged_key_changes: Vec<ConversationId>,
@@ -61,6 +63,9 @@ pub(super) struct OpsState {
   revealed_scim_token: Option<(teamcraft_proto::ScimClientId, teamcraft_proto::WebhookSecretText)>,
 }
 
+/// Hits per kind the console's search shows, as the server is asked for.
+const FOUND_PER_KIND: usize = 5;
+
 impl OpsState {
   pub(super) fn new(now: TimestampMs, users: &[crate::model::User]) -> Self {
     Self {
@@ -70,10 +75,11 @@ impl OpsState {
       moderation: HashMap::new(),
       announcement: None,
       audit_filter: AuditFilter::default(),
-      channels: demo_channels(now),
+      channels: demo_channels(now, &default_policy().retention),
       users: demo_admin_users(now, users),
       channel_query: Default::default(),
       user_query: Default::default(),
+      find_text: String::new(),
       audit: demo_audit(now),
       next_audit_id: 1000,
       acknowledged_key_changes: Vec::new(),
@@ -220,6 +226,44 @@ impl AdminBackend for MockBackend {
     self.ops.borrow_mut().user_query = query;
   }
 
+  fn admin_find(&self, text: String) {
+    self.ops.borrow_mut().find_text = text;
+  }
+
+  fn admin_found(&self) -> teamcraft_client_api::admin::AdminFound {
+    let ops = self.ops.borrow();
+    let text = ops.find_text.clone();
+    if text.trim().is_empty() {
+      return Default::default();
+    }
+    let people_query = teamcraft_client_api::admin::AdminUserQuery {
+      text: text.clone(),
+      kind: Default::default(),
+    };
+    let channel_query = teamcraft_client_api::admin::AdminChannelQuery {
+      text: text.clone(),
+      filter: Default::default(),
+    };
+    teamcraft_client_api::admin::AdminFound {
+      people: ops
+        .users
+        .iter()
+        .filter(|user| people_query.matches(user))
+        .take(FOUND_PER_KIND)
+        .cloned()
+        .collect(),
+      channels: ops
+        .channels
+        .iter()
+        .filter(|channel| channel_query.matches(channel, self.now))
+        .take(FOUND_PER_KIND)
+        .cloned()
+        .collect(),
+      text,
+      is_searching: false,
+    }
+  }
+
   fn workspace_policy(&self) -> (u64, WorkspacePolicy) {
     let ops = self.ops.borrow();
     (ops.policy_version, ops.policy.clone())
@@ -250,6 +294,11 @@ impl AdminBackend for MockBackend {
     ops.policy_version += 1;
     let detail = format!("policy version {}", ops.policy_version);
     ops.policy = policy;
+    // A new instance default applies at once to every channel that follows it.
+    let retention = ops.policy.retention;
+    for channel in &mut ops.channels {
+      channel.retention = applied_retention(channel.own_retention, channel.space_retention, &retention);
+    }
     ops.record(self.now, AuditAction::PolicyChanged, "security policy", &detail);
   }
 
@@ -843,12 +892,14 @@ impl AdminBackend for MockBackend {
     self.ops.borrow_mut().audit_filter = filter;
   }
 
-  fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
+  fn set_channel_retention(&self, channel: ConversationId, own: RetentionOverride) {
     let mut ops = self.ops.borrow_mut();
+    let policy = ops.policy.retention;
     let Some(entry) = ops.channels.iter_mut().find(|candidate| candidate.id == channel) else {
       return;
     };
-    entry.retention = retention;
+    entry.own_retention = own;
+    entry.retention = applied_retention(own, entry.space_retention, &policy);
     let name = entry.name.clone();
     ops.record(
       self.now,
@@ -1058,9 +1109,31 @@ impl SecurityBackend for MockBackend {
   }
 }
 
+/// What applies to a channel: its own setting, else its space's, else the instance default, as
+/// the server works it out.
+fn applied_retention(
+  own: RetentionOverride,
+  space: RetentionOverride,
+  policy: &RetentionPolicy,
+) -> Retention {
+  let applied = own.or(space).or(RetentionOverride::from(policy.default));
+  Retention {
+    maybe_days: applied.maybe_days,
+    maybe_max_messages: applied.maybe_max_messages,
+    keeps_pinned: policy.keep_pinned,
+  }
+}
+
 fn default_policy() -> WorkspacePolicy {
   let defaults = WorkspacePolicy::default();
   WorkspacePolicy {
+    retention: RetentionPolicy {
+      default: RetentionSetting {
+        maybe_max_age_days: Some(365),
+        maybe_max_messages: None,
+      },
+      ..defaults.retention
+    },
     history_default: HistoryPolicy::FromJoin,
     session: SessionPolicy {
       requires_mfa: true,
@@ -1100,11 +1173,11 @@ fn push_status(
   }
 }
 
-fn demo_channels(now: TimestampMs) -> Vec<AdminChannel> {
-  let retention = |days: Option<u32>, messages: Option<u32>| Retention {
+fn demo_channels(now: TimestampMs, policy: &RetentionPolicy) -> Vec<AdminChannel> {
+  // The demo's channels' own settings; the rest follows the instance default.
+  let retention = |days: Option<u32>, messages: Option<u32>| RetentionOverride {
     maybe_days: days,
     maybe_max_messages: messages,
-    keeps_pinned: true,
   };
   #[allow(clippy::too_many_arguments)]
   let channel = |id: u64,
@@ -1117,7 +1190,7 @@ fn demo_channels(now: TimestampMs) -> Vec<AdminChannel> {
                  idle: i64,
                  messages: u64,
                  storage_mib: u64,
-                 retention: Retention,
+                 own_retention: RetentionOverride,
                  history: HistoryPolicy| AdminChannel {
     id: id_from_raw(id),
     space_name: space.into(),
@@ -1129,7 +1202,9 @@ fn demo_channels(now: TimestampMs) -> Vec<AdminChannel> {
     last_activity: now - idle,
     message_count: messages,
     storage_bytes: storage_mib * MIB,
-    retention,
+    retention: applied_retention(own_retention, RetentionOverride::default(), policy),
+    own_retention,
+    space_retention: RetentionOverride::default(),
     history,
     is_archived: false,
     maybe_inactivity: None,
@@ -1335,7 +1410,6 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
   };
   users
     .iter()
-    .filter(|user| !user.is_bot)
     .map(|user| {
       let n = raw_id(user.id);
       let role = match n {
@@ -1344,7 +1418,9 @@ fn demo_admin_users(now: TimestampMs, users: &[crate::model::User]) -> Vec<Admin
         9 => Role::Guest,
         _ => Role::Member,
       };
+      // Bots sign in with a token, not a device.
       let devices = match n {
+        _ if user.is_bot => vec![],
         1 => vec![
           device(101, "Laptop (Linux)", "Linux desktop", 0, true),
           device(102, "Phone (iOS)", "iOS", 3 * HOUR, false),

@@ -113,6 +113,30 @@ mod overview {
       (json!(2), json!(1))
     );
     assert!(first.get("last_activity_at").is_some());
+    // Retention: what applies, and the channel's and its space's own settings apart from it.
+    app
+      .put(
+        &alice,
+        &format!("/spaces/{space}/retention"),
+        json!({"retention": {"max_messages": 500}}),
+      )
+      .await;
+    app
+      .put(
+        &alice,
+        &format!("/conversations/{private}/retention"),
+        json!({"retention": {"max_age_days": 30}}),
+      )
+      .await;
+    let listed = app.get(&bob, "/admin/conversations").await;
+    let (first, second) = (&listed.body["conversations"][0], &listed.body["conversations"][1]);
+    assert_eq!(first["own_retention"], json!({"max_age_days": 30}));
+    assert_eq!(first["space_retention"], json!({"max_messages": 500}));
+    assert_eq!(
+      first["retention"],
+      json!({"max_age_days": 30, "max_messages": 500})
+    );
+    assert!(second.get("own_retention").is_none(), "nothing of its own");
 
     let members = app
       .get(&bob, &format!("/admin/conversations/{private}/members"))
@@ -278,6 +302,26 @@ mod overview {
         .as_array()
         .unwrap()
         .is_empty()
+    );
+
+    // By kind: people (members and guests) apart from bots.
+    let bot = app.post(&bob, "/admin/bots", json!({"name": "Log bridge"})).await;
+    assert_eq!(bot.status, StatusCode::CREATED, "{}", bot.body);
+    let bots = app.get(&bob, "/admin/users?kind=bots").await;
+    assert_eq!(bots.body["users"].as_array().unwrap().len(), 1);
+    assert_eq!(bots.body["users"][0]["kind"], "bot");
+    let people = app.get(&bob, "/admin/users?kind=people").await;
+    assert!(
+      people.body["users"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|user| user["kind"] != "bot")
+    );
+    assert_eq!(people.body["users"].as_array().unwrap().len(), 3);
+    assert_eq!(
+      app.get(&bob, "/admin/users?kind=robots").await.status,
+      StatusCode::BAD_REQUEST
     );
 
     // By ID: the accounts a notice refers to, on whatever page.

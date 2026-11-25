@@ -3,10 +3,11 @@ use leptos::prelude::*;
 use teamcraft_proto::{ChannelInactivityStatus, ChannelModeration, HistoryPolicy, Permission, UnixMillis};
 
 use crate::admin::{
-  AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, SelfJoinOutcome, format_bytes,
+  AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminFocus, AdminLoad, AdminSection, SelfJoinOutcome,
+  format_bytes,
 };
 use crate::admission::{Admission, admission};
-use crate::channel_access::ChannelAccess;
+use crate::channel_access::{ChannelAccess, can_in_workspace_now};
 use crate::clock::{format_date, format_relative, now_ms};
 use crate::components::admin_console::{ListMore, SectionHeader};
 use crate::components::admin_spaces::{LoadNotice, SpacesPanel};
@@ -281,8 +282,20 @@ pub fn ChannelsSection() -> impl IntoView {
   // The list is the server's: it filters and searches, and the next pages load on request
   // (issue #1241). The page comes back to what it was asked last.
   let asked = state.read(|backend| backend.admin_channel_query());
-  let query = RwSignal::new(asked.text);
-  let filter = RwSignal::new(asked.filter);
+  // Reached from the console's search: that channel, found by its name, with its details open.
+  let maybe_focus = match state.admin_focus.get_untracked() {
+    Some(AdminFocus::Channel { id, name }) => {
+      state.admin_focus.set(None);
+      Some((id, name))
+    },
+    _ => None,
+  };
+  let query = RwSignal::new(maybe_focus.as_ref().map_or(asked.text, |(_, name)| name.clone()));
+  let filter = RwSignal::new(if maybe_focus.is_some() {
+    AdminChannelFilter::All
+  } else {
+    asked.filter
+  });
   let debounced = use_debounced(query, SEARCH_DEBOUNCE_MS);
   Effect::new(move |_| {
     let asked = AdminChannelQuery {
@@ -291,7 +304,7 @@ pub fn ChannelsSection() -> impl IntoView {
     };
     state.write(|backend| backend.admin_set_channel_query(asked));
   });
-  let selected = RwSignal::new(None::<ConversationId>);
+  let selected = RwSignal::new(maybe_focus.map(|(id, _)| id));
   let tab = RwSignal::new(ListTab::Channels);
   let now = now_ms();
 
@@ -474,7 +487,8 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       .map(|user| user.display_name)
   });
   let retention = move || {
-    let retention = current.with(|channel| channel.retention);
+    let (retention, own, space) =
+      current.with(|channel| (channel.retention, channel.own_retention, channel.space_retention));
     let mut parts = Vec::new();
     if let Some(days) = retention.maybe_days {
       parts.push(i18n.t_count("admin-retention-days", days as usize));
@@ -482,11 +496,19 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
     if let Some(messages) = retention.maybe_max_messages {
       parts.push(i18n.t_count("admin-retention-messages", messages as usize));
     }
-    if parts.is_empty() {
+    let value = if parts.is_empty() {
       i18n.t("admin-retention-forever")
     } else {
       parts.join(" / ")
-    }
+    };
+    let source = if !own.is_empty() {
+      "admin-retention-source-own"
+    } else if !space.is_empty() {
+      "admin-retention-source-space"
+    } else {
+      "admin-retention-source-default"
+    };
+    i18n.t_with(source, &[("value", &value)])
   };
   let history = move || {
     current.with(|channel| match &channel.history {
@@ -503,11 +525,11 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
       <dt>{move || i18n.t("admin-col-members")}</dt>
       <dd>{move || i18n.t_count("members-count", current.with(|channel| channel.member_count) as usize)}</dd>
       <dt>{move || i18n.t("admin-guests")}</dt>
-      <dd>{move || current.with(|channel| channel.guest_count)}</dd>
+      <dd>{move || i18n.t_count("admin-guests-count", current.with(|channel| channel.guest_count) as usize)}</dd>
       <dt>{move || i18n.t("admin-col-owner")}</dt>
       <dd translate="no">{move || owner_name.get().unwrap_or_else(|| "–".to_owned())}</dd>
       <dt>{move || i18n.t("admin-messages")}</dt>
-      <dd>{move || current.with(|channel| channel.message_count.to_string())}</dd>
+      <dd>{move || i18n.t_count("admin-messages-count", current.with(|channel| channel.message_count) as usize)}</dd>
       <dt>{move || i18n.t("admin-col-storage")}</dt>
       <dd>{move || current.with(|channel| format_bytes(channel.storage_bytes))}</dd>
       <dt>{move || i18n.t("admin-history")}</dt>
@@ -518,7 +540,11 @@ fn ChannelDetail(channel: AdminChannel, latest: Memo<Option<AdminChannel>>) -> i
         if text == key { history } else { text }
       }}</dd>
       <dt>{move || i18n.t("admin-retention")}</dt>
-      <dd>{retention}</dd>
+      <dd>
+        <button type="button" class="admin-link" on:click=move |_| state.open_admin(AdminSection::Retention)>
+          {retention}
+        </button>
+      </dd>
     </dl>
     <InactivityNote current=current />
     <p class="no-content-note">
@@ -771,24 +797,64 @@ fn assign_owner(
   }
 }
 
-/// What members and guests may not do in this channel. A channel can only take permissions away.
+/// What members and guests may do in this channel, in plain words. A channel can only take
+/// permissions away; what stays on follows the permission settings. Changing it is the instance's
+/// business (`manage_workspace`): others see it without the switches.
 #[component]
 fn ModerationEditor(channel: ConversationId) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
   let moderation = Memo::new(move |_| state.read(|backend| backend.channel_moderation(channel)));
+  let can_change = Memo::new(move |_| can_in_workspace_now(state, &Permission::ManageWorkspace));
+  let who_cell = move |who: Who, permission: Permission, key: String| {
+    let is_allowed = {
+      let permission = permission.clone();
+      move || {
+        moderation.with(|current| match who {
+          Who::Members => !current.member_denied.contains(&permission),
+          Who::Guests => !current.guest_denied.contains(&permission),
+        })
+      }
+    };
+    let label = move || {
+      i18n.t_with(
+        match who {
+          Who::Members => "admin-moderation-members-may",
+          Who::Guests => "admin-moderation-guests-may",
+        },
+        &[("action", &i18n.t(&key))],
+      )
+    };
+    view! {
+      <td>
+        <label class="switch-row moderation-switch">
+          <input
+            type="checkbox"
+            role="switch"
+            aria-label=label
+            prop:checked=is_allowed.clone()
+            disabled=move || !can_change.get()
+            on:change=move |ev| set_allowed(state, channel, moderation.get_untracked(), who, permission.clone(), event_target_checked(&ev))
+          />
+          <span class="moderation-state" aria-hidden="true">
+            {move || i18n.t(if is_allowed() { "admin-moderation-on" } else { "admin-moderation-off" })}
+          </span>
+        </label>
+      </td>
+    }
+  };
 
   view! {
     <section class="moderation" aria-labelledby="moderation-title">
       <h4 id="moderation-title" class="detail-heading">{move || i18n.t("admin-moderation")}</h4>
       <p class="muted-text small">{move || i18n.t("admin-moderation-hint")}</p>
-      <table class="data-table moderation-table">
+      <table class="moderation-table">
         <caption class="visually-hidden">{move || i18n.t("admin-moderation")}</caption>
         <thead>
           <tr>
-            <th scope="col">{move || i18n.t("permissions-permission")}</th>
-            <th scope="col">{move || i18n.t("permissions-role-member")}</th>
-            <th scope="col">{move || i18n.t("permissions-role-guest")}</th>
+            <th scope="col"><span class="visually-hidden">{move || i18n.t("admin-moderation-action")}</span></th>
+            <th scope="col">{move || i18n.t("permissions-roles-member")}</th>
+            <th scope="col">{move || i18n.t("permissions-roles-guest")}</th>
           </tr>
         </thead>
         <tbody>
@@ -796,37 +862,25 @@ fn ModerationEditor(channel: ConversationId) -> impl IntoView {
             .into_iter()
             .map(|permission| {
               let key = format!("permission-{}", permission.as_str());
-              let (member_perm, guest_perm) = (permission.clone(), permission.clone());
-              let (member_set, guest_set) = (permission.clone(), permission);
+              let hint_key = format!("{key}-hint");
+              let name_key = key.clone();
               view! {
                 <tr>
-                  <th scope="row">{move || i18n.t(&key)}</th>
-                  <td>
-                    <label class="checkbox">
-                      <input
-                        type="checkbox"
-                        prop:checked=move || !moderation.get().member_denied.contains(&member_perm)
-                        on:change=move |ev| set_allowed(state, channel, moderation.get_untracked(), Who::Members, member_set.clone(), event_target_checked(&ev))
-                      />
-                      <span class="visually-hidden">{move || i18n.t("admin-moderation-allowed")}</span>
-                    </label>
-                  </td>
-                  <td>
-                    <label class="checkbox">
-                      <input
-                        type="checkbox"
-                        prop:checked=move || !moderation.get().guest_denied.contains(&guest_perm)
-                        on:change=move |ev| set_allowed(state, channel, moderation.get_untracked(), Who::Guests, guest_set.clone(), event_target_checked(&ev))
-                      />
-                      <span class="visually-hidden">{move || i18n.t("admin-moderation-allowed")}</span>
-                    </label>
-                  </td>
+                  <th scope="row">
+                    <span class="moderation-name">{move || i18n.t(&name_key)}</span>
+                    <span class="muted-text small">{move || i18n.t(&hint_key)}</span>
+                  </th>
+                  {who_cell(Who::Members, permission.clone(), key.clone())}
+                  {who_cell(Who::Guests, permission, key)}
                 </tr>
               }
             })
             .collect_view()}
         </tbody>
       </table>
+      <Show when=move || !can_change.get() fallback=|| ()>
+        <p class="muted-text small">{move || i18n.t("admin-moderation-read-only")}</p>
+      </Show>
     </section>
   }
 }

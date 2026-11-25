@@ -689,10 +689,38 @@
   border-bottom: 1px solid var(--border);
 }
 
+:root[data-layout="compact"] .admin-nav {
+  flex-wrap: wrap;
+}
+
 :root[data-layout="compact"] .admin-nav h1,
-:root[data-layout="compact"] .admin-nav-search,
 :root[data-layout="compact"] .admin-nav-groups {
   display: none;
+}
+
+/* Phone width: the search stays, on a row of its own below the page picker; what it finds opens
+   under it while something is typed, and the picker's list is back once the field is empty. */
+:root[data-layout="compact"] .admin-nav-search {
+  order: 1;
+  flex-basis: 100%;
+  margin: 0;
+}
+
+:root[data-layout="compact"] .admin-nav-search input {
+  min-height: var(--touch);
+}
+
+:root[data-layout="compact"] .admin-nav.is-finding .admin-nav-groups {
+  order: 2;
+  display: flex;
+  flex-basis: 100%;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding-bottom: var(--space-2);
+}
+
+:root[data-layout="compact"] .admin-nav-found {
+  min-height: var(--touch);
 }
 
 :root[data-layout="compact"] .admin-back {

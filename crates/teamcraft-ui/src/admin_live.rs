@@ -32,10 +32,10 @@ use teamcraft_proto::{
 };
 
 use crate::admin::{
-  AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminLoad, AdminSection, AdminSpace,
-  AdminSpaceChanges, AdminUser, AdminUserQuery, AuditAction, AuditEntry, AuditFilter, DeviceInfo,
-  DeviceVerification, INACTIVE_AFTER_DAYS, RATE_LIMITED_CODE, READ_FAILED_CODE, Retention, SettingsTestKind,
-  UNREACHABLE_CODE,
+  AdminAccountKind, AdminChannel, AdminChannelFilter, AdminChannelQuery, AdminFound, AdminLoad, AdminSection,
+  AdminSpace, AdminSpaceChanges, AdminUser, AdminUserQuery, AuditAction, AuditEntry, AuditFilter, DeviceInfo,
+  DeviceVerification, INACTIVE_AFTER_DAYS, RATE_LIMITED_CODE, READ_FAILED_CODE, Retention, RetentionOverride,
+  SettingsTestKind, UNREACHABLE_CODE,
 };
 use crate::auth::{ApiMethod, Authenticator, BinaryBody};
 use crate::clock::now_ms;
@@ -68,6 +68,8 @@ const MAX_ROLE_PAGES: usize = 5;
 const QUERY_DELAY: Duration = Duration::ZERO;
 const MORE_CHANNELS_KEY: &str = "more:channels";
 const MORE_USERS_KEY: &str = "more:users";
+/// Hits per kind the console's search asks for: a glance, not a list; the page lists the rest.
+const FOUND_PER_KIND: usize = 5;
 /// Servers from before the list carried owner and retention (`maybe_retention` absent): only this
 /// many channels get them, one request each, so an old server isn't flooded.
 const LEGACY_DETAIL_LIMIT: usize = 100;
@@ -187,6 +189,8 @@ pub struct AdminData {
   /// Requests for on-demand data that are under way.
   loading: HashSet<String>,
   maybe_error: Option<String>,
+  /// What the console's search asked for and found.
+  found: AdminFound,
   /// Changes (not reads) that have had their answer, refused or not: the console's save bar tells
   /// "saved" from "still saving" by it (issue #958).
   writes_done: u64,
@@ -356,6 +360,85 @@ impl AdminLive {
     data.user_query = query;
     data.user_paging = data.user_paging.restarted();
     true
+  }
+
+  /// Asks for people and channels named like `text`, for the console's search. A newer text
+  /// replaces the question; the answer to an older one is dropped when it comes.
+  pub fn find(&self, text: String) {
+    let text = text.trim().to_owned();
+    {
+      let mut data = self.data.borrow_mut();
+      if data.found.text == text {
+        return;
+      }
+      data.found = AdminFound {
+        is_searching: !text.is_empty(),
+        text: text.clone(),
+        ..AdminFound::default()
+      };
+    }
+    if !text.is_empty() {
+      self.run(AdminTask::Find { text });
+    }
+  }
+
+  pub fn found(&self) -> AdminFound {
+    self.data.borrow().found.clone()
+  }
+
+  async fn find_now(&self, text: String) {
+    let query = encode_component(&text);
+    let (users, channels) = join(
+      self.fetch_result::<ListAdminUsersResponse>(format!(
+        "/api/v1/admin/users?status=all&limit={FOUND_PER_KIND}&query={query}"
+      )),
+      self.fetch_result::<ListAdminConversationsResponse>(format!(
+        "/api/v1/admin/conversations?limit={FOUND_PER_KIND}&query={query}"
+      )),
+    )
+    .await;
+    {
+      let mut data = self.data.borrow_mut();
+      if data.found.text != text {
+        return;
+      }
+      let space_names: HashMap<SpaceId, String> = data
+        .spaces
+        .iter()
+        .map(|space| (space.id, space.name.clone()))
+        .collect();
+      let mut errors = Vec::new();
+      let people = match users {
+        Ok(page) => page.users.iter().map(user_from_wire).collect(),
+        Err(error) => {
+          errors.push(error);
+          Vec::new()
+        },
+      };
+      let channels = match channels {
+        Ok(page) => channels_of(
+          &page.conversations,
+          &space_names,
+          &data.legacy_details,
+          &data.policy.history_default,
+          data.policy.retention.keep_pinned,
+        ),
+        Err(error) => {
+          errors.push(error);
+          Vec::new()
+        },
+      };
+      data.found = AdminFound {
+        text,
+        people,
+        channels,
+        is_searching: false,
+      };
+      if let Some(error) = errors.into_iter().next() {
+        data.maybe_error = Some(error);
+      }
+    }
+    self.changed();
   }
 
   /// A page after the last entry is being read.
@@ -1583,12 +1666,12 @@ impl AdminLive {
     );
   }
 
-  pub fn set_channel_retention(&self, channel: ConversationId, retention: Retention) {
+  pub fn set_channel_retention(&self, channel: ConversationId, own: RetentionOverride) {
     self.data.borrow_mut().legacy_details.remove(&channel);
     let request = SetRetentionRequest {
       retention: RetentionSetting {
-        maybe_max_age_days: retention.maybe_days,
-        maybe_max_messages: retention.maybe_max_messages.map(u64::from),
+        maybe_max_age_days: own.maybe_days,
+        maybe_max_messages: own.maybe_max_messages.map(u64::from),
       },
     };
     if let Ok(body) = serde_json::to_string(&request) {
@@ -1673,7 +1756,10 @@ impl AdminLive {
           .find(|member| member.role == teamcraft_proto::ChannelRole::Admin)
           .map(|member| member.user.id)
       }),
-      maybe_retention: retention.map(|status| status.effective),
+      maybe_retention: retention.as_ref().map(|status| status.effective),
+      own_retention: retention.map(|status| status.own).unwrap_or_default(),
+      // The status of a channel doesn't name its space's setting; its effective value does the job.
+      space_retention: RetentionSetting::default(),
     }
   }
 
@@ -1855,9 +1941,7 @@ impl AdminLive {
     let mut list = Listed::empty(paging.generation);
     let mut maybe_after: Option<UserId> = None;
     for _ in 0..paging.pages.clamp(1, MAX_REFRESH_PAGES) {
-      let page: ListAdminUsersResponse = self
-        .fetch_result(users_path(&query.text, None, maybe_after))
-        .await?;
+      let page: ListAdminUsersResponse = self.fetch_result(users_path(&query, None, maybe_after)).await?;
       maybe_after = page.users.last().map(|summary| summary.id);
       list.has_more = page.has_more && maybe_after.is_some();
       list.pages += 1;
@@ -1876,7 +1960,9 @@ impl AdminLive {
     for role in ["owner", "admin"] {
       let mut maybe_after: Option<UserId> = None;
       for _ in 0..MAX_ROLE_PAGES {
-        let page: ListAdminUsersResponse = self.fetch_result(users_path("", Some(role), maybe_after)).await?;
+        let page: ListAdminUsersResponse = self
+          .fetch_result(users_path(&AdminUserQuery::default(), Some(role), maybe_after))
+          .await?;
         maybe_after = page.users.last().map(|summary| summary.id);
         holders.extend(page.users.into_iter().filter(|user| !user.is_deactivated));
         if !page.has_more || maybe_after.is_none() {
@@ -1946,7 +2032,7 @@ impl AdminLive {
       )
     };
     let result = self
-      .fetch_result::<ListAdminUsersResponse>(users_path(&query.text, None, maybe_after))
+      .fetch_result::<ListAdminUsersResponse>(users_path(&query, None, maybe_after))
       .await;
     {
       let mut data = self.data.borrow_mut();
@@ -2230,6 +2316,7 @@ impl AdminLive {
       AdminTask::Load { key, path, what } => self.load_now(key, path, what).await,
       AdminTask::MoreChannels => self.more_channels_now().await,
       AdminTask::MoreUsers => self.more_users_now().await,
+      AdminTask::Find { text } => self.find_now(text).await,
       AdminTask::References { channels, users } => self.references_now(channels, users).await,
       AdminTask::SettingsTest { kind, path, body } => self.run_settings_test_now(kind, path, body).await,
       AdminTask::BrandPreview { key, path } => self.brand_preview_now(key, path).await,
@@ -2286,6 +2373,8 @@ pub enum AdminTask {
   MoreChannels,
   /// The next page of the user list.
   MoreUsers,
+  /// People and channels for the console's search.
+  Find { text: String },
   /// Channels and accounts by ID, for the names in notices (issue #1433).
   References {
     channels: Vec<ConversationId>,
@@ -2618,6 +2707,8 @@ fn appended<T>(
 struct ChannelDetails {
   maybe_owner: Option<UserId>,
   maybe_retention: Option<RetentionSetting>,
+  own_retention: RetentionSetting,
+  space_retention: RetentionSetting,
 }
 
 /// What the list says; for a server that sent neither field, what was read for the channel.
@@ -2629,6 +2720,8 @@ fn details_of(
     return ChannelDetails {
       maybe_owner: summary.maybe_owner_user_id,
       maybe_retention: summary.maybe_retention,
+      own_retention: summary.own_retention,
+      space_retention: summary.space_retention,
     };
   }
   legacy
@@ -2778,6 +2871,8 @@ fn channel_from_wire(
     // Ciphertext bytes of the channel's files and search index in storage.
     storage_bytes: summary.storage_bytes,
     retention,
+    own_retention: RetentionOverride::from(details.own_retention),
+    space_retention: RetentionOverride::from(details.space_retention),
     history,
     is_archived: summary.is_archived,
     maybe_inactivity: summary.maybe_inactivity.clone(),
@@ -2806,12 +2901,17 @@ fn conversations_path(query: &AdminChannelQuery, maybe_after: Option<Conversatio
 
 /// `GET /admin/users` for one page: every account (or the active ones of `maybe_role`) whose name
 /// contains `text`.
-fn users_path(text: &str, maybe_role: Option<&str>, maybe_after: Option<UserId>) -> String {
+fn users_path(query: &AdminUserQuery, maybe_role: Option<&str>, maybe_after: Option<UserId>) -> String {
   let status = if maybe_role.is_some() { "active" } else { "all" };
   let mut path = format!("/api/v1/admin/users?status={status}&limit={PAGE_SIZE}");
-  let text = text.trim();
+  let text = query.text.trim();
   if !text.is_empty() {
     path.push_str(&format!("&query={}", encode_component(text)));
+  }
+  match query.kind {
+    AdminAccountKind::All => {},
+    AdminAccountKind::People => path.push_str("&kind=people"),
+    AdminAccountKind::Bots => path.push_str("&kind=bots"),
   }
   if let Some(role) = maybe_role {
     path.push_str(&format!("&role={role}"));
@@ -2894,7 +2994,7 @@ fn user_from_wire(summary: &AdminUserSummary) -> AdminUser {
       maybe_custom_status: None::<CustomStatus>,
       avatar_hue: hue_from_seed(&format!("{}{username}", summary.display_name)),
       is_guest: summary.kind == UserKind::Guest,
-      is_bot: false,
+      is_bot: summary.kind == UserKind::Bot,
       maybe_organization: None,
       is_deactivated: false,
       is_deleted: summary.is_deleted,
@@ -3177,6 +3277,8 @@ mod tests {
         maybe_max_messages: None,
         keeps_pinned: true,
       },
+      own_retention: RetentionOverride::default(),
+      space_retention: RetentionOverride::default(),
       history: HistoryPolicy::Full,
       is_archived: false,
       maybe_inactivity: None,
@@ -3244,6 +3346,8 @@ mod tests {
       maybe_last_activity_at: None,
       maybe_owner_user_id: None,
       maybe_retention: None,
+      own_retention: RetentionSetting::default(),
+      space_retention: RetentionSetting::default(),
       maybe_inactivity: None,
     };
     let status = RetentionSetting {
@@ -3257,12 +3361,26 @@ mod tests {
       ChannelDetails {
         maybe_owner: Some(id_from_raw(1)),
         maybe_retention: Some(status),
+        own_retention: RetentionSetting {
+          maybe_max_age_days: None,
+          maybe_max_messages: Some(500),
+        },
+        space_retention: RetentionSetting::default(),
       },
       HistoryPolicy::Full,
       false,
     );
     assert_eq!(channel.space_name, "Space A");
     assert_eq!(channel.retention.maybe_days, Some(30));
+    assert_eq!(
+      channel.own_retention,
+      RetentionOverride {
+        maybe_days: None,
+        maybe_max_messages: Some(500)
+      },
+      "the channel's own setting stays apart from what applies"
+    );
+    assert!(channel.space_retention.is_empty());
     assert!(!channel.retention.keeps_pinned);
     assert_eq!(channel.last_activity, 100);
     assert_eq!(
@@ -3628,12 +3746,13 @@ mod tests {
       server.clear();
       assert!(live.apply_user_query(AdminUserQuery {
         text: "Person 29".into(),
+        kind: AdminAccountKind::People,
       }));
       live.wanted.set(Reads::USERS);
       block_on(live.refresh_once());
       assert_eq!(
         server.paths(),
-        ["/api/v1/admin/users?status=all&limit=100&query=Person%2029"]
+        ["/api/v1/admin/users?status=all&limit=100&query=Person%2029&kind=people"]
       );
       let names: Vec<String> = live
         .users()
@@ -3848,7 +3967,7 @@ mod tests {
         "/api/v1/admin/conversations?limit=100"
       );
       assert_eq!(
-        users_path("", Some("admin"), None),
+        users_path(&AdminUserQuery::default(), Some("admin"), None),
         "/api/v1/admin/users?status=active&limit=100&role=admin"
       );
     }
@@ -4142,6 +4261,8 @@ mod tests {
           maybe_max_age_days: Some(30),
           maybe_max_messages: None,
         }),
+        own_retention: RetentionSetting::default(),
+        space_retention: RetentionSetting::default(),
         maybe_inactivity: None,
       }
     }
