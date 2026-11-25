@@ -3469,7 +3469,8 @@ store of version 3 opens, at the cost measured for version 3 above.
 On web the core runs on the page's only thread. A catch-up after a long absence decrypts and writes
 conversation after conversation, and the server's answers often come faster than the work, so the
 UI's input, its reads of the core and its paints waited until the catch-up was done. The client now
-hands the thread back every 30 ms (`ClientSettings::with_thread_turns`, web only): between two
+hands the thread back every 8 ms (`ClientSettings::with_thread_turns`, web only; 30 ms until
+#2397, below): between two
 conversations, welcomes, member lists, MLS queue entries and live events, and within a page of
 messages. Native hosts have a thread for the engine and one for reads; there the backlog's pages
 are paced instead (`RunnerSettings::background_page_gap`, at least the page's own time and 100 ms).

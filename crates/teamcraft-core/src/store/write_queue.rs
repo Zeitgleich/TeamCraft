@@ -61,6 +61,10 @@ pub(crate) struct Writes {
   maybe_last_failure: Option<WriteFailure>,
   /// Another page (a newer version) asked for the database; it was closed, writes wait for a reload.
   pub(crate) is_closed: bool,
+  /// The owner holds the writes back until its next flush: a catalog build in many short steps
+  /// rewrites the same nodes in each, and a batch issued between two would seal and write them
+  /// again every time (issue #2397).
+  pub(crate) is_held: bool,
   /// Depth of the open group of writes ([`crate::store::LocalStore::begin_writes`]): the size limit
   /// doesn't issue a batch in the middle of one.
   pub(crate) group_depth: u32,
@@ -93,6 +97,7 @@ impl Default for Writes {
       last_ended_batch: 0,
       maybe_last_failure: None,
       is_closed: false,
+      is_held: false,
       group_depth: 0,
       failed_batches: 0,
       maybe_last_issue_ms: None,
@@ -194,7 +199,7 @@ impl Writes {
   /// open here is one a panic ended (in the browser a panic doesn't unwind): what it wrote so far
   /// must never reach the disk.
   pub(crate) fn take_next_batch(&mut self, now_ms: i64, is_flush: bool) -> Option<Vec<String>> {
-    if self.maybe_running_batch.is_some() || self.group_depth > 0 {
+    if self.maybe_running_batch.is_some() || self.group_depth > 0 || (self.is_held && !is_flush) {
       return None;
     }
     if self.failed_batches > 0 {
@@ -591,6 +596,18 @@ mod tests {
       writes.take_queued();
       assert!(matches!(writes.issue("node"), Ok(Some(Issue::Put { sealed, .. })) if sealed == b"second"));
       assert_eq!(seals.get(), 2);
+    }
+
+    #[test]
+    fn held_writes_go_out_with_a_flush_only() {
+      let mut writes = Writes {
+        is_held: true,
+        ..Writes::default()
+      };
+      let seals = Rc::new(Cell::new(0));
+      writes.queue("node".into(), Some(lazy(&seals, b"node")), 1);
+      assert_eq!(writes.take_next_batch(0, false), None);
+      assert_eq!(writes.take_next_batch(0, true), Some(vec!["node".to_string()]));
     }
 
     #[test]
