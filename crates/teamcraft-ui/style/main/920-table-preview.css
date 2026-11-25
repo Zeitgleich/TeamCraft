@@ -148,11 +148,14 @@
 .tt thead .tt-corner { z-index: 3; left: 0; cursor: default; }
 .tt tr.is-selected > .tt-n { color: var(--accent-strong); }
 
+/* Measures a row: a cell's padding and bottom border, so the rows' heights the scroller counts
+   match the drawn rows' (one pixel short per row made the end of a long table jump). */
 .tt-probe {
   position: absolute;
   top: 0;
   left: 0;
   padding: var(--tt-pad-y) var(--tt-pad-x);
+  border-bottom: 1px solid transparent;
   visibility: hidden;
   white-space: nowrap;
   pointer-events: none;
