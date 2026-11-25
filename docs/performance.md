@@ -3495,6 +3495,48 @@ lag shows on fast machines too), the UI's snapshot updates and entry counts cost
 GlitchTip shows `snapshot_update` up to 5 s and `entry_counts` around 350 ms. Those are reads, not
 the catch-up, and are tracked on their own.
 
+### Coming back after a long absence: the page's thread (issue #2397)
+
+A member who opened the web app after weeks found it unusable: the sidebar stuttered and clicks
+didn't land, for a long time after the start. The core runs on the page's only thread, and a store
+that changed a lot (a catalog rebuilt by an update, many conversations to catch up) kept it busy in
+blocks of seconds. Measured with `tests/e2e` `perf.rs` at the large scale (300 channels, 100k
+messages), `PERF_CATCH_UP_AFTER_BUILD=1` (the catalog is rebuilt, then 298 conversations catch up),
+the CPU slowed down 2×, a debug web build at opt-level 1, on one machine, 2026-11-25. Profiles with
+`PERF_PROFILE=catch_up,catalog`; `scripts/long-task-profile.py` names the functions that ran in the
+long tasks (with the build's names map, `teamcraft-web-bundle --names-out`).
+
+| Catch-up after a rebuilt catalog, large workspace | Before      | After      |
+|---------------------------------------------------|-------------|------------|
+| Main-thread tasks over 50 ms                      | 182         | 165        |
+| Their total                                       | 37.6 s      | 15.3 s     |
+| Longest                                           | 2,684 ms    | 808 ms     |
+| Catalog build alone: tasks over 50 ms / total     | 33 / 29.2 s | 31 / 4.0 s |
+| Catalog build alone: longest                      | 2,217 ms    | 675 ms     |
+
+Where the time went, before:
+
+- **The catalog build:** one group of 4,096 records per task, 0.7 s growing to 2.7 s as the
+  indexes grew. About half of each was sealing the batch's queued writes when it was issued. Now
+  the build goes in steps of 40 ms, each a group of writes, with the thread handed back in between;
+  its writes are held from the batch timer and committed every 4,096 records, and queued writes are
+  sealed 8 ms at a time before a batch is issued.
+- **The first snapshot after the rebuild** counted all 300 entries in one read (2.6 s): a rebuilt
+  catalog drops the entries' tallies. It is now read a conversation at a time, the thread handed
+  back every 8 ms.
+- **Finding one conversation by decoding all of them** on every page of rows the UI read
+  (`tick_members`, 0.8 s over the run): one record now (`conversation_raw`).
+- **Handing the thread back** cost a 4 ms timer clamp from the fifth zero timeout in a row: it
+  posts to a `MessageChannel` now, and the catch-up's turn is 8 ms instead of 30.
+- **Times and dates** were formatted with `toLocaleTimeString` and its kin, which build a new
+  formatter for every row; one `Intl.DateTimeFormat` per locale and format now.
+
+The steps cost time in total: at 8 ms per step the large store's build took 140 s instead of 37 s
+(every step read the index nodes the node cache had dropped since the last), so the steps are
+40 ms, under a long task; that setting has no large run of its own yet. What stays on the thread
+after this is the UI's own rendering. The structural answer is the core in a worker (#2363), which
+takes all of this off the page.
+
 ### Web bundle size
 
 Two budgets, both on the **compressed** wasm (issue #910's follow-up, 2026-10-31). The strict one
@@ -3525,10 +3567,11 @@ the chunks that load later. The limit:
 | The call module: gzip -9             | 2,100,000 B  | fails                            |
 
 Both budgets are the sizes after the rarely shown parts left the first visit (#1699, 2026-11-22,
-below) plus about 6 %: 6,342,543 and 5,614,660 B. The guest's was raised by 30 kB on 2026-11-25
-(#2397, the maintainer's decision): the core a guest runs in the page hands its thread back in
-short steps, and the page keeps its date formatters and watches its thread for long tasks. 5 % would have put the warning (95 %) below
-today's sizes. Before, they were 7.34 and 7 MB (2026-11-20 and 2026-11-17, below). Earlier, both
+below) plus about 6 %: 6,342,543 and 5,614,660 B. 5 % would have put the warning (95 %) below
+today's sizes. The guest's was raised by 30 kB on 2026-11-25 (#2397, the maintainer's decision):
+the core a guest runs in the page hands its thread back in short steps, and the page keeps its
+date formatters and watches its thread for long tasks. Before, they were 7.34 and 7 MB (2026-11-20
+and 2026-11-17, below). Earlier, both
 budgets were the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
 out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
 before; the signed-in one raised to 5.63 MB the same day (below). On 2026-11-14 the service worker's
