@@ -12,8 +12,14 @@ import uniffi.teamcraft_ffi.ChannelAnchorMarksItem
 import uniffi.teamcraft_ffi.GroupMentionReachItem
 import uniffi.teamcraft_ffi.MentionableGroupItem
 import uniffi.teamcraft_ffi.PollLimitsItem
+import uniffi.teamcraft_ffi.CanvasBlockItem
+import uniffi.teamcraft_ffi.CanvasEdit
+import uniffi.teamcraft_ffi.CanvasEditOutcome
+import uniffi.teamcraft_ffi.CanvasPageEditor
 import uniffi.teamcraft_ffi.CanvasPageItem
 import uniffi.teamcraft_ffi.CanvasPresenceItem
+import uniffi.teamcraft_ffi.CanvasVersionItem
+import uniffi.teamcraft_ffi.CanvasVersionKey
 import uniffi.teamcraft_ffi.ChannelMembersInfo
 import uniffi.teamcraft_ffi.ChannelRolesReviewItem
 import uniffi.teamcraft_ffi.CreateOutcome
@@ -283,6 +289,26 @@ class ChatClient(
   /** The page is no longer shown: the others drop this device at once. */
   suspend fun leaveCanvasPage(conversation: String, maybePage: String?, isShared: Boolean) =
     core().leaveCanvasPage(conversation, maybePage, isShared)
+
+  /** The page an editor shows, with its edits not sent yet (#2361). */
+  suspend fun canvasEditorPage(editor: CanvasPageEditor): CanvasPageItem = core().canvasEditorPage(editor)
+
+  /** Makes an edit on the editor's page; the page with it, and when to send the waiting edits. */
+  suspend fun canvasEdit(editor: CanvasPageEditor, edit: CanvasEdit): CanvasEditOutcome = core().canvasEdit(editor, edit)
+
+  /** Sends the edits waiting in the editor: typing paused, or the page is left. */
+  suspend fun flushCanvasEdits(editor: CanvasPageEditor) = core().flushCanvasEdits(editor)
+
+  /** The page is left: the editor's waiting edits go out and the core lets go of it. */
+  suspend fun closeCanvasEditor(editor: CanvasPageEditor) = core().closeCanvasEditor(editor)
+
+  /** The page's versions as this device holds them, newest first (#2361). */
+  suspend fun canvasVersions(conversation: String, maybePage: String?): List<CanvasVersionItem> =
+    core().canvasVersions(conversation, maybePage)
+
+  /** The page as it was at [version]; `null` when this device no longer has that version. */
+  suspend fun canvasVersionPage(conversation: String, maybePage: String?, version: CanvasVersionKey): List<CanvasBlockItem>? =
+    core().canvasVersionPage(conversation, maybePage, version)
 
   /** Reads the channel's members and signed roles afresh; the change arrives as a store update. */
   suspend fun refreshChannelMembers(conversation: String) = core().refreshChannelMembers(conversation)

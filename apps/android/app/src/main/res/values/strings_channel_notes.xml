@@ -1,12 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- A channel's shared notes, read-only on the phone (#1456, e2ee.md §4.11). -->
+<!-- A conversation's shared notes on the phone (#1456, #2361, e2ee.md §4.11). -->
 <resources>
   <string name="channel_notes_title">Notes</string>
   <string name="channel_notes_pages">Pages</string>
   <string name="channel_notes_page_untitled">Untitled</string>
-  <string name="channel_notes_read_only_phone">Everyone in the channel shares these notes; they are end-to-end encrypted like its messages. On the phone you can read them; edit them on the desktop app or the web.</string>
   <string name="channel_notes_empty_title">No notes yet</string>
-  <string name="channel_notes_empty">Members who may post here can write notes for the whole channel on the desktop app or the web.</string>
+  <string name="channel_notes_empty">Nobody has written notes here yet.</string>
   <string name="channel_notes_loading_history">Loading earlier changes…</string>
   <string name="channel_notes_history_failed">Some earlier changes could not be loaded yet.</string>
   <string name="channel_notes_incomplete">Some changes to these notes aren\'t on this device yet.</string>
@@ -17,6 +16,36 @@
   <string name="channel_notes_file_downloading">Downloading…</string>
   <string name="channel_notes_checked">Done</string>
   <string name="channel_notes_unchecked">Not done</string>
+  <string name="channel_notes_shared">Everyone in this conversation shares these notes; they are end-to-end encrypted like its messages. Tap a block to write in it.</string>
+  <string name="channel_notes_read_only">Everyone in this conversation shares these notes; they are end-to-end encrypted like its messages. Only people who may post here can edit them.</string>
+  <string name="channel_notes_empty_editable">Add a block to start. Everyone in this conversation sees and edits these notes.</string>
+  <string name="channel_notes_add_block">Add a block</string>
+  <string name="channel_notes_undo">Undo</string>
+  <string name="channel_notes_redo">Redo</string>
+  <string name="channel_notes_history">Version history</string>
+  <string name="channel_notes_done">Done</string>
+  <string name="channel_notes_edit_block">Edit</string>
+  <string name="channel_notes_empty_block">Empty block</string>
+  <string name="channel_notes_block_actions">Block options</string>
+  <string name="channel_notes_kind_paragraph">Text</string>
+  <string name="channel_notes_kind_heading">Heading 1</string>
+  <string name="channel_notes_kind_heading2">Heading 2</string>
+  <string name="channel_notes_kind_heading3">Heading 3</string>
+  <string name="channel_notes_kind_bullet">Bulleted list</string>
+  <string name="channel_notes_kind_numbered">Numbered list</string>
+  <string name="channel_notes_kind_check">Checklist</string>
+  <string name="channel_notes_kind_quote">Quote</string>
+  <string name="channel_notes_kind_code">Code</string>
+  <string name="channel_notes_move_up">Move up</string>
+  <string name="channel_notes_move_down">Move down</string>
+  <string name="channel_notes_delete_block">Delete block</string>
+  <string name="channel_notes_history_someone">Someone</string>
+  <string name="channel_notes_history_all">All versions</string>
+  <string name="channel_notes_history_close">Back to the page</string>
+  <string name="channel_notes_history_hint">The versions of this page as this device holds them. Restoring one makes the page that version again as a new change; nothing is lost.</string>
+  <string name="channel_notes_history_empty">No versions on this device yet.</string>
+  <string name="channel_notes_history_restore">Restore this version</string>
+  <string name="channel_notes_history_gone">This version is no longer on this device.</string>
   <!-- Who else has the page open now, and who edited it lately without having it open; names joined by commas. -->
   <plurals name="channel_notes_open_by">
     <item quantity="one">%1$s has this page open</item>

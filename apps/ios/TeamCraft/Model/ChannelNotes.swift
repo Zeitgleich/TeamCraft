@@ -1,8 +1,9 @@
 import Foundation
 import SwiftUI
 
-/// A channel's shared notes, read-only on the phone (issue #1456, e2ee.md §4.11). The core builds the
-/// page from the updates this device holds (`canvas_page`); the app only words and draws it.
+/// A conversation's shared notes on the phone (issues #1456, #2361, e2ee.md §4.11). The core builds
+/// the page from the updates this device holds (`canvas_page`) and edits it (`NotesEditor`); the app
+/// only words and draws it.
 enum ChannelNotes {
   /// Pages of older history read per opening, as on desktop and web ("A device catching up").
   static let maxHistoryPages = 20

@@ -44,19 +44,19 @@ pub(crate) enum ChannelTab {
   Messages,
   /// Everything shared in the conversation.
   Files,
-  /// The channel's shared page (#1221).
+  /// The conversation's shared pages (#1221; DMs, group DMs and meeting chats since #2361).
   Notes,
 }
 
 impl ChannelTab {
-  /// The tabs of a channel of a space; DMs, group DMs, meeting chats and integration channels have
-  /// no page yet.
-  const CHANNEL: [Self; 3] = [Self::Messages, Self::Files, Self::Notes];
+  /// The tabs of a conversation with shared notes: channels, DMs, group DMs and meeting chats.
+  const WITH_NOTES: [Self; 3] = [Self::Messages, Self::Files, Self::Notes];
+  /// Integration channels (logs) and the notes to self have no shared pages.
   const OTHER: [Self; 2] = [Self::Messages, Self::Files];
 
   fn all_of(conversation: &Conversation) -> &'static [Self] {
     if has_page(conversation) {
-      &Self::CHANNEL
+      &Self::WITH_NOTES
     } else {
       &Self::OTHER
     }
@@ -190,10 +190,10 @@ pub fn ChannelView(conversation: ConversationId) -> impl IntoView {
   }
 }
 
-/// Whether the conversation has a shared page (#1221): a channel of a space, not an integration
-/// channel's log.
+/// Whether the conversation has shared pages: a channel (#1221), a DM, a group DM or a meeting's
+/// chat (#2361); not an integration channel's log, nor the notes to self, which nobody shares.
 fn has_page(conversation: &Conversation) -> bool {
-  conversation.has_channel_settings() && conversation.kind != ConversationKind::Integration
+  conversation.kind != ConversationKind::Integration && !conversation.is_notes_to_self
 }
 
 /// The name a conversation is shown with: the notes to self have none of their own (#699).

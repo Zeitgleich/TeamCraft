@@ -45,8 +45,13 @@
 //!   as its message names it: the page holds no key, and a device shows the file only if it holds
 //!   that message.
 
+mod editor;
 mod history;
 
+pub use editor::{
+  COMPACT_ABOVE, FLUSH_IDLE_MS, FLUSH_MAX_WAIT_MS, Focus, MAX_SNAPSHOT_BYTES, Outgoing, PageEditor,
+  SNAPSHOT_EVERY, Typed,
+};
 pub use history::{
   CanvasMark, CanvasOrigin, CanvasVersion, EDITING_WINDOW_MS, compaction, editors_since, marks, origin_of,
   page_at, versions,
