@@ -72,8 +72,8 @@ async fn a_sent_message_shows_in_the_desktop_app_without_waiting_for_the_shell()
   }
   report("text", &mut texts);
   report("photo", &mut photos);
-  // The median is the gate. The p95 of 20 is the slowest send, and photos still have slow ones
-  // (#2364: a file whose staging hasn't finished is staged again by the send), so it is only printed.
+  // The median is the gate. The p95 of 20 is the slowest send: it is printed, not gated, because
+  // a shared CI runner has its own slow moments (#2364 numbers: docs/performance.md).
   for (what, millis) in [("text", &texts), ("photo", &photos)] {
     let median = millis[millis.len() / 2];
     assert!(
