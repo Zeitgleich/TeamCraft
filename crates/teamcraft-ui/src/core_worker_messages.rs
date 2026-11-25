@@ -87,7 +87,7 @@ pub(crate) struct PreparedCallJson {
   pub(crate) join: CallJoinTokenResponse,
   pub(crate) user_id: UserId,
   pub(crate) device_id: DeviceId,
-  /// [`teamcraft_crypto::identity::VerifiedDevice::to_checked_bytes`] of each.
+  /// [`teamcraft_crypto::identity::VerifiedDevice::to_bytes_verified`] of each.
   pub(crate) devices: Vec<Base64Bytes>,
 }
 

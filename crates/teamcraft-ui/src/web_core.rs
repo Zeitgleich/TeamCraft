@@ -620,6 +620,17 @@ pub async fn sign_call_key(
   Ok(binding.into_vec())
 }
 
+/// The page's call ended or its calls stopped: the core's worker signs no binding for it any more
+/// (`core_forget_call_signer`, e2ee.md §8). Nothing to do with the core in this page.
+pub fn forget_call_signer() {
+  if let Some(link) = worker_link() {
+    wasm_bindgen_futures::spawn_local(async move {
+      // A worker that is gone signs nothing anyway.
+      let _ = link.call("core_forget_call_signer", Value::Null).await;
+    });
+  }
+}
+
 /// Whether the core runs in this tab's worker: the page's calls have the worker sign.
 pub fn core_in_worker() -> bool {
   worker_link().is_some()
@@ -660,22 +671,26 @@ pub async fn call_devices(conversation: ConversationId) -> Result<Vec<VerifiedDe
   ask(|reply| Request::CallDevices(conversation, reply)).await?
 }
 
-/// The devices the core in the worker verified ([`VerifiedDevice::from_checked_bytes`]): the
-/// worker's channel is written by this page's own core only.
+/// The devices the core in this page's worker verified: the only caller of
+/// [`VerifiedDevice::from_bytes_verified_elsewhere_unchecked`]. The bytes come from the worker's
+/// channel, which only this page's own core writes to; never pass it anything else.
 fn checked_devices(devices: &[teamcraft_proto::Base64Bytes]) -> Result<Vec<VerifiedDevice>, String> {
   devices
     .iter()
-    .map(|device| VerifiedDevice::from_checked_bytes(device.as_slice()).map_err(|error| error.to_string()))
+    .map(|device| {
+      VerifiedDevice::from_bytes_verified_elsewhere_unchecked(device.as_slice())
+        .map_err(|error| error.to_string())
+    })
     .collect()
 }
 
-/// [`VerifiedDevice::to_checked_bytes`] of each, for the page ([`checked_devices`]).
+/// [`VerifiedDevice::to_bytes_verified`] of each, for the page ([`checked_devices`]).
 fn devices_for_page(devices: &[VerifiedDevice]) -> Result<Vec<teamcraft_proto::Base64Bytes>, String> {
   devices
     .iter()
     .map(|device| {
       device
-        .to_checked_bytes()
+        .to_bytes_verified()
         .map(teamcraft_proto::Base64Bytes::new)
         .map_err(|error| error.to_string())
     })
@@ -804,6 +819,7 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
     | "core_open_stream"
     | "core_read_stream"
     | "core_close_stream"
+    | "core_forget_call_signer"
     | "core_background_picture" => {
       crate::areas::serve_worker_page_command(command.to_owned(), args)
         .await
@@ -828,11 +844,13 @@ pub(crate) async fn serve_worker_page_command(command: String, args: Value) -> R
         device_id: prepared.device_id,
         devices: devices_for_page(&prepared.devices)?,
       };
-      // The device key stays here; the page asks for each binding (`core_sign_call_key`).
-      // async-ok: a thread-local map of the worker, not a signal.
-      WORKER_CALL_SIGNERS.with(|signers| {
-        signers.borrow_mut().insert(
+      // The device key stays here; the page asks for each binding of this call only
+      // (`core_sign_call_key`).
+      // async-ok: a thread-local of the worker, not a signal.
+      WORKER_CALL_SIGNER.with(|signer| {
+        signer.borrow_mut().prepare(
           conversation,
+          answer.join.call_id,
           Arc::new(crate::web_calls::CoreSigner(prepared.signer)),
         );
       });
@@ -842,10 +860,10 @@ pub(crate) async fn serve_worker_page_command(command: String, args: Value) -> R
       let conversation: ConversationId = field(&args, "conversation")?;
       let call_id: teamcraft_proto::CallId = field(&args, "call_id")?;
       let key: teamcraft_proto::Base64Bytes = field(&args, "key")?;
-      let signer = WORKER_CALL_SIGNERS
-        // async-ok: a thread-local map of the worker, not a signal.
-        .with(|signers| signers.borrow().get(&conversation).cloned())
-        .ok_or("no call of this conversation was prepared")?;
+      let signer = WORKER_CALL_SIGNER
+        // async-ok: a thread-local of the worker, not a signal.
+        .with(|signer| signer.borrow().signer_for(conversation, call_id).cloned())
+        .map_err(|refused| refused.to_string())?;
       let binding = crate::web_calls::sign_binding(signer, call_id, key.as_slice())?;
       to_value(teamcraft_proto::Base64Bytes::new(binding))
     },
@@ -853,6 +871,11 @@ pub(crate) async fn serve_worker_page_command(command: String, args: Value) -> R
       let conversation: ConversationId = field(&args, "conversation")?;
       let devices = ask(|reply| Request::CallDevices(conversation, reply)).await??;
       to_value(devices_for_page(&devices)?)
+    },
+    "core_forget_call_signer" => {
+      // async-ok: a thread-local of the worker, not a signal.
+      WORKER_CALL_SIGNER.with(|signer| signer.borrow_mut().forget());
+      Ok(Value::Null)
     },
     "core_probe_ticket" => {
       let maybe_meeting: Option<teamcraft_proto::MeetingId> = field(&args, "meeting")?;
@@ -902,11 +925,11 @@ pub(crate) async fn serve_worker_page_command(command: String, args: Value) -> R
 }
 
 thread_local! {
-  /// The signers of the calls the page of this worker prepared, by conversation: the device key
-  /// stays in the worker (`core_sign_call_key`, #2397). One per conversation, replaced by the
-  /// next preparation; they hold the key as the core does.
-  static WORKER_CALL_SIGNERS: RefCell<std::collections::HashMap<ConversationId, Arc<dyn teamcraft_media::call_auth::CallBindingSigner>>> =
-    RefCell::new(std::collections::HashMap::new());
+  /// The call this worker's page prepared last, which alone it signs bindings for: the device key
+  /// stays in the worker (`core_sign_call_key`, e2ee.md §8, #2397).
+  static WORKER_CALL_SIGNER: RefCell<
+    crate::worker_call_signer::WorkerCallSigner<Arc<dyn teamcraft_media::call_auth::CallBindingSigner>>,
+  > = const { RefCell::new(crate::worker_call_signer::WorkerCallSigner::new()) };
 }
 
 /// Runs a command on this tab's core.
@@ -1518,7 +1541,8 @@ async fn has_moved(user: UserId) -> bool {
   if !is_member_page() {
     return false;
   }
-  match OpfsStore::has_log(&store_name(user)).await {
+  // The files alone, not their content: the worker of the page before may still hold them (#2397).
+  match OpfsStore::has_log_files(&store_name(user)).await {
     Ok(has_moved) => has_moved,
     Err(error) => {
       // Nothing says it didn't move: only the worker may open it.

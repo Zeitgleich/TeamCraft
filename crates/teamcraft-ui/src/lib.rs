@@ -166,6 +166,8 @@ pub mod web_core;
 mod web_export;
 #[cfg(target_arch = "wasm32")]
 mod web_tabs;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod worker_call_signer;
 
 pub use components::app::App;
 

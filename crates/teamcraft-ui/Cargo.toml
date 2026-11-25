@@ -23,7 +23,8 @@ teamcraft-proto.workspace = true
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 # Bridge source tokens are generated in the app (integrations.rs); the browser build also uses it
 # for the client core.
-teamcraft-crypto = { path = "../teamcraft-crypto" }
+# `device-handoff`: the page of the core's worker takes the call's verified devices from it (#2397).
+teamcraft-crypto = { path = "../teamcraft-crypto", features = ["device-handoff"] }
 leptos = { version = "0.8.22", features = ["csr"] }
 # Leptos' task executor, set up by hand in the core's worker, which mounts no UI (core_worker.rs,
 # #2363). Already in the tree through Leptos.

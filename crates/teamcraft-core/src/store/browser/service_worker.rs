@@ -199,6 +199,14 @@ pub(super) async fn has_log(name: &str) -> Result<bool, StoreError> {
   Ok(newest_slot(&headers).map_err(store_error)?.is_some())
 }
 
+/// See [`super::OpfsStore::has_log_files`].
+pub(super) async fn has_log_files(name: &str) -> Result<bool, StoreError> {
+  let Some(directory) = existing_store_directory(name).await? else {
+    return Ok(false);
+  };
+  Ok(LogFiles::find(&directory).await?.is_some())
+}
+
 /// The handles of a store's log files on OPFS.
 struct LogFiles {
   slots: [FileSystemFileHandle; 2],

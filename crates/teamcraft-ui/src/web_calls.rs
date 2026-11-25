@@ -482,8 +482,10 @@ impl WebCallHost {
       Ok(snapshot) => {
         let is_in_call = snapshot.maybe_active.is_some();
         if self.was_in_call.replace(is_in_call) && !is_in_call {
-          // The call ended: its keys go. (A join in progress has no active call yet.)
+          // The call ended: its keys go, and the worker signs for it no more. (A join in progress
+          // has no active call yet.)
           self.maybe_call.borrow_mut().take();
+          crate::web_core::forget_call_signer();
         }
         let maybe_on_change = self.maybe_on_change.borrow().clone();
         if let Some(on_change) = maybe_on_change {
@@ -572,6 +574,7 @@ impl WebCallHost {
 /// Signing out: a running call ends with the page's session.
 impl Drop for WebCallHost {
   fn drop(&mut self) {
+    crate::web_core::forget_call_signer();
     if let Some(module) = self.loaded_module() {
       // The module keeps calling back while it leaves; the callbacks live until it is done.
       spawn_local(async move {

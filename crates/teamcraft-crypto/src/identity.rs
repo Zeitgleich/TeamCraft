@@ -439,16 +439,22 @@ impl SignedDeviceCertificate {
 
 impl VerifiedDevice {
   /// The verified certificate, for handing it to another part of this client that can't check it
-  /// itself ([`Self::from_checked_bytes`]).
-  pub fn to_checked_bytes(&self) -> Result<Vec<u8>, IdentityError> {
+  /// itself ([`Self::from_bytes_verified_elsewhere_unchecked`]).
+  #[cfg(any(test, feature = "device-handoff"))]
+  #[doc(hidden)]
+  pub fn to_bytes_verified(&self) -> Result<Vec<u8>, IdentityError> {
     Ok(self.certificate.tls_serialize_detached()?)
   }
 
-  /// A device this client's core verified ([`Self::to_checked_bytes`]), on the other side of a
-  /// channel only that core writes to: the page of a core that runs in the browser's worker gets
-  /// the call's devices this way and verifies the others' call keys against them (e2ee.md §8,
-  /// #2397). Never for bytes from anywhere else: no signature is checked here.
-  pub fn from_checked_bytes(bytes: &[u8]) -> Result<Self, IdentityError> {
+  /// UNCHECKED: a device this client's own core verified ([`Self::to_bytes_verified`]), taken as
+  /// verified without checking any signature. Only for the page of a browser's core worker, which
+  /// gets the call's devices over the worker's channel (only that core writes to it) and verifies
+  /// the others' call keys against them (e2ee.md §8, "Where the device key is", #2397). Never for
+  /// bytes from the server, another device or storage: that would make anyone's key "verified".
+  /// Behind the `device-handoff` feature, which only the web UI turns on.
+  #[cfg(any(test, feature = "device-handoff"))]
+  #[doc(hidden)]
+  pub fn from_bytes_verified_elsewhere_unchecked(bytes: &[u8]) -> Result<Self, IdentityError> {
     let certificate = DeviceCertificate::tls_deserialize_exact_bytes(bytes)?;
     if certificate.version != DEVICE_CERTIFICATE_VERSION {
       return Err(IdentityError::UnsupportedVersion(certificate.version));
@@ -550,9 +556,12 @@ mod tests {
       .unwrap()
       .verify(&identity.public_key())
       .unwrap();
-    let bytes = verified.to_checked_bytes().unwrap();
-    assert_eq!(VerifiedDevice::from_checked_bytes(&bytes).unwrap(), verified);
-    assert!(VerifiedDevice::from_checked_bytes(&bytes[..bytes.len() - 1]).is_err());
+    let bytes = verified.to_bytes_verified().unwrap();
+    assert_eq!(
+      VerifiedDevice::from_bytes_verified_elsewhere_unchecked(&bytes).unwrap(),
+      verified
+    );
+    assert!(VerifiedDevice::from_bytes_verified_elsewhere_unchecked(&bytes[..bytes.len() - 1]).is_err());
   }
 
   #[test]

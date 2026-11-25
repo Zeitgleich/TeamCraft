@@ -6730,10 +6730,16 @@ keys.
    worker (`core_sign_call_key`), which signs with the signer it kept from preparing the call, and
    hands the binding to the engine, which sends the package then. A binding of a key the session no
    longer has (the SFU started the group over meanwhile) is dropped; one that couldn't be signed is
-   an encryption failure. The device key never leaves the worker. To verify the others' bindings
-   the page gets the call's devices from the worker as certificates the worker verified
-   (`VerifiedDevice::to_checked_bytes` / `from_checked_bytes`, over the worker's channel, which
-   only the page's own core writes to).
+   an encryption failure. The device key never leaves the worker. The worker signs only for the
+   call its page prepared last (`core_prepare_call`: that conversation and the call ID of its join
+   token) and refuses any other conversation or call ID; the page tells it when that call ended
+   or its calls stopped (`core_forget_call_signer`), and nothing is signed until the next
+   preparation (`worker_call_signer.rs`). To verify the others' bindings the page gets the call's
+   devices from the worker as certificates the worker verified
+   (`VerifiedDevice::to_bytes_verified`, and on the page `from_bytes_verified_elsewhere_unchecked`,
+   which checks no signature: behind the crypto crate's `device-handoff` feature, which only the
+   web UI turns on, and only ever fed from the worker's channel, which only the page's own core
+   writes to).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
    chat) and reject it if it is for another call or another device. **Time.** Only a joining
    device's binding (the one that comes with the proposal) is checked for time, by the verifying
