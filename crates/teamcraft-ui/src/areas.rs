@@ -594,6 +594,19 @@ pub(crate) fn chat_request_from_json(
   Ok(Box::pin(crate::web_core::serve_chat_json(command, args)))
 }
 
+/// What the page of the core's worker asks of it for its calls and streams (#2397): only a page
+/// whose core runs in the worker asks, so this is in `tabs`, which such a page loads anyway.
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn serve_worker_page_command(
+  command: String,
+  args: serde_json::Value,
+) -> Result<ChatRun<serde_json::Value>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::serve_worker_page_command(
+    command, args,
+  )))
+}
+
 /// A follower tab's chat action, as JSON for the tab that runs the core (or this tab's core worker).
 #[cfg(target_arch = "wasm32")]
 #[wasm_split(tabs, wasm_split_path = ::leptos::wasm_split, fallible)]

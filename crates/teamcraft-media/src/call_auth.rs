@@ -27,6 +27,14 @@ const BINDING_VALIDITY: Duration = Duration::from_secs(600);
 pub trait CallKeyAuthenticator: fmt::Debug + Send + Sync {
   /// A signed binding of `dave_public_key` to this device for `call_id`.
   fn sign(&self, call_id: CallId, dave_public_key: &[u8]) -> Result<Vec<u8>, CallKeyError>;
+  /// Whether the device key is elsewhere, so [`Self::sign`] can't sign here and now: a browser
+  /// whose client core runs in a worker keeps the key there (e2ee.md §8, #2397). The engine then
+  /// holds its key package back, asks for the binding with
+  /// [`crate::call_engine::CallEngineEvent::KeyBindingWanted`] and sends the package once it is
+  /// handed in ([`crate::call_engine::CallEngine::key_binding_signed`]).
+  fn signs_later(&self) -> bool {
+    false
+  }
   /// Verifies `device_id`'s binding for `call_id`; returns the bound DAVE public key.
   fn verify(
     &self,

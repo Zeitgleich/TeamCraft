@@ -455,13 +455,44 @@ impl Rig {
   }
 }
 
+/// Where the web client runs its core (#2397).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CoreAt {
+  /// In the page over IndexedDB, the default.
+  Page,
+  /// In its worker over OPFS, which the user turns on.
+  Worker,
+}
+
+impl CoreAt {
+  /// `E2E_CORE_IN_WORKER=1` measures with the core in the worker.
+  fn from_env() -> Self {
+    if std::env::var("E2E_CORE_IN_WORKER").is_ok_and(|value| value == "1") {
+      Self::Worker
+    } else {
+      Self::Page
+    }
+  }
+}
+
 /// Signs in through Keycloak and unlocks the account's keys with the recovery passphrase.
 pub(crate) async fn sign_in_and_unlock(page: &Page, origin: &str, user: &str) {
+  sign_in_and_unlock_with(page, origin, user, CoreAt::from_env()).await;
+}
+
+/// [`sign_in_and_unlock`] with the core where `core` says.
+pub(crate) async fn sign_in_and_unlock_with(page: &Page, origin: &str, user: &str, core: CoreAt) {
   page.goto(format!("{origin}/healthz")).await.unwrap();
   page
     .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
     .await
     .unwrap();
+  if core == CoreAt::Worker {
+    page
+      .evaluate("localStorage.setItem('teamcraft.coreWorker', '1')")
+      .await
+      .unwrap();
+  }
   page.goto(format!("{origin}/?backend=server")).await.unwrap();
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;
@@ -1994,6 +2025,16 @@ impl Report {
   /// shared); the budgets in robustness.md are the targets.
   fn assert_budgets(&self) {
     assert!(self.seconds_reload_to_channel_list < 15.0, "{self:#?}");
+    // #2397: nothing holds the page's thread for a second, not a catch-up after a long absence
+    // with the CPU slowed down, not a catalog build (the core hands the thread back in steps).
+    assert!(
+      self.catch_up_longest_task_ms < 1000.0,
+      "the page's thread was held while catching up: {self:#?}"
+    );
+    assert!(
+      self.catalog_build_longest_task_ms < 1000.0,
+      "the page's thread was held while the catalog was built: {self:#?}"
+    );
     // Issue #714: synced within 300 ms of opening; the bound leaves room for a shared machine.
     assert!(
       self.reload_sync_ms >= 0.0,

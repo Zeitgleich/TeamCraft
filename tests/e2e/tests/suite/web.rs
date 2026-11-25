@@ -820,7 +820,16 @@ pub(crate) async fn wait_for_element(page: &Page, selector: &str) -> chromiumoxi
     if let Ok(element) = page.find_element(selector).await {
       return element;
     }
-    assert!(Instant::now() < deadline, "no element {selector} within {WAIT:?}");
+    if Instant::now() >= deadline {
+      // What the page shows instead says more than the missing element.
+      let shown: String = page
+        .evaluate("`${location.pathname}: ${document.body.innerText.slice(0, 1500)}`")
+        .await
+        .ok()
+        .and_then(|value| value.into_value().ok())
+        .unwrap_or_default();
+      panic!("no element {selector} within {WAIT:?}; the page shows {shown}");
+    }
     tokio::time::sleep(Duration::from_millis(200)).await;
   }
 }

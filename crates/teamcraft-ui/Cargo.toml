@@ -23,7 +23,8 @@ teamcraft-proto.workspace = true
 teamcraft-client-api = { path = "../teamcraft-client-api" }
 # Bridge source tokens are generated in the app (integrations.rs); the browser build also uses it
 # for the client core.
-teamcraft-crypto = { path = "../teamcraft-crypto" }
+# `device-handoff`: the page of the core's worker takes the call's verified devices from it (#2397).
+teamcraft-crypto = { path = "../teamcraft-crypto", features = ["device-handoff"] }
 leptos = { version = "0.8.22", features = ["csr"] }
 # Leptos' task executor, set up by hand in the core's worker, which mounts no UI (core_worker.rs,
 # #2363). Already in the tree through Leptos.
@@ -39,7 +40,7 @@ web-sys = { version = "0.3", features = [
   "BroadcastChannel", "MediaError", "MessagePort", "MouseEvent", "StorageManager", "ServiceWorkerState", "VisibilityState", "NotificationOptions",
   "PointerEvent", "WheelEvent", "HtmlAnchorElement", "HtmlImageElement", "AddEventListenerOptions",
   "HtmlCanvasElement", "CanvasRenderingContext2d", "TextMetrics", "ImageData", "HtmlMediaElement", "HtmlVideoElement", "Selection", "MediaStream",
-  "VisualViewport", "MutationObserver", "MutationObserverInit", "Performance", "TouchEvent", "TouchList", "Touch",
+  "VisualViewport", "MutationObserver", "MutationObserverInit", "console", "Performance", "PerformanceEntry", "PerformanceObserver", "PerformanceObserverEntryList", "TouchEvent", "TouchList", "Touch",
   "HtmlDocument", "DomParser", "SupportedType", "Range", "DocumentFragment", "Text", "CharacterData", "InputEvent", "TreeWalker",
   "ImageBitmap", "IntersectionObserver", "IntersectionObserverEntry", "TimeRanges", "HtmlButtonElement",
   # The pre-join speaker test (speaker_test.rs): it has to start inside the click.

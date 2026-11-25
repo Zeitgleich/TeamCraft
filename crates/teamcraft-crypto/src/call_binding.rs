@@ -87,6 +87,9 @@ pub enum CallBindingError {
   InvalidSignature,
   #[error("the DAVE member's key is not the bound key")]
   KeyMismatch,
+  /// The device key signs elsewhere: a browser page whose client core runs in a worker (#2397).
+  #[error("this device's key signs in another part of the client")]
+  KeyElsewhere,
   #[error("encoding failed: {0}")]
   Encoding(#[from] tls_codec::Error),
 }

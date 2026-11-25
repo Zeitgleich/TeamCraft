@@ -117,7 +117,7 @@ use crate::audio_frame::{
 };
 use crate::audio_io::{AudioDeviceChoice, AudioDeviceId, AudioDeviceInfo, AudioSink, AudioSource, sine_tone};
 use crate::audio_level::{CallMeter, DEFAULT_VOICE_THRESHOLD_DBOV, SharedLevel, measure_audio_level};
-use crate::call_auth::CallKeyAuthenticator;
+use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
   AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
@@ -506,6 +506,11 @@ impl EncodedChunk {
 }
 
 enum Command {
+  /// The binding of this device's DAVE key, signed where the device key is (#2397).
+  KeyBindingSigned {
+    dave_public_key: Vec<u8>,
+    signed: Result<Vec<u8>, CallKeyError>,
+  },
   Mute(bool),
   Deafen(bool),
   MoveHere,
@@ -1026,6 +1031,16 @@ impl WebCall {
   }
 
   /// Answers `recorder`'s recordings that ask for consent (#2115).
+  /// Hands in the binding of this device's DAVE key that
+  /// [`CallEngineEvent::KeyBindingWanted`] asked for ([`CallEngine::key_binding_signed`]).
+  pub fn key_binding_signed(&self, dave_public_key: Vec<u8>, signed: Result<Vec<u8>, CallKeyError>) {
+    // The call already ended if this fails.
+    let _ = self.command(Command::KeyBindingSigned {
+      dave_public_key,
+      signed,
+    });
+  }
+
   pub fn answer_recording(&self, recorder: teamcraft_proto::UserId, is_allowed: bool) {
     // The call already ended if this fails.
     let _ = self.command(Command::AnswerRecording { recorder, is_allowed });
@@ -2744,6 +2759,10 @@ impl CallState<'_> {
       },
       Command::StartRecordingNow => engine.start_recording_now(),
       Command::AnswerRecording { recorder, is_allowed } => engine.answer_recordings_of(recorder, is_allowed),
+      Command::KeyBindingSigned {
+        dave_public_key,
+        signed,
+      } => engine.key_binding_signed(&dave_public_key, signed),
       #[cfg(feature = "call-view")]
       Command::VideoStats(done) => {
         // The caller may have given up waiting.

@@ -132,6 +132,15 @@ impl SealedStore<OpfsRecords> {
   pub async fn has_log(name: &str) -> Result<bool, StoreError> {
     super::service_worker::has_log(name).await
   }
+
+  /// Whether OPFS holds the files of a log of the store `name`, without reading them: a page that
+  /// asks while the worker of the page before it is still letting go of them (a reload, a
+  /// navigation) must not read them. Reading them then crashed Chrome's renderer (#2397). A log
+  /// whose files exist but hold nothing yet is the worker's to take over, which opens it and moves
+  /// the records from IndexedDB, as on the first start.
+  pub async fn has_log_files(name: &str) -> Result<bool, StoreError> {
+    super::service_worker::has_log_files(name).await
+  }
 }
 
 /// Runs the first catalog build of `store` with a yield between batches: the worker's thread is

@@ -96,6 +96,8 @@ mod core_worker_messages;
 #[cfg(target_arch = "wasm32")]
 pub mod crash_reports;
 pub mod custom_emoji;
+#[cfg(target_arch = "wasm32")]
+mod main_thread_watch;
 pub mod notification_pictures;
 pub mod notifier;
 pub mod notify_sync;
@@ -164,6 +166,8 @@ pub mod web_core;
 mod web_export;
 #[cfg(target_arch = "wasm32")]
 mod web_tabs;
+#[cfg(any(test, target_arch = "wasm32"))]
+mod worker_call_signer;
 
 pub use components::app::App;
 
@@ -172,6 +176,8 @@ pub fn mount() {
   // Before the panic hook: a panic during start is reported too (docs/crash-reports.md).
   #[cfg(target_arch = "wasm32")]
   crash_reports::install();
+  #[cfg(target_arch = "wasm32")]
+  main_thread_watch::install();
   panic_overlay::install();
   // The UI's texts first (`init.js` fetched them next to the app, i18n.rs): no view ever shows a
   // message's key. Without them nothing mounts, and `init.js` shows the loading screen's failure.

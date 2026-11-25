@@ -107,10 +107,29 @@ pub(crate) struct Callbacks {
   _failed: Closure<dyn Fn(String)>,
   _background_rule: Closure<dyn Fn() -> Promise>,
   _background_picture: Closure<dyn Fn(String) -> Promise>,
+  /// With the core in the worker: has the worker sign this device's DAVE key binding (#2397).
+  _maybe_sign_later: Option<Closure<dyn Fn(String, Uint8Array) -> Promise>>,
 }
 
 /// Lets the media layer's authenticator sign with the core's signer.
-struct CoreSigner(CallKeySigner);
+pub(crate) struct CoreSigner(pub(crate) CallKeySigner);
+
+/// The page's stand-in for a signer whose device key is in the core's worker: the call module
+/// asks the worker for each binding instead (`sign_later`, [`CallKeyAuthenticator::signs_later`]),
+/// so this never signs.
+struct WorkerSigner;
+
+/// This device's DAVE key binding for `call_id`, signed with `signer` (the core's worker answers
+/// the page's `core_sign_call_key` with it, #2397).
+pub(crate) fn sign_binding(
+  signer: Arc<dyn CallBindingSigner>,
+  call_id: CallId,
+  dave_public_key: &[u8],
+) -> Result<Vec<u8>, String> {
+  DeviceCallKeyAuthenticator::from_verified(signer, Vec::new())
+    .and_then(|authenticator| authenticator.sign(call_id, dave_public_key))
+    .map_err(|error| error.to_string())
+}
 
 /// Whether the call module can put background effects behind the camera image in this browser
 /// (#439): WebGPU or WebGL2 for the compositing, WebAssembly SIMD for the segmentation.
@@ -463,8 +482,10 @@ impl WebCallHost {
       Ok(snapshot) => {
         let is_in_call = snapshot.maybe_active.is_some();
         if self.was_in_call.replace(is_in_call) && !is_in_call {
-          // The call ended: its keys go. (A join in progress has no active call yet.)
+          // The call ended: its keys go, and the worker signs for it no more. (A join in progress
+          // has no active call yet.)
           self.maybe_call.borrow_mut().take();
+          crate::web_core::forget_call_signer();
         }
         let maybe_on_change = self.maybe_on_change.borrow().clone();
         if let Some(on_change) = maybe_on_change {
@@ -481,7 +502,10 @@ impl WebCallHost {
       .await
       .map_err(|text| ActionFailure::from_wire(&text))?;
     let own_device = preparation.device_id;
-    let signer: Arc<dyn CallBindingSigner> = Arc::new(CoreSigner(preparation.signer));
+    let signer: Arc<dyn CallBindingSigner> = match preparation.maybe_signer {
+      Some(signer) => Arc::new(CoreSigner(signer)),
+      None => Arc::new(WorkerSigner),
+    };
     let authenticator = DeviceCallKeyAuthenticator::from_verified(Arc::clone(&signer), preparation.devices)
       .map_err(|error| ActionFailure::other(error.to_string()))?;
     let trusted_devices = others(&authenticator, own_device);
@@ -550,6 +574,7 @@ impl WebCallHost {
 /// Signing out: a running call ends with the page's session.
 impl Drop for WebCallHost {
   fn drop(&mut self) {
+    crate::web_core::forget_call_signer();
     if let Some(module) = self.loaded_module() {
       // The module keeps calling back while it leaves; the callbacks live until it is done.
       spawn_local(async move {
@@ -589,6 +614,17 @@ impl CallModule {
       .ok()
       .and_then(|value| value.dyn_into().ok())
       .ok_or_else(|| ActionFailure::other(format!("the call module has no {name}")))
+  }
+}
+
+impl CallBindingSigner for WorkerSigner {
+  fn sign_call_key_binding(
+    &self,
+    _call_id: CryptoCallId,
+    _dave_public_key: &[u8],
+    _not_after: u64,
+  ) -> Result<SignedCallKeyBinding, CallBindingError> {
+    Err(CallBindingError::KeyElsewhere)
   }
 }
 
@@ -710,6 +746,7 @@ impl Callbacks {
       )
     };
     let verify = {
+      let host = host.clone();
       Closure::<VerifyCallback>::new(
         move |call_id: String, device_id: String, binding: Uint8Array, maybe_role: Option<String>| {
           let host = host.upgrade().ok_or_else(|| JsValue::from_str("signed out"))?;
@@ -750,6 +787,25 @@ impl Callbacks {
         Ok(Uint8Array::from(picture.as_slice()).into())
       })
     });
+    // The core in the worker keeps the device key: the call module asks for each binding (#2397).
+    let maybe_sign_later = crate::web_core::core_in_worker().then(|| {
+      let host = host.clone();
+      Closure::<dyn Fn(String, Uint8Array) -> Promise>::new(move |call_id: String, key: Uint8Array| {
+        let host = host.clone();
+        future_to_promise(async move {
+          let call_id: CallId =
+            serde_json::from_str(&call_id).map_err(|error| JsValue::from_str(&error.to_string()))?;
+          let conversation = host
+            .upgrade()
+            .and_then(|host| host.maybe_call.borrow().as_ref().map(|call| call.conversation))
+            .ok_or_else(|| JsValue::from_str("no call is being joined"))?;
+          let binding = crate::web_core::sign_call_key(conversation, call_id, &key.to_vec())
+            .await
+            .map_err(|error| JsValue::from_str(&error))?;
+          Ok(Uint8Array::from(binding.as_slice()).into())
+        })
+      })
+    });
     let object = Object::new();
     let worklet = meta_content(WORKLET_META).ok_or("the page names no call worklet")?;
     Reflect::set(
@@ -771,6 +827,10 @@ impl Callbacks {
     ] {
       Reflect::set(&object, &JsValue::from_str(name), function).map_err(|error| js_text(&error))?;
     }
+    if let Some(sign_later) = &maybe_sign_later {
+      Reflect::set(&object, &JsValue::from_str("sign_later"), sign_later.as_ref())
+        .map_err(|error| js_text(&error))?;
+    }
     Ok(Self {
       object,
       _changed: changed,
@@ -782,6 +842,7 @@ impl Callbacks {
       _failed: failed,
       _background_rule: background_rule,
       _background_picture: background_picture,
+      _maybe_sign_later: maybe_sign_later,
     })
   }
 }

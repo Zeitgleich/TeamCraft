@@ -48,6 +48,7 @@ pub mod background_picker;
 pub mod bookmarks;
 pub mod bottom_nav;
 pub mod brand_logo;
+pub mod browser_support_banner;
 pub mod bundle_banner;
 pub mod call_announcer;
 pub mod call_audio_menu;

@@ -3570,7 +3570,8 @@ Both budgets are the sizes after the rarely shown parts left the first visit (#1
 below) plus about 6 %: 6,342,543 and 5,614,660 B. 5 % would have put the warning (95 %) below
 today's sizes. The guest's was raised by 30 kB on 2026-11-25 (#2397, the maintainer's decision):
 the core a guest runs in the page hands its thread back in short steps, and the page keeps its
-date formatters. Before, they were 7.34 and 7 MB (2026-11-20 and 2026-11-17, below). Earlier, both
+date formatters and watches its thread for long tasks. Before, they were 7.34 and 7 MB (2026-11-20
+and 2026-11-17, below). Earlier, both
 budgets were the sizes of #1699 below plus about 5 %, lowered on 2026-11-13 by what #1462 took
 out (what only a member's page asks for and the desktop app's chrome, below): 6.44 and 5.61 MB
 before; the signed-in one raised to 5.63 MB the same day (below). On 2026-11-14 the service worker's

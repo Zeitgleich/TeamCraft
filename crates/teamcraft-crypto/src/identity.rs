@@ -438,6 +438,30 @@ impl SignedDeviceCertificate {
 }
 
 impl VerifiedDevice {
+  /// The verified certificate, for handing it to another part of this client that can't check it
+  /// itself ([`Self::from_bytes_verified_elsewhere_unchecked`]).
+  #[cfg(any(test, feature = "device-handoff"))]
+  #[doc(hidden)]
+  pub fn to_bytes_verified(&self) -> Result<Vec<u8>, IdentityError> {
+    Ok(self.certificate.tls_serialize_detached()?)
+  }
+
+  /// UNCHECKED: a device this client's own core verified ([`Self::to_bytes_verified`]), taken as
+  /// verified without checking any signature. Only for the page of a browser's core worker, which
+  /// gets the call's devices over the worker's channel (only that core writes to it) and verifies
+  /// the others' call keys against them (e2ee.md §8, "Where the device key is", #2397). Never for
+  /// bytes from the server, another device or storage: that would make anyone's key "verified".
+  /// Behind the `device-handoff` feature, which only the web UI turns on.
+  #[cfg(any(test, feature = "device-handoff"))]
+  #[doc(hidden)]
+  pub fn from_bytes_verified_elsewhere_unchecked(bytes: &[u8]) -> Result<Self, IdentityError> {
+    let certificate = DeviceCertificate::tls_deserialize_exact_bytes(bytes)?;
+    if certificate.version != DEVICE_CERTIFICATE_VERSION {
+      return Err(IdentityError::UnsupportedVersion(certificate.version));
+    }
+    Ok(Self { certificate })
+  }
+
   pub fn user_id(&self) -> UserId {
     self.certificate.user_id
   }
@@ -521,6 +545,23 @@ mod tests {
     verified
       .ensure_signing_key(device.public_keys().signing_key.as_bytes())
       .unwrap();
+  }
+
+  #[test]
+  fn a_verified_device_crosses_to_another_part_of_the_client_unchanged() {
+    let identity = IdentityKeyPair::generate(&mut OsRng);
+    let device = DeviceKeyPair::generate(ALICE, LAPTOP, &mut OsRng);
+    let verified = identity
+      .certify_device(ALICE, &device.public_keys())
+      .unwrap()
+      .verify(&identity.public_key())
+      .unwrap();
+    let bytes = verified.to_bytes_verified().unwrap();
+    assert_eq!(
+      VerifiedDevice::from_bytes_verified_elsewhere_unchecked(&bytes).unwrap(),
+      verified
+    );
+    assert!(VerifiedDevice::from_bytes_verified_elsewhere_unchecked(&bytes[..bytes.len() - 1]).is_err());
   }
 
   #[test]

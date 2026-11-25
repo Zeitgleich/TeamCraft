@@ -90,8 +90,10 @@ async fn open_in_page(
   message: MessageId,
   file_id: String,
 ) -> Result<StreamUrl, String> {
-  let opened = crate::web_core::open_media_stream(conversation, message, file_id).await?;
-  let token = opened.token.as_str().to_owned();
+  let token = crate::web_core::open_media_stream(conversation, message, file_id)
+    .await?
+    .as_str()
+    .to_owned();
   Ok(StreamUrl {
     url: format!("/media-stream/{token}"),
     token,
