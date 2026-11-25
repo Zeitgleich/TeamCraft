@@ -10,12 +10,14 @@
 
 mod app_changes;
 mod app_link;
+mod beside_engine;
 mod blocking;
 mod bridge;
 mod calls;
 mod canvas;
 mod channel_anchor;
 mod channel_roles;
+mod coalesced;
 mod color_theme;
 mod command_failures;
 mod composer_format;
@@ -207,6 +209,8 @@ pub struct TeamCraft {
   is_foreground: std::sync::atomic::AtomicBool,
   /// "Connect directly in calls" (#127): read when a call starts, followed while it runs.
   direct_connections: tokio::sync::watch::Sender<bool>,
+  /// Meeting list reads beside the engine that overlapping callers share (#2401).
+  meeting_lists: beside_engine::MeetingLists,
 }
 
 /// Supplies the current OIDC access token. The app owns login and refresh (AppAuth on Android).
@@ -1414,16 +1418,15 @@ impl TeamCraft {
   }
 
   /// An authenticated call to a plain server endpoint under `/api/v1` (notification settings,
-  /// meetings): `method` is the HTTP verb, `body` JSON; answers the response JSON.
+  /// meetings): `method` is the HTTP verb, `body` JSON; answers the response JSON. Sent beside the
+  /// engine, so a slow answer holds up nothing else (#2401).
   pub async fn api_request(
     &self,
     method: String,
     path: String,
     maybe_body: Option<String>,
   ) -> Result<String, TeamCraftError> {
-    self
-      .call(move |engine| Box::pin(async move { engine.api_request(&method, &path, maybe_body).await }))
-      .await
+    self.request_beside_engine(method, path, maybe_body).await
   }
 
   /// The profile picture of a person (image bytes, at most `max_bytes`), or `None` without one.
@@ -1833,10 +1836,16 @@ impl TeamCraft {
   /// organizer's upkeep desktop runs on every list (#1841): the signed admitters of meetings that
   /// run or start within a day are kept current, and edits whose chat change is still owed are
   /// finished. The apps read their meeting list through this, and call it when they come to the
-  /// foreground.
+  /// foreground. The list is read beside the engine and shared with reads that overlap (#2401).
   pub async fn meeting_upkeep(&self) -> Result<String, TeamCraftError> {
+    let json = self.meeting_list_json().await?;
     self
-      .call(|engine| Box::pin(async move { engine.meeting_upkeep().await }))
+      .call(move |engine| {
+        Box::pin(async move {
+          engine.apply_meeting_list(&json).await?;
+          Ok(json)
+        })
+      })
       .await
   }
 
@@ -1849,9 +1858,7 @@ impl TeamCraft {
   /// after joining a meeting's call; each admission it returns is said with "Remove"
   /// ([`Self::remove_link_arrival`]).
   pub async fn meeting_watch(&self) -> Result<Vec<LinkArrival>, TeamCraftError> {
-    self
-      .call(|engine| Box::pin(async move { engine.meeting_watch().await }))
-      .await
+    self.watch_meetings().await
   }
 
   /// "Remove" on the notice of an admission by the meeting watch: takes `user_id` out of the
@@ -1870,11 +1877,12 @@ impl TeamCraft {
 
   /// Tells the server this app lets guests of the meeting link in by itself (#987, #2258), so
   /// guests of the user's meetings aren't told the organizer's app needs an update. Once per
-  /// signed-in start is enough; a failure is tried again on the next.
+  /// signed-in start is enough; a failure is tried again on the next. Sent beside the engine.
   pub async fn mark_admitter(&self) -> Result<(), TeamCraftError> {
     self
-      .call(|engine| Box::pin(async move { engine.mark_admitter().await }))
+      .request_beside_engine("PUT".into(), "/meetings/admitter".into(), Some("{}".to_owned()))
       .await
+      .map(drop)
   }
 
   /// Counts the changes of the user's meetings this device heard of (a meeting changed, somebody
@@ -1907,12 +1915,29 @@ impl TeamCraft {
   /// as desktop shows them on the meeting's row. Read again on a knock (`lobby_join` changes the
   /// meetings) and after a decision ([`Self::decide_lobby_entry`] with the meeting's chat).
   pub async fn meetings_with_lobbies(&self) -> Result<MeetingsWithLobbies, TeamCraftError> {
-    let (meetings_json, reads) = self
-      .call(|engine| Box::pin(async move { engine.meetings_with_lobbies().await }))
-      .await?;
-    let mut lobbies = Vec::with_capacity(reads.len());
-    for read in reads {
-      lobbies.push(self.lobby_of_read(read).await?);
+    let meetings_json = self.meeting_list_json().await?;
+    let hosted = {
+      let json = meetings_json.clone();
+      self
+        .call(move |engine| Box::pin(async move { engine.hosted_lobbies_of(&json).await }))
+        .await?
+    };
+    let mut lobbies = Vec::new();
+    for meeting in hosted {
+      // Read beside the engine (#2401); one that can't be read is left out until the next read.
+      match self.lobby_beside_engine(meeting.id).await {
+        Ok(lobby) if lobby.is_host && !lobby.entries.is_empty() => {
+          let read = meeting_lobby::LobbyRead {
+            meeting,
+            entries: lobby.entries,
+          };
+          lobbies.push(self.lobby_of_read(read).await?);
+        },
+        Ok(_) => {},
+        Err(error) => {
+          tracing::debug!(meeting_id = %meeting.id, %error, "a meeting's lobby could not be read");
+        },
+      }
     }
     Ok(MeetingsWithLobbies {
       meetings_json,
@@ -2449,6 +2474,7 @@ impl TeamCraft {
       link: Arc::default(),
       is_foreground: std::sync::atomic::AtomicBool::new(true),
       direct_connections: tokio::sync::watch::Sender::new(true),
+      meeting_lists: coalesced::Coalesced::new(),
     }))
   }
 
@@ -3053,6 +3079,64 @@ mod tests {
       held.release().await;
     }
 
+    /// Issue #2401: the server holds every request of the meeting watch, the meetings screen and
+    /// the plain requests unanswered (a slow network); the engine answers meanwhile, as `start`,
+    /// `stop` and every action need it to.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn meeting_requests_leave_the_engine_free_while_the_server_is_slow() {
+      let directory = TestDir::new("slow-meetings");
+      enroll(&directory).await;
+      let (server_url, mut requests) = silent_server().await;
+      let config = AppConfig {
+        server_url,
+        ..config(&directory, KEY.to_vec())
+      };
+      let core = TeamCraft::open_blocking(config, Arc::new(SomeToken), Arc::new(Quiet)).unwrap();
+
+      let pending = [
+        tokio::spawn({
+          let core = core.clone();
+          async move { core.meeting_watch().await.map(drop) }
+        }),
+        tokio::spawn({
+          let core = core.clone();
+          async move { core.mark_admitter().await }
+        }),
+        tokio::spawn({
+          let core = core.clone();
+          async move { core.api_request("GET".into(), "/me".into(), None).await.map(drop) }
+        }),
+      ];
+      let mut seen = Vec::new();
+      let all_sent = tokio::time::timeout(Duration::from_secs(20), async {
+        while seen.len() < pending.len() {
+          seen.push(requests.recv().await.unwrap());
+        }
+      })
+      .await;
+      assert!(all_sent.is_ok(), "the requests went out: {seen:?}");
+      assert!(seen.iter().any(|line| line.starts_with("GET /api/v1/meetings?")));
+      assert!(
+        seen
+          .iter()
+          .any(|line| line.starts_with("PUT /api/v1/meetings/admitter "))
+      );
+
+      let answered = tokio::time::timeout(
+        Duration::from_secs(10),
+        core.call(|_| Box::pin(async { Ok::<_, TeamCraftError>(()) })),
+      )
+      .await;
+      assert!(matches!(answered, Ok(Ok(()))), "the engine waited for the server");
+      assert!(
+        pending.iter().all(|task| !task.is_finished()),
+        "still waiting for the server"
+      );
+      for task in pending {
+        task.abort();
+      }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn a_message_shows_before_the_engine_thread_is_free() {
       let directory = TestDir::new("held-send");
@@ -3489,6 +3573,49 @@ mod tests {
       fn on_change(&self) {
         // The test may be over.
         let _ = self.0.send(());
+      }
+    }
+
+    /// A server that reads each request and never answers; the request lines arrive in order.
+    async fn silent_server() -> (String, tokio::sync::mpsc::UnboundedReceiver<String>) {
+      use tokio::io::AsyncReadExt as _;
+
+      let listener = tokio::net::TcpListener::bind("[::1]:0").await.unwrap();
+      let url = format!("http://{}", listener.local_addr().unwrap());
+      let (lines, requests) = tokio::sync::mpsc::unbounded_channel();
+      tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+          let (mut stream, _) = listener.accept().await.unwrap();
+          let mut head = Vec::new();
+          let mut byte = [0u8; 1];
+          while !head.ends_with(b"\r\n\r\n") {
+            if stream.read_exact(&mut byte).await.is_err() {
+              break;
+            }
+            head.push(byte[0]);
+          }
+          let line = String::from_utf8_lossy(&head)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+          // The test may be over.
+          let _ = lines.send(line);
+          held.push(stream);
+        }
+      });
+      (url, requests)
+    }
+
+    /// Signed in with a token the silent server never checks.
+    struct SomeToken;
+
+    impl TokenProvider for SomeToken {
+      fn access_token(&self) -> AccessToken {
+        AccessToken::Token {
+          value: "token".into(),
+        }
       }
     }
 

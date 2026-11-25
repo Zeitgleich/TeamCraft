@@ -97,26 +97,16 @@ impl Engine {
     Ok(organizer_code(&self.verified_fragment(&meeting).await?))
   }
 
-  /// The meeting list through the organizer's upkeep ([`Engine::meeting_upkeep`], JSON), and the
-  /// lobbies of the meetings on it the user hosts that can be joined now, where somebody waits.
-  /// One list request for both; a lobby that can't be read is left out until the next read.
-  pub(crate) async fn meetings_with_lobbies(&mut self) -> Result<(String, Vec<LobbyRead>), TeamCraftError> {
-    let (json, meetings) = self.meeting_upkeep_list().await?;
+  /// Applies the meeting list `json` through the organizer's upkeep
+  /// ([`Engine::apply_meeting_list`]) and answers the meetings on it the user hosts that can be
+  /// joined now, whose lobbies the meetings screen shows (read beside the engine, #2401).
+  pub(crate) async fn hosted_lobbies_of(
+    &mut self,
+    json: &str,
+  ) -> Result<Vec<MeetingResponse>, TeamCraftError> {
+    let meetings = self.apply_meeting_list(json).await?;
     let me = self.backend()?.me().id;
-    let mut lobbies = Vec::new();
-    for meeting in live_hosted(meetings, me, SystemClock.now_ms()) {
-      match self.lobby_of(&meeting).await {
-        Ok(lobby) if lobby.is_host && !lobby.entries.is_empty() => lobbies.push(LobbyRead {
-          meeting,
-          entries: lobby.entries,
-        }),
-        Ok(_) => {},
-        Err(error) => {
-          tracing::debug!(meeting_id = %meeting.id, %error, "a meeting's lobby could not be read")
-        },
-      }
-    }
-    Ok((json, lobbies))
+    Ok(live_hosted(meetings, me, SystemClock.now_ms()))
   }
 }
 
