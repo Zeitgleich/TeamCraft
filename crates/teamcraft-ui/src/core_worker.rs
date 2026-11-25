@@ -326,6 +326,11 @@ impl WorkerLink {
       ToPage::WantsIdToken => (self.on_event)(WorkerEvent::WantsIdToken),
       // The page runs the calls; its core's worker hears the gateway (#2397).
       ToPage::CallEvent { event } => crate::web_calls::on_gateway_event(&event),
+      // Kept for "Report a problem" and crash breadcrumbs, and shown where the page's log is.
+      ToPage::Log { line } => {
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&line));
+        teamcraft_client_api::debug_log::global().add_line(line);
+      },
       // The worker dies with it: what waits for it fails when its error arrives.
       ToPage::Panic { panic } => crate::crash_reports::capture_worker_panic(*panic),
     }
@@ -389,6 +394,8 @@ fn boot_failure(data: &JsValue) -> Option<ToPage> {
 /// The worker's entry: `main` calls it instead of mounting the UI when it runs in the core's
 /// worker. Listens to the page and takes what arrived before.
 pub fn run() {
+  // The page keeps the core's log lines for its reports (#2397).
+  teamcraft_client_api::debug_log::global().forward_lines(forward_log_line);
   // Logged to the console, and reported by the page: the worker has no reporter (#2397).
   std::panic::set_hook(Box::new(|info| {
     console_error_panic_hook::hook(info);
@@ -560,6 +567,19 @@ pub(crate) fn was_store_ready() -> bool {
 /// In the worker: whether the page is in view.
 pub(crate) fn is_page_visible() -> bool {
   IS_VISIBLE.with(Cell::get)
+}
+
+/// In the worker: a line of the debug log for the page. Logs nothing itself: a failure here would
+/// write a line, which comes here again.
+fn forward_log_line(line: &str) {
+  let message = ToPage::Log {
+    line: line.to_owned(),
+  };
+  if let Ok(json) = serde_json::to_string(&message) {
+    let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
+    // Deliberately ignored: see above; a page that is gone hears nothing anyway.
+    let _ = scope.post_message(&wasm_bindgen::JsValue::from_str(&json));
+  }
 }
 
 /// In the worker: a call event of the gateway for the page's calls (#2397).

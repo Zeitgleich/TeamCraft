@@ -64,6 +64,10 @@ pub(crate) enum ToPage {
   },
   StoreReady,
   WantsIdToken,
+  /// A line of the worker's redacted debug log, for the page's reports and console (#2397).
+  Log {
+    line: String,
+  },
   /// The worker's core panicked (its instance ends); the page reports it (#2397).
   Panic {
     panic: Box<teamcraft_client_api::crash_reporting::PendingPanic>,
@@ -78,6 +82,7 @@ pub(crate) enum ToPage {
 /// #2397): the join token and the call's verified devices, not the signer: the device key stays
 /// in the worker, which signs the call key bindings itself (`core_sign_call_key`).
 #[derive(Debug, Serialize, Deserialize)]
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 pub(crate) struct PreparedCallJson {
   pub(crate) join: CallJoinTokenResponse,
   pub(crate) user_id: UserId,

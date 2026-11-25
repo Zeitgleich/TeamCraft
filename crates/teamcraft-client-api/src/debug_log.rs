@@ -144,6 +144,8 @@ impl Default for DebugLogSettings {
 pub struct DebugLog {
   settings: DebugLogSettings,
   lines: Arc<Mutex<VecDeque<String>>>,
+  /// Hands every kept line on as well ([`Self::forward_lines`]).
+  forward: Arc<OnceLock<fn(&str)>>,
 }
 
 /// The process's ring, created with the default size on first use. Shells add it to their
@@ -181,7 +183,20 @@ impl DebugLog {
       lines: Arc::new(Mutex::new(VecDeque::with_capacity(
         settings.max_lines.min(DEFAULT_MAX_LINES),
       ))),
+      forward: Arc::new(OnceLock::new()),
     }
+  }
+
+  /// Hands every line kept from now on to `forward` too, once set: a browser's client core runs in
+  /// a worker whose lines its page keeps for reports ([`Self::add_line`], #2397).
+  pub fn forward_lines(&self, forward: fn(&str)) {
+    // Set once per process; a second call keeps the first.
+    let _ = self.forward.set(forward);
+  }
+
+  /// Keeps a line another part of the app wrote and redacted (the page keeps its core worker's).
+  pub fn add_line(&self, line: String) {
+    self.push(line);
   }
 
   /// The kept lines, oldest first.
@@ -205,6 +220,9 @@ impl DebugLog {
       return;
     }
     let line = truncate(line, self.settings.max_line_chars);
+    if let Some(forward) = self.forward.get() {
+      forward(&line);
+    }
     let mut lines = self.lock();
     while lines.len() >= self.settings.max_lines {
       lines.pop_front();
@@ -625,6 +643,21 @@ mod tests {
 
   mod ring {
     use super::*;
+
+    #[test]
+    fn hands_kept_lines_on_and_takes_another_parts_lines() {
+      static FORWARDED: Mutex<Vec<String>> = Mutex::new(Vec::new());
+      let log = DebugLog::new(DebugLogSettings::default());
+      log.forward_lines(|line| FORWARDED.lock().unwrap().push(line.to_owned()));
+      record(&log, || tracing::warn!("in the worker"));
+      let forwarded = FORWARDED.lock().unwrap().clone();
+      assert_eq!(forwarded.len(), 1);
+      assert!(forwarded[0].ends_with("in the worker"), "{forwarded:?}");
+
+      let page = DebugLog::new(DebugLogSettings::default());
+      page.add_line(forwarded[0].clone());
+      assert_eq!(page.lines(), forwarded);
+    }
 
     #[test]
     fn keeps_only_the_newest_lines_in_order() {
