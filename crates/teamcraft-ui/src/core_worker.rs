@@ -25,7 +25,7 @@
 //! and always once the store has moved: OPFS holds its log, IndexedDB's records were emptied, and
 //! only a worker can read it again. Never for guests. It isn't the default yet: Chrome's renderer
 //! crashes when it ends a worker that is writing through an OPFS sync access handle, which a reload
-//! or a navigation does (#2397, docs/robustness-audit.md).
+//! or a navigation does (#2397, docs/robustness-audit.md); the default once Chrome is fixed (#2407).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
