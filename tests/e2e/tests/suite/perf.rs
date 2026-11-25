@@ -462,6 +462,13 @@ pub(crate) async fn sign_in_and_unlock(page: &Page, origin: &str, user: &str) {
     .evaluate("localStorage.setItem('teamcraft.locale', 'en')")
     .await
     .unwrap();
+  // E2E_CORE_IN_PAGE=1: the core runs in the page, as before it ran in a worker by default (#2397).
+  if std::env::var("E2E_CORE_IN_PAGE").is_ok_and(|value| value == "1") {
+    page
+      .evaluate("localStorage.setItem('teamcraft.coreWorker', '0')")
+      .await
+      .unwrap();
+  }
   page.goto(format!("{origin}/?backend=server")).await.unwrap();
   wait_for_text(page, "Sign in").await;
   click_text(page, "Sign in").await;

@@ -12,7 +12,7 @@ use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::UserId;
 
 use crate::perf::sign_in_and_unlock;
-use crate::web::{TEST_CSP, shot, wait_for_element};
+use crate::web::{TEST_CSP, shot};
 
 const PORT: u16 = 8083;
 const WEB_ORIGIN: &str = "http://127.0.0.1:8083";
@@ -69,21 +69,29 @@ async fn a_video_streams_from_the_core_in_the_worker() {
       sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
       let channel = alice_ref.client.create_channel(space, "clips").await.unwrap();
       alice_ref.client.add_member(channel, carol).await.unwrap();
+      // Two clips: a single small one plays in the row from the whole file; a tile of an album
+      // opens the lightbox, which streams.
+      let clip = |name: &str| OutgoingFile {
+        file_name: name.into(),
+        media_type: "video/webm".into(),
+        content: CLIP.to_vec(),
+      };
       alice_ref
         .client
-        .send_file(
-          channel,
-          None,
-          OutgoingFile {
-            file_name: "clip.webm".into(),
-            media_type: "video/webm".into(),
-            content: CLIP.to_vec(),
-          },
-        )
+        .send_files(channel, None, "clips", vec![clip("a.webm"), clip("b.webm")])
         .await
         .unwrap();
-      page.goto(format!("{WEB_ORIGIN}/c/{channel}")).await.unwrap();
-      wait_for_element(&page, ".media-tile [data-media-key]").await;
+      // Without waiting for the load event, as perf.rs navigates: the page's core works on.
+      page
+        .evaluate(format!("location.href = '{WEB_ORIGIN}/c/{channel}'"))
+        .await
+        .unwrap();
+      wait_until(
+        &page,
+        "both clips show as tiles",
+        "document.querySelectorAll('.media-tile [data-media-key]').length === 2",
+      )
+      .await;
       let is_on_opfs: bool = page.evaluate(STORE_ON_OPFS).await.unwrap().into_value().unwrap();
       assert!(is_on_opfs, "the core runs in the worker over OPFS by default");
       page
@@ -118,5 +126,11 @@ async fn wait_until(page: &Page, what: &str, condition: &str) {
     }
     tokio::time::sleep(Duration::from_millis(100)).await;
   }
-  panic!("waited in vain until {what}");
+  let text: String = page
+    .evaluate("document.body.innerText.slice(0, 2000)")
+    .await
+    .ok()
+    .and_then(|value| value.into_value().ok())
+    .unwrap_or_default();
+  panic!("waited in vain until {what}; the page shows: {text}");
 }
