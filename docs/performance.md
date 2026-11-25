@@ -2032,17 +2032,26 @@ through the shell, two round trips more (see above): there the row no longer wai
 desktop app is measured by `desktop_echo.rs` (`DESKTOP_ECHO_RUNS`, feature `desktop`, same page probe as the web
 test) in the e2e workflow's `desktop` job (debug build, Xvfb, 20 sends of each kind, CI runner, November 2026):
 
-| What                                                          | Before the photo fix | After           | Budget    |
-|---------------------------------------------------------------|----------------------|-----------------|-----------|
-| Text, Enter until the pending row is in the DOM, median / p95 | 9.0 / 79.0 ms        | 12.0 / 123.0 ms | one frame |
-| 12 MP photo, median                                           | 47.0 ms              | 15.0 ms         | one frame |
-| 12 MP photo, p95 (the slowest of 20)                          | 3,291 ms             | 3,771 ms        | one frame |
+| What                                                          | Before the photo fix | Next task       | Joined handover (#2388) | Budget    |
+|---------------------------------------------------------------|----------------------|-----------------|-------------------------|-----------|
+| Text, Enter until the pending row is in the DOM, median / p95 | 9.0 / 79.0 ms        | 12.0 / 123.0 ms | 13.0 / 2,058 ms         | one frame |
+| 12 MP photo, median                                           | 47.0 ms              | 15.0 ms         | 22.0 ms                 | one frame |
+| 12 MP photo, p95 (the slowest of 20)                          | 3,291 ms             | 3,771 ms        | 101.0 ms                | one frame |
 
 The photo's row waited for the shell call: the files' bytes were serialized for it in the task that
 also had to put the row into the DOM. The call now follows in the next task (`next_task` in
-`act_showing`), which took the median from 47 to 15 ms. **Open:** one or two photos in 20 still come
-3 to 4 s after Enter (the first sends and one more): a file whose staging for the draft hasn't
-finished is staged again by the send (`composer.rs`, `send_checked`). Issue #2364 stays open for that.
+`act_showing`), which took the median from 47 to 15 ms. One or two photos in 20 still came 3 to 4 s
+after Enter: a file whose staging for the draft hadn't finished was staged again by the send, and the
+row waited for that second copy. Now the send joins the draft's staging (`large_files::Handovers`),
+the row shows with stand-ins for the files (`ChatBackend::show_before_send`) and the message follows
+once the copy is done (#2388, e2e run 45504025975; photos are sent with Numpad Enter). The slowest
+photo is 101 ms.
+
+**Open (#2364):** two texts in 20 now take about 2 s (1,954 and 2,058 ms; the other 18 are 6 to
+85 ms). The test sends a text right after each photo; the photo's message now reaches the core while
+that text is typed, where before it had arrived before the photo's row showed. The likely cause: the
+feed is refreshed for the photo's send just then, and `push_pending` doesn't add a row to a feed that
+is moving or has a gap, so the text shows only when the core's answer comes.
 
 Reactions and edits (#2269) read no conversation: the target is one keyed read (`find_stored`,
 `message_by_server_id`; a pending one is looked for among the outbox's rows only) and a reaction's
