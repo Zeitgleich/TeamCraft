@@ -31,6 +31,7 @@ use fluent_bundle::FluentArgs;
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{Either, pending, poll_immediate, select};
 use futures_util::{FutureExt, StreamExt};
+use leptos::prelude::{Get, RwSignal, Set};
 use leptos::wasm_split::SplitLoaderError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -514,6 +515,34 @@ fn session_storage_get(key: &str) -> Option<String> {
   web_sys::window()
     .and_then(|window| window.session_storage().ok().flatten())
     .and_then(|storage| storage.get_item(key).ok().flatten())
+}
+
+thread_local! {
+  /// This member's browser lacks what the core's worker needs (module workers, Web Locks, OPFS
+  /// sync access handles), so the core runs in the page: `BrowserSupportBanner` says so (#2397).
+  static IS_BROWSER_UNSUPPORTED: RwSignal<bool> = RwSignal::new(false);
+  /// The user put the banner away for this session.
+  static IS_BANNER_DISMISSED: RwSignal<bool> = RwSignal::new(session_storage_get(BROWSER_BANNER_KEY).is_some());
+}
+
+/// Where the banner's dismissal is kept for the session.
+const BROWSER_BANNER_KEY: &str = "teamcraft.browserBannerDismissed";
+
+/// Whether to show that this browser can't run the core in its worker (tracked).
+pub fn shows_browser_unsupported() -> bool {
+  IS_BROWSER_UNSUPPORTED.with(|signal| signal.get()) && !IS_BANNER_DISMISSED.with(|signal| signal.get())
+}
+
+/// The user put the banner away; it comes back in the next session.
+pub fn dismiss_browser_unsupported() {
+  session_storage_set(BROWSER_BANNER_KEY, Some("1"));
+  IS_BANNER_DISMISSED.with(|signal| signal.try_set(true));
+}
+
+fn note_browser_unsupported() {
+  if is_member_page() {
+    IS_BROWSER_UNSUPPORTED.with(|signal| signal.try_set(true));
+  }
 }
 
 /// Whether the core runs in this tab or in this tab's worker (not in another tab this one
@@ -1421,7 +1450,10 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
       Ownership::Unsupported if has_moved(user).await => {
         return Err("the local data is in a store this browser can't open without Web Locks".to_owned());
       },
-      Ownership::Unsupported => start_owner(user, None).await?,
+      Ownership::Unsupported => {
+        note_browser_unsupported();
+        start_owner(user, None).await?;
+      },
       Ownership::Taken => start_where_taken(user).await?,
     }
   }
@@ -1448,6 +1480,9 @@ async fn start_owning(user: UserId, lock: OwnerLock) -> Result<(), String> {
     Ok(()) => Ok(()),
     Err((lock, failure)) if !has_moved => {
       tracing::warn!(%failure, "running the core in this page instead");
+      if matches!(failure, StartFailure::Unsupported(_)) {
+        note_browser_unsupported();
+      }
       start_owner(user, Some(lock)).await
     },
     Err((_, failure)) => Err(failure.to_string()),

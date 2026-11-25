@@ -88,3 +88,5 @@ mod web_scroll_older;
 mod web_single_image;
 #[cfg(feature = "browser")]
 mod web_split;
+#[cfg(feature = "browser")]
+mod web_video_stream;

@@ -22,6 +22,7 @@ use crate::calls::{
 use crate::clock::now_ms;
 use crate::components::announcement_banner::AnnouncementBanner;
 use crate::components::bottom_nav::BottomNav;
+use crate::components::browser_support_banner::BrowserSupportBanner;
 use crate::components::bundle_banner::{BundleBanner, ReleaseBanner};
 use crate::components::channel_view::ChannelView;
 use crate::components::desktop_notify::DesktopNotificationPrompt;
@@ -339,6 +340,7 @@ pub fn Shell(backend: Rc<dyn Backend>, settings: Settings) -> impl IntoView {
         <ReleaseBanner />
         <OfflineBanner />
         <StorageBanner />
+        <BrowserSupportBanner />
         <RosterBanner />
         <NotificationPrompt />
         <PersistencePrompt />
