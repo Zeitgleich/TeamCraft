@@ -166,7 +166,82 @@ struct ChatPane: View {
   /// The reaction a double tap toggles, as in most chat apps.
   private static let quickReaction = "👍"
 
+  // The view is cut into type-erased parts (`AnyView`: `lifecycle`, `screenWithDialogs`, `screen`,
+  // `messageList`, `floatingComposer`, `composerRow`, `messageField`; #2392). As one type its
+  // metadata nested so deep that SwiftUI's instantiation of it overflowed the main thread's stack
+  // (iOS 1.0.44). `scripts/check-swiftui-chains.py` keeps each part's modifier chain short.
   var body: some View {
+    lifecycle
+    .fullScreenCover(item: $maybeEditingPicture) { file in
+      PictureEditorView(file: file) { edited in
+        guard edited.path != file.path else { return }
+        // The edited picture replaces the one in the draft (#1220).
+        var replacement = edited
+        replacement.maybeDraftId = PickedFile.newDraftId()
+        attachments = attachments.map { $0.id == file.id ? replacement : $0 }
+        if let id = file.maybeDraftId { removeDraftFile(id) }
+        Task { await attachToDraft([replacement]) }
+        // The unedited copy in the staging folder goes, as on Android: it is no longer sent.
+        try? FileManager.default.removeItem(atPath: file.path)
+      }
+    }
+    .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
+    .sheet(isPresented: $isShowingNotes, onDismiss: { maybeNotesRequest = nil }) {
+      ChannelNotesView(
+        conversationId: conversation.id, maybeStartPageId: maybeNotesRequest?.maybePageId,
+        seeksMention: maybeNotesRequest != nil)
+    }
+    .onChange(of: model.openedNotes, initial: true) { _, opened in
+      guard let opened, opened.conversationId == conversation.id else { return }
+      model.openedNotes = nil
+      maybeNotesRequest = opened
+      isShowingNotes = true
+    }
+    .sheet(item: $maybeForwarding) { target in
+      ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
+    }
+    .sheet(isPresented: forwardingSelectionBinding) {
+      ForwardSheet(
+        fromConversationId: conversation.id, messageId: forwardingSelection.first ?? "", batchIds: forwardingSelection,
+        onForwarded: { selection.clear() })
+    }
+    .sheet(item: $maybeForwardingImage) { file in
+      ForwardSheet(fromConversationId: file.conversation, messageId: file.message, maybeAttachmentId: file.fileId)
+    }
+    .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
+    .fullScreenCover(item: $maybeViewing) { target in
+      PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
+        .pictureZoomTransition(id: target.id, in: pictureZoom, reduceMotion: reduceMotion)
+    }
+    .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
+    .sheet(item: $maybeShowingEdits) { target in
+      EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
+    }
+    // Receipts sent while this device was offline never arrive as events: they are read when the
+    // conversation opens and whenever the connection comes back (#769). Channels have none, so the
+    // core doesn't ask for theirs.
+    .task(id: model.connection?.isConnected == true) {
+      guard threadId == nil, model.connection?.isConnected == true else { return }
+      await model.perform(.refreshReadReceipts(conversationId: conversation.id))
+    }
+    .onAppear { model.visibleConversationId = conversation.id }
+    // After a voice message the next unplayed one of the conversation starts (#2054).
+    .onChange(of: voiceFiles, initial: true) { _, files in VoicePlayer.shared.setQueue(files, owner: draftKey) }
+    .onDisappear {
+      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
+      selection.clear()
+      // A recording stops when the user leaves; the take waits here for their return (#204).
+      VoiceRecorder.shared.interrupt(.left, owner: draftKey)
+      VoicePlayer.shared.clearQueue(owner: draftKey)
+      // Text typed less than the pause ago is stored now; the pause's task goes with the view.
+      Task { await saveDraft() }
+    }
+  }
+
+  /// The banners above the screen and the tasks that keep it current.
+  private var lifecycle: AnyView { AnyView(lifecycleContent) }
+
+  private var lifecycleContent: some View {
     screenWithDialogs
     .safeAreaInset(edge: .top, spacing: 0) {
       VStack(spacing: 0) {
@@ -291,74 +366,12 @@ struct ChatPane: View {
     .onChange(of: model.reopenedConversation) { _, reopened in
       if reopened?.id == conversation.id { readAgain &+= 1 }
     }
-    .fullScreenCover(item: $maybeEditingPicture) { file in
-      PictureEditorView(file: file) { edited in
-        guard edited.path != file.path else { return }
-        // The edited picture replaces the one in the draft (#1220).
-        var replacement = edited
-        replacement.maybeDraftId = PickedFile.newDraftId()
-        attachments = attachments.map { $0.id == file.id ? replacement : $0 }
-        if let id = file.maybeDraftId { removeDraftFile(id) }
-        Task { await attachToDraft([replacement]) }
-        // The unedited copy in the staging folder goes, as on Android: it is no longer sent.
-        try? FileManager.default.removeItem(atPath: file.path)
-      }
-    }
-    .sheet(isPresented: $isShowingMembers) { ChannelMembersView(conversationId: conversation.id) }
-    .sheet(isPresented: $isShowingNotes, onDismiss: { maybeNotesRequest = nil }) {
-      ChannelNotesView(
-        conversationId: conversation.id, maybeStartPageId: maybeNotesRequest?.maybePageId,
-        seeksMention: maybeNotesRequest != nil)
-    }
-    .onChange(of: model.openedNotes, initial: true) { _, opened in
-      guard let opened, opened.conversationId == conversation.id else { return }
-      model.openedNotes = nil
-      maybeNotesRequest = opened
-      isShowingNotes = true
-    }
-    .sheet(item: $maybeForwarding) { target in
-      ForwardSheet(fromConversationId: conversation.id, messageId: target.message.id)
-    }
-    .sheet(isPresented: forwardingSelectionBinding) {
-      ForwardSheet(
-        fromConversationId: conversation.id, messageId: forwardingSelection.first ?? "", batchIds: forwardingSelection,
-        onForwarded: { selection.clear() })
-    }
-    .sheet(item: $maybeForwardingImage) { file in
-      ForwardSheet(fromConversationId: file.conversation, messageId: file.message, maybeAttachmentId: file.fileId)
-    }
-    .alert("file_gone", isPresented: $isPictureGone) { Button("done", role: .cancel) {} }
-    .fullScreenCover(item: $maybeViewing) { target in
-      PictureViewer(target: target, maybeOnReply: canReply ? startImageReply : nil)
-        .pictureZoomTransition(id: target.id, in: pictureZoom, reduceMotion: reduceMotion)
-    }
-    .fullScreenCover(item: $maybeVideo) { video in VideoViewer(opened: video) }
-    .sheet(item: $maybeShowingEdits) { target in
-      EditHistorySheet(edits: extras[target.message.id]?.edits ?? [], current: target.message.body)
-    }
-    // Receipts sent while this device was offline never arrive as events: they are read when the
-    // conversation opens and whenever the connection comes back (#769). Channels have none, so the
-    // core doesn't ask for theirs.
-    .task(id: model.connection?.isConnected == true) {
-      guard threadId == nil, model.connection?.isConnected == true else { return }
-      await model.perform(.refreshReadReceipts(conversationId: conversation.id))
-    }
-    .onAppear { model.visibleConversationId = conversation.id }
-    // After a voice message the next unplayed one of the conversation starts (#2054).
-    .onChange(of: voiceFiles, initial: true) { _, files in VoicePlayer.shared.setQueue(files, owner: draftKey) }
-    .onDisappear {
-      if model.visibleConversationId == conversation.id { model.visibleConversationId = nil }
-      selection.clear()
-      // A recording stops when the user leaves; the take waits here for their return (#204).
-      VoiceRecorder.shared.interrupt(.left, owner: draftKey)
-      VoicePlayer.shared.clearQueue(owner: draftKey)
-      // Text typed less than the pause ago is stored now; the pause's task goes with the view.
-      Task { await saveDraft() }
-    }
   }
 
   /// The messages and the composer, with navigation and pickers.
-  private var screen: some View {
+  private var screen: AnyView { AnyView(screenContent) }
+
+  private var screenContent: some View {
     VStack(spacing: 0) {
       OfflineBanner()
       // Only this conversation's own mark (issue #1457); a thread's pane follows its channel's.
@@ -482,7 +495,9 @@ struct ChatPane: View {
   }
 
   /// `screen` with its confirmations, alerts and the in-app handling of message links.
-  private var screenWithDialogs: some View {
+  private var screenWithDialogs: AnyView { AnyView(screenWithDialogsContent) }
+
+  private var screenWithDialogsContent: some View {
     screen
     .confirmationDialog("delete_confirm_title", isPresented: deletingBinding, titleVisibility: .visible, presenting: maybeDeleting) {
       message in
@@ -568,7 +583,9 @@ struct ChatPane: View {
   /// The messages on a recycling collection view (issue #2180, `MessageListView`). It extends
   /// under the floating composer and the keyboard (they are its bottom inset), so messages scroll
   /// on behind them.
-  private var messageList: some View {
+  private var messageList: AnyView { AnyView(messageListContent) }
+
+  private var messageListContent: some View {
     GeometryReader { geometry in
       let listWidth = max(geometry.size.width - MessageListView.listPadding * 2, 0)
       let look = BubbleLook(
@@ -928,7 +945,9 @@ struct ChatPane: View {
   /// The typing line and the composer over a scrim from the background colour: one gradient from
   /// clear at the top to nearly opaque at the screen's bottom edge, so the messages behind fade out
   /// down to the home indicator without a solid band. Drawn once per size, not per scroll.
-  private var floatingComposer: some View {
+  private var floatingComposer: AnyView { AnyView(floatingComposerContent) }
+
+  private var floatingComposerContent: some View {
     VStack(spacing: 0) {
       if let line = typingText(typingNames(in: model.typingNow, conversation: conversation.id, thread: threadId)) {
         Text(line)
@@ -1010,7 +1029,9 @@ struct ChatPane: View {
   /// The field and the send button; while there is nothing to send and voice messages are on, the
   /// record button takes the send button's place (#204). A held recording shows in place of the
   /// field, so the button the finger holds stays where it is.
-  private var composerRow: some View {
+  private var composerRow: AnyView { AnyView(composerRowContent) }
+
+  private var composerRowContent: some View {
     HStack(alignment: .bottom, spacing: 8) {
       if VoiceRecorder.shared.isHeld(by: draftKey) {
         VoiceHoldHint(owner: draftKey)
@@ -1065,7 +1086,9 @@ struct ChatPane: View {
   }
 
   /// The rounded field with attach on the leading side and the camera on the trailing side.
-  private var messageField: some View {
+  private var messageField: AnyView { AnyView(messageFieldContent) }
+
+  private var messageFieldContent: some View {
     HStack(alignment: .bottom, spacing: 0) {
       if maybeEditing != nil {
         Button { cancelEditing() } label: { composerIcon("xmark") }
