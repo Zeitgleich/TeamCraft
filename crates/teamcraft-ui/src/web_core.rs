@@ -775,6 +775,7 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
         devices: devices_for_page(&prepared.devices)?,
       };
       // The device key stays here; the page asks for each binding (`core_sign_call_key`).
+      // async-ok: a thread-local map of the worker, not a signal.
       WORKER_CALL_SIGNERS.with(|signers| {
         signers.borrow_mut().insert(
           conversation,
@@ -788,6 +789,7 @@ pub(crate) async fn serve_page_of_worker(command: &str, args: Value) -> Result<V
       let call_id: teamcraft_proto::CallId = field(&args, "call_id")?;
       let key: teamcraft_proto::Base64Bytes = field(&args, "key")?;
       let signer = WORKER_CALL_SIGNERS
+        // async-ok: a thread-local map of the worker, not a signal.
         .with(|signers| signers.borrow().get(&conversation).cloned())
         .ok_or("no call of this conversation was prepared")?;
       let binding = crate::web_calls::sign_binding(signer, call_id, key.as_slice())?;
@@ -1330,13 +1332,14 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
   }
 }
 
-/// Runs the core of the tab that holds the store's lock: in a worker on OPFS (`core_worker`) when
-/// the store moved there or the user turned it on, else in this page on IndexedDB. A store that
+/// Runs the core of the tab that holds the store's lock: in a worker on OPFS (`core_worker`) for a
+/// member unless the user turned it off (#2397) or the worker can't start, else in this page on
+/// IndexedDB. A store that
 /// moved is never opened from IndexedDB again (its records there were emptied): if its worker
 /// can't start, the start fails and the user tries again.
 async fn start_owning(user: UserId, lock: OwnerLock) -> Result<(), String> {
   let has_moved = has_moved(user).await;
-  if !has_moved && !(is_member_page() && core_worker::is_opted_in()) {
+  if !has_moved && !(is_member_page() && core_worker::is_wanted()) {
     return start_owner(user, Some(lock)).await;
   }
   match start_worker(user, lock).await {

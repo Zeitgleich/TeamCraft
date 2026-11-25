@@ -1994,6 +1994,16 @@ impl Report {
   /// shared); the budgets in robustness.md are the targets.
   fn assert_budgets(&self) {
     assert!(self.seconds_reload_to_channel_list < 15.0, "{self:#?}");
+    // #2397: nothing holds the page's thread for a second, not a catch-up after a long absence
+    // with the CPU slowed down, not a catalog build (the core runs in a worker by default).
+    assert!(
+      self.catch_up_longest_task_ms < 1000.0,
+      "the page's thread was held while catching up: {self:#?}"
+    );
+    assert!(
+      self.catalog_build_longest_task_ms < 1000.0,
+      "the page's thread was held while the catalog was built: {self:#?}"
+    );
     // Issue #714: synced within 300 ms of opening; the bound leaves room for a shared machine.
     assert!(
       self.reload_sync_ms >= 0.0,

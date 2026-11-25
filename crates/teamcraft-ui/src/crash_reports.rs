@@ -143,6 +143,27 @@ pub fn capture_panic(info: &PanicHookInfo<'_>) {
   store_queue();
 }
 
+/// In the core's worker (#2397): its panic as the page reports it ([`capture_worker_panic`]); the
+/// worker has no reporter of its own (no consent, no queue). Built like [`capture_panic`]'s.
+pub(crate) fn worker_panic(info: &PanicHookInfo<'_>) -> PendingPanic {
+  let parts = PanicParts::from_hook(info, String::new()).with_script_stack(ScriptStack {
+    text: script_stack(&js_sys::Error::new("").into()).unwrap_or_default(),
+    origin: page_origin(),
+  });
+  PendingPanic {
+    parts,
+    timestamp_ms: now_ms(),
+    breadcrumbs: page_breadcrumbs(),
+  }
+}
+
+/// The page reports a panic of its core's worker, which ended the worker's instance.
+pub(crate) fn capture_worker_panic(panic: PendingPanic) {
+  capture_pending(panic);
+  store_queue();
+  flush();
+}
+
 /// Desktop: the page's panics of the last run, with the shell's log up to each (the shell lives
 /// on while the page reloads). Kept with that log until the reporter took them, so a page that
 /// goes again before doesn't lose it.

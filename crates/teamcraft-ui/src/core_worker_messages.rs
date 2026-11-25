@@ -64,6 +64,10 @@ pub(crate) enum ToPage {
   },
   StoreReady,
   WantsIdToken,
+  /// The worker's core panicked (its instance ends); the page reports it (#2397).
+  Panic {
+    panic: Box<teamcraft_client_api::crash_reporting::PendingPanic>,
+  },
   /// A call event of the gateway (start, update, end, ring) for the page's calls (#2397).
   CallEvent {
     event: Box<GatewayEvent>,

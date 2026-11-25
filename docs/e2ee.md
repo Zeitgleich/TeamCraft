@@ -6723,6 +6723,17 @@ keys.
    10 minutes after signing, by the signer's clock). The binding travels to the SFU with the
    DAVE key package; the SFU hands it to the members together with the proposal to add the device,
    and to a joining device together with the welcome (the bindings of the existing members).
+   **Where the device key is.** The device key signs where the client core runs. In a browser
+   whose core runs in a dedicated worker (§9.1, #2397) that is not the page that runs the call:
+   the call engine then holds its key package back and asks for the binding
+   (`CallKeyAuthenticator::signs_later`, `CallEngineEvent::KeyBindingWanted`); the page asks the
+   worker (`core_sign_call_key`), which signs with the signer it kept from preparing the call, and
+   hands the binding to the engine, which sends the package then. A binding of a key the session no
+   longer has (the SFU started the group over meanwhile) is dropped; one that couldn't be signed is
+   an encryption failure. The device key never leaves the worker. To verify the others' bindings
+   the page gets the call's devices from the worker as certificates the worker verified
+   (`VerifiedDevice::to_checked_bytes` / `from_checked_bytes`, over the worker's channel, which
+   only the page's own core writes to).
 3. Members verify a binding against the device's certificate (§3, the same `VerifiedDevice` as in
    chat) and reject it if it is for another call or another device. **Time.** Only a joining
    device's binding (the one that comes with the proposal) is checked for time, by the verifying
@@ -8020,19 +8031,21 @@ reads one when it is asked for. Only the backend under the sealed store changes
   flushes), the request for persistent storage, the service worker's messages, background
   failures, and the "store was set up" mark in `localStorage`. Nothing decrypted crosses besides
   what the page's UI reads today (snapshots, messages, a file's bytes for the viewer).
-- **Which core runs where.** The worker runs when the store already moved (OPFS holds a log of it:
+- **Which core runs where.** For a member, the worker runs by default (#2397): the store moves to
+  OPFS on the first start in the worker, with its progress on the catalog-build screen. It doesn't
+  where the user turned it off (`localStorage` `teamcraft.coreWorker = "0"`) and the store hasn't
+  moved, and it always runs when the store already moved (OPFS holds a log of it:
   `OpfsStore::has_log`, which reads the slots' headers through `getFile()` and creates nothing; a
-  slot it can't read counts as moved) or when the user turned it on (`localStorage`
-  `teamcraft.coreWorker = "1"`, a development switch until the rest of #2363). The move is one
+  slot it can't read counts as moved). The move is one
   way: IndexedDB's records are emptied, so a moved store is never opened in the page again; if its
   worker can't start, the start fails and the user tries again. A store that hasn't moved falls
   back to the page when the worker can't start (no module workers, no sync access handles). Guests
   always run the core in the page on IndexedDB.
-- **What is left** (#2363): calls and streamed videos from a page whose core is in a worker (they
-  need the device key that signs a call's keys, which stays with the core: until then the page
-  answers them as a follower tab, no calls, videos downloaded whole), the service worker asking the
-  owning tab's worker instead of copying the files, the move on by default with its progress on the
-  catalog-build screen, and the measurements of the start.
+- **Calls** from a page whose core is in the worker: the page runs the call, the worker keeps the
+  device key and signs the call key binding (§8, "Where the device key is"), forwards the
+  gateway's call events and answers the join, devices, probe tickets and background pictures.
+- **What is left** (#2363): streamed videos from such a page (until then they download whole),
+  and the service worker asking the owning tab's worker instead of copying the files.
 
 **Sign-in tokens across reloads:** the web client keeps its OIDC tokens (access and refresh token)
 in a separate IndexedDB database, `teamcraft-session`, sealed with AES-256-GCM under a

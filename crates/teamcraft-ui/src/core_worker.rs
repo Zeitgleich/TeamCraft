@@ -17,13 +17,14 @@
 //! reads the DPoP key from IndexedDB itself, it is the same origin's), visibility and the page's
 //! lifecycle (hidden, frozen, closed: the worker saves the store's index and flushes), the request
 //! for persistent storage, the service worker's messages, background failures and the "store was
-//! ready" mark in `localStorage`. Calls and streamed videos need the page's media and the device
-//! key in one place; a page whose core runs in a worker answers them as a follower tab does (no
-//! calls, files whole) until the call module talks to the worker too (the rest of #2363).
+//! ready" mark in `localStorage`. Calls run in the page, which asks the worker for the join and
+//! each call key binding (the device key stays here, e2ee.md §8, #2397); streamed videos download
+//! whole for now (the rest of #2363).
 //!
-//! **Which core.** The worker runs when the user turned it on (`teamcraft.coreWorker`, a
-//! development switch until the rest of #2363), or whenever the store has moved: OPFS holds its
-//! log, IndexedDB's records were emptied, and only a worker can read it again. Never for guests.
+//! **Which core.** The worker runs for members by default (#2397), unless the user turned it off
+//! (`teamcraft.coreWorker = "0"`) before the store moved; always once the store has moved: OPFS
+//! holds its log, IndexedDB's records were emptied, and only a worker can read it again. Never for
+//! guests.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -50,8 +51,9 @@ const WORKER_SCRIPT: &str = "/core-worker.js";
 const GLUE_URL_GLOBAL: &str = "teamcraftMainJs";
 /// Where `core-worker.js` keeps the messages that arrived before [`run`] listened.
 const INBOX_GLOBAL: &str = "teamcraftCoreWorkerInbox";
-/// The development switch in `localStorage` that moves the store before the rest of #2363.
-const OPT_IN_KEY: &str = "teamcraft.coreWorker";
+/// The switch in `localStorage` that keeps the core in the page (`"0"`), for a browser whose worker
+/// misbehaves; a store that moved runs in the worker anyway.
+const SWITCH_KEY: &str = "teamcraft.coreWorker";
 /// How long the page waits for the worker to start: instantiating the module and the support check.
 /// The worker compiles nothing (it gets the compiled module), so this is generous.
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -145,9 +147,9 @@ pub(crate) fn is_worker() -> bool {
   })
 }
 
-/// Whether the user turned the core in a worker on before it is the default.
-pub(crate) fn is_opted_in() -> bool {
-  load_string(OPT_IN_KEY).as_deref() == Some("1")
+/// Whether the core should run in a worker: by default, unless the user turned it off (#2397).
+pub(crate) fn is_wanted() -> bool {
+  load_string(SWITCH_KEY).as_deref() != Some("0")
 }
 
 impl WorkerLink {
@@ -324,6 +326,8 @@ impl WorkerLink {
       ToPage::WantsIdToken => (self.on_event)(WorkerEvent::WantsIdToken),
       // The page runs the calls; its core's worker hears the gateway (#2397).
       ToPage::CallEvent { event } => crate::web_calls::on_gateway_event(&event),
+      // The worker dies with it: what waits for it fails when its error arrives.
+      ToPage::Panic { panic } => crate::crash_reports::capture_worker_panic(*panic),
     }
   }
 
@@ -385,7 +389,13 @@ fn boot_failure(data: &JsValue) -> Option<ToPage> {
 /// The worker's entry: `main` calls it instead of mounting the UI when it runs in the core's
 /// worker. Listens to the page and takes what arrived before.
 pub fn run() {
-  console_error_panic_hook::set_once();
+  // Logged to the console, and reported by the page: the worker has no reporter (#2397).
+  std::panic::set_hook(Box::new(|info| {
+    console_error_panic_hook::hook(info);
+    post_to_page(&ToPage::Panic {
+      panic: Box::new(crate::crash_reports::worker_panic(info)),
+    });
+  }));
   // The core's split modules and the media cache spawn on Leptos' executor.
   if any_spawner::Executor::init_wasm_bindgen().is_err() {
     tracing::debug!("the task executor was set up already");
