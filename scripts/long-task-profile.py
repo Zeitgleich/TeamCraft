@@ -17,7 +17,6 @@ import json
 import re
 import shutil
 import subprocess
-import sys
 from collections import Counter
 
 HASH = re.compile(r'::h[0-9a-f]{16}$')
@@ -154,4 +153,4 @@ def main():
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    main()
