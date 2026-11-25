@@ -3508,6 +3508,10 @@ service worker serves it from its cache on every later visit. The uncompressed s
 of this scope is not a useful budget on its own; 10 MB uncompressed was reached with the features of
 v1, and nothing cheap is left to cut (below).
 
+The release `index.html` is minified (comments and whitespace between tags dropped, ~37 % smaller;
+`scripts/minify-html.py`, last step of `build-app.sh`, #2396), so the page every client fetches first
+carries no developer comments.
+
 `.github/workflows/web-size.yml` builds the release bundle on every change to the crates in it and
 runs `scripts/check-web-size.py`. The script prints uncompressed, gzip -9 and (when the `brotli`
 module is installed) brotli -11 sizes, the gzip delta to `main` and a guest's first visit, and lists

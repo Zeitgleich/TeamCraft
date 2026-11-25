@@ -79,3 +79,8 @@ else
 fi
 # Edits index.html too, so it runs in this hook, after the bundle.
 sh "$here/scripts/finish-calls.sh"
+# Release only, last: after the hooks that edit index.html, before the release is signed (#2396).
+if [ "$profile" = "web-release" ]; then
+  python="$(command -v python3 || command -v python)"
+  "$python" "$here/scripts/minify-html.py" "$dist/index.html"
+fi
