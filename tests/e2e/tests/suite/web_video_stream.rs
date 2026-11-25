@@ -1,6 +1,8 @@
 //! A video plays while it streams in the web client whose core runs in the worker (#200, #2397):
 //! the service worker's range reads go through the page to the core in the worker, which decrypts
-//! only the chunks they cover.
+//! only the chunks they cover. The worker is turned on for it (it isn't the default while Chrome
+//! crashes ending a worker that writes to OPFS, so the test opens the channel in the app instead
+//! of loading a new page).
 
 use std::time::Duration;
 
@@ -11,7 +13,7 @@ use teamcraft_e2e::scenario::space_with;
 use teamcraft_e2e::{Peer, Stack};
 use teamcraft_proto::UserId;
 
-use crate::perf::sign_in_and_unlock;
+use crate::perf::{CoreAt, sign_in_and_unlock_with};
 use crate::web::{TEST_CSP, shot};
 
 const PORT: u16 = 8083;
@@ -66,7 +68,7 @@ async fn a_video_streams_from_the_core_in_the_worker() {
   browser
     .screenshot_on_failure("video-stream", |page| async move {
       prefer_mouse(&page).await;
-      sign_in_and_unlock(&page, WEB_ORIGIN, "carol").await;
+      sign_in_and_unlock_with(&page, WEB_ORIGIN, "carol", CoreAt::Worker).await;
       let channel = alice_ref.client.create_channel(space, "clips").await.unwrap();
       alice_ref.client.add_member(channel, carol).await.unwrap();
       // Two clips: a single small one plays in the row from the whole file; a tile of an album
@@ -81,19 +83,25 @@ async fn a_video_streams_from_the_core_in_the_worker() {
         .send_files(channel, None, "clips", vec![clip("a.webm"), clip("b.webm")])
         .await
         .unwrap();
-      // Without waiting for the load event, as perf.rs navigates: the page's core works on.
-      page
-        .evaluate(format!("location.href = '{WEB_ORIGIN}/c/{channel}'"))
-        .await
-        .unwrap();
+      // Through the app's router, not by loading the page again: the worker stays (see above).
+      // Told again every 3 s until the tiles show: a router not ready yet misses the first.
       wait_until(
         &page,
         "both clips show as tiles",
-        "document.querySelectorAll('.media-tile [data-media-key]').length === 2",
+        &format!(
+          "(() => {{ \
+             if (document.querySelectorAll('.media-tile [data-media-key]').length === 2) return true; \
+             if (Date.now() - (window.e2eNavigatedAt || 0) > 3000) {{ \
+               window.e2eNavigatedAt = Date.now(); \
+               history.pushState(null, '', '/c/{channel}'); \
+               dispatchEvent(new PopStateEvent('popstate')); \
+             }} \
+             return false; }})()"
+        ),
       )
       .await;
       let is_on_opfs: bool = page.evaluate(STORE_ON_OPFS).await.unwrap().into_value().unwrap();
-      assert!(is_on_opfs, "the core runs in the worker over OPFS by default");
+      assert!(is_on_opfs, "the core runs in the worker over OPFS once turned on");
       page
         .evaluate("document.querySelector('.media-tile [data-media-key]').click()")
         .await

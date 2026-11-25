@@ -21,10 +21,11 @@
 //! each call key binding (the device key stays here, e2ee.md §8, #2397); streamed videos download
 //! whole for now (the rest of #2363).
 //!
-//! **Which core.** The worker runs for members by default (#2397), unless the user turned it off
-//! (`teamcraft.coreWorker = "0"`) before the store moved; always once the store has moved: OPFS
-//! holds its log, IndexedDB's records were emptied, and only a worker can read it again. Never for
-//! guests.
+//! **Which core.** The worker runs for a member who turned it on (`teamcraft.coreWorker = "1"`),
+//! and always once the store has moved: OPFS holds its log, IndexedDB's records were emptied, and
+//! only a worker can read it again. Never for guests. It isn't the default yet: Chrome's renderer
+//! crashes when it ends a worker that is writing through an OPFS sync access handle, which a reload
+//! or a navigation does (#2397, docs/robustness-audit.md).
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -147,9 +148,10 @@ pub(crate) fn is_worker() -> bool {
   })
 }
 
-/// Whether the core should run in a worker: by default, unless the user turned it off (#2397).
+/// Whether the core should run in a worker: when the user turned it on (#2397; not the default
+/// while Chrome crashes ending a worker that writes to OPFS).
 pub(crate) fn is_wanted() -> bool {
-  load_string(SWITCH_KEY).as_deref() != Some("0")
+  load_string(SWITCH_KEY).as_deref() == Some("1")
 }
 
 impl WorkerLink {

@@ -1514,10 +1514,9 @@ async fn start(user: UserId) -> Result<CoreStatus, String> {
 }
 
 /// Runs the core of the tab that holds the store's lock: in a worker on OPFS (`core_worker`) for a
-/// member unless the user turned it off (#2397) or the worker can't start, else in this page on
-/// IndexedDB. A store that
-/// moved is never opened from IndexedDB again (its records there were emptied): if its worker
-/// can't start, the start fails and the user tries again.
+/// member who turned it on (#2397) or whose store moved, unless the worker can't start; else in
+/// this page on IndexedDB. A store that moved is never opened from IndexedDB again (its records
+/// there were emptied): if its worker can't start, the start fails and the user tries again.
 async fn start_owning(user: UserId, lock: OwnerLock) -> Result<(), String> {
   let has_moved = has_moved(user).await;
   if !has_moved && !(is_member_page() && core_worker::is_wanted()) {

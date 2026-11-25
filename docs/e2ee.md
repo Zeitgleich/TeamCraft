@@ -8037,14 +8037,15 @@ reads one when it is asked for. Only the backend under the sealed store changes
   flushes), the request for persistent storage, the service worker's messages, background
   failures, and the "store was set up" mark in `localStorage`. Nothing decrypted crosses besides
   what the page's UI reads today (snapshots, messages, a file's bytes for the viewer).
-- **Which core runs where.** For a member, the worker runs by default (#2397): the store moves to
-  OPFS on the first start in the worker, with its progress on the catalog-build screen. It doesn't
-  where the user turned it off (`localStorage` `teamcraft.coreWorker = "0"`) and the store hasn't
-  moved, and it always runs when the store already moved (OPFS holds a log of it:
-  `OpfsStore::has_log`, which reads the slots' headers through `getFile()` and creates nothing; a
-  slot it can't read counts as moved). The move is one
-  way: IndexedDB's records are emptied, so a moved store is never opened in the page again; if its
-  worker can't start, the start fails and the user tries again. A store that hasn't moved falls
+- **Which core runs where.** For a member, the worker runs when the user turned it on
+  (`localStorage` `teamcraft.coreWorker = "1"`, #2397): the store moves to OPFS on the first start
+  in the worker, with its progress on the catalog-build screen. It always runs when the store
+  already moved (OPFS holds log files of it: `OpfsStore::has_log_files`, which only looks for the
+  files, since the worker of the page before may still hold them). It isn't the default yet:
+  Chrome's renderer crashes when it ends a worker in the middle of a write through an OPFS sync
+  access handle, which a reload or a navigation of the tab does (docs/robustness-audit.md). The
+  move is one way: IndexedDB's records are emptied, so a moved store is never opened in the page
+  again; if its worker can't start, the start fails and the user tries again. A store that hasn't moved falls
   back to the page when the worker can't start (no module workers, no sync access handles). Guests
   always run the core in the page on IndexedDB.
 - **Calls** from a page whose core is in the worker: the page runs the call, the worker keeps the
