@@ -1409,7 +1409,9 @@ fn observe_size(
     };
     let glyphs = probe.get_bounding_client_rect();
     let style = web_sys::window().and_then(|window| window.get_computed_style(&probe).ok().flatten());
-    let padding_px = style
+    // The probe has a cell's padding and bottom border, so `row_px` is a drawn row's height
+    // (border included) and `line_px` its text line alone.
+    let frame_px = style
       .map(|style| {
         let read = |name: &str| {
           style
@@ -1418,12 +1420,12 @@ fn observe_size(
             .and_then(|value| value.trim_end_matches("px").parse::<f64>().ok())
             .unwrap_or(0.0)
         };
-        read("padding-top") + read("padding-bottom")
+        read("padding-top") + read("padding-bottom") + read("border-top-width") + read("border-bottom-width")
       })
       .unwrap_or(0.0);
     let next = Metrics {
       row_px: glyphs.height(),
-      line_px: glyphs.height() - padding_px,
+      line_px: glyphs.height() - frame_px,
       char_px: (glyphs.width() - CELL_PADDING_PX) / PROBE_TEXT.chars().count() as f64,
       header_px: head.get_bounding_client_rect().height(),
       viewport_px: f64::from(element.client_height()),
