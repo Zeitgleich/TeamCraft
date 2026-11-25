@@ -33,14 +33,18 @@ mod imp {
 
 #[cfg(target_arch = "wasm32")]
 mod imp {
+  use std::cell::RefCell;
+  use std::collections::VecDeque;
   use std::future::Future;
   use std::pin::Pin;
+  use std::rc::Rc;
   use std::task::{Context, Poll};
   use std::time::Duration;
 
   use futures_channel::oneshot;
   use wasm_bindgen::prelude::{Closure, wasm_bindgen};
   use wasm_bindgen::{JsCast, JsValue};
+  use web_sys::{MessageChannel, MessageEvent, MessagePort};
 
   // The global functions exist in windows and in (service) workers alike; `web_sys::Window` doesn't.
   #[wasm_bindgen]
@@ -77,10 +81,73 @@ mod imp {
     .await;
   }
 
-  /// A task of its own (a zero timeout), not a microtask: the browser handles input and paints
-  /// in between, which a resolved promise wouldn't let it.
+  /// A task of its own, not a microtask: the browser handles input and paints in between, which a
+  /// resolved promise wouldn't let it. A message to the thread's own channel, not a zero timeout:
+  /// a timer set from a timer's callback waits at least 4 ms from the fifth in a row (HTML's
+  /// nesting clamp), so work that hands the thread back every few milliseconds spent as long
+  /// waiting as working (issue #2397). Messages run in order with the other tasks, so neither
+  /// IndexedDB's events nor the UI's timers wait behind them. Without a channel (it can't fail in
+  /// a window or worker), the timeout.
   pub(super) async fn yield_now() {
-    sleep(Duration::ZERO).await;
+    let (sender, turn) = oneshot::channel();
+    let is_posted = YIELDS.with(|yields| {
+      let mut yields = yields.borrow_mut();
+      if yields.is_none() {
+        *yields = ThreadYields::new();
+      }
+      yields.as_ref().is_some_and(|yields| yields.post(sender))
+    });
+    if is_posted {
+      // A dropped sender (the channel went away) is a turn as well.
+      let _ = turn.await;
+    } else {
+      sleep(Duration::ZERO).await;
+    }
+  }
+
+  thread_local! {
+    static YIELDS: RefCell<Option<ThreadYields>> = const { RefCell::new(None) };
+  }
+
+  /// The thread's channel for [`yield_now`]: each waiter posts one message and goes on when it
+  /// arrives, first come first served.
+  struct ThreadYields {
+    sending: MessagePort,
+    waiting: Rc<RefCell<VecDeque<oneshot::Sender<()>>>>,
+    _receiving: MessagePort,
+    _on_message: Closure<dyn FnMut(MessageEvent)>,
+  }
+
+  impl ThreadYields {
+    fn new() -> Option<Self> {
+      let channel = MessageChannel::new().ok()?;
+      let waiting: Rc<RefCell<VecDeque<oneshot::Sender<()>>>> = Rc::default();
+      let woken = Rc::clone(&waiting);
+      let on_message = Closure::<dyn FnMut(MessageEvent)>::new(move |_: MessageEvent| {
+        let maybe_next = woken.borrow_mut().pop_front();
+        if let Some(next) = maybe_next {
+          // Its yield was dropped meanwhile: nobody to wake.
+          let _ = next.send(());
+        }
+      });
+      let receiving = channel.port1();
+      receiving.set_onmessage(Some(on_message.as_ref().unchecked_ref()));
+      Some(Self {
+        sending: channel.port2(),
+        waiting,
+        _receiving: receiving,
+        _on_message: on_message,
+      })
+    }
+
+    /// Queues `sender` to be woken by the next message; false if the message can't be posted.
+    fn post(&self, sender: oneshot::Sender<()>) -> bool {
+      if self.sending.post_message(&JsValue::UNDEFINED).is_err() {
+        return false;
+      }
+      self.waiting.borrow_mut().push_back(sender);
+      true
+    }
   }
 
   impl Future for Sleep {

@@ -56,7 +56,10 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # maintainer: the call module, which is part of this visit, had grown past its own budget.
 # Lowered to 6.72 MB on 2026-11-22 (#1699): 6.34 MB after what moved out of the app then, plus
 # about 6 % (5 % would warn at once).
-DEFAULT_GUEST_BUDGET_BYTES = 6_720_000
+# Raised by 30 kB to 6.75 MB on 2026-11-25 (#2397), a decision of the maintainer: the core a guest
+# runs in the page hands its thread back in short steps (catalog build, sealing, the snapshot), and
+# the page formats times with kept formatters.
+DEFAULT_GUEST_BUDGET_BYTES = 6_750_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
 GUEST_MODULES = ("guest", "calls")
 SPLIT_LOADER = "teamcraft-ui-split-*.js"

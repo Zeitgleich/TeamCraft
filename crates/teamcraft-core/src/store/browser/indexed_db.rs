@@ -56,7 +56,9 @@ use web_sys::{IdbDatabase, IdbObjectStore, IdbTransaction, IdbTransactionMode};
 
 use super::idb::{self, OpenMode, RECORDS};
 use crate::clock::{Clock, SystemClock};
-use crate::store::sealed::{BuildStep, LazySeal, RecordBackend, SealedStore, format_id, parse_id};
+use crate::store::sealed::{
+  BuildStep, CATALOG_BATCH, LazySeal, RecordBackend, SealedStore, format_id, parse_id,
+};
 use crate::store::write_queue::{Issue, OpenValue, RecordValue, WriteFailure, Writes};
 use crate::store::{SealedStoreLimits, StoreError};
 
@@ -65,6 +67,18 @@ use crate::store::{SealedStoreLimits, StoreError};
 const BATCH_DELAY: Duration = Duration::from_millis(50);
 /// How much longer a batch over `LARGE_BATCH_BYTES` waits after its delay.
 const LARGE_BATCH_EXTRA: Duration = Duration::from_millis(200);
+/// How long a step of a catalog build runs before it hands the thread back
+/// ([`build_catalog_committing`]): under the 50 ms of a long task. Each step reads again the index
+/// nodes the node cache dropped since the last; at 8 ms a large store's build took four times as
+/// long (#2397). This build runs where the core runs in the page; in the worker the OPFS store
+/// builds (`opfs.rs`), off the page's thread.
+const BUILD_STEP_MS: f64 = 40.0;
+/// Records of the first step of a catalog build; the next ones follow the pace.
+const FIRST_BUILD_STEP: usize = 32;
+/// Records of a step at least, however slow: the build gets on.
+const MIN_BUILD_STEP: usize = 4;
+/// How long [`seal_in_slices`] seals before it hands the thread back: half a frame.
+const SEAL_SLICE_MS: f64 = 8.0;
 /// Property on a write transaction naming the batch of writes it carries.
 const BATCH_PROPERTY: &str = "teamcraftBatch";
 /// `DOMException.name` of a write refused for lack of space.
@@ -176,6 +190,7 @@ impl IndexedDbRecords {
   /// See [`IndexedDbStore::flush`].
   pub(super) async fn flush(&self) -> Result<(), StoreError> {
     let inner = &self.inner;
+    seal_in_slices(&Rc::downgrade(inner), true).await;
     inner.issue_batch(true);
     let maybe_due = inner.writes.borrow().last_batch_due();
     while !inner.writes.borrow().is_closed {
@@ -194,6 +209,7 @@ impl IndexedDbRecords {
         break;
       }
       // Written meanwhile, with nothing running: no need to wait for the batch timer.
+      seal_in_slices(&Rc::downgrade(inner), true).await;
       inner.issue_queued();
     }
     inner.writes.borrow().failure()
@@ -201,7 +217,8 @@ impl IndexedDbRecords {
 
   /// See [`IndexedDbStore::write_now`].
   pub(super) fn write_now(&self) {
-    self.inner.issue_queued();
+    // As a flush: also what a catalog build holds back ([`Writes::is_held`]).
+    self.inner.issue_batch(true);
   }
 
   /// See [`IndexedDbStore::write_revision`].
@@ -215,9 +232,14 @@ impl IndexedDbRecords {
   }
 }
 
-/// Runs the first catalog build of `store` one batch per task, each committed before the next
-/// starts ([`IndexedDbStore::open_reporting`]); `records` reaches the IndexedDB records of the
-/// store's backend. `on_progress` may stop it ([`StoreError::InUse`]).
+/// Runs the first catalog build of `store` ([`IndexedDbStore::open_reporting`]); `records` reaches
+/// the IndexedDB records of the store's backend. `on_progress` may stop it ([`StoreError::InUse`]).
+///
+/// The build runs on the page's only thread, so it goes in steps of [`BUILD_STEP_MS`], each a group
+/// of writes of its own, handing the thread back in between: one batch of 4,096 records per task
+/// held it for seconds on a large store, longer with every batch (issue #2397). The steps' writes
+/// collect in the write queue, where a node of the catalog rewritten by many steps is sealed once,
+/// and go to the disk every [`CATALOG_BATCH`] records: the build commits as often as before.
 pub(super) async fn build_catalog_committing<B: RecordBackend>(
   store: &SealedStore<B>,
   records: impl Fn(&SealedStore<B>) -> Option<&IndexedDbRecords>,
@@ -226,8 +248,21 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
   let Some(mut build) = store.start_catalog_build()? else {
     return Ok(());
   };
+  let _held = records(store).map(HeldWrites::new);
+  let mut step_records = FIRST_BUILD_STEP;
+  let mut since_commit = 0usize;
   loop {
-    let step = store.step_catalog_build(&mut build)?;
+    let started_ms = js_sys::Date::now();
+    let step = store.step_catalog_build_of(&mut build, step_records)?;
+    since_commit += step_records;
+    // The step that read the last records commits and reports, as the last batch did.
+    let is_at_end = step == BuildStep::Advanced && !store.has_more_to_build(&build)?;
+    step_records = next_build_step(step_records, js_sys::Date::now() - started_ms);
+    if step != BuildStep::Complete && since_commit < CATALOG_BATCH && !is_at_end {
+      crate::platform::yield_now().await;
+      continue;
+    }
+    since_commit = 0;
     let flushed = match records(store) {
       Some(records) => records.flush().await,
       None => Ok(()),
@@ -241,10 +276,40 @@ pub(super) async fn build_catalog_committing<B: RecordBackend>(
     if step == BuildStep::Complete {
       return Ok(());
     }
+    // After a commit, as before the steps: a build stopped here goes on from what it wrote.
     if on_progress(build.percent()).is_break() {
       return Err(StoreError::InUse);
     }
   }
+}
+
+/// Holds the store's writes back from the batch timer while it lives ([`Writes::is_held`]); a flush
+/// still takes them.
+struct HeldWrites<'a> {
+  records: &'a IndexedDbRecords,
+}
+
+impl<'a> HeldWrites<'a> {
+  fn new(records: &'a IndexedDbRecords) -> Self {
+    records.inner.writes.borrow_mut().is_held = true;
+    Self { records }
+  }
+}
+
+impl Drop for HeldWrites<'_> {
+  fn drop(&mut self) {
+    self.records.inner.writes.borrow_mut().is_held = false;
+    // What waited goes out now, as it would have without the hold.
+    issue_soon(Rc::downgrade(&self.records.inner));
+  }
+}
+
+/// The records of the next step of a catalog build, after one of `records` took `took_ms`: as many
+/// as fit into [`BUILD_STEP_MS`] at that pace, at most twice as many as the last.
+fn next_build_step(records: usize, took_ms: f64) -> usize {
+  let per_ms = records as f64 / took_ms.max(0.5);
+  let fitting = (per_ms * BUILD_STEP_MS) as usize;
+  fitting.clamp(MIN_BUILD_STEP, records.saturating_mul(2).min(CATALOG_BATCH))
 }
 
 impl RecordBackend for IndexedDbRecords {
@@ -320,7 +385,7 @@ impl RecordBackend for IndexedDbRecords {
       writes.group_depth == 0 && writes.is_over_limit()
     };
     if is_due {
-      self.inner.issue_queued();
+      issue_soon(Rc::downgrade(&self.inner));
     }
     Ok(())
   }
@@ -378,7 +443,7 @@ impl IndexedDbRecords {
       }
     };
     if is_due {
-      self.inner.issue_queued();
+      issue_soon(Rc::downgrade(&self.inner));
     }
   }
 }
@@ -394,9 +459,7 @@ impl Inner {
         if let Some(batch) = batch_of(&event) {
           writes.borrow_mut().committed(batch);
         }
-        if let Some(inner) = own.upgrade() {
-          inner.issue_queued();
-        }
+        issue_soon(own.clone());
       }
     })
     .into_js_value()
@@ -420,9 +483,7 @@ impl Inner {
         // What waits for this batch goes with this batch's writes once the retry backoff ran out
         // (the next write, flush or batch timer after it). If nothing waits they stay failed until
         // the next write or flush, so a full disk doesn't retry in a loop.
-        if let Some(inner) = own.upgrade() {
-          inner.issue_queued();
-        }
+        issue_soon(own.clone());
       }
     })
     .into_js_value()
@@ -540,19 +601,61 @@ impl Drop for IndexedDbRecords {
 
 /// Issues the queued writes after `delay`, unless the store is gone by then. A large batch gets
 /// [`LARGE_BATCH_EXTRA`] once when `may_extend`.
-fn schedule(inner: Weak<Inner>, delay: Duration, may_extend: bool) {
+fn schedule(own: Weak<Inner>, delay: Duration, may_extend: bool) {
   wasm_bindgen_futures::spawn_local(async move {
     crate::platform::sleep(delay).await;
-    let Some(inner) = inner.upgrade() else {
+    let Some(inner) = own.upgrade() else {
       return;
     };
     let is_large = inner.writes.borrow().is_large();
     if may_extend && is_large {
       schedule(Rc::downgrade(&inner), LARGE_BATCH_EXTRA, false);
     } else {
-      inner.issue_queued();
+      drop(inner);
+      issue_sealed(&own).await;
     }
   });
+}
+
+/// Issues the queued writes once they are sealed ([`seal_in_slices`]), in a task of its own: a
+/// batch that ended, or a queue over its size limit. Writes that must go out before the page goes
+/// away (`write_now`) don't wait for this.
+fn issue_soon(inner: Weak<Inner>) {
+  wasm_bindgen_futures::spawn_local(async move {
+    issue_sealed(&inner).await;
+  });
+}
+
+async fn issue_sealed(inner: &Weak<Inner>) {
+  seal_in_slices(inner, false).await;
+  if let Some(inner) = inner.upgrade() {
+    inner.issue_queued();
+  }
+}
+
+/// Seals the queued writes a slice of [`SEAL_SLICE_MS`] at a time, handing the thread back between
+/// two (issue #2397): sealing a catalog build's batch at once held the page's only thread for
+/// seconds. Ends early if the store is gone, or, unless for a flush (`is_flush`), while its writes
+/// are held ([`Writes::is_held`]): they would be sealed for nothing.
+async fn seal_in_slices(inner: &Weak<Inner>, is_flush: bool) {
+  loop {
+    let Some(strong) = inner.upgrade() else {
+      return;
+    };
+    if !is_flush && strong.writes.borrow().is_held {
+      return;
+    }
+    let started_ms = js_sys::Date::now();
+    let is_left = strong
+      .writes
+      .borrow_mut()
+      .seal_ahead(|| js_sys::Date::now() - started_ms < SEAL_SLICE_MS);
+    drop(strong);
+    if !is_left {
+      return;
+    }
+    crate::platform::yield_now().await;
+  }
 }
 
 fn batch_of(event: &web_sys::Event) -> Option<u32> {

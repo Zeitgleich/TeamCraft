@@ -69,7 +69,7 @@ const MESSAGE_NAMESPACE: &str = "message";
 /// Each batch rewrites the index nodes it touched, about one per conversation, so larger batches
 /// build faster: 100,000 messages in 300 conversations took 10 s at 512, 2.6 s at 4,096 and 1.3 s
 /// at 16,384 (#1509, release, desktop). 4,096 keeps a batch's records to a few MiB on phones.
-const CATALOG_BATCH: usize = 4096;
+pub(crate) const CATALOG_BATCH: usize = 4096;
 /// Entries of an index checked against their records for the edge of a conversation; all of them
 /// failing means the catalog is built again anyway.
 const EDGE_CANDIDATES: usize = 8;
@@ -559,7 +559,18 @@ impl<B: RecordBackend> SealedStore<B> {
   /// build got, so what is written is always a build that can go on from there. Every record is
   /// noted once, and a build that is killed goes on after its last batch.
   pub(crate) fn step_catalog_build(&self, build: &mut CatalogBuild) -> Result<BuildStep, StoreError> {
-    match self.build_batch(build) {
+    self.step_catalog_build_of(build, CATALOG_BATCH)
+  }
+
+  /// [`Self::step_catalog_build`] with a batch of at most `max_records` records: a host whose only
+  /// thread is the UI's keeps each group of writes short and hands the thread back in between
+  /// (issue #2397).
+  pub(crate) fn step_catalog_build_of(
+    &self,
+    build: &mut CatalogBuild,
+    max_records: usize,
+  ) -> Result<BuildStep, StoreError> {
+    match self.build_batch(build, max_records.clamp(1, CATALOG_BATCH)) {
       Ok(BuildStep::Complete) => {
         self.lock().is_building = false;
         Ok(BuildStep::Complete)
@@ -575,6 +586,18 @@ impl<B: RecordBackend> SealedStore<B> {
         Err(error)
       },
     }
+  }
+
+  /// Whether `build` has records left to go through: the step that read the last ones is the one
+  /// a host reports progress after ([`crate::store::browser`]'s stepped build).
+  #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+  pub(crate) fn has_more_to_build(&self, build: &CatalogBuild) -> Result<bool, StoreError> {
+    Ok(
+      !self
+        .backend
+        .records_after(build.maybe_after.as_ref(), 1)?
+        .is_empty(),
+    )
   }
 
   /// Builds the catalog again under a new generation: it was found damaged while the store is open.
@@ -631,11 +654,11 @@ impl<B: RecordBackend> SealedStore<B> {
   }
 
   /// One batch of `build`, or its end when no record is left.
-  fn build_batch(&self, build: &mut CatalogBuild) -> Result<BuildStep, StoreError> {
+  fn build_batch(&self, build: &mut CatalogBuild, max_records: usize) -> Result<BuildStep, StoreError> {
     let _step = crate::timing::step("catalog_build_batch");
     let batch = self
       .backend
-      .records_after(build.maybe_after.as_ref(), CATALOG_BATCH)?;
+      .records_after(build.maybe_after.as_ref(), max_records)?;
     let Some((last, _)) = batch.last() else {
       return self.finish_build(build);
     };

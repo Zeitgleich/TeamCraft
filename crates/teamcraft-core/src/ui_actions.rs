@@ -369,10 +369,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       None => imported_author_name(&authorship),
     };
     let maybe_conversation_name = self
-      .conversations_raw()
-      .iter()
-      .find(|conversation| conversation.id == from)
-      .and_then(|conversation| conversation.maybe_name.clone());
+      .conversation_raw(from)
+      .and_then(|conversation| conversation.maybe_name);
     match forward_content(
       &authorship,
       &original,
@@ -599,9 +597,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       return;
     }
     let may_post = self
-      .conversations_raw()
-      .iter()
-      .any(|response| response.id == conversation && response.may_post());
+      .conversation_raw(conversation)
+      .is_some_and(|response| response.may_post());
     if !may_post {
       tracing::warn!(%conversation, "a page edit where the user may not post was not sent");
       return;
@@ -1072,9 +1069,8 @@ impl<S: LocalStore> CoreChatBackend<S> {
       return event;
     };
     let is_member = self
-      .conversations_raw()
-      .iter()
-      .any(|conversation| conversation.id == room && conversation.maybe_my_membership.is_some());
+      .conversation_raw(room)
+      .is_some_and(|conversation| conversation.maybe_my_membership.is_some());
     let room_name = is_member
       .then(|| teamcraft_client_api::backend::ChatBackend::conversation(self, room))
       .flatten()

@@ -107,6 +107,9 @@ const MESSAGE_CACHE_BYTES: usize = DEFAULT_MESSAGE_CACHE_BYTES;
 const TICK: Duration = Duration::from_secs(3);
 /// How often the UI is told to read again while a long sync fills the store (issue #247).
 const SYNC_PROGRESS: Duration = Duration::from_secs(1);
+/// How long a read of every conversation's entry runs before it hands the page's thread back
+/// (`SnapshotCache::changes_since_sliced`, issue #2397): half a frame.
+const SNAPSHOT_SLICE: Duration = Duration::from_millis(8);
 /// Pause between two pages read in the background (a catch-up's backlog), and at least the page's
 /// own time (issues #1572, #1910): the browser reads
 /// history on demand, so the slow reading is there only for what the backlog's messages change
@@ -2716,7 +2719,7 @@ impl Core {
       Request::Focus(conversation) => self.catch_up_focus.set(conversation),
       Request::Snapshot(reply) => drop(reply.send(self.snapshot())),
       Request::SnapshotChanges(maybe_since, reply) => {
-        let changes = start_timing::timed_now(Part::SnapshotBuild, || self.snapshot_changes(maybe_since));
+        let changes = start_timing::timed(Part::SnapshotBuild, self.snapshot_changes(maybe_since)).await;
         drop(reply.send(changes));
       },
       Request::Messages {
@@ -3181,22 +3184,33 @@ impl Core {
     )
   }
 
-  fn snapshot_changes(&mut self, maybe_since: Option<SnapshotCursor>) -> Result<SnapshotChanges, String> {
+  // Requests are handled one at a time: no other borrow of the cache comes in during the read's
+  // yields.
+  #[allow(clippy::await_holding_refcell_ref)]
+  async fn snapshot_changes(
+    &mut self,
+    maybe_since: Option<SnapshotCursor>,
+  ) -> Result<SnapshotChanges, String> {
     let (Some(backend), Some(store)) = (self.backend.as_ref(), self.store.as_ref()) else {
       return Err(not_set_up());
     };
     let changes = store.take_changes();
     drop_removed_media(store);
     let mut maybe_security = None;
-    let answer = self.snapshots.borrow_mut().changes_since(
-      backend,
-      changes,
-      || {
-        maybe_security = self.security_snapshot().ok();
-        maybe_security.clone()
-      },
-      maybe_since,
-    );
+    let answer = self
+      .snapshots
+      .borrow_mut()
+      .changes_since_sliced(
+        backend,
+        changes,
+        || {
+          maybe_security = self.security_snapshot().ok();
+          maybe_security.clone()
+        },
+        maybe_since,
+        SNAPSHOT_SLICE,
+      )
+      .await;
     if maybe_security.is_some() {
       self.maybe_last_security = maybe_security;
     }
@@ -4042,7 +4056,7 @@ impl SyncReads<'_> {
       match select(&mut connecting, select(request, wakes)).await {
         Either::Left((outcome, _)) => return outcome,
         Either::Right((Either::Left((Some(request), _)), _)) => {
-          if let Some(request) = self.answer(request) {
+          if let Some(request) = self.answer(request).await {
             deferred.push_back(request);
           }
         },
@@ -4050,7 +4064,7 @@ impl SyncReads<'_> {
         Either::Right((Either::Right((Either::Left(((), _)), _)), _)) => {
           progress = Box::pin(platform::sleep(SYNC_PROGRESS));
           let revision = self.store.inner().write_revision();
-          if revision != seen_revision && self.has_become_known(deferred) {
+          if revision != seen_revision && self.has_become_known(deferred).await {
             notify_local();
           }
           // A download or upload in flight: its progress.
@@ -4078,7 +4092,7 @@ impl SyncReads<'_> {
   /// A first sync stores the conversation list before it catches each one up (issue #247): from
   /// then on the workspace is shown, each conversation marked while it is caught up, and the
   /// requests that waited for it are answered. Returns whether that happened now.
-  fn has_become_known(&self, deferred: &mut VecDeque<Request>) -> bool {
+  async fn has_become_known(&self, deferred: &mut VecDeque<Request>) -> bool {
     if self.stored.get() == StoredWorkspace::Known
       || StoredWorkspace::of(self.backend) == StoredWorkspace::Empty
     {
@@ -4086,7 +4100,7 @@ impl SyncReads<'_> {
     }
     self.stored.set(StoredWorkspace::Known);
     for request in std::mem::take(deferred) {
-      if let Some(request) = self.answer(request) {
+      if let Some(request) = self.answer(request).await {
         deferred.push_back(request);
       }
     }
@@ -4094,7 +4108,7 @@ impl SyncReads<'_> {
   }
 
   /// Answers a read; hands back a request that has to wait.
-  fn answer(&self, request: Request) -> Option<Request> {
+  async fn answer(&self, request: Request) -> Option<Request> {
     // The badge goes at once; the read position needs the client and waits (issue #778).
     if let Request::Action(action, _) = &request
       && let ChatAction::MarkRead { conversation } = **action
@@ -4103,10 +4117,11 @@ impl SyncReads<'_> {
       notify_changed();
     }
     let request = match request {
-      Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request),
+      Request::Snapshot(_) | Request::SnapshotChanges(..) => return self.answer_snapshot(request).await,
       // Never held back by a sync or an upload: the message shows at once and goes out after.
       Request::Action(action, reply) if action.is_outbox_write() => {
         queue_send(self.backend, *action);
+        // async-ok: a cell of the core's sync, not a signal.
         self.has_queued_sends.set(true);
         drop(reply.send(Ok(())));
         notify_changed();
@@ -4124,12 +4139,14 @@ impl SyncReads<'_> {
       },
       Request::Focus(conversation) => {
         // The sync holding the client takes it between two steps.
+        // async-ok: a cell of the core's sync, not a signal.
         self.focus.set(conversation);
         return None;
       },
       other => other,
     };
     let read = match &request {
+      // async-ok: a cell of the core's sync, not a signal.
       Request::Status(_) if self.stored.get() == StoredWorkspace::Empty => {
         // Ready with an empty store would show an empty workspace: the first sync is awaited.
         return Some(request);
@@ -4142,6 +4159,7 @@ impl SyncReads<'_> {
         ..
       } => {
         // The conversation the user opened is caught up next.
+        // async-ok: a cell of the core's sync, not a signal.
         self.focus.set(*conversation);
         Some(SyncRead::Messages {
           conversation: *conversation,
@@ -4160,6 +4178,7 @@ impl SyncReads<'_> {
       _ => return Some(request),
     };
     let maybe_answer = match read {
+      // async-ok: a cell of the core's sync, not a signal.
       Some(read) => match answer_during_sync(read, self.backend, self.stored.get(), self.maybe_security) {
         Some(answer) => Some(answer),
         None => return Some(request),
@@ -4188,19 +4207,35 @@ impl SyncReads<'_> {
 impl SyncReads<'_> {
   /// The snapshot from the cache, as far as the sync has filled the store. Waits while the
   /// workspace was empty or no security part was taken yet (it needs the client).
-  fn answer_snapshot(&self, request: Request) -> Option<Request> {
+  // `serve` answers one request at a time: no other borrow of the cache comes in during the read's
+  // yields.
+  #[allow(clippy::await_holding_refcell_ref)]
+  async fn answer_snapshot(&self, request: Request) -> Option<Request> {
     let (StoredWorkspace::Known, Some(security)) = (self.stored.get(), self.maybe_security) else {
       return Some(request);
     };
     let changes = self.store.take_changes();
-    let mut snapshots = self.snapshots.borrow_mut();
     let security = || Some(security.clone());
     match request {
-      Request::Snapshot(reply) => drop(reply.send(Ok(snapshots.snapshot(self.backend, changes, security)))),
+      Request::Snapshot(reply) => {
+        let snapshot = self
+          .snapshots
+          .borrow_mut()
+          .snapshot(self.backend, changes, security);
+        drop(reply.send(Ok(snapshot)));
+      },
       Request::SnapshotChanges(maybe_since, reply) => {
-        let answer = start_timing::timed_now(Part::SnapshotBuild, || {
-          snapshots.changes_since(self.backend, changes, security, maybe_since)
-        });
+        let answer = start_timing::timed(
+          Part::SnapshotBuild,
+          self.snapshots.borrow_mut().changes_since_sliced(
+            self.backend,
+            changes,
+            security,
+            maybe_since,
+            SNAPSHOT_SLICE,
+          ),
+        )
+        .await;
         drop(reply.send(Ok(answer)));
       },
       other => return Some(other),

@@ -594,9 +594,9 @@ grant (`InputContentInfo.requestPermission`) and copy in the background.
   full sync, and the attachment lookup (`client/files.rs` `find_attachment`, next to #153's transfer
   code) are not part of this change. The 5,000-member workspace is not measured yet. The web store
   still reads all ciphertext at open, so it stays O(store) there; fetching per conversation is not
-  sound with a synchronous `LocalStore` (docs/performance.md, #1127). Its first catalog build yields
-  between batches and shows progress; a rebuild after damage is found still blocks the main thread,
-  because it runs inside a synchronous read.
+  sound with a synchronous `LocalStore` (docs/performance.md, #1127). Its first catalog build runs in
+  steps of about 8 ms with the thread handed back in between, and shows progress (#2397); a rebuild
+  after damage is found still blocks the main thread, because it runs inside a synchronous read.
 
 ### B8 Resumable enrollment and confirmed device linking – high, v1 blocker
 
