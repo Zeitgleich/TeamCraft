@@ -34,7 +34,7 @@ oauth2 = { version = "5", default-features = false }
 rand_core.workspace = true
 reqwest.workspace = true
 # The import's progress (IDs only, no content); unified with the core's SQLCipher build.
-rusqlite = "0.39"
+rusqlite = "0.43"
 secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
