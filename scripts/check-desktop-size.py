@@ -22,8 +22,8 @@ import struct
 import sys
 
 # The mapped sections of the x86_64 release build (the sum of SECTIONS), decimal megabytes:
-# 128.45 MB on 2026-11-25 before #2384, __AFTER__ after it (fat LTO, one codegen unit), plus about 5 %.
-DEFAULT_BUDGET_BYTES = 130_000_000
+# 128.29 MB on 2026-11-26 before #2384, 111.84 MB after it (one codegen unit per crate), plus about 6 % (5 % would warn at once).
+DEFAULT_BUDGET_BYTES = 118_600_000
 # Warn when the total is above this share of the budget.
 WARN_SHARE = 0.95
 # What the loader maps and the budget counts: code, read-only data and the tables for unwinding.

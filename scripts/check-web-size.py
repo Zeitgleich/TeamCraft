@@ -4,11 +4,13 @@
 The strict budget is a guest's (.claude/rules/robustness.md, "Download size"): somebody from
 outside who opens a meeting link, often once and in a browser that never saw the app, waits for
 the lobby (the app, `teamcraft-ui-*_bg.wasm`, and the service worker), then, once let in, the
-split modules of the meeting (`guest`, `calls`) with the shared chunks they import, read from the
+browser's core (`engine`) and the split modules of the meeting (`guest`, `calls`) with the shared
+chunks they import, read from the
 split loader `teamcraft-ui-split-*.js`, and the call module (`teamcraft-web-calls-*_bg.wasm`). `--guest-budget-bytes` limits
 that. The signed-in budget (`--budget-bytes`) is a looser ceiling against big regressions and
 counts the compressed wasm a signed-in user's first visit transfers: the app (`teamcraft-ui-*_bg.wasm`), the signed-in app's pack, the
-one file with its chunks that `init.js` fetches next to it (#334, #1465; a guest's meeting link skips it) and the service worker
+one file with its chunks that `init.js` fetches next to it (#334, #1465; a guest's meeting link skips it), the browser's core
+(`engine`, #2384: the files of it that aren't in the pack) and the service worker
 (`teamcraft-web-sw*_bg.wasm`, installed on the first visit too). Both count the UI's texts in one
 language (`i18n/<language>-<hash>.ftl`, #1437): the app carries none and fetches the language it starts in
 next to it; the larger language counts. The administration console's texts
@@ -27,8 +29,16 @@ someone who turns an effect on loads it.
 Both budgets are gzip -9 totals; each warns within 5 % of it and fails above it. The uncompressed
 size is printed for information only: what users wait for is the transfer.
 
+The desktop app's page has a budget of its own (`--desktop-start-budget-bytes`), uncompressed: it
+reads its files from the app itself, so the transfer costs nothing, but WebKit's JavaScriptCore
+keeps about four times the bytes of every module it compiles, for as long as the page lives
+(docs/performance.md, "Desktop on Linux: a smaller binary and less wasm at the start", #2384). At
+its start it compiles the app and the signed-in app's pack; it never loads the browser's core,
+which runs in the shell there.
+
         scripts/check-web-size.py crates/teamcraft-ui/dist [--guest-budget-bytes N]
-                [--budget-bytes N] [--call-module-budget-bytes N] [--baseline main.json]
+                [--budget-bytes N] [--call-module-budget-bytes N] [--desktop-start-budget-bytes N]
+                [--baseline main.json]
                 [--write sizes.json]
 
 `--baseline` is the `--write` output of an earlier build (CI keeps main's); the delta to it is
@@ -59,9 +69,14 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # Raised by 30 kB to 6.75 MB on 2026-11-25 (#2397), a decision of the maintainer: the core a guest
 # runs in the page hands its thread back in short steps (catalog build, sealing, the snapshot), the
 # page formats times with kept formatters and watches its thread for long tasks.
-DEFAULT_GUEST_BUDGET_BYTES = 6_750_000
-# The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`).
-GUEST_MODULES = ("guest", "calls")
+# Raised to 7.26 MB on 2026-11-26 (#2384): the browser's core moved out of the app into a module of
+# its own (`engine`), so the desktop app's page no longer compiles it at every start (2.3 MB of wasm,
+# about 9 MiB of its memory). A guest loads the same code in more files: 6.85 MB, plus about 6 %.
+DEFAULT_GUEST_BUDGET_BYTES = 7_260_000
+# The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`), and the
+# browser's core, which every browser page that starts a core loads (#2384).
+ENGINE_MODULE = "engine"
+GUEST_MODULES = ("guest", "calls", ENGINE_MODULE)
 SPLIT_LOADER = "teamcraft-ui-split-*.js"
 # In the split loader: the shared chunks, and each module's own file with the chunks it imports.
 # (`fetchPart` where the file is in the signed-in app's pack, `fetch` otherwise.)
@@ -81,7 +96,9 @@ SPLIT_MODULE = re.compile(
 # own; the warning from 95 % (6.65 MB) is the signal to split chunks off. Lowered to 5.95 MB on
 # 2026-11-22 (#1699): 5.61 MB after what moved out of the app and the signed-in app then, plus
 # about 6 % (5 % would warn at once).
-DEFAULT_BUDGET_BYTES = 5_950_000
+# Raised to 6.37 MB on 2026-11-26 (#2384), with the guest's budget above: 6.01 MB after the browser's
+# core moved into a module of its own, plus about 6 %.
+DEFAULT_BUDGET_BYTES = 6_370_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
 # segmentation is a module of its own that only loads when an effect starts.
@@ -89,6 +106,10 @@ DEFAULT_BUDGET_BYTES = 5_950_000
 # to 1.103 MB and failed every web pull request.
 DEFAULT_CALL_MODULE_BUDGET_BYTES = 2_100_000
 CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
+# What the desktop app's page compiles at its start, uncompressed: the app and the signed-in app's
+# pack. 13.62 MB before the browser's core moved out of the app (#2384, 2026-11-26), 11.32 MB
+# after, plus about 5 %.
+DEFAULT_DESKTOP_START_BUDGET_BYTES = 11_900_000
 # Lazy files that only load on demand (marked in the list): the background effects' segmentation
 # (#439) and the voice decoder with FEC (#2140), which the call module starts when a voice packet
 # first goes missing.
@@ -107,8 +128,8 @@ ADMIN_TRANSLATIONS = re.compile(r"-admin-[0-9a-f]+\.ftl$")
 # The signed-in app's chunks: the one file `init.js` fetches next to the app (teamcraft-web-bundle).
 SESSION_PACK = re.compile(r"const sessionPack = '/([^'/]+)'")
 SESSION_MODULE = "session"
-LABELS = {"app": "app", "session": "signed-in app", "service_worker": "service worker",
-          "translations": "texts (1 lang)"}
+LABELS = {"app": "app", "session": "signed-in app", "engine": "browser core",
+          "service_worker": "service worker", "translations": "texts (1 lang)"}
 
 
 def main(argv=None):
@@ -120,6 +141,9 @@ def main(argv=None):
                         help="fail when a signed-in first visit is above this gzip -9 total")
     parser.add_argument("--call-module-budget-bytes", type=int, default=DEFAULT_CALL_MODULE_BUDGET_BYTES,
                         help="fail when the call module is above this gzip -9 size")
+    parser.add_argument("--desktop-start-budget-bytes", type=int, default=DEFAULT_DESKTOP_START_BUDGET_BYTES,
+                        help="fail when what the desktop app's page compiles at its start is above this, "
+                             "uncompressed")
     parser.add_argument("--baseline", type=pathlib.Path, help="sizes of an earlier build (JSON)")
     parser.add_argument("--write", type=pathlib.Path, help="write this build's sizes (JSON)")
     args = parser.parse_args(argv)
@@ -131,11 +155,15 @@ def main(argv=None):
     if sizes is None:
         return 2
     maybe_baseline = load_baseline(args.baseline)
-    lazy = measure_lazy(args.dist, session_files(args.dist) + packed_files(args.dist))
+    lazy = measure_lazy(args.dist, session_files(args.dist) + packed_files(args.dist) + engine_files(args.dist))
     guest_bytes = guest_visit_bytes(args.dist)
     if guest_bytes is None:
         return 2
+    desktop_start = desktop_start_bytes(sizes)
     report = render(sizes, maybe_baseline, args.budget_bytes, guest_bytes, args.guest_budget_bytes)
+    report += (f"\nThe desktop app's page at its start (app and signed-in app, uncompressed): "
+               f"{mb(desktop_start)}; budget {mb(args.desktop_start_budget_bytes)}, "
+               f"headroom {mb(args.desktop_start_budget_bytes - desktop_start)}.")
     report += render_lazy(lazy)
     print(report)
     summary = os.environ.get("GITHUB_STEP_SUMMARY")
@@ -149,6 +177,7 @@ def main(argv=None):
         check_limit("a guest's meeting visit", guest_bytes, args.guest_budget_bytes),
         check_limit("the signed-in web wasm", total_bytes(sizes, "gzip_bytes"), args.budget_bytes),
         check_call_module(lazy, args.call_module_budget_bytes),
+        check_desktop_start(desktop_start, args.desktop_start_budget_bytes),
     )
 
 
@@ -169,6 +198,14 @@ def measure(dist):
             print(f"error: init.js fetches files that aren't there: {', '.join(missing)}", file=sys.stderr)
             return None
         sizes["session"] = sizes_of(session)
+    engine = engine_files(dist)
+    if engine:
+        missing = [path.name for path in engine if not path.is_file()]
+        if missing:
+            print(f"error: the browser's core needs files that aren't there: {', '.join(missing)}",
+                  file=sys.stderr)
+            return None
+        sizes["engine"] = sizes_of(engine)
     maybe_texts = start_language_file(dist)
     if maybe_texts is not None:
         sizes["translations"] = sizes_of([maybe_texts])
@@ -218,6 +255,32 @@ def packed_files(dist):
     if not loaders:
         return []
     return [dist / name for name in split_modules(loaders[0].read_text(encoding="utf-8")).get(SESSION_MODULE, [])]
+
+
+def engine_files(dist):
+    """The browser's core (`engine`) with the shared chunks it imports, without what the app or the
+    signed-in app's pack already brings: a browser's first visit loads them as its core starts."""
+    loaders = sorted(dist.glob(SPLIT_LOADER))
+    if not loaders:
+        return []
+    modules = split_modules(loaders[0].read_text(encoding="utf-8"))
+    packed = set(modules.get(SESSION_MODULE, []))
+    return [dist / name for name in modules.get(ENGINE_MODULE, []) if name not in packed]
+
+
+def desktop_start_bytes(sizes):
+    """What the desktop app's page compiles at its start, uncompressed: the app and the signed-in
+    app's pack (the browser's core, the service worker and the texts aren't wasm it compiles)."""
+    return sum(sizes[part]["bytes"] for part in ("app", "session") if part in sizes)
+
+
+def check_desktop_start(size, budget_bytes):
+    """The exit code for the desktop app's start: 1 above its budget."""
+    if size > budget_bytes:
+        print(f"error: the desktop app's page compiles {size:,} bytes of wasm at its start, over its "
+              f"budget of {budget_bytes:,}", file=sys.stderr)
+        return 1
+    return 0
 
 
 class SessionListMissing(Exception):

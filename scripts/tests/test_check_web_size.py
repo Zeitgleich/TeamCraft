@@ -85,10 +85,12 @@ class BudgetTest(unittest.TestCase):
             (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-admin-0123abcd.wasm").write_bytes(os.urandom(5000))
+            (dist / "teamcraft-ui-split-engine-0123abcd.wasm").write_bytes(os.urandom(100))
             (dist / "init.js").write_text(SESSION_INIT)
             (dist / "teamcraft-ui-split-0123abcd.js").write_text(split_loader({
                 "guest": ["teamcraft-ui-split-admin-0123abcd.wasm"],
                 "calls": ["teamcraft-ui-split-admin-0123abcd.wasm"],
+                "engine": ["teamcraft-ui-split-engine-0123abcd.wasm"],
                 "session": ["teamcraft-ui-split-session-0123abcd.wasm"],
             }, {}))
             code, out, err = run(str(dist), "--budget-bytes", "1500")
@@ -149,6 +151,7 @@ class BudgetTest(unittest.TestCase):
                 "teamcraft-ui-split-guest-0123abcd.wasm": 200,
                 "teamcraft-ui-split-calls-0123abcd.wasm": 300,
                 "teamcraft-ui-chunk-1-0123abcd.wasm": 400,
+                "teamcraft-ui-split-engine-0123abcd.wasm": 600,
                 "teamcraft-ui-split-session-0123abcd.wasm": 5000,
             }
             for name, size in files.items():
@@ -156,9 +159,10 @@ class BudgetTest(unittest.TestCase):
             (dist / "teamcraft-ui-split-0123abcd.js").write_text(split_loader({
                 "guest": ["teamcraft-ui-split-guest-0123abcd.wasm", "__chunk_1"],
                 "calls": ["teamcraft-ui-split-calls-0123abcd.wasm", "__chunk_1"],
+                "engine": ["teamcraft-ui-split-engine-0123abcd.wasm", "__chunk_1"],
                 "session": ["teamcraft-ui-split-session-0123abcd.wasm"],
             }, {"__chunk_1": "teamcraft-ui-chunk-1-0123abcd.wasm"}))
-            meeting = sum(len(gzip.compress((dist / name).read_bytes(), 9)) for name in list(files)[:3])
+            meeting = sum(len(gzip.compress((dist / name).read_bytes(), 9)) for name in list(files)[:4])
             code, out, err = run(str(dist), "--budget-bytes", "100000")
         self.assertEqual(code, 0, err)
         self.assertIn(f"meeting visit (lobby, meeting, call module): {(lobby + meeting) / 1_000_000:.2f} MB", out)
@@ -182,6 +186,51 @@ class BudgetTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("the signed-in web wasm is", err)
 
+    def test_the_browsers_core_counts_in_both_visits_once(self):
+        """The engine (#2384) loads as a browser's core starts: a guest's and a member's first visit
+        count it, without the chunks the pack already brings."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300)
+            files = {
+                "teamcraft-ui-split-guest-0123abcd.wasm": 200,
+                "teamcraft-ui-split-calls-0123abcd.wasm": 200,
+                "teamcraft-ui-split-engine-0123abcd.wasm": 900,
+                "teamcraft-ui-split-session-0123abcd.wasm": 300,
+                "teamcraft-ui-chunk-1-0123abcd.wasm": 400,
+                "teamcraft-ui-session-0123abcd.pack": 700,
+            }
+            for name, size in files.items():
+                (dist / name).write_bytes(os.urandom(size))
+            (dist / "init.js").write_text(SESSION_INIT)
+            (dist / "teamcraft-ui-split-0123abcd.js").write_text(split_loader({
+                "guest": ["teamcraft-ui-split-guest-0123abcd.wasm"],
+                "calls": ["teamcraft-ui-split-calls-0123abcd.wasm"],
+                "engine": ["teamcraft-ui-split-engine-0123abcd.wasm", "__chunk_1"],
+                "session": ["teamcraft-ui-split-session-0123abcd.wasm", "__chunk_1"],
+            }, {"__chunk_1": "teamcraft-ui-chunk-1-0123abcd.wasm"}))
+            engine = len(gzip.compress((dist / "teamcraft-ui-split-engine-0123abcd.wasm").read_bytes(), 9))
+            self.assertEqual(check.measure(dist)["engine"]["gzip_bytes"], engine)
+            code, out, err = run(str(dist), "--budget-bytes", "100000", "--guest-budget-bytes", "100000")
+        self.assertEqual(code, 0, err)
+        self.assertIn("| browser core ", out)
+        lazy = out.split("Loaded when first used")[1]
+        self.assertNotIn("split-engine", lazy)
+        self.assertNotIn("chunk-1", lazy)
+
+    def test_the_desktop_start_counts_the_app_and_the_pack_uncompressed(self):
+        """Not the browser's core, the service worker or the texts: the desktop page compiles the
+        app and the signed-in app's pack at its start (#2384)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            dist = dist_with(tmp, app_bytes=600, service_worker_bytes=300, compressible=True)
+            (dist / "teamcraft-ui-session-0123abcd.pack").write_bytes(b"\0" * 700)
+            (dist / "init.js").write_text(SESSION_INIT)
+            code, out, err = run(str(dist), "--desktop-start-budget-bytes", "1300")
+            self.assertEqual(code, 0, err)
+            self.assertIn("The desktop app's page at its start (app and signed-in app, uncompressed): 0.00 MB", out)
+            code, _, err = run(str(dist), "--desktop-start-budget-bytes", "1299")
+        self.assertEqual(code, 1)
+        self.assertIn("compiles 1,300 bytes of wasm at its start, over its budget of 1,299", err)
+
     def test_a_named_pack_that_is_missing_is_an_error(self):
         with tempfile.TemporaryDirectory() as tmp:
             dist = dist_with(tmp, app_bytes=10, service_worker_bytes=10)
@@ -197,10 +246,12 @@ class BudgetTest(unittest.TestCase):
             (dist / "teamcraft-ui-chunk-1-0123abcd.wasm").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-session-0123abcd.wasm").write_bytes(os.urandom(700))
             (dist / "teamcraft-ui-split-guest-0123abcd.wasm").write_bytes(os.urandom(700))
+            (dist / "teamcraft-ui-split-engine-0123abcd.wasm").write_bytes(os.urandom(700))
             (dist / "init.js").write_text(SESSION_INIT)
             loader = split_loader({
                 "guest": ["teamcraft-ui-split-guest-0123abcd.wasm"],
                 "calls": ["teamcraft-ui-split-guest-0123abcd.wasm"],
+                "engine": ["teamcraft-ui-split-engine-0123abcd.wasm"],
                 "session": ["teamcraft-ui-split-session-0123abcd.wasm", "__chunk_1"],
             }, {"__chunk_1": "teamcraft-ui-chunk-1-0123abcd.wasm"})
             # The loader names a packed file with `fetchPart`.
