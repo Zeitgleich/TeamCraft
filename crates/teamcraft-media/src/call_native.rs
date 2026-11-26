@@ -75,6 +75,7 @@ use crate::call_resilience::{
   fallback_delay, rejoin_attempt,
 };
 use crate::capture_health::{CaptureSample, CaptureStallWatch, StallChange};
+use crate::datagram::TransportSeq;
 use crate::fallback_link::{
   AudioLink, FallbackOpener, LoopbackOpener, SignalFrames, SocketEnd, SocketInput, is_allowed_url,
   is_going_away, read_socket,
@@ -935,6 +936,10 @@ async fn run_call(
     tokio::select! {
       event = connection.next_event() => match event {
         ConnectionEvent::Input(LinkInput::Signal(message)) => {
+          // What the pacer held is measured from when it left, before its feedback (#2218).
+          if let Some(link) = connection.sending_link() {
+            engine.on_uplink_departed(&link.take_departures());
+          }
           if let Err(error) = engine.handle_signal(message, Instant::now()) {
             break Err(error.into());
           }
@@ -2219,6 +2224,23 @@ impl Link {
     }
   }
 
+  /// The session connection's paced datagrams that left since the last call, and when
+  /// (`QuicSender::take_departures`); none on the fallback.
+  fn take_departures(&self) -> Vec<(TransportSeq, Instant)> {
+    match &self.path {
+      LinkPath::Quic { sender, .. } => sender.take_departures(),
+      LinkPath::Fallback { .. } => Vec::new(),
+    }
+  }
+
+  /// Paces the session connection's video for the uplink estimate (`QuicSender::pace_video_for`,
+  /// #2218). The fallback's pacer measures its uplink itself.
+  fn pace_video_for(&self, estimate_bps: u32) {
+    if let LinkPath::Quic { sender, .. } = &self.path {
+      sender.pace_video_for(estimate_bps);
+    }
+  }
+
   fn close_as_leave(&self) {
     match &self.path {
       LinkPath::Quic {
@@ -2830,8 +2852,11 @@ impl Sinks {
                 sender.set_layer_bitrates(bitrates.clone());
               }
             },
-            CallEngineEvent::UplinkEstimate { loss_percent, .. } => {
+            CallEngineEvent::UplinkEstimate { bps, loss_percent } => {
               capture.set_measured_loss_percent(*loss_percent)?;
+              if let Some(link) = maybe_link {
+                link.pace_video_for(*bps);
+              }
             },
             CallEngineEvent::VoiceEncoding(encoding) => capture.set_voice_encoding(*encoding)?,
             CallEngineEvent::ThinVoice(is_sent) => capture.set_thin_voice(*is_sent)?,

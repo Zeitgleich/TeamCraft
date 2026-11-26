@@ -3179,6 +3179,14 @@ impl CallEngine {
     was_published
   }
 
+  /// Own datagrams on the uplink that its pacer let out later than they were numbered, and when
+  /// (`crate::quic_send`, #2218): the estimator measures their delay from then.
+  pub fn on_uplink_departed(&mut self, departures: &[(TransportSeq, Instant)]) {
+    for (seq, at) in departures {
+      self.uplink.on_departed(*seq, *at);
+    }
+  }
+
   /// New uplink feedback: the estimate decides which own video layers fit next to the audio, the
   /// loss how much forward error correction the audio carries.
   fn on_uplink_feedback(&mut self, feedback: &TransportFeedback, now: Instant) {

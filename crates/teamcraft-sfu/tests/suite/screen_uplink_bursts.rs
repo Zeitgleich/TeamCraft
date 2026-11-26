@@ -96,7 +96,10 @@ const LOSSY_VIEWERS: usize = 2;
 /// its bursts at once, each within seconds, and the bottleneck drops next to nothing. The desktop's
 /// share steps its rate with the uplink in place (#1781): no keyframe beyond those asked for and
 /// those of new layers. Every encoded slide is judged, also one whose packets the bottleneck
-/// dropped (#2175): the SFU asks the presenter for them at once (#2189).
+/// dropped (#2175): the SFU asks the presenter for them at once (#2189). The sharp layer's slides
+/// and keyframes (100–140 kB) are larger than the bottleneck's queue (104 kB): the presenter paces
+/// them (#2218); sent at once, their tails were lost, and with them the voice, slides and the
+/// estimate.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn slides_reach_the_viewer_through_a_limited_uplink() {
   let layers_bps: u64 = share_layers(WINDOW)
@@ -832,7 +835,14 @@ impl Run {
       new_encoder: count(KeyframeCause::NewEncoder),
       forced: count(KeyframeCause::Forced),
       own: count(KeyframeCause::Encoders),
-      built: self.built.iter().filter(|at| after_settle(at)).count(),
+      // The share's own encoders are built with its first frame, which a loaded machine took
+      // until after the first seconds to capture.
+      built: self
+        .built
+        .iter()
+        .skip(self.layers.len())
+        .filter(|at| after_settle(at))
+        .count(),
       republished: self.republished.iter().filter(|at| after_settle(at)).count(),
       asked: self
         .keyframe_requests

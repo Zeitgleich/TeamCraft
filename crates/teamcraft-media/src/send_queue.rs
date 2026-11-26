@@ -270,6 +270,27 @@ impl SendQueue {
     self.audio.is_empty() && self.video.is_empty()
   }
 
+  /// How long the oldest datagram waits, at `now`; zero when none does.
+  pub fn oldest_wait(&self, now: Instant) -> Duration {
+    self
+      .audio
+      .front()
+      .into_iter()
+      .chain(self.video.front())
+      .map(|queued| now.saturating_duration_since(queued.queued_at))
+      .max()
+      .unwrap_or(Duration::ZERO)
+  }
+
+  /// Whether the next datagram [`Self::pop`] hands over is a video frame's (no audio waits).
+  pub fn is_video_next(&self) -> bool {
+    self.audio.is_empty()
+      && self
+        .video
+        .front()
+        .is_some_and(|queued| queued.maybe_frame.is_some())
+  }
+
   /// Datagrams dropped since the start, for the metrics.
   pub fn dropped_packets(&self) -> u64 {
     self.dropped_packets
@@ -346,6 +367,11 @@ fn is_marked(marks: &HashMap<Chain, Mark>, frame: &Frame, now: Instant) -> bool 
 
 /// Reads what the queue needs from a datagram's headers (the SFU reads the same ones, never the
 /// encrypted payload).
+/// Whether `datagram` carries a video frame's part (not audio, nor the SFU's padding).
+pub fn is_video_frame(datagram: &[u8]) -> bool {
+  matches!(content(datagram), Content::Video(_))
+}
+
 fn content(datagram: &[u8]) -> Content {
   let Ok(header) = DatagramHeader::parse(datagram) else {
     return Content::Other;

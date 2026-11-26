@@ -953,7 +953,11 @@ Settings → Chats).
   gap in the transport sequence numbers like a loss. A fixed small QUIC buffer instead (4 KiB),
   or 20 ms, starved a 1440p share's 450 KB keyframes on a loaded machine: handed over a few
   packets at a time, they looked like a queue to the presenter's estimator, which cut the share's
-  sharp layer.
+  sharp layer. A client's uplink also paces its video at twice its estimate, at most 200 ms behind
+  (#2218): QUIC sends a picture as fast as its window allows, and a still screen's slide or sharp
+  keyframe (100–180 KB) at once lost its tail in a home router's 250 ms queue on an uplink with
+  room for the share, and the voice next to it, which held the video for the voice. Voice and
+  probe padding go unpaced.
   How old the limited viewer's picture gets after the drop to 500 kbit/s, until the lower layer
   shows (`bandwidth_limits`, eight runs in parallel on a laptop, 14 to 16 drops each; medians in
   brackets):
