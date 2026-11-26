@@ -31,7 +31,7 @@ use fluent_bundle::FluentArgs;
 use futures_channel::{mpsc, oneshot};
 use futures_util::future::{Either, pending, poll_immediate, select};
 use futures_util::{FutureExt, StreamExt};
-use leptos::prelude::{Get, RwSignal, Set};
+use leptos::prelude::{ArcRwSignal, Get, Set};
 use leptos::wasm_split::SplitLoaderError;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -517,12 +517,16 @@ fn session_storage_get(key: &str) -> Option<String> {
     .and_then(|storage| storage.get_item(key).ok().flatten())
 }
 
+// Reference-counted signals, not arena ones: an arena signal belongs to the reactive owner that
+// first touched it (the banner) and is disposed with it. The app unmounts when the tab hands the
+// app to another tab, and reading the disposed signal when it takes the app back panicked (#2415).
 thread_local! {
   /// This member's browser lacks what the core's worker needs (module workers, Web Locks, OPFS
   /// sync access handles), so the core runs in the page: `BrowserSupportBanner` says so (#2397).
-  static IS_BROWSER_UNSUPPORTED: RwSignal<bool> = RwSignal::new(false);
+  static IS_BROWSER_UNSUPPORTED: ArcRwSignal<bool> = ArcRwSignal::new(false);
   /// The user put the banner away for this session.
-  static IS_BANNER_DISMISSED: RwSignal<bool> = RwSignal::new(session_storage_get(BROWSER_BANNER_KEY).is_some());
+  static IS_BANNER_DISMISSED: ArcRwSignal<bool> =
+    ArcRwSignal::new(session_storage_get(BROWSER_BANNER_KEY).is_some());
 }
 
 /// Where the banner's dismissal is kept for the session.
