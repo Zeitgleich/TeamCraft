@@ -222,6 +222,13 @@ impl AudioOutput {
     let failed = |error: cpal::Error| open_failure(&device, "output", &error);
     let is_closing = Arc::new(AtomicBool::new(false));
     let (config, format) = pick_config(device.supported_output_configs().map_err(failed)?, "output")?;
+    info!(
+      device = %device_name(&device),
+      channels = config.channels,
+      rate_hz = config.sample_rate,
+      ?format,
+      "opening the speakers"
+    );
     let stream = match format {
       SampleFormat::I16 => build_output::<i16>(&device, config, buffer, Arc::clone(&is_closing)),
       SampleFormat::I32 => build_output::<i32>(&device, config, buffer, Arc::clone(&is_closing)),
@@ -453,11 +460,22 @@ where
   T: SizedSample,
   f32: FromSample<T>,
 {
-  let mut resampler = MonoResampler::new(usize::from(config.channels), config.sample_rate);
+  let channels = usize::from(config.channels).max(1);
+  let mut resampler = MonoResampler::new(channels, config.sample_rate);
   let mut interleaved = Vec::new();
+  let mut has_reported = false;
   let stream = device.build_input_stream(
     config,
-    move |data: &[T], _: &cpal::InputCallbackInfo| {
+    move |data: &[T], info: &cpal::InputCallbackInfo| {
+      if !has_reported {
+        has_reported = true;
+        let timestamp = info.timestamp();
+        report_first_callback(
+          "microphone",
+          data.len() / channels,
+          timestamp.callback.duration_since(timestamp.capture),
+        );
+      }
       interleaved.clear();
       interleaved.extend(data.iter().map(|sample| sample.to_sample::<f32>()));
       on_samples(&resampler.process(&interleaved));
@@ -481,9 +499,19 @@ where
   let channels = usize::from(config.channels);
   let mut playback = DeviceRatePlayback::new(buffer, config.sample_rate);
   let mut mono = Vec::new();
+  let mut has_reported = false;
   let stream = device.build_output_stream(
     config,
-    move |data: &mut [T], _: &cpal::OutputCallbackInfo| {
+    move |data: &mut [T], info: &cpal::OutputCallbackInfo| {
+      if !has_reported {
+        has_reported = true;
+        let timestamp = info.timestamp();
+        report_first_callback(
+          "speakers",
+          data.len() / channels,
+          timestamp.playback.duration_since(timestamp.callback),
+        );
+      }
       mono.resize(data.len() / channels, 0.0);
       playback.fill(&mut mono);
       for (frame, sample) in data.chunks_mut(channels).zip(&mono) {
@@ -494,6 +522,23 @@ where
     None,
   )?;
   Ok(stream)
+}
+
+/// Once per stream, from its first callback: how much the device hands over at a time and how
+/// long it takes from the microphone to us or from us to the speakers, as the system reports it.
+/// Together with the echo canceller's delay this tells whether the echo stays in its range
+/// (#2418).
+fn report_first_callback(
+  kind: &'static str,
+  frames_per_callback: usize,
+  device_latency: std::time::Duration,
+) {
+  info!(
+    kind,
+    frames_per_callback,
+    device_latency_ms = device_latency.as_millis() as u64,
+    "audio device running"
+  );
 }
 
 impl Drop for OpenStream {

@@ -12,6 +12,7 @@ use teamcraft_proto::DeviceId;
 use crate::audio_codec::{
   AudioChannels, FRAME_SAMPLES_PER_CHANNEL, OpusDecoder, OpusEncoder, OpusEncoderConfig, OpusError,
 };
+use crate::audio_diagnostics::{LevelSummary, LevelWindow};
 pub use crate::audio_frame::EncodedAudioFrame;
 use crate::audio_frame::opus_packet_samples;
 use crate::audio_level::{DEFAULT_VOICE_THRESHOLD_DBOV, measure_audio_level};
@@ -34,6 +35,10 @@ pub struct CapturePipeline {
   encoder_config: OpusEncoderConfig,
   /// The voice's thin copy while it is sent (#1893 step 3).
   maybe_thin: Option<ThinCopy>,
+  /// The microphone's level as it came and as it leaves after processing, for the debug log
+  /// (#2418).
+  microphone_level: LevelWindow,
+  sent_level: LevelWindow,
 }
 
 /// The voice a second time at the thinnest step, for receivers on thin downlinks (#1893 step 3):
@@ -56,6 +61,8 @@ pub struct PlaybackMixer {
   /// The sound of our own shared screen: the speakers play it too, so the echo canceller has to
   /// know it, or the microphone sends it a second time.
   echo_reference: VecDeque<f32>,
+  /// The level of what the speakers are given, for the debug log (#2418).
+  played_level: LevelWindow,
   /// Where the others' voices go for live captions on this device (#215), while they are on.
   #[cfg(feature = "captions")]
   maybe_caption_tap: Option<crate::captions::CaptionTap>,
@@ -92,6 +99,8 @@ impl CapturePipeline {
       maybe_processor: None,
       encoder_config,
       maybe_thin: None,
+      microphone_level: LevelWindow::default(),
+      sent_level: LevelWindow::default(),
     })
   }
 
@@ -172,7 +181,9 @@ impl CapturePipeline {
     self.pending.extend_from_slice(samples);
     while self.pending.len() >= FRAME_SAMPLES_PER_CHANNEL {
       let mut frame: Vec<f32> = self.pending.drain(..FRAME_SAMPLES_PER_CHANNEL).collect();
+      self.microphone_level.push(&frame);
       self.process(&mut frame)?;
+      self.sent_level.push(&frame);
       if let Some(thin) = &mut self.maybe_thin {
         thin.processed.extend_from_slice(&frame);
       }
@@ -189,6 +200,12 @@ impl CapturePipeline {
       });
     }
     Ok(frames)
+  }
+
+  /// The microphone's level as the device delivered it and as it is sent, since the last call
+  /// (#2418). Muted, nothing is measured.
+  pub fn take_levels(&mut self) -> (LevelSummary, LevelSummary) {
+    (self.microphone_level.take(), self.sent_level.take())
   }
 
   fn process(&self, frame: &mut [f32]) -> Result<(), AudioPipelineError> {
@@ -209,6 +226,7 @@ impl PlaybackMixer {
       is_deafened: false,
       maybe_processor: None,
       echo_reference: VecDeque::new(),
+      played_level: LevelWindow::default(),
       #[cfg(feature = "captions")]
       maybe_caption_tap: None,
     }
@@ -348,8 +366,14 @@ impl PlaybackMixer {
     for sample in mix.iter_mut().chain(maybe_admitted_mix.iter_mut().flatten()) {
       *sample = sample.clamp(-1.0, 1.0);
     }
+    self.played_level.push(&mix);
     self.analyze(&mix)?;
     Ok((mix, maybe_admitted_mix))
+  }
+
+  /// The level of the mixes played since the last call (#2418), status sounds not included.
+  pub fn take_played_level(&mut self) -> LevelSummary {
+    self.played_level.take()
   }
 
   /// The far-end signal for the echo canceller: what the speakers play, plus our own shared

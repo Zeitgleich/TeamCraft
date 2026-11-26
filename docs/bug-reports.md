@@ -80,6 +80,19 @@ lines ("top bar change"); more than 12 events in a minute give one `warn` line (
 flickering") with the counts per kind, then silence until a quiet minute passed. A flicker seen once
 in the field is so visible in a report's log afterwards.
 
+### Call audio (#2418)
+
+A native call logs which processing the microphone goes through (`audio processing`: echo
+cancellation, noise suppression, gain control; the platform's own voice processing is not used),
+each device as it opens (rate, channels) and its first callback (`audio device running`: frames per
+callback, the latency the system reports). 15 seconds into the call and then once a minute a
+`call audio` line follows, all numbers: the microphone's level as it came in (`microphone_dbfs`,
+the RMS of the frames above -60 dBFS, with its peak and how much of the time it was above), as it
+is sent after processing (`sent_*`), what the speakers were given (`played_*`), the audio waiting
+for them and their underruns, and the echo canceller's delay, echo return loss and enhancement.
+"Barely audible" then reads as a quiet microphone, gain that didn't raise it, or a canceller that
+removed the voice with the echo.
+
 ### Redaction
 
 security.md already forbids logging content, file names, keys, tokens, passwords and push payloads.
