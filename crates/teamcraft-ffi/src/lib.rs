@@ -47,6 +47,7 @@ mod os_log;
 mod perf_jobs;
 mod picture_retries;
 mod polls;
+mod push_lane;
 mod reads;
 mod recent_activity;
 mod recovery_kit;
@@ -145,8 +146,7 @@ pub use text_preview::{
   CellFind, CellHit, ColumnInfo, DelimiterChoice, LineFind, LineMatch, PreviewEncoding, TableInfo,
   TextPreview, TextPreviewError, TextPreviewInfo, open_text_preview,
 };
-use tokio::sync::{mpsc, oneshot};
-use tracing::Instrument as _;
+use tokio::sync::mpsc;
 pub use types::{
   AccountState, AppActivity, AppConfig, BrandAccent, BrandLinks, ConnectionState, ConversationItem,
   ConversationKind, ConversationOutboxItem, EmojiSuggestion, FirstSyncItem, FirstSyncStageItem,
@@ -170,7 +170,7 @@ pub use voice::{
 
 use crate::engine::{DrainGoal, Engine, EngineThreads, Job, PushOpening, PushReader};
 use crate::http_fetch::run_request;
-use crate::logging::{JobClock, LifecycleStep, outcome};
+use crate::logging::{LifecycleStep, outcome};
 use crate::motion::MotionLimitsItem;
 use crate::polls::PollLimitsItem;
 use crate::reads::{ReadQueue, Reads};
@@ -1113,14 +1113,7 @@ impl TeamCraft {
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(engine.notification_for_push(
-          payload,
-          utc_offset_minutes,
-          PushOpening::Received,
-          PushReader::App,
-        ))
-      })
+      .app_push(payload, utc_offset_minutes, PushOpening::Received)
       .await
   }
 
@@ -1178,14 +1171,7 @@ impl TeamCraft {
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(engine.notification_for_push(
-          payload,
-          utc_offset_minutes,
-          PushOpening::Retry,
-          PushReader::App,
-        ))
-      })
+      .app_push(payload, utc_offset_minutes, PushOpening::Retry)
       .await
   }
 
@@ -1197,14 +1183,7 @@ impl TeamCraft {
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(engine.notification_for_push(
-          payload,
-          utc_offset_minutes,
-          PushOpening::LateLook,
-          PushReader::App,
-        ))
-      })
+      .app_push(payload, utc_offset_minutes, PushOpening::LateLook)
       .await
   }
 
@@ -1217,14 +1196,7 @@ impl TeamCraft {
     utc_offset_minutes: i16,
   ) -> Result<PushNotification, TeamCraftError> {
     self
-      .call(move |engine| {
-        Box::pin(engine.notification_for_push(
-          payload,
-          utc_offset_minutes,
-          PushOpening::StoreOnly,
-          PushReader::App,
-        ))
-      })
+      .app_push(payload, utc_offset_minutes, PushOpening::StoreOnly)
       .await
   }
 
@@ -2538,26 +2510,26 @@ impl TeamCraft {
     R: Send + 'static,
     F: for<'a> FnOnce(&'a mut Engine) -> engine::LocalFuture<'a, Result<R, TeamCraftError>> + Send + 'static,
   {
-    let (reply, answer) = oneshot::channel();
-    let queued = Instant::now();
-    let timing = perf_jobs::queued(PerfJobKind::EngineQueue, std::any::type_name::<F>());
-    let boxed: Job = Box::new(move |engine| {
-      Box::pin(async move {
-        let span = timing.span();
-        let running = timing.start();
-        let clock = JobClock::start();
-        let result = job(engine).instrument(span).await;
-        logging::slow_job(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
-        running.done();
-        // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
-        let _ = reply.send(result);
-      })
-    });
+    let (job, answer) = engine::timed_job(job);
     self
       .engine_jobs()?
-      .send(boxed)
+      .send(job)
       .map_err(|_| TeamCraftError::EngineStopped)?;
     answer.await.map_err(|_| TeamCraftError::EngineStopped)?
+  }
+
+  /// The app's notification for a push, opened beside the engine (issue #2441).
+  async fn app_push(
+    &self,
+    payload: Vec<u8>,
+    utc_offset_minutes: i16,
+    opening: PushOpening,
+  ) -> Result<PushNotification, TeamCraftError> {
+    let threads = self.threads()?;
+    let lane = threads.push_lane.upgrade().ok_or(TeamCraftError::EngineStopped)?;
+    lane
+      .notification(threads.push_jobs, payload, utc_offset_minutes, opening)
+      .await
   }
 
   /// Runs `job` on the read thread: what the local store holds, without waiting for the engine.
