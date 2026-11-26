@@ -5045,6 +5045,7 @@ mod tests {
           codec: VideoCodec::H264,
           layers: layers(),
           maybe_publication_id: Some(CAMERA),
+          maybe_replaces: None,
         }))
       );
       follow_outputs(&outputs, &mut publications);
