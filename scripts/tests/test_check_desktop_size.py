@@ -6,8 +6,8 @@ import pathlib
 import struct
 import tempfile
 import unittest
+import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
-from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
 SCRIPT = ROOT / "scripts" / "check-desktop-size.py"
@@ -92,7 +92,7 @@ def elf_file(tmp, sections, machine=check.EM_X86_64):
 
 def run(*argv):
     out, err = io.StringIO(), io.StringIO()
-    with mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), redirect_stdout(out), redirect_stderr(err):
+    with unittest.mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}), redirect_stdout(out), redirect_stderr(err):
         code = check.main(list(argv))
     return code, out.getvalue(), err.getvalue()
 
