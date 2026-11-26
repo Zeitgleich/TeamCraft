@@ -96,7 +96,7 @@ store() {
   if [ "$has_backend" = true ]; then
     # --wait: the backend assembles the chunks after the upload; without waiting, a file it drops
     # there (as GlitchTip did with the large dSYMs of the iOS app) still reads as uploaded.
-    if "$SENTRY_CLI" debug-files upload --wait "$@"; then
+    if upload_to_backend "$@"; then
       verify_on_backend "$label" "$@"
     else
       warn "the debug files of $label did not reach the crash reports backend"
@@ -172,6 +172,20 @@ fetch_web_names() {
   echo "$target"
 }
 
+# `sentry-cli debug-files upload` with retries: the iOS 1.0.43 upload died once on the API request
+# ("seek callback returned error 2") and the release's crashes stayed without symbols (#2438). The
+# upload is idempotent (files the backend has are skipped), so a retry is safe. Attempts and pause
+# are settable for tests.
+upload_to_backend() {
+  local attempts="${DEBUG_FILES_UPLOAD_ATTEMPTS:-3}" pause="${DEBUG_FILES_UPLOAD_PAUSE_SECONDS:-30}" attempt=1
+  while ! "$SENTRY_CLI" debug-files upload --wait "$@"; do
+    [ "$attempt" -lt "$attempts" ] || return 1
+    warn "debug file upload failed (attempt $attempt of $attempts); trying again in ${pause}s"
+    sleep "$pause"
+    attempt=$((attempt + 1))
+  done
+}
+
 # Checks that the backend kept each uploaded file: it lists them by debug ID, newest first.
 verify_on_backend() {
   local label="$1" file id listing missing=() files=() arg
@@ -198,11 +212,13 @@ verify_on_backend() {
   fi
 }
 
-# The debug IDs of the newest 100 debug files on the backend, lower case, one per line.
+# The debug IDs of the newest debug files on the backend, lower case, one per line. The backend
+# lists a file once per upload, 50 to a page, and a release adds dozens: the pages are followed (at
+# most 40), so a file of this release is not reported missing because it sits on a later page.
 backend_debug_ids() {
   local url="${SENTRY_URL%/}/api/0/projects/$SENTRY_ORG/$SENTRY_PROJECT/files/dsyms/" cursor="" headers
   headers="$(mktemp)"
-  for _ in 1 2; do
+  for _ in $(seq 1 40); do
     # The token goes in a header read from stdin, never on the command line.
     printf 'header = "Authorization: Bearer %s"\n' "$SENTRY_AUTH_TOKEN" \
       | curl --fail --silent --show-error --retry 3 --config - --dump-header "$headers" \
