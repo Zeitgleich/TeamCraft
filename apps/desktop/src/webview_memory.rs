@@ -6,20 +6,29 @@
 //!
 //! WebKit also only starts giving memory back when its web process passes a third of a limit that
 //! defaults to the machine's RAM, at most 3 GB: about 1 GB on any current machine, far above the
-//! app's budget of 400 MiB. [`set_memory_pressure`] lowers that limit (issue #1708).
+//! app's budget of 400 MiB. [`set_memory_pressure`] lowers that first threshold (issue #1708).
+//!
+//! Only the first one, the conservative threshold: on WebKitGTK 2.54 the release at the strict
+//! threshold deadlocks the web process (#2450). It frees the GPU resources of the compositor
+//! thread under a lock that the flush it starts takes again on the same thread
+//! (`SkiaGLContext::releaseUnusedResources` → `GrDirectContext::freeGpuResources`), and the main
+//! thread waits for that thread for good. The conservative release only purges scratch resources,
+//! which flushes nothing. So the strict threshold sits at the top of WebKit's own limit, further
+//! away than WebKit's own default puts it, and the conservative one where #1708 measured it.
 
 use std::time::Duration;
 
 use webkit2gtk::{CacheModel, MemoryPressureSettings, SettingsExt, WebContextExt, WebViewExt};
 
 /// The web process's memory limit WebKit's thresholds are fractions of, in MiB. `0` keeps WebKit's
-/// own (the machine's RAM, at most 3 GB).
+/// own (the machine's RAM, at most 3 GB). Changing it moves both thresholds.
 const LIMIT_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_LIMIT_MIB";
 /// Fraction of the limit above which WebKit releases what it can do without (caches it can
 /// rebuild).
 const CONSERVATIVE_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_CONSERVATIVE";
 /// Fraction of the limit above which WebKit also releases what costs time to rebuild (JIT code,
-/// a full garbage collection).
+/// a full garbage collection, the compositor's GPU resources). Reaching it can deadlock WebKitGTK
+/// 2.54's web process (#2450).
 const STRICT_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_STRICT";
 /// How often WebKit measures the web process, in seconds.
 const POLL_ENV: &str = "TEAMCRAFT_WEBVIEW_MEMORY_POLL_SECS";
@@ -79,14 +88,15 @@ struct MemoryPressure {
 }
 
 impl MemoryPressure {
-  /// The defaults, measured on the large workspace of `tests/e2e` `desktop_perf.rs`
-  /// (docs/performance.md, "Desktop on Linux: memory pressure and the allocator"). The conservative
-  /// threshold is WebKit's own: until #2362 the app asked for 0.5, which WebKit refused (see
-  /// [`WEBKIT_STRICT_DEFAULT`]), so every measurement ran with a third.
+  /// The defaults (docs/performance.md, "Desktop on Linux: memory pressure and the allocator").
+  /// Conservative at 3072 MiB × 0.055 = 169 MiB, where #1708 measured 512 MiB × 0.33 on the large
+  /// workspace of `tests/e2e` `desktop_perf.rs`. Strict at 3041 MiB, out of the page's reach:
+  /// its release deadlocks WebKitGTK 2.54 (#2450, see the module's comment). The limit is
+  /// WebKit's own largest, and WebKit's own strict default would be half of it.
   const DEFAULT: Self = Self {
-    maybe_limit_mib: Some(512),
-    conservative_fraction: 0.33,
-    strict_fraction: 0.7,
+    maybe_limit_mib: Some(3072),
+    conservative_fraction: 0.055,
+    strict_fraction: 0.99,
     poll_interval: Duration::from_secs(10),
   };
 
@@ -213,6 +223,7 @@ mod tests {
   #[test]
   fn webkit_takes_both_thresholds_in_their_order() {
     let pairs = [
+      (0.055, 0.99),
       (0.33, 0.7),
       (0.5, 0.7),
       (0.6, 0.9),

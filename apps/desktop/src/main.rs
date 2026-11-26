@@ -57,6 +57,8 @@ mod webview_renderer;
 #[cfg(target_os = "linux")]
 mod webview_scrolling;
 mod webview_spellcheck;
+#[cfg(target_os = "linux")]
+mod webview_watchdog;
 mod window_chrome;
 #[cfg(target_os = "linux")]
 mod window_menu;
@@ -604,6 +606,7 @@ fn create_main_window(app: &tauri::AppHandle, maybe_was_visible: Option<bool>) -
       webview_menu::filter_menus(&webview);
       window_menu::watch(&webview);
       webview_recovery::watch(&webview, handle.clone());
+      webview_watchdog::watch(&webview);
       dropped_files::watch(&webview, dropped, handle);
     });
     if let Err(error) = configured {
