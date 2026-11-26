@@ -523,6 +523,10 @@ pub enum CallEngineEvent {
   /// A video track was published; for this device's own tracks it carries the stream id to send
   /// on. Subscribe to other devices' tracks with [`CallEngine::subscribe_video`].
   VideoPublished(VideoTrack),
+  /// Another device's track goes on with other layers (#2417: a screen share stepped its size or
+  /// codec): same stream, subscription and tile; the picture shown stays until the new layers'
+  /// keyframes.
+  VideoTrackChanged(VideoTrack),
   VideoUnpublished(MediaStreamId),
   /// Not from the engine but from the media driver: an own track ended by itself (a camera
   /// unplugged or taken away by the system, a share ended from the system's indicator or the
@@ -760,6 +764,8 @@ struct PendingPublication {
   is_withdrawn: bool,
   /// The driver's encoders follow [`CallEngineEvent::LayerBitrates`].
   adaptation: Adaptation,
+  /// The own track this publication goes on from (#2417, [`CallEngine::replace_video`]).
+  maybe_replaces: Option<StreamId>,
 }
 
 /// A prepared DAVE transition waiting for [`CallEvent::DaveExecuteTransition`].
@@ -2078,6 +2084,68 @@ impl CallEngine {
       layers,
       is_withdrawn: false,
       adaptation,
+      maybe_replaces: None,
+    });
+  }
+
+  /// Publishes `layers` under `publication` as the own track of `replaced` going on (#2417): a
+  /// screen share whose layers changed (a size or codec step of the share policy) keeps its
+  /// stream, so viewers keep their tile and its picture until the new layers' keyframes, and the
+  /// uplink's estimate and allocation go on rather than starting over. Frames go out under
+  /// `publication` once [`CallEngineEvent::VideoPublished`] confirms it, with the same stream id.
+  /// `replaced` may itself be a replacement still waiting for its answer (two steps in a row): it
+  /// is withdrawn, and the stream goes on under `publication`. Where `replaced` is no track of
+  /// `kind` in `codec` (a first publication not confirmed yet, or the codec changed), the old
+  /// track is withdrawn and a new one published, as before. Encoders change their rate in place
+  /// ([`Self::publish_video_adapting_in_place`]).
+  pub fn replace_video(
+    &mut self,
+    replaced: VideoPublicationId,
+    publication: VideoPublicationId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+  ) {
+    let maybe_pending_stream = self
+      .pending_publications
+      .iter()
+      .find(|pending| pending.id == replaced && !pending.is_withdrawn)
+      .and_then(|pending| pending.maybe_replaces);
+    let maybe_stream = self
+      .own_stream_of(replaced)
+      .or(maybe_pending_stream)
+      .filter(|stream| {
+        self
+          .own_tracks
+          .get(stream)
+          .is_some_and(|track| track.kind == kind && track.codec == codec)
+      });
+    let Some(stream) = maybe_stream else {
+      self.withdraw_video(replaced);
+      self.publish_video_adapting_in_place(publication, kind, codec, layers);
+      return;
+    };
+    // A replacement not answered yet gives way to this one: its answer then changes nothing.
+    if maybe_pending_stream.is_some() {
+      self.withdraw_video(replaced);
+    }
+    let is_in_use = self
+      .pending_publications
+      .iter()
+      .any(|pending| pending.id == publication)
+      || self.own_stream_of(publication).is_some();
+    if is_in_use {
+      warn!(?publication, "video publication id used twice; ignored");
+      return;
+    }
+    self.request_publication(PendingPublication {
+      id: publication,
+      kind,
+      codec,
+      layers,
+      is_withdrawn: false,
+      adaptation: Adaptation::InPlace,
+      maybe_replaces: Some(stream),
     });
   }
 
@@ -2943,10 +3011,9 @@ impl CallEngine {
       self.subscriptions.remove(&stream);
       self.event(CallEngineEvent::VideoUnpublished(MediaStreamId(stream.0)));
     }
-    for (stream, track) in current {
-      if !self.remote_video.contains_key(&stream) {
-        self.add_video_track(track.clone());
-      }
+    for track in current.into_values() {
+      // New tracks, and known ones that went on with other layers while away (#2417).
+      self.add_video_track(track.clone());
     }
   }
 
@@ -3014,7 +3081,7 @@ impl CallEngine {
       // have no sender any more (withdrawn or unpublished while away) and are unpublished.
       self.on_own_track_published((*track).clone());
     }
-    let unanswered = std::mem::take(&mut self.pending_publications);
+    let mut unanswered = std::mem::take(&mut self.pending_publications);
     // Tracks the SFU dropped with the slot: asked for again under their id; the driver learns
     // the new stream id.
     let mut lost: Vec<(VideoPublicationId, VideoTrack)> = self
@@ -3026,13 +3093,26 @@ impl CallEngine {
       .collect();
     lost.sort_by_key(|(id, _)| *id);
     for (id, track) in lost {
+      let stream = StreamId(track.stream_id.0);
       let adaptation = self
         .adaptive_tracks
-        .get(&StreamId(track.stream_id.0))
+        .get(&stream)
         .copied()
         .unwrap_or(Adaptation::Whole);
-      self.forget_own_track(StreamId(track.stream_id.0));
+      self.forget_own_track(stream);
       self.event(CallEngineEvent::VideoUnpublished(track.stream_id));
+      // A replacement of it that waits for its answer (#2417) is the track's publication now: it
+      // goes out as a new track, the old layers don't.
+      let mut is_replaced = false;
+      for pending in &mut unanswered {
+        if pending.maybe_replaces == Some(stream) {
+          pending.maybe_replaces = None;
+          is_replaced = true;
+        }
+      }
+      if is_replaced {
+        continue;
+      }
       self.request_publication(PendingPublication {
         id,
         kind: track.kind,
@@ -3040,6 +3120,7 @@ impl CallEngine {
         layers: track.layers,
         is_withdrawn: false,
         adaptation,
+        maybe_replaces: None,
       });
     }
     // Requests the SFU never answered (lost with the connection, or dropped with the slot): asked
@@ -3429,6 +3510,11 @@ impl CallEngine {
       (self.voice_steps.wanted_bps().is_some() || self.is_video_proof_wanted)
         && self.maybe_probe_bytes.is_some(),
     );
+    // Held video on an uplink of more than the thin voice's room proves the rate it needs in one
+    // cluster (#2417), not stepped up from the voice alone.
+    self
+      .uplink_rate_probe
+      .set_estimate_trusted(self.is_video_proof_wanted && !self.is_uplink_thin());
     let was_running = self.uplink_rate_probe.is_running();
     // Only on a thin uplink: on 500 kbit/s a cluster next to the voice costs it nothing, and a
     // presenter who talked on kept voice and camera down after a drop.
@@ -4736,6 +4822,20 @@ impl CallEngine {
       self.on_own_track_published(track);
       return;
     }
+    let stream = StreamId(track.stream_id.0);
+    // The sender's track goes on with other layers (#2417): the subscription and the picture
+    // shown stay; reception starts over at the new layers' keyframes.
+    if let Some(known) = self
+      .remote_video
+      .get_mut(&stream)
+      .filter(|known| known.sender == track.device_id && known.kind == track.kind)
+    {
+      if known.layers != track.layers {
+        known.replace_layers(&track.layers);
+        self.event(CallEngineEvent::VideoTrackChanged(track));
+      }
+      return;
+    }
     self.remote_video.insert(
       StreamId(track.stream_id.0),
       IncomingVideo::new(&track, self.maybe_nack),
@@ -4748,10 +4848,28 @@ impl CallEngine {
   /// is unpublished at once, rather than staying a black tile with the camera shown on for the
   /// others (#929). A track known already (kept over a rejoin) stays as it is.
   fn on_own_track_published(&mut self, track: VideoTrack) {
-    if self.own_tracks.contains_key(&StreamId(track.stream_id.0)) {
+    let stream = StreamId(track.stream_id.0);
+    if self.own_tracks.contains_key(&stream) {
+      // A known track answers only a replacement of itself (#2417); else it was kept over a
+      // rejoin.
+      if let Some(pending) = self.take_replacement_of(&track) {
+        self.on_replaced(pending, track);
+      }
       return;
     }
-    match self.take_answered_publication(&track) {
+    let maybe_pending = self.take_answered_publication(&track);
+    // An SFU that didn't take the new layers in place (the old track ended meanwhile, or an SFU
+    // from before #2417) published a new track: the old one ends, and later replacements of it
+    // go on from the new one.
+    if let Some(replaced) = maybe_pending.as_ref().and_then(|pending| pending.maybe_replaces) {
+      for later in &mut self.pending_publications {
+        if later.maybe_replaces == Some(replaced) {
+          later.maybe_replaces = Some(stream);
+        }
+      }
+      self.unpublish_video(MediaStreamId(replaced.0));
+    }
+    match maybe_pending {
       Some(pending) if !pending.is_withdrawn => {
         if pending.adaptation != Adaptation::Whole {
           let stream = StreamId(track.stream_id.0);
@@ -4779,6 +4897,72 @@ impl CallEngine {
         });
       },
     }
+  }
+
+  /// Takes the pending replacement (#2417) that the known own track `track` answers: the one whose
+  /// id the SFU echoed, of the same stream.
+  fn take_replacement_of(&mut self, track: &VideoTrack) -> Option<PendingPublication> {
+    let stream = StreamId(track.stream_id.0);
+    let position = self.pending_publications.iter().position(|pending| {
+      pending.maybe_replaces == Some(stream) && track.maybe_publication_id == Some(pending.id)
+    })?;
+    self.pending_publications.remove(position)
+  }
+
+  /// The SFU took the new layers of `pending` in place for the own track `track` (#2417): frames go
+  /// out under the new publication on the same stream. The uplink is measured afresh as for a new
+  /// track (`add_own_track`): its voice steps and video holds start over too. Keeping them was
+  /// measured to hold a share's video for its voice 6 to 11 s after an uplink dip (5 s at most
+  /// with the reset, #2417), as the voice's recovery after a collapse is slow. A replacement
+  /// stopped before its answer ends the track, unless a later one goes on from it.
+  fn on_replaced(&mut self, pending: PendingPublication, mut track: VideoTrack) {
+    let stream = StreamId(track.stream_id.0);
+    if pending.is_withdrawn {
+      let is_replaced_again = self
+        .pending_publications
+        .iter()
+        .any(|later| later.maybe_replaces == Some(stream));
+      if !is_replaced_again {
+        self.unpublish_video(track.stream_id);
+      }
+      return;
+    }
+    track.maybe_publication_id = Some(pending.id);
+    if let Some(outgoing) = self.own_video.get_mut(&stream) {
+      outgoing.replace_layers(&track.layers);
+    }
+    let own_layers: Vec<u8> = track.layers.iter().map(|info| info.layer).collect();
+    let asked: Vec<u8> = pending.layers.iter().map(|info| info.layer).collect();
+    // As for a new track (`add_own_track`): every layer is sent until told otherwise.
+    self.sfu_layers.remove(&stream);
+    self.sfu_bound_layers.remove(&stream);
+    self.encoder_top_layers.remove(&stream);
+    self.sent_layers.insert(
+      stream,
+      if asked.len() > own_layers.len() {
+        asked
+      } else {
+        own_layers.clone()
+      },
+    );
+    self.uplink_announced.insert(stream, own_layers.clone());
+    if pending.adaptation == Adaptation::Whole {
+      self.adaptive_tracks.remove(&stream);
+      self.bitrates_announced.remove(&stream);
+    } else {
+      self.adaptive_tracks.insert(stream, pending.adaptation);
+      let own: Vec<(u8, u32)> = track
+        .layers
+        .iter()
+        .map(|info| (info.layer, info.max_bitrate_bps))
+        .collect();
+      self.bitrates_announced.insert(stream, own);
+    }
+    self.own_tracks.insert(stream, track.clone());
+    self.update_uplink_demand();
+    let stream_id = track.stream_id;
+    self.event(CallEngineEvent::VideoPublished(track));
+    self.request_own_keyframes(stream_id, &own_layers);
   }
 
   /// Takes the pending publication an announced own track answers: the one whose id the SFU
@@ -4869,6 +5053,7 @@ impl CallEngine {
         codec: pending.codec.clone(),
         layers: pending.layers.iter().take(limit).cloned().collect(),
         maybe_publication_id: Some(pending.id),
+        maybe_replaces: pending.maybe_replaces.map(|stream| MediaStreamId(stream.0)),
       });
     }
     self.pending_publications.push_back(pending);
@@ -7131,6 +7316,7 @@ mod tests {
           codec: VideoCodec::H264,
           layers: layers(3),
           maybe_publication_id: Some(VideoPublicationId(50)),
+          maybe_replaces: None,
         }),
         EngineOutput::Signal(CallClientMessage::PublishScreenAudio),
         EngineOutput::Event(CallEngineEvent::Reconnected),
@@ -8878,6 +9064,186 @@ mod tests {
     }
   }
 
+  /// #2417: a screen share whose layers change goes on as the same stream.
+  mod replaced_publications {
+    use super::*;
+
+    const FIRST: VideoPublicationId = VideoPublicationId(1);
+    const SECOND: VideoPublicationId = VideoPublicationId(2);
+    const THIRD: VideoPublicationId = VideoPublicationId(3);
+    const SHARE: u32 = 50;
+
+    /// The new layers go out under the new publication on the old stream: nothing is unpublished,
+    /// the uplink isn't measured afresh, and every new layer starts with a keyframe.
+    #[test]
+    fn a_share_with_new_layers_goes_on_as_the_same_stream() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.replace_video(FIRST, SECOND, VideoTrackKind::Screen, VideoCodec::H264, layers(2));
+      let outputs = drain(&mut alice);
+      assert_eq!(
+        outputs,
+        vec![EngineOutput::Signal(CallClientMessage::PublishVideo {
+          kind: VideoTrackKind::Screen,
+          codec: VideoCodec::H264,
+          layers: layers(2),
+          maybe_publication_id: Some(SECOND),
+          maybe_replaces: Some(MediaStreamId(SHARE)),
+        })]
+      );
+      answer(&mut alice, 3, screen(SHARE, SECOND, 2), now);
+      let outputs = drain(&mut alice);
+      assert!(!outputs.iter().any(is_unpublish), "{outputs:?}");
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::VideoPublished(screen(
+          SHARE, SECOND, 2
+        )))),
+        "{outputs:?}"
+      );
+      let keyframes: Vec<u8> = outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::KeyframeRequested { layer, .. }) => Some(*layer),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(keyframes, vec![0, 1]);
+      assert_ne!(
+        alice.send_video(MediaStreamId(SHARE), &video_frame(), now),
+        VideoSendOutcome::NotPublished
+      );
+    }
+
+    /// An SFU that published a new track instead (the old one ended meanwhile, or an SFU from
+    /// before the field): the old track ends, the new one is sent.
+    #[test]
+    fn a_replacement_published_as_a_new_track_ends_the_old_one() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.replace_video(FIRST, SECOND, VideoTrackKind::Screen, VideoCodec::H264, layers(2));
+      drain(&mut alice);
+      answer(&mut alice, 3, screen(51, SECOND, 2), now);
+      let outputs = drain(&mut alice);
+      assert!(outputs.contains(&unpublish(SHARE)), "{outputs:?}");
+      assert!(!outputs.contains(&unpublish(51)), "{outputs:?}");
+      assert_ne!(
+        alice.send_video(MediaStreamId(51), &video_frame(), now),
+        VideoSendOutcome::NotPublished
+      );
+    }
+
+    /// The share stopped while its replacement waited for the answer: the stream ends.
+    #[test]
+    fn a_share_stopped_before_its_replacement_is_answered_ends() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.replace_video(FIRST, SECOND, VideoTrackKind::Screen, VideoCodec::H264, layers(2));
+      alice.withdraw_video(SECOND);
+      drain(&mut alice);
+      answer(&mut alice, 3, screen(SHARE, SECOND, 2), now);
+      let outputs = drain(&mut alice);
+      assert_eq!(outputs, vec![unpublish(SHARE)]);
+    }
+
+    /// Two steps before the first is answered: the stream goes on under the last one, and the
+    /// first's answer ends nothing.
+    #[test]
+    fn two_steps_in_a_row_keep_the_stream() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.replace_video(FIRST, SECOND, VideoTrackKind::Screen, VideoCodec::H264, layers(2));
+      alice.replace_video(SECOND, THIRD, VideoTrackKind::Screen, VideoCodec::H264, layers(1));
+      let outputs = drain(&mut alice);
+      assert!(!outputs.iter().any(is_unpublish), "{outputs:?}");
+      assert!(
+        outputs.iter().any(|output| matches!(
+          output,
+          EngineOutput::Signal(CallClientMessage::PublishVideo {
+            maybe_publication_id: Some(THIRD),
+            maybe_replaces: Some(MediaStreamId(SHARE)),
+            ..
+          })
+        )),
+        "{outputs:?}"
+      );
+      answer(&mut alice, 3, screen(SHARE, SECOND, 2), now);
+      answer(&mut alice, 4, screen(SHARE, THIRD, 1), now);
+      let outputs = drain(&mut alice);
+      assert!(!outputs.iter().any(is_unpublish), "{outputs:?}");
+      assert!(
+        outputs.contains(&EngineOutput::Event(CallEngineEvent::VideoPublished(screen(
+          SHARE, THIRD, 1
+        )))),
+        "{outputs:?}"
+      );
+    }
+
+    /// A viewer keeps the track and its subscription: it hears the new layers, nothing ends or
+    /// starts, and nothing is asked of the SFU.
+    #[test]
+    fn a_viewer_keeps_a_track_that_goes_on_with_other_layers() {
+      let now = Instant::now();
+      let mut bob = engine_joined(2, now);
+      let shared = VideoTrack {
+        kind: VideoTrackKind::Screen,
+        ..video_track(SHARE, 1, 3)
+      };
+      answer(&mut bob, 2, shared.clone(), now);
+      bob.subscribe_video(MediaStreamId(SHARE), Some(2));
+      drain(&mut bob);
+      let stepped = VideoTrack {
+        layers: layers(2),
+        ..shared
+      };
+      answer(&mut bob, 3, stepped.clone(), now);
+      assert_eq!(
+        drain(&mut bob),
+        vec![EngineOutput::Event(CallEngineEvent::VideoTrackChanged(
+          stepped.clone()
+        ))]
+      );
+      // Told again as it is (a rejoin lists it): nothing changes.
+      answer(&mut bob, 4, stepped, now);
+      assert!(drain(&mut bob).is_empty());
+    }
+
+    /// Alice shares her screen in three layers under [`FIRST`], confirmed as stream [`SHARE`].
+    fn sharing(now: Instant) -> CallEngine {
+      let mut alice = engine_joined(1, now);
+      alice.publish_video_adapting_in_place(FIRST, VideoTrackKind::Screen, VideoCodec::H264, layers(3));
+      answer(&mut alice, 2, screen(SHARE, FIRST, 3), now);
+      drain(&mut alice);
+      alice
+    }
+
+    fn screen(stream: u32, publication: VideoPublicationId, layer_count: u8) -> VideoTrack {
+      VideoTrack {
+        kind: VideoTrackKind::Screen,
+        maybe_publication_id: Some(publication),
+        ..video_track(stream, 1, layer_count)
+      }
+    }
+
+    fn answer(engine: &mut CallEngine, seq: u64, track: VideoTrack, now: Instant) {
+      engine
+        .handle_signal(event(seq, CallEvent::VideoPublished { track }), now)
+        .unwrap();
+    }
+
+    fn unpublish(stream: u32) -> EngineOutput {
+      EngineOutput::Signal(CallClientMessage::UnpublishVideo {
+        stream_id: MediaStreamId(stream),
+      })
+    }
+
+    fn is_unpublish(output: &EngineOutput) -> bool {
+      matches!(
+        output,
+        EngineOutput::Signal(CallClientMessage::UnpublishVideo { .. })
+      )
+    }
+  }
+
   mod own_publications {
     use super::*;
 
@@ -9265,6 +9631,7 @@ mod tests {
           codec: VideoCodec::H264,
           layers: layers(1),
           maybe_publication_id: Some(CAMERA),
+          maybe_replaces: None,
         }),
       ] {
         assert!(outputs.contains(&expected), "missing {expected:?} in {outputs:?}");
@@ -9302,6 +9669,7 @@ mod tests {
           codec: VideoCodec::H264,
           layers: layers(1),
           maybe_publication_id: Some(SHARE),
+          maybe_replaces: None,
         }),
         EngineOutput::Signal(CallClientMessage::PublishScreenAudio),
       ] {

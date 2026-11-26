@@ -2106,7 +2106,9 @@ impl CallState<'_> {
             } => {
               self.remotes.remove(&(*device_id, AudioOrigin::Screen));
             },
-            CallEngineEvent::VideoPublished(track) => {
+            // A track that goes on with other layers (#2417) keeps its tile, canvas and decoder;
+            // the layer asked for follows its new sizes.
+            CallEngineEvent::VideoPublished(track) | CallEngineEvent::VideoTrackChanged(track) => {
               self.on_publication(&event);
               // A tile may have been watching before its layers were known.
               self.update_layer(engine, track.stream_id);
@@ -2892,22 +2894,24 @@ impl CallState<'_> {
 
   /// Publishes anew the own tracks whose layers changed beyond what their encoders follow in
   /// place (#1733: a share's middle layer stopped, its top's codec changed, or the viewers'
-  /// codecs did). The capture goes on; viewers see the track end and the new one start, with
-  /// keyframes. A track whose new encoders don't open keeps its layers.
+  /// codecs did), as the same stream going on (#2417). The capture goes on; viewers keep the tile
+  /// and its picture until the new layers' keyframes. A track whose new encoders don't open keeps
+  /// its layers.
   fn publish_replans(&mut self, engine: &mut CallEngine) {
     for sender in &mut self.senders {
       let Some(replan) = sender.take_replan() else {
         continue;
       };
       let publication = self.next_publication;
-      let withdrawn = sender.publication.own.id;
+      let replaced = sender.publication.own.id;
       let layers = replan.layers.len();
       match sender.rebuild(replan, publication, self.inputs) {
         Ok(()) => {
           self.next_publication = VideoPublicationId(publication.0.wrapping_add(1));
-          debug!(kind = ?sender.publication.kind, codec = %sender.codec(), layers, "video track goes out with other layers");
-          engine.withdraw_video(withdrawn);
-          engine.publish_video_adapting_in_place(
+          debug!(kind = ?sender.publication.kind, codec = %sender.codec(), layers, "video track goes on with other layers");
+          // The same stream goes on (#2417): viewers keep the tile and its picture.
+          engine.replace_video(
+            replaced,
             publication,
             sender.publication.kind.clone(),
             sender.codec().clone(),
@@ -3095,7 +3099,9 @@ impl CallState<'_> {
         self.remote_tracks.remove(stream_id);
         self.qualities.remove(stream_id);
       },
-      CallEngineEvent::VideoPublished(track) if track.device_id != self.own_device => {
+      CallEngineEvent::VideoPublished(track) | CallEngineEvent::VideoTrackChanged(track)
+        if track.device_id != self.own_device =>
+      {
         self.remote_tracks.insert(track.stream_id, track.clone());
       },
       _ => {},
@@ -5039,6 +5045,7 @@ mod tests {
           codec: VideoCodec::H264,
           layers: layers(),
           maybe_publication_id: Some(CAMERA),
+          maybe_replaces: None,
         }))
       );
       follow_outputs(&outputs, &mut publications);

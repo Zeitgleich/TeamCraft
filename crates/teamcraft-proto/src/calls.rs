@@ -189,6 +189,15 @@ pub enum CallClientMessage {
     layers: Vec<VideoLayerInfo>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     maybe_publication_id: Option<VideoPublicationId>,
+    /// The own track this publication goes on from (#2417): a screen share whose layers changed
+    /// (a size or codec step of the share policy) keeps its stream, so viewers keep their tile and
+    /// its picture until the new layers' keyframes, instead of the share ending and starting anew
+    /// (the stage rebuilt, a blank tile, every viewer's downlink measured afresh). The SFU takes the
+    /// new layers in place when the stream is this device's track of the same kind and codec and
+    /// answers [`CallEvent::VideoPublished`] with that stream; otherwise it publishes a new track
+    /// as without the field, and the client ends the old one. Older SFUs ignore it.
+    #[serde(rename = "replaces", default, skip_serializing_if = "Option::is_none")]
+    maybe_replaces: Option<MediaStreamId>,
   },
   UnpublishVideo {
     stream_id: MediaStreamId,
@@ -814,12 +823,14 @@ impl fmt::Debug for CallClientMessage {
         codec,
         layers,
         maybe_publication_id,
+        maybe_replaces,
       } => f
         .debug_struct("PublishVideo")
         .field("kind", kind)
         .field("codec", codec)
         .field("layers", layers)
         .field("maybe_publication_id", maybe_publication_id)
+        .field("maybe_replaces", maybe_replaces)
         .finish(),
       Self::TransportFeedback { feedback } => f
         .debug_struct("TransportFeedback")
@@ -1457,6 +1468,25 @@ mod tests {
     assert_eq!(serde_json::from_str::<CallServerMessage>(&json).unwrap(), pong);
   }
 
+  /// #2417: a share that goes on with other layers names the stream it replaces; a first
+  /// publication leaves the field out, as above.
+  #[test]
+  fn publish_video_wire_format_of_a_replacement() {
+    let publish = CallClientMessage::PublishVideo {
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::H264,
+      layers: Vec::new(),
+      maybe_publication_id: Some(VideoPublicationId(5)),
+      maybe_replaces: Some(MediaStreamId(7)),
+    };
+    let json = serde_json::to_string(&publish).unwrap();
+    assert_eq!(
+      json,
+      r#"{"type":"publish_video","kind":"screen","codec":"h264","layers":[],"maybe_publication_id":5,"replaces":7}"#
+    );
+    assert_eq!(serde_json::from_str::<CallClientMessage>(&json).unwrap(), publish);
+  }
+
   #[test]
   fn publish_video_wire_format_with_and_without_publication_id() {
     let publish = CallClientMessage::PublishVideo {
@@ -1464,6 +1494,7 @@ mod tests {
       codec: VideoCodec::H264,
       layers: Vec::new(),
       maybe_publication_id: Some(VideoPublicationId(4)),
+      maybe_replaces: None,
     };
     let json = serde_json::to_string(&publish).unwrap();
     assert_eq!(
@@ -1480,6 +1511,7 @@ mod tests {
         codec: VideoCodec::H264,
         layers: Vec::new(),
         maybe_publication_id: None,
+        maybe_replaces: None,
       }
     );
     // An SFU from before the field reads the request as before: unknown fields of a known message

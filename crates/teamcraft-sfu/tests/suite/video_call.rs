@@ -43,6 +43,7 @@ async fn subscriber_receives_the_allocated_layer_after_a_keyframe() {
       codec: VideoCodec::Av1,
       layers: three_layers(),
       maybe_publication_id: Some(VideoPublicationId(3)),
+      maybe_replaces: None,
     })
     .await;
   let published = publisher
@@ -116,6 +117,77 @@ async fn subscriber_receives_the_allocated_layer_after_a_keyframe() {
   );
 }
 
+/// #2417: a screen share whose layers change goes on as the same stream. The viewer is told the
+/// track again, never that it ended, keeps its subscription, and gets the new layers' keyframe
+/// without subscribing anew.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_share_with_new_layers_goes_on_for_its_viewer() {
+  let (port, certificate_hash) = start_sfu().await;
+  let mut publisher = Client::join(port, certificate_hash.clone(), 1).await;
+  let mut viewer = Client::join(port, certificate_hash, 2).await;
+  publisher
+    .send(CallClientMessage::PublishVideo {
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::Av1,
+      layers: three_layers(),
+      maybe_publication_id: Some(VideoPublicationId(1)),
+      maybe_replaces: None,
+    })
+    .await;
+  let CallEvent::VideoPublished { track } = viewer
+    .expect(|event| matches!(event, CallEvent::VideoPublished { .. }))
+    .await
+  else {
+    unreachable!()
+  };
+  let stream_id = track.stream_id;
+  viewer
+    .send(CallClientMessage::Subscribe {
+      stream_id,
+      maybe_max_layer: Some(2),
+    })
+    .await;
+  publisher
+    .expect(|event| matches!(event, CallEvent::KeyframeRequested { .. }))
+    .await;
+  publisher.send_frame(stream_id, 0, true, 1).await;
+  assert!(viewer.receive_keyframe_of(stream_id).await);
+
+  let mut two_layers = three_layers();
+  two_layers.truncate(2);
+  publisher
+    .send(CallClientMessage::PublishVideo {
+      kind: VideoTrackKind::Screen,
+      codec: VideoCodec::Av1,
+      layers: two_layers.clone(),
+      maybe_publication_id: Some(VideoPublicationId(2)),
+      maybe_replaces: Some(stream_id),
+    })
+    .await;
+  let is_about_the_share = |event: &CallEvent| {
+    matches!(
+      event,
+      CallEvent::VideoPublished { .. } | CallEvent::VideoUnpublished { .. }
+    )
+  };
+  for client in [&mut publisher, &mut viewer] {
+    let told = client.expect(is_about_the_share).await;
+    let CallEvent::VideoPublished { track } = told else {
+      panic!("the share ended: {told:?}");
+    };
+    assert_eq!(track.stream_id, stream_id);
+    assert_eq!(track.layers, two_layers);
+    assert_eq!(track.maybe_publication_id, Some(VideoPublicationId(2)));
+  }
+  // The new encoders' keyframe is asked for, and reaches the viewer as it is.
+  let request = publisher
+    .expect(|event| matches!(event, CallEvent::KeyframeRequested { .. }))
+    .await;
+  assert_eq!(request, CallEvent::KeyframeRequested { stream_id, layer: 0 });
+  publisher.send_frame(stream_id, 0, true, 2).await;
+  assert!(viewer.receive_keyframe_of(stream_id).await);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn subscribing_to_an_undecodable_codec_is_rejected() {
   let (port, certificate_hash) = start_sfu().await;
@@ -128,6 +200,7 @@ async fn subscribing_to_an_undecodable_codec_is_rejected() {
       layers: three_layers()[..1].to_vec(),
       // An older client: nothing to echo.
       maybe_publication_id: None,
+      maybe_replaces: None,
     })
     .await;
   let CallEvent::VideoPublished { track } = audio_only
@@ -239,6 +312,29 @@ impl Client {
     })
     .await
     .expect("error did not arrive")
+  }
+
+  /// Waits for a keyframe's datagram of `stream_id` (others, padding among them, are skipped);
+  /// whether one came in time.
+  async fn receive_keyframe_of(&mut self, stream_id: MediaStreamId) -> bool {
+    tokio::time::timeout(EVENT_TIMEOUT, async {
+      loop {
+        let datagram = self.connection.receive_datagram().await.unwrap();
+        let payload = datagram.payload();
+        let Ok(parsed) = MediaDatagram::parse(&payload) else {
+          continue;
+        };
+        if parsed.header.stream_id != StreamId(stream_id.0) {
+          continue;
+        }
+        let (rtp, _) = RtpHeader::parse(parsed.rtp).unwrap();
+        if FrameFragment::from_header(&rtp).unwrap().is_keyframe {
+          return;
+        }
+      }
+    })
+    .await
+    .is_ok()
   }
 
   /// Sends one single-fragment frame on `layer`, numbered for uplink estimation.

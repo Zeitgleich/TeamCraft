@@ -228,6 +228,13 @@ impl OutgoingVideo {
 
   /// The track's layers in another codec than the track's own (#1733).
   pub fn with_layers(mut self, layers: &[VideoLayerInfo]) -> Self {
+    self.replace_layers(layers);
+    self
+  }
+
+  /// The track goes on with `layers` (#2417): its numbering goes on, so receivers see one stream
+  /// that switches layers at the new layers' keyframes.
+  pub fn replace_layers(&mut self, layers: &[VideoLayerInfo]) {
     self.layer_codecs = layers
       .iter()
       .filter_map(|info| {
@@ -235,7 +242,6 @@ impl OutgoingVideo {
         (codec != &self.codec).then(|| (info.layer, codec.clone()))
       })
       .collect();
-    self
   }
 
   /// The codec `layer` is encoded in.
@@ -455,6 +461,12 @@ impl IncomingVideo {
   /// was sent meanwhile went elsewhere and isn't missing).
   pub fn restart(&mut self) {
     self.maybe_layer = None;
+  }
+
+  /// The sender goes on with `layers` (#2417): reception starts over at their keyframes.
+  pub fn replace_layers(&mut self, layers: &[VideoLayerInfo]) {
+    self.layers = layers.to_vec();
+    self.restart();
   }
 
   /// Adds one packet, which arrived `now`. Returns the frames that may go to the decoder now (a

@@ -490,8 +490,18 @@ encodes no AV1 or VP9): 30, 20, 15, 10, 5 fps, then the middle layer off, then t
 sizes, then the 480p base alone. A rate step changes the running encoders in place (#1781:
 OpenH264's `SetOption`, the GStreamer elements' `bitrate` while they play, which `vtenc_h264`
 passes on as VideoToolbox's `AverageBitRate` and `mfh264enc` as Media Foundation's
-`CODECAPI_AVEncCommonMeanBitRate`): no keyframe. A layer or size step publishes the share anew,
-each layer starting with a keyframe, as the browser does. On a 1440p share in OpenH264 (60 % of
+`CODECAPI_AVEncCommonMeanBitRate`): no keyframe. A layer or size step publishes the new layers
+in place of the old ones on the same stream (`PublishVideo` with `replaces`, #2417), each layer
+starting with a keyframe, as the browser does: viewers keep the share's tile and its last picture
+until the keyframe, and neither their downlinks nor the presenter's uplink are measured afresh.
+Before, each step ended the share and started a new one, and every viewer saw it flicker
+(`measure_share_continuity_on_a_swinging_uplink`: 4 to 10 ends and starts per viewer in 16 s of
+an uplink that drops to a half or a quarter of the share for 3 s in every 6, none since). Each of
+those restarts also let go of a video held for the voice (the presenter had no track for a
+moment); without them the held video waited for a probe that stepped up from the voice's few
+kilobits, and the picture stood still for up to 13 s. A held video on an uplink that isn't thin
+now probes the rate it needs at once (`UplinkProbe::set_estimate_trusted`): the longest still
+picture per run is 5.5 to 6.9 s, the dip and the voice guard's hold after the last lost voice. On a 1440p share in OpenH264 (60 % of
 a core at 30 fps above) the first step to 20 fps should leave about 40 % (the same work per
 frame, two thirds of the frames); not yet measured on a slow machine.
 

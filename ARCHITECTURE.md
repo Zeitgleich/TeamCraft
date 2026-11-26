@@ -548,7 +548,9 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   with no renegotiation. A receiver's decoder opens anew for the other codec at the switch's
   keyframe. `decodable_video_codecs` also names the codecs at least one viewer that reads layer
   codecs decodes (`decodable_by_some`); a sender encodes an AV1 layer only when someone does, and
-  publishes the share anew when its layers' codecs change. An SFU from before sends no
+  publishes the share's new layers in place of the old ones when its layers' codecs change (the
+  same stream goes on, #2417: `PublishVideo` names the stream it `replaces`; receivers hear
+  `video_published` for a stream they know and keep its tile). An SFU from before sends no
   `decodable_by_some`: the share then goes out in one codec, as below.
 - **A browser that can't encode H.264** (#1793): `isConfigSupported` isn't trusted alone; a web
   client test-encodes one small frame per codec once per page (Firefox on Linux says yes to

@@ -783,33 +783,7 @@ impl Forwarder {
     layers: Vec<VideoLayerInfo>,
     maybe_publication_id: Option<VideoPublicationId>,
   ) -> Result<VideoTrack, ForwardError> {
-    let participant = self.participants.get(&owner).ok_or(ForwardError::NotJoined)?;
-    let encoders = &participant.capabilities.video_encoders;
-    if !encoders.contains(&codec) || layers.iter().any(|info| !encoders.contains(info.codec(&codec))) {
-      return Err(ForwardError::InvalidPublication(
-        "codec not in the publisher's encoders",
-      ));
-    }
-    // #1733: the lowest layer is in the track's codec, so a receiver that knows only the track's
-    // codec (a client from before layer codecs) has a layer to get.
-    if layers.first().is_some_and(|info| info.codec(&codec) != &codec) {
-      return Err(ForwardError::InvalidPublication(
-        "the lowest layer must be in the track's codec",
-      ));
-    }
-    // Four since #978; clients publish three to SFUs from before, which say no limit in `joined`.
-    if layers.is_empty() || layers.len() > usize::from(MAX_SIMULCAST_LAYERS) {
-      return Err(ForwardError::InvalidPublication("needs 1 to 4 layers"));
-    }
-    if layers
-      .iter()
-      .zip(0u8..)
-      .any(|(info, expected)| info.layer != expected)
-    {
-      return Err(ForwardError::InvalidPublication(
-        "layers must be numbered from 0 in order",
-      ));
-    }
+    self.check_publication(owner, &codec, &layers)?;
     let is_new_stream = !self.video_tracks.contains_key(&stream_id);
     let published = self
       .video_tracks
@@ -839,6 +813,105 @@ impl Forwarder {
     };
     self.video_tracks.insert(stream_id, route);
     Ok(track)
+  }
+
+  /// Takes `layers` for `owner`'s track `stream_id` in place (#2417): a screen share whose layers
+  /// changed keeps its stream and its receivers, who switch to the new layers at their keyframes
+  /// and show the last picture meanwhile. The layers' state starts over as for a new track; every
+  /// receiver is allocated afresh, and the publisher is asked for keyframes and told the layers
+  /// needed. `Ok(None)` when the stream is no track of `owner` of `kind` in `codec` (it ended
+  /// meanwhile, or another codec): the caller publishes a new track instead.
+  #[allow(clippy::too_many_arguments)]
+  pub fn replace_video(
+    &mut self,
+    owner: DeviceId,
+    stream_id: StreamId,
+    kind: &VideoTrackKind,
+    codec: &VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+    maybe_publication_id: Option<VideoPublicationId>,
+    now: Instant,
+  ) -> Result<Option<(VideoTrack, Vec<Effect>)>, ForwardError> {
+    self.check_publication(owner, codec, &layers)?;
+    let repair_config = self.uplink_repair_config();
+    let Some(route) = self.video_tracks.get_mut(&stream_id).filter(|route| {
+      route.track.device_id == owner && route.track.kind == *kind && route.track.codec == *codec
+    }) else {
+      return Ok(None);
+    };
+    route.track.layers = layers;
+    route.track.maybe_publication_id = maybe_publication_id;
+    // The new layers count as carried until the publisher says otherwise, as a new track's.
+    let was_paused = route.uplink_layers == 0;
+    route.uplink_layers = route.track.layers.len();
+    route.layers_needed = Vec::new();
+    route.arrivals = [None; MAX_SIMULCAST_LAYERS as usize];
+    route.frame_fragments = [0; MAX_SIMULCAST_LAYERS as usize];
+    route.history = Default::default();
+    route.repair = std::array::from_fn(|_| UplinkRepair::new(repair_config, &route.track.kind));
+    // Each receiver waits for a keyframe of the new layers; its decoder keeps the last picture.
+    for subscription in route.subscribers.values_mut() {
+      subscription.target = None;
+      subscription.current = None;
+      subscription.maybe_last_request = None;
+    }
+    let receivers: Vec<DeviceId> = route.subscribers.keys().copied().collect();
+    let track = route.track.clone();
+    // The old layers' request pacing says nothing about the new encoders.
+    self
+      .last_keyframe_requests
+      .retain(|(stream, _), _| *stream != stream_id);
+    let mut effects = Vec::new();
+    // Viewers that were told the publisher held the track (#1891) hear that it goes on.
+    if was_paused {
+      effects.push(Effect::VideoPausedByPublisher {
+        publisher: owner,
+        stream_id,
+        is_paused: false,
+      });
+    }
+    for receiver in receivers {
+      effects.extend(self.reallocate(receiver, now));
+    }
+    effects.extend(self.update_layers_needed(stream_id, now));
+    Ok(Some((track, effects)))
+  }
+
+  /// Whether `owner` may publish a track in `codec` with `layers`.
+  fn check_publication(
+    &self,
+    owner: DeviceId,
+    codec: &VideoCodec,
+    layers: &[VideoLayerInfo],
+  ) -> Result<(), ForwardError> {
+    let participant = self.participants.get(&owner).ok_or(ForwardError::NotJoined)?;
+    let encoders = &participant.capabilities.video_encoders;
+    if !encoders.contains(codec) || layers.iter().any(|info| !encoders.contains(info.codec(codec))) {
+      return Err(ForwardError::InvalidPublication(
+        "codec not in the publisher's encoders",
+      ));
+    }
+    // #1733: the lowest layer is in the track's codec, so a receiver that knows only the track's
+    // codec (a client from before layer codecs) has a layer to get.
+    if layers.first().is_some_and(|info| info.codec(codec) != codec) {
+      return Err(ForwardError::InvalidPublication(
+        "the lowest layer must be in the track's codec",
+      ));
+    }
+    // Four since #978; clients publish three to SFUs from before, which say no limit in `joined`.
+    if layers.is_empty() || layers.len() > usize::from(MAX_SIMULCAST_LAYERS) {
+      return Err(ForwardError::InvalidPublication("needs 1 to 4 layers"));
+    }
+    if layers
+      .iter()
+      .zip(0u8..)
+      .any(|(info, expected)| info.layer != expected)
+    {
+      return Err(ForwardError::InvalidPublication(
+        "layers must be numbered from 0 in order",
+      ));
+    }
+    Ok(())
   }
 
   pub fn unpublish_video(&mut self, owner: DeviceId, stream_id: StreamId) -> Result<(), ForwardError> {
@@ -2446,6 +2519,140 @@ mod tests {
         .unwrap()
         .deliveries
         .len()
+    }
+  }
+
+  /// #2417: a screen share whose layers change goes on as the same stream.
+  mod replacement {
+    use super::*;
+
+    /// The viewer keeps its subscription: once the new layers' keyframe comes it gets them, with
+    /// no subscribe of its own, and the publisher is asked for that keyframe and told the layers
+    /// needed.
+    #[test]
+    fn a_share_with_new_layers_keeps_its_stream_and_viewers() {
+      let (mut forwarder, now) = shared_screen();
+      let mut two_layers = three_layers();
+      two_layers.truncate(2);
+      let (track, effects) = forwarder
+        .replace_video(
+          device(1),
+          VIDEO,
+          &VideoTrackKind::Screen,
+          &VideoCodec::Av1,
+          two_layers.clone(),
+          Some(VideoPublicationId(2)),
+          now,
+        )
+        .unwrap()
+        .unwrap();
+      assert_eq!(track.stream_id, MediaStreamId(VIDEO.0));
+      assert_eq!(track.layers, two_layers);
+      assert_eq!(track.maybe_publication_id, Some(VideoPublicationId(2)));
+      assert!(
+        effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::KeyframeRequest { stream_id: VIDEO, .. })),
+        "{effects:?}"
+      );
+      assert!(
+        effects
+          .iter()
+          .any(|effect| matches!(effect, Effect::LayersNeeded { stream_id: VIDEO, .. })),
+        "{effects:?}"
+      );
+      // The old layers' deltas don't reach it; the new keyframe does.
+      let later = now + Duration::from_millis(40);
+      assert!(send_frame(&mut forwarder, 0, false, later).is_empty());
+      assert_eq!(send_frame(&mut forwarder, 0, true, later), devices(&[2]));
+      assert_eq!(forwarder.video_tracks().len(), 1);
+    }
+
+    /// A stream that isn't the owner's track of the same kind and codec is not replaced: the room
+    /// publishes a new track then.
+    #[test]
+    fn only_the_owners_own_kind_and_codec_is_replaced() {
+      let (mut forwarder, now) = shared_screen();
+      let mut replace = |owner: u64, stream: StreamId, kind: VideoTrackKind, codec: VideoCodec| {
+        forwarder
+          .replace_video(device(owner), stream, &kind, &codec, three_layers(), None, now)
+          .unwrap()
+          .is_some()
+      };
+      assert!(!replace(2, VIDEO, VideoTrackKind::Screen, VideoCodec::Av1));
+      assert!(!replace(
+        1,
+        StreamId(101),
+        VideoTrackKind::Screen,
+        VideoCodec::Av1
+      ));
+      assert!(!replace(1, VIDEO, VideoTrackKind::Camera, VideoCodec::Av1));
+      assert!(!replace(1, VIDEO, VideoTrackKind::Screen, VideoCodec::Vp9));
+      assert!(replace(1, VIDEO, VideoTrackKind::Screen, VideoCodec::Av1));
+    }
+
+    /// A track its publisher held (#1891) goes on with the new layers: viewers hear it isn't held.
+    #[test]
+    fn a_held_share_goes_on_unheld() {
+      let (mut forwarder, now) = shared_screen();
+      forwarder.set_uplink_layers(device(1), VIDEO, &[], now).unwrap();
+      let (_, effects) = forwarder
+        .replace_video(
+          device(1),
+          VIDEO,
+          &VideoTrackKind::Screen,
+          &VideoCodec::Av1,
+          three_layers(),
+          None,
+          now,
+        )
+        .unwrap()
+        .unwrap();
+      assert!(
+        effects.contains(&Effect::VideoPausedByPublisher {
+          publisher: device(1),
+          stream_id: VIDEO,
+          is_paused: false,
+        }),
+        "{effects:?}"
+      );
+    }
+
+    /// New layers are checked as a publication's are.
+    #[test]
+    fn invalid_layers_are_refused() {
+      let (mut forwarder, now) = shared_screen();
+      assert!(matches!(
+        forwarder.replace_video(
+          device(1),
+          VIDEO,
+          &VideoTrackKind::Screen,
+          &VideoCodec::Av1,
+          Vec::new(),
+          None,
+          now
+        ),
+        Err(ForwardError::InvalidPublication(_))
+      ));
+    }
+
+    /// Device 1 shares its screen in three layers; device 2 receives its base layer.
+    fn shared_screen() -> (Forwarder, Instant) {
+      let (mut forwarder, now) = room(2);
+      forwarder
+        .publish_video(
+          device(1),
+          VIDEO,
+          VideoTrackKind::Screen,
+          VideoCodec::Av1,
+          three_layers(),
+          Some(VideoPublicationId(1)),
+        )
+        .unwrap();
+      forwarder.subscribe(device(2), VIDEO, Some(0), now).unwrap();
+      assert_eq!(send_frame(&mut forwarder, 0, true, now), devices(&[2]));
+      assert_eq!(send_frame(&mut forwarder, 0, false, now), devices(&[2]));
+      (forwarder, now)
     }
   }
 
