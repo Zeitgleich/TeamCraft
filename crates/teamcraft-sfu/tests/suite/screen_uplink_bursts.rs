@@ -241,6 +241,84 @@ async fn measure_screen_share_bursts_on_a_limited_uplink() {
   }
 }
 
+/// #2417: every viewer saw shared screens flicker. Each size or codec step of the share policy
+/// (#1777) published the share anew: viewers saw it end and start, the share stage was built
+/// again, the tile stood empty until the new track's keyframe, and every viewer's downlink and
+/// the presenter's uplink were measured afresh, which invited the next step. Through an uplink
+/// that swings to a quarter of the share every few seconds (a laptop on a train), the share now
+/// goes on as one stream with other layers: no viewer sees it end, and each keeps getting
+/// pictures. On main this was 10 ends and starts per viewer in 16 s (release build, 5 steps).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_swinging_uplink_keeps_the_share_one_stream_for_its_viewers() {
+  let run = run_scenario(swinging_scenario(SHARED, 4)).await;
+  let summary = run.summary();
+  println!("{summary}");
+  for (viewer, continuity) in run.continuity().iter().enumerate() {
+    println!("viewer {viewer}: {continuity:?}");
+    assert_eq!(
+      continuity.restarts, 0,
+      "viewer {viewer} saw the share end and start anew: {continuity:?}\n{summary}"
+    );
+    assert!(
+      continuity.longest_gap < SHARE - SETTLE,
+      "viewer {viewer} got no picture after the first {} s: {continuity:?}\n{summary}",
+      SETTLE.as_secs()
+    );
+  }
+}
+
+/// #2417: an uplink that swings between room for the share and a half or a quarter of it, as on a
+/// train or shared Wi-Fi, makes the Retina-size share step its size down and back up. Prints per
+/// run and viewer whether its share stayed one track (a track that ends and starts anew rebuilds
+/// the share stage: the flicker everyone saw) and how long its picture stood still, with the
+/// presenter's holds of its video for its voice, which stand the picture still too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement: prints the viewers' continuity per uplink, takes about three minutes"]
+async fn measure_share_continuity_on_a_swinging_uplink() {
+  for divisor in [2, 4] {
+    for round in 0..3 {
+      let run = run_scenario(swinging_scenario(SHARED, divisor)).await;
+      let keyframes = run.keyframes();
+      for (viewer, continuity) in run.continuity().iter().enumerate() {
+        println!(
+          "dips to 1/{divisor}, run {round}, viewer {viewer}: {continuity:?}, republished {}, video held for the voice {} ms",
+          keyframes.republished,
+          run.held_for().as_millis()
+        );
+      }
+    }
+  }
+}
+
+/// An uplink with room for the share that drops to `1 / divisor` of it for [`SWING_LOW`] every
+/// [`SWING_PERIOD`], after the first [`SETTLE`].
+fn swinging_scenario(size: VideoResolution, divisor: u64) -> Scenario {
+  let layers_bps: u64 = share_layers(size)
+    .iter()
+    .map(|layer| u64::from(layer.max_bitrate_bps))
+    .sum();
+  let dips = (0..)
+    .map(|index| SETTLE + SWING_PERIOD * index)
+    .take_while(|after| *after + SWING_LOW < SHARE)
+    .map(|after| Dip {
+      after,
+      lasts: SWING_LOW,
+      limit_bps: layers_bps / divisor,
+    })
+    .collect();
+  Scenario {
+    maybe_limit_bps: Some((layers_bps as f64 * LIMIT_SHARE) as u64),
+    dips,
+    viewers: LOSSY_VIEWERS,
+    slide_intervals: SHORT_AND_LONG_SLIDES,
+    ..Scenario::new(size)
+  }
+}
+
+/// How long a swinging uplink stays low, and how often it drops.
+const SWING_LOW: Duration = Duration::from_secs(3);
+const SWING_PERIOD: Duration = Duration::from_secs(6);
+
 /// A viewer's pictures: when, the capture timestamp, the size.
 type Pictures = Vec<(Duration, u64, VideoResolution)>;
 
@@ -249,7 +327,8 @@ struct Scenario {
   /// The shared screen's size.
   size: VideoResolution,
   maybe_limit_bps: Option<u64>,
-  maybe_dip: Option<Dip>,
+  /// Stretches with a narrower uplink, in order.
+  dips: Vec<Dip>,
   /// Loss and delay on the presenter's uplink, from the share's start.
   maybe_impairment: Option<Impairment>,
   /// How long the slides stay, in turn.
@@ -265,7 +344,7 @@ impl Scenario {
     Self {
       size,
       maybe_limit_bps: None,
-      maybe_dip: None,
+      dips: Vec::new(),
       maybe_impairment: None,
       slide_intervals: &[SLIDE_INTERVAL],
       viewers: 1,
@@ -273,6 +352,36 @@ impl Scenario {
     }
   }
 }
+
+/// What a viewer was told of the shared screen's track.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScreenChange {
+  /// A screen track started: its tile is built and waits for its first picture.
+  Started(Duration),
+  /// The track goes on with other layers (#2417): the tile and its picture stay.
+  Changed(Duration),
+  /// A track ended (only the screen's are watched): its tile goes.
+  Ended(Duration),
+}
+
+/// What a viewer saw of the share after [`SETTLE`] (#2417).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Continuity {
+  /// Screen tracks that started or ended: each one a tile built anew, the share stage gone
+  /// meanwhile.
+  restarts: usize,
+  /// Times the track went on with other layers.
+  changes: usize,
+  /// The longest time between two pictures.
+  longest_gap: Duration,
+  /// Times without a picture longer than [`VISIBLE_GAP`].
+  visible_gaps: usize,
+  /// Times the picture's size changed.
+  size_changes: usize,
+}
+
+/// A time without a new picture that a viewer notices on slides that change every second or two.
+const VISIBLE_GAP: Duration = Duration::from_millis(2500);
 
 /// A stretch of a run with a narrower uplink.
 struct Dip {
@@ -291,6 +400,8 @@ struct Run {
   changes: Vec<(Duration, u64)>,
   /// Each viewer's pictures.
   received: Vec<Pictures>,
+  /// What each viewer was told of the screen share's track.
+  screens: Vec<Vec<ScreenChange>>,
   shown: BTreeMap<u64, usize>,
   encoded: Vec<Encoded>,
   /// When an encoder was built (the share's start, new layers, or a rate an encoder couldn't take
@@ -331,7 +442,7 @@ fn profile() -> ScreenProfile {
 async fn run(size: VideoResolution, maybe_limit_bps: Option<u64>, maybe_dip: Option<Dip>) -> Run {
   run_scenario(Scenario {
     maybe_limit_bps,
-    maybe_dip,
+    dips: maybe_dip.into_iter().collect(),
     ..Scenario::new(size)
   })
   .await
@@ -342,7 +453,7 @@ async fn run_scenario(scenario: Scenario) -> Run {
   let Scenario {
     size,
     maybe_limit_bps,
-    maybe_dip,
+    dips,
     maybe_impairment,
     slide_intervals,
     viewers: viewer_count,
@@ -394,23 +505,21 @@ async fn run_scenario(scenario: Scenario) -> Run {
   presenter.start_video(config).await.unwrap();
 
   let received: Vec<Arc<Mutex<Pictures>>> = viewers.iter().map(|_| Arc::default()).collect();
+  let mut screens: Vec<Vec<ScreenChange>> = viewers.iter().map(|_| Vec::new()).collect();
   let (mut uplink_estimates, mut layers_needed) = (Vec::new(), Vec::new());
   let (mut keyframe_requests, mut published, mut held) = (Vec::new(), Vec::new(), Vec::new());
   let share_start = tokio::time::Instant::now();
   let end = share_start + SHARE;
-  let mut is_dipped = false;
+  let mut is_dipped: Option<u64> = None;
   while tokio::time::Instant::now() < end {
-    if let Some(dip) = &maybe_dip {
-      let since = share_start.elapsed();
-      let should_dip = since >= dip.after && since < dip.after + dip.lasts;
-      if should_dip != is_dipped {
-        is_dipped = should_dip;
-        relay.to_sfu.set_limit(if should_dip {
-          Some(dip.limit_bps)
-        } else {
-          maybe_limit_bps
-        });
-      }
+    let since = share_start.elapsed();
+    let maybe_dip = dips
+      .iter()
+      .find(|dip| since >= dip.after && since < dip.after + dip.lasts);
+    let dipped_to = maybe_dip.map(|dip| dip.limit_bps);
+    if dipped_to != is_dipped {
+      is_dipped = dipped_to;
+      relay.to_sfu.set_limit(dipped_to.or(maybe_limit_bps));
     }
     match tokio::time::timeout(Duration::from_millis(5), presenter.next_event()).await {
       Ok(Some(CallEngineEvent::LayersNeeded { layers, .. })) => layers_needed.push((start.elapsed(), layers)),
@@ -422,15 +531,20 @@ async fn run_scenario(scenario: Scenario) -> Run {
       },
       _ => {},
     }
-    for (viewer, received) in viewers.iter_mut().zip(&received) {
-      let Ok(Some(CallEngineEvent::VideoPublished(track))) =
-        tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await
-      else {
-        continue;
+    for ((viewer, received), screens) in viewers.iter_mut().zip(&received).zip(&mut screens) {
+      let track = match tokio::time::timeout(Duration::from_millis(5), viewer.next_event()).await {
+        Ok(Some(CallEngineEvent::VideoPublished(track))) if track.kind == VideoTrackKind::Screen => track,
+        Ok(Some(CallEngineEvent::VideoTrackChanged(track))) if track.kind == VideoTrackKind::Screen => {
+          screens.push(ScreenChange::Changed(start.elapsed()));
+          continue;
+        },
+        Ok(Some(CallEngineEvent::VideoUnpublished(_))) => {
+          screens.push(ScreenChange::Ended(start.elapsed()));
+          continue;
+        },
+        _ => continue,
       };
-      if track.kind != VideoTrackKind::Screen {
-        continue;
-      }
+      screens.push(ScreenChange::Started(start.elapsed()));
       let sink = Arc::clone(received);
       viewer.watch_video(
         track.stream_id,
@@ -464,6 +578,7 @@ async fn run_scenario(scenario: Scenario) -> Run {
     layers,
     changes,
     received,
+    screens,
     shown,
     encoded,
     built,
@@ -562,6 +677,52 @@ impl Run {
       delays.push(arrival);
     }
     delays
+  }
+
+  /// Per viewer: what it saw of the share after [`SETTLE`].
+  fn continuity(&self) -> Vec<Continuity> {
+    let settled = self.started_at + SETTLE;
+    self
+      .received
+      .iter()
+      .zip(&self.screens)
+      .map(|(received, screens)| {
+        let after_settle = |change: &&ScreenChange| match change {
+          ScreenChange::Started(at) | ScreenChange::Changed(at) | ScreenChange::Ended(at) => *at >= settled,
+        };
+        let restarts = screens
+          .iter()
+          .filter(after_settle)
+          .filter(|change| !matches!(change, ScreenChange::Changed(_)))
+          .count();
+        let changes = screens
+          .iter()
+          .filter(after_settle)
+          .filter(|change| matches!(change, ScreenChange::Changed(_)))
+          .count();
+        let pictures: Vec<&(Duration, u64, VideoResolution)> =
+          received.iter().filter(|(at, ..)| *at >= settled).collect();
+        let gaps: Vec<Duration> = pictures
+          .windows(2)
+          .map(|pair| pair[1].0.saturating_sub(pair[0].0))
+          .collect();
+        // The share's end counts too: a picture that never came back is the longest gap of all.
+        let tail = pictures
+          .last()
+          .map_or(SHARE, |(at, ..)| (self.started_at + SHARE).saturating_sub(*at));
+        Continuity {
+          restarts,
+          changes,
+          longest_gap: gaps.iter().copied().chain([tail]).max().unwrap_or(SHARE),
+          visible_gaps: gaps
+            .iter()
+            .chain([&tail])
+            .filter(|gap| **gap > VISIBLE_GAP)
+            .count(),
+          size_changes: pictures.windows(2).filter(|pair| pair[0].2 != pair[1].2).count(),
+        }
+      })
+      .collect()
   }
 
   /// Whether the presenter's video was held for its voice at some time from `from` to `to`.

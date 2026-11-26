@@ -125,6 +125,9 @@ pub struct UplinkProbe {
   /// The sender wants a cluster's proof of the wanted rate, whatever the estimate says
   /// ([`UplinkProbe::set_proof_wanted`]).
   is_proof_wanted: bool,
+  /// A cluster may probe up from the estimate rather than from what is sent
+  /// ([`UplinkProbe::set_estimate_trusted`]).
+  is_estimate_trusted: bool,
 }
 
 /// What a cluster showed.
@@ -453,6 +456,15 @@ impl UplinkProbe {
     self.is_proof_wanted = is_proof_wanted;
   }
 
+  /// Whether a cluster steps up from the estimate instead of from what is sent now (#2417):
+  /// video held for its voice after an uplink's dip waits for a cluster's proof, while only the
+  /// voice flows. Stepped up from the voice's few kilobits, the proof took five clusters, and a
+  /// shared screen stood still for 7.5 to 13 s after a dip of 3 s on a link of megabits. Only where
+  /// the uplink isn't thin: there each cluster that falls short costs the voice.
+  pub fn set_estimate_trusted(&mut self, is_estimate_trusted: bool) {
+    self.is_estimate_trusted = is_estimate_trusted;
+  }
+
   /// Notes `feedback` and answers a cluster it completes on `uplink`.
   pub fn on_feedback(
     &mut self,
@@ -491,7 +503,12 @@ impl UplinkProbe {
     }
     let sending_bps = uplink.sent_bps(now);
     let carried_bps = estimate_bps.min(sending_bps.max(self.probe.shown_bps(config, now)));
-    let target_bps = self.probe.target_bps(config, wanted_bps, carried_bps);
+    let base_bps = if self.is_estimate_trusted {
+      estimate_bps
+    } else {
+      carried_bps
+    };
+    let target_bps = self.probe.target_bps(config, wanted_bps, base_bps);
     if target_bps <= carried_bps {
       return false;
     }

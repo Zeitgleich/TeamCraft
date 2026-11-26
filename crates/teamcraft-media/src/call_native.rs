@@ -2793,7 +2793,8 @@ impl Sinks {
               self.video.end_taken_over_share(engine, *takeover, &self.events);
               continue;
             },
-            CallEngineEvent::VideoPublished(track) => {
+            // A track that goes on with other layers (#2417) keeps its receiver and decoder.
+            CallEngineEvent::VideoPublished(track) | CallEngineEvent::VideoTrackChanged(track) => {
               let asks =
                 self
                   .video
@@ -3108,9 +3109,9 @@ impl VideoState {
   }
 
   /// Takes each governed share a step along the share policy for its encoders' load and its
-  /// uplink (#1777); a share whose layers changed goes out anew under a new publication, as the
-  /// browser's does. The capture goes on; viewers see the track end and the new one start, with
-  /// keyframes.
+  /// uplink (#1777); a share whose layers changed goes on under a new publication of the same
+  /// stream, as the browser's does (#2417). The capture goes on; viewers keep the share's tile and
+  /// picture until the new layers' keyframes.
   fn govern_shares(&mut self, engine: &mut CallEngine, now: Instant) {
     for (sender, publication) in &mut self.senders {
       let maybe_top = publication
@@ -3120,9 +3121,15 @@ impl VideoState {
         continue;
       };
       let republished = VideoPublicationId(self.next_publication.fetch_add(1, Ordering::Relaxed));
-      debug!(kind = ?sender.kind, layers = layers.len(), "video track goes out with other layers");
-      engine.withdraw_video(publication.id);
-      engine.publish_video_adapting_in_place(republished, sender.kind.clone(), VideoCodec::H264, layers);
+      debug!(kind = ?sender.kind, layers = layers.len(), "video track goes on with other layers");
+      // The same stream goes on (#2417): viewers keep the share's tile and picture.
+      engine.replace_video(
+        publication.id,
+        republished,
+        sender.kind.clone(),
+        VideoCodec::H264,
+        layers,
+      );
       *publication = OwnPublication::new(republished);
     }
   }

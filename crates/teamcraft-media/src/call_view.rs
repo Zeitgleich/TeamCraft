@@ -318,7 +318,9 @@ impl CallRoster {
         _ => return false,
       },
       // Remote tracks changed (see update_video_tracks); the snapshot lists them.
-      CallEngineEvent::VideoPublished(_) | CallEngineEvent::VideoUnpublished(_) => {},
+      CallEngineEvent::VideoPublished(_)
+      | CallEngineEvent::VideoTrackChanged(_)
+      | CallEngineEvent::VideoUnpublished(_) => {},
       CallEngineEvent::Error(error) => {
         // The SFU's message names the request's subject ("unknown video track …"): the error
         // carries no request id (issue #976).
@@ -390,6 +392,16 @@ impl CallRoster {
               is_paused_by_publisher: false,
             },
           );
+        }
+      },
+      // Same stream, same tile (#2417): only the sizes it comes in changed.
+      CallEngineEvent::VideoTrackChanged(track) => {
+        if let Some(known) = tracks.get_mut(&track.stream_id) {
+          known.layers = track
+            .layers
+            .iter()
+            .map(|layer| (layer.width, layer.height))
+            .collect();
         }
       },
       CallEngineEvent::RemoteVideoPaused { stream_id, is_paused } => {

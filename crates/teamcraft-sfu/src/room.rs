@@ -759,9 +759,21 @@ impl Room {
         codec,
         layers,
         maybe_publication_id,
+        maybe_replaces,
       } => rejected(
         participant_id,
-        self.publish_video(participant_id, kind, codec, layers, maybe_publication_id),
+        match maybe_replaces {
+          Some(replaced) => self.replace_video(
+            participant_id,
+            replaced,
+            kind,
+            codec,
+            layers,
+            maybe_publication_id,
+            now,
+          ),
+          None => self.publish_video(participant_id, kind, codec, layers, maybe_publication_id),
+        },
       ),
       CallClientMessage::UnpublishVideo { stream_id } => {
         rejected(participant_id, self.unpublish_video(participant_id, stream_id))
@@ -885,6 +897,40 @@ impl Room {
       state.end_other_screen_shares(self.call_id, owner, track.stream_id);
     }
     state.broadcast(CallEvent::VideoPublished { track });
+    Ok(())
+  }
+
+  /// Publishes `owner`'s track with `layers` in place of its track `replaced` (#2417): the same
+  /// stream goes on with the new layers, announced to everyone as published again. A stream that
+  /// is no longer such a track (it ended meanwhile) gets a new track as by
+  /// [`Self::publish_video`]; the owner ends the old one then.
+  #[allow(clippy::too_many_arguments)]
+  pub fn replace_video(
+    &self,
+    owner: DeviceId,
+    replaced: MediaStreamId,
+    kind: VideoTrackKind,
+    codec: VideoCodec,
+    layers: Vec<VideoLayerInfo>,
+    maybe_publication_id: Option<VideoPublicationId>,
+    now: Instant,
+  ) -> Result<(), RoomError> {
+    let mut state = lock(&self.state);
+    let maybe_replaced = state.forwarder.replace_video(
+      owner,
+      StreamId(replaced.0),
+      &kind,
+      &codec,
+      layers.clone(),
+      maybe_publication_id,
+      now,
+    )?;
+    let Some((track, effects)) = maybe_replaced else {
+      drop(state);
+      return self.publish_video(owner, kind, codec, layers, maybe_publication_id);
+    };
+    state.broadcast(CallEvent::VideoPublished { track });
+    state.apply(effects);
     Ok(())
   }
 
