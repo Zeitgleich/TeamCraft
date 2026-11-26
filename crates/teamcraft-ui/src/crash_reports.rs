@@ -57,7 +57,9 @@ thread_local! {
   static STORAGE_REPORTS: Cell<u32> = const { Cell::new(0) };
   static CALL_REPORTS: Cell<u32> = const { Cell::new(0) };
   static CALL_GATE: RefCell<CallReportGate> = RefCell::new(CallReportGate::new(0));
-  static STATUS: RwSignal<Option<CrashReportsStatus>> = RwSignal::new(None);
+  /// Reference-counted, not an arena signal: one is disposed with the reactive owner that first
+  /// touched it, and the app's views come and go (a tab handing the app to another, #2415).
+  static STATUS: ArcRwSignal<Option<CrashReportsStatus>> = ArcRwSignal::new(None);
 }
 
 /// What the privacy settings and the first-start notice show: reports are on for this instance.
