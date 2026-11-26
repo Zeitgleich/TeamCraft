@@ -943,22 +943,36 @@ impl Room {
     Ok(())
   }
 
+  /// Ends `owner`'s screen sound. Sound that ended meanwhile is no error (#2442): the request
+  /// crossed a takeover or a host's "mute all", which announced the end already.
   pub fn unpublish_screen_audio(&self, owner: DeviceId, stream_id: MediaStreamId) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
-    state
+    match state
       .forwarder
-      .unpublish_screen_audio(owner, StreamId(stream_id.0))?;
-    state.broadcast(CallEvent::ScreenAudioUnpublished { stream_id });
+      .unpublish_screen_audio(owner, StreamId(stream_id.0))
+    {
+      Ok(()) => state.broadcast(CallEvent::ScreenAudioUnpublished { stream_id }),
+      Err(ForwardError::UnknownTrack(_)) => {},
+      Err(error) => return Err(error.into()),
+    }
     Ok(())
   }
 
+  /// Ends `owner`'s track. A track that ended meanwhile is no error (#2442): the request crossed
+  /// a takeover of the share, which announced the end already. Another device's track is.
   pub fn unpublish_video(&self, owner: DeviceId, stream_id: MediaStreamId) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
-    state.forwarder.unpublish_video(owner, StreamId(stream_id.0))?;
-    state.broadcast(CallEvent::VideoUnpublished { stream_id });
+    match state.forwarder.unpublish_video(owner, StreamId(stream_id.0)) {
+      Ok(()) => state.broadcast(CallEvent::VideoUnpublished { stream_id }),
+      Err(ForwardError::UnknownTrack(_)) => {},
+      Err(error) => return Err(error.into()),
+    }
     Ok(())
   }
 
+  /// Receives another device's track up to `maybe_max_layer` (`None`: no more). A track
+  /// unpublished meanwhile is no error (#2442): the request crossed its `video_unpublished`, as a
+  /// viewer's does whenever a share is taken over or a publisher stops.
   pub fn subscribe(
     &self,
     receiver: DeviceId,
@@ -967,10 +981,16 @@ impl Room {
     now: Instant,
   ) -> Result<(), RoomError> {
     let mut state = lock(&self.state);
-    let effects = state
+    match state
       .forwarder
-      .subscribe(receiver, StreamId(stream_id.0), maybe_max_layer, now)?;
-    state.apply(effects);
+      .subscribe(receiver, StreamId(stream_id.0), maybe_max_layer, now)
+    {
+      Ok(effects) => state.apply(effects),
+      Err(ForwardError::UnknownTrack(_)) => {
+        debug!(participant_id = %receiver, stream_id = stream_id.0, "subscription to a track that is gone");
+      },
+      Err(error) => return Err(error.into()),
+    }
     Ok(())
   }
 

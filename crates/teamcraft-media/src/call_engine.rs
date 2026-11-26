@@ -2220,13 +2220,19 @@ impl CallEngine {
     self.announce_uplink_layers();
   }
 
-  /// Receives another device's track up to `max_layer`; `None` stops receiving it.
+  /// Receives another device's track up to `max_layer`; `None` stops receiving it. Stopping a
+  /// track not received (it was unpublished meanwhile, which ends its subscription) asks the SFU
+  /// nothing (#2442).
   pub fn subscribe_video(&mut self, stream_id: MediaStreamId, maybe_max_layer: Option<u8>) {
     let stream = StreamId(stream_id.0);
-    match maybe_max_layer {
-      Some(max_layer) => self.subscriptions.insert(stream, max_layer),
-      None => self.subscriptions.remove(&stream),
+    let was_subscribed = match maybe_max_layer {
+      Some(max_layer) => self.subscriptions.insert(stream, max_layer).is_some(),
+      None => self.subscriptions.remove(&stream).is_some(),
     };
+    if maybe_max_layer.is_none() && !was_subscribed {
+      debug!(stream_id = stream.0, "not receiving the track; nothing to stop");
+      return;
+    }
     // A new subscription feeds a new decoder: deltas wait for the keyframe the SFU asks for.
     if maybe_max_layer.is_some()
       && let Some(track) = self.remote_video.get_mut(&stream)
