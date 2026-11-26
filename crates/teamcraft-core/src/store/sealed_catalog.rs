@@ -362,6 +362,12 @@ impl MessageEntry {
     self.server_id()
   }
 
+  /// A readable server message that acts on others ([`StoredMessage::is_hidden`]): what
+  /// [`super::LocalStore::controls_from`] reads; the message itself decides, this only preselects.
+  pub(crate) fn is_readable_hidden(self) -> bool {
+    self.has(MessageFlags::HIDDEN) && self.readable_server_id().is_some()
+  }
+
   pub(crate) fn server_id(self) -> Option<MessageId> {
     self
       .0

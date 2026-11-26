@@ -1185,6 +1185,25 @@ pub trait LocalStore {
     pinned.sort_by_key(StoredMessage::order);
     Ok(pinned)
   }
+  /// `conversation`'s readable control messages ([`StoredMessage::is_control_from`]: pins,
+  /// bookmarks, role entries, reactions, edits) with a server ID at or after `from`, in display
+  /// order: what a replay of the controls from a point on takes again (issue #2440). A store with an
+  /// index of the order walks only that range and reads only those records; the default reads the
+  /// conversation whole.
+  fn controls_from(
+    &self,
+    conversation: ConversationId,
+    from: MessageId,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let mut controls = Vec::new();
+    self.visit_messages(conversation, MessageFilter::All, &mut |message| {
+      if message.is_control_from(from) {
+        controls.push(message.clone());
+      }
+    })?;
+    controls.sort_by_key(StoredMessage::order);
+    Ok(controls)
+  }
   /// The newest `limit` of `conversation`'s messages that `link` `user` ([`StoredMessage::links`]),
   /// newest (last in display order) first: the mentions of the user, or their posts (issue #1790).
   /// A store with an index of them reads only those; the default reads the conversation whole.
@@ -1642,6 +1661,14 @@ macro_rules! forward_local_store {
         (**self).pinned_messages(conversation)
       }
 
+      fn controls_from(
+        &self,
+        conversation: ConversationId,
+        from: MessageId,
+      ) -> Result<Vec<StoredMessage>, StoreError> {
+        (**self).controls_from(conversation, from)
+      }
+
       fn user_messages(
         &self,
         conversation: ConversationId,
@@ -1917,6 +1944,12 @@ impl StoredMessage {
   /// ([`LocalStore::pinned_messages`]).
   pub fn is_shown_pin(&self) -> bool {
     self.is_pinned && !self.is_hidden()
+  }
+
+  /// A readable server message at or after `from` that acts on others instead of being listed
+  /// ([`Self::is_hidden`]): what [`LocalStore::controls_from`] returns.
+  pub fn is_control_from(&self, from: MessageId) -> bool {
+    self.maybe_unreadable.is_none() && self.is_hidden() && self.maybe_server_id.is_some_and(|id| id >= from)
   }
 
   /// A text that mentions `user`.
@@ -2385,6 +2418,7 @@ pub(crate) mod tests {
     a_place_holds_its_message_and_lines_and_pending_ones_their_own(store);
     feed_reads_follow_every_write(store);
     pinned_messages_follow_every_write(store);
+    controls_from_a_point_are_what_a_whole_read_finds(store);
     thread_and_user_reads_follow_every_write(store);
   }
 
@@ -2626,6 +2660,77 @@ pub(crate) mod tests {
     assert_eq!(pinned_ids(other), [elsewhere.client_message_id]);
     store.upsert_message(&plain).unwrap();
     assert!(pinned_ids(conversation).is_empty(), "nothing comes back");
+    store.delete_messages(other).unwrap();
+  }
+
+  /// Issue #2440: the controls from a point on are the readable hidden server messages a whole read
+  /// finds there, in display order: not those before it, no listed message, placeholder, pending
+  /// message or another conversation's control.
+  fn controls_from_a_point_are_what_a_whole_read_finds(store: &impl LocalStore) {
+    let conversation = id(90);
+    let other = id(91);
+    let target = message(conversation, 90, Some(3_000), None, 3_000);
+    let control = |client: u8, server: i64| {
+      let mut stored = message(conversation, client, Some(server), None, server);
+      stored.content = MessageContent::Pin {
+        target: target.client_message_id,
+        is_pinned: true,
+      };
+      stored
+    };
+    let before = control(91, 3_100);
+    let at = control(92, 3_200);
+    let mut reaction = message(conversation, 93, Some(3_300), None, 3_300);
+    reaction.content = MessageContent::Reaction {
+      target: target.client_message_id,
+      emoji: "+1".into(),
+      is_added: true,
+      maybe_custom: None,
+    };
+    let listed = message(conversation, 94, Some(3_400), None, 3_400);
+    let mut placeholder = control(95, 3_500);
+    placeholder.maybe_unreadable = Some(Unreadable::Waiting { since_ms: 0 });
+    let mut pending = control(96, 0);
+    pending.maybe_server_id = None;
+    // Written out of order: the read returns them in display order all the same.
+    let after = control(97, 3_600);
+    let mut elsewhere = control(98, 3_700);
+    elsewhere.conversation_id = other;
+    for stored in [
+      &target,
+      &after,
+      &before,
+      &at,
+      &reaction,
+      &listed,
+      &placeholder,
+      &pending,
+      &elsewhere,
+    ] {
+      store.upsert_message(stored).unwrap();
+    }
+
+    let from = id(3_200);
+    let controls = store.controls_from(conversation, from).unwrap();
+    let mut all = store.messages(conversation, MessageFilter::All).unwrap();
+    all.sort_by_key(StoredMessage::order);
+    let expected: Vec<StoredMessage> = all
+      .into_iter()
+      .filter(|stored| stored.is_control_from(from))
+      .collect();
+    assert_eq!(controls, expected, "as a whole read finds them");
+    let ids: Vec<ClientMessageId> = controls.iter().map(|stored| stored.client_message_id).collect();
+    assert_eq!(
+      ids,
+      [
+        at.client_message_id,
+        reaction.client_message_id,
+        after.client_message_id
+      ]
+    );
+    assert!(store.controls_from(conversation, id(9_000)).unwrap().is_empty());
+    store.delete_messages(conversation).unwrap();
+    assert!(store.controls_from(conversation, id(1)).unwrap().is_empty());
     store.delete_messages(other).unwrap();
   }
 
