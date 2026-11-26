@@ -11,7 +11,6 @@ nothing can read.
 """
 import gzip
 import http.server
-import json
 import os
 import re
 import socketserver
@@ -80,6 +79,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:
                 self.connection.shutdown(2)
             except OSError:
+                # The client may already be gone; dropping is the point.
                 pass
             return
         self.send_response(503)
