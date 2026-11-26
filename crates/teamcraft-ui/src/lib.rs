@@ -125,6 +125,7 @@ pub mod search_scope;
 pub mod sections;
 pub mod selection;
 pub mod server_backend;
+pub mod service_worker;
 pub mod session;
 pub mod settings;
 pub mod settings_sync;
@@ -219,8 +220,10 @@ fn register_service_worker() {
   if auth::tauri::is_available() {
     return;
   }
-  let Some(window) = web_sys::window() else { return };
-  let container = window.navigator().service_worker();
+  let Some(container) = service_worker::container() else {
+    tracing::info!("this browser offers no service worker; the app runs without one");
+    return;
+  };
   let promise = container.register("/sw.js");
   wasm_bindgen_futures::spawn_local(async move {
     if let Err(error) = wasm_bindgen_futures::JsFuture::from(promise).await {

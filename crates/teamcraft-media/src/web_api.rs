@@ -77,6 +77,10 @@ extern "C" {
   #[wasm_bindgen(method, getter, js_name = encodeQueueSize)]
   pub fn encode_queue_size(this: &AudioEncoder) -> u32;
 
+  /// Drops the frames not encoded yet and the configuration; `configure` must follow.
+  #[wasm_bindgen(method, catch)]
+  pub fn reset(this: &AudioEncoder) -> Result<(), JsValue>;
+
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &AudioEncoder) -> Result<(), JsValue>;
 
@@ -353,6 +357,28 @@ pub const CALL_GLOBALS: [(&str, &str); 3] = [
 /// The global calls go over QUIC with; without it they take the fallback.
 pub const QUIC_GLOBAL: &str = "WebTransport";
 
+/// The globals a call takes, or goes without on another path (Firefox has no
+/// `MediaStreamTrackProcessor`, Safari before 26.4 no `WebTransport`), for the join's log line.
+pub const CALL_FEATURE_GLOBALS: [&str; 7] = [
+  QUIC_GLOBAL,
+  "AudioEncoder",
+  "AudioDecoder",
+  "AudioWorkletNode",
+  "VideoEncoder",
+  "VideoDecoder",
+  "MediaStreamTrackProcessor",
+];
+
+/// Which of [`CALL_FEATURE_GLOBALS`] a browser with `has` offers, e.g. `+WebTransport
+/// -MediaStreamTrackProcessor`.
+pub fn call_features(has: impl Fn(&str) -> bool) -> String {
+  CALL_FEATURE_GLOBALS
+    .iter()
+    .map(|global| format!("{}{global}", if has(global) { '+' } else { '-' }))
+    .collect::<Vec<_>>()
+    .join(" ")
+}
+
 /// The first thing calls need that a browser with `has` lacks; `None` if it can call.
 pub fn missing_for_calls(has: impl Fn(&str) -> bool) -> Option<&'static str> {
   CALL_GLOBALS
@@ -373,6 +399,18 @@ mod tests {
     assert!(!safari_26_2(QUIC_GLOBAL));
     let chrome = |_: &str| true;
     assert_eq!(missing_for_calls(chrome), None);
+  }
+
+  #[test]
+  fn the_join_log_names_what_the_browser_has() {
+    let firefox = |name: &str| name != "MediaStreamTrackProcessor";
+    assert_eq!(
+      call_features(firefox),
+      "+WebTransport +AudioEncoder +AudioDecoder +AudioWorkletNode +VideoEncoder +VideoDecoder \
+       -MediaStreamTrackProcessor"
+    );
+    let safari_26_2 = |name: &str| !["WebTransport", "MediaStreamTrackProcessor"].contains(&name);
+    assert!(call_features(safari_26_2).starts_with("-WebTransport +AudioEncoder"));
   }
 
   #[test]

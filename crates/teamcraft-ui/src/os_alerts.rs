@@ -1027,7 +1027,9 @@ fn listen_for_actions(state: AppState, i18n: I18n) {
     );
     return;
   }
-  let Some(window) = web_sys::window() else { return };
+  let Some(container) = crate::service_worker::container() else {
+    return;
+  };
   let liveness = OwnerLiveness::of_current_owner();
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |message: web_sys::MessageEvent| {
     if !liveness.is_alive() {
@@ -1055,9 +1057,7 @@ fn listen_for_actions(state: AppState, i18n: I18n) {
       },
     );
   });
-  if window
-    .navigator()
-    .service_worker()
+  if container
     .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
     .is_ok()
   {

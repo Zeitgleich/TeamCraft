@@ -1149,12 +1149,11 @@ fn open_conversations_from_notifications(state: AppState) {
       open(&value, maybe_notes_page);
     }
   });
-  if window
-    .navigator()
-    .service_worker()
-    .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
-    .is_ok()
-  {
+  if crate::service_worker::container().is_some_and(|container| {
+    container
+      .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
+      .is_ok()
+  }) {
     // Lives as long as the page.
     listener.forget();
   }
