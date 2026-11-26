@@ -24,8 +24,8 @@ use crate::convert;
 use crate::error::CoreError;
 use crate::records::{self, OutboxEntry};
 use crate::store::{
-  EditRecord, LocalStore, MessageContent, MessageEdge, MessageFilter, MessageMeta, Priority, StoredMessage,
-  Table, Unreadable,
+  EditRecord, LocalStore, MessageContent, MessageEdge, MessageMeta, Priority, StoredMessage, Table,
+  Unreadable,
 };
 
 /// Result of [`Client::flush_outbox`].
@@ -563,24 +563,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     from: MessageId,
   ) -> Result<(), CoreError> {
-    let mut controls: Vec<(MessageId, UserId, MessageContent)> = Vec::new();
-    self
+    // Only the controls from `from` on: a read of the whole conversation here took minutes on a
+    // phone for a long history, on the engine's thread and with the store's writer waiting (#2440).
+    let mut controls: Vec<(MessageId, UserId, MessageContent)> = self
       .store
-      .visit_messages(conversation, MessageFilter::All, &mut |message| {
-        let Some(id) = message.maybe_server_id.filter(|id| *id >= from) else {
-          return;
-        };
-        if message.maybe_unreadable.is_none()
-          && matches!(
-            message.content,
-            MessageContent::Pin { .. }
-              | MessageContent::Bookmarks { .. }
-              | MessageContent::ChannelRolesEntry { .. }
-          )
-        {
-          controls.push((id, message.sender_user_id, message.content.clone()));
-        }
-      })?;
+      .controls_from(conversation, from)?
+      .into_iter()
+      .filter(|message| {
+        matches!(
+          message.content,
+          MessageContent::Pin { .. }
+            | MessageContent::Bookmarks { .. }
+            | MessageContent::ChannelRolesEntry { .. }
+        )
+      })
+      .filter_map(|message| Some((message.maybe_server_id?, message.sender_user_id, message.content)))
+      .collect();
     controls.sort_by_key(|(id, _, _)| *id);
     for (id, sender, content) in controls {
       let at_ms = id.snowflake().unix_millis();

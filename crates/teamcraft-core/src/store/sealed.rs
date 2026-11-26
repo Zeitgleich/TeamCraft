@@ -2076,6 +2076,29 @@ impl<B: RecordBackend> LocalStore for SealedStore<B> {
     })
   }
 
+  /// Walks the message index from `from` on and reads only the records its entries mark as readable
+  /// and hidden: a backlog's end replays the controls since its newest page without reading the
+  /// conversation's history (issue #2440: 141 s on a phone, with the engine and the writer held).
+  fn controls_from(
+    &self,
+    conversation: ConversationId,
+    from: MessageId,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.reading(|state| {
+      let keys = self.index_keys(
+        state,
+        conversation,
+        Bound::Included(&MessageKey::first_at(from)),
+        Direction::Forward,
+        &mut |_, entry| Some(entry.is_readable_hidden()),
+      )?;
+      let mut controls = self.load_messages(state, conversation, &keys)?;
+      // The entry only preselects; the record decides.
+      controls.retain(|message| message.is_control_from(from));
+      Ok(controls)
+    })
+  }
+
   /// A walk back through the relations index that stops after `limit` of them: their pages and
   /// records, whatever the conversation's length.
   fn user_messages(
@@ -3069,6 +3092,57 @@ mod tests {
       assert!(records.reads.get() <= 2 + pinned_at.len());
       store.delete_messages(id(CHANNEL)).unwrap();
       assert!(store.pinned_messages(id(CHANNEL)).unwrap().is_empty());
+    }
+
+    /// Issue #2440: the end of a backlog replays the controls since its newest page. In a
+    /// conversation of 100,000 messages it reads the index from there and the control records in
+    /// it, not the conversation: the whole read took 141 s on a phone, holding the engine's thread
+    /// and the store's writer (a setting saved meanwhile waited 50 s).
+    #[test]
+    fn controls_from_a_point_read_only_the_range() {
+      const MESSAGES: i64 = 100_000;
+      const CHANNEL: i64 = 8;
+      const FROM: i64 = MESSAGES - 50;
+      let records = Records::default();
+      let key = SymmetricKey::generate(&mut OsRng);
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::default()).unwrap();
+      let controls_at = [3, MESSAGES / 2, FROM, MESSAGES - 2];
+      for start in (0..MESSAGES).step_by(10_000) {
+        crate::store::write_group(&store, || {
+          for n in start..start + 10_000 {
+            let mut stored = numbered(CHANNEL, n);
+            if controls_at.contains(&n) {
+              stored.content = crate::store::MessageContent::Pin {
+                target: client_id(CHANNEL, 0),
+                is_pinned: true,
+              };
+            }
+            store.upsert_message(&stored)?;
+          }
+          Ok::<_, StoreError>(())
+        })
+        .unwrap();
+      }
+      drop(store);
+
+      let store = SealedStore::open_backend(&records, &key, SealedStoreLimits::minimal()).unwrap();
+      records.reads.set(0);
+      let from: MessageId = id(server_id(CHANNEL, FROM));
+      let controls: Vec<ClientMessageId> = store
+        .controls_from(id(CHANNEL), from)
+        .unwrap()
+        .into_iter()
+        .map(|stored| stored.client_message_id)
+        .collect();
+      assert_eq!(
+        controls,
+        [client_id(CHANNEL, FROM), client_id(CHANNEL, MESSAGES - 2)]
+      );
+      assert!(
+        records.reads.get() <= 8,
+        "the index from there and two records, not 100,000: {} reads",
+        records.reads.get()
+      );
     }
 
     /// Issue #1757: a catalog of version 4 knows no pins. The store builds it again when it opens,

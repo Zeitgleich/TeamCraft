@@ -916,6 +916,14 @@ impl<S: LocalStore> LocalStore for TrackedStore<S> {
     self.inner.pinned_messages(conversation)
   }
 
+  fn controls_from(
+    &self,
+    conversation: ConversationId,
+    from: MessageId,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    self.inner.controls_from(conversation, from)
+  }
+
   fn user_messages(
     &self,
     conversation: ConversationId,

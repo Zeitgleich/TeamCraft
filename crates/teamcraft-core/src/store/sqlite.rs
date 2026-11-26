@@ -558,6 +558,39 @@ impl LocalStore for SqlCipherStore {
     records.iter().map(|record| decode_message(record)).collect()
   }
 
+  /// The order index from `from` on. Not preselected on `is_hidden`: a row written by an older
+  /// version may say "listed" for a kind this one hides, so the record decides.
+  fn controls_from(
+    &self,
+    conversation: ConversationId,
+    from: MessageId,
+  ) -> Result<Vec<StoredMessage>, StoreError> {
+    let inner = self.lock();
+    let records: Vec<Vec<u8>> = inner
+      .connection
+      .prepare_cached(
+        "SELECT record FROM messages WHERE conversation_id = ?1 AND sort_group = 0 AND sort_value >= ?2 \
+         ORDER BY sort_value, client_message_id",
+      )
+      .and_then(|mut statement| {
+        statement
+          .query_map(
+            params![conversation.snowflake().get(), from.snowflake().get()],
+            |row| row.get(0),
+          )?
+          .collect()
+      })
+      .map_err(database_error)?;
+    let mut controls = Vec::new();
+    for record in &records {
+      let message = decode_message(record)?;
+      if message.is_control_from(from) {
+        controls.push(message);
+      }
+    }
+    Ok(controls)
+  }
+
   fn messages(
     &self,
     conversation: ConversationId,
