@@ -674,6 +674,11 @@ core). The Android measures of its own (`Perf.kt`) take their names from the cor
   extension dSYMs of 1.0.39 and dropped the app's and the notification extension's, though
   `sentry-cli` printed them as uploaded; restored after the upgrade to GlitchTip 7). See "Reading
   an iOS report".
+  The upload is tried three times (a release's 1.0.43 upload died once on the API request, and
+  that build's crashes stayed addresses only, #2438); the check follows all pages of the backend's
+  list, which holds one row per upload. Reports that arrive before their build's dSYM is stored,
+  and those of builds without one, keep their addresses: resolve them as in "Reading an iOS
+  report".
 - **Upload is optional.** The workflow uploads when the secrets `CRASH_REPORTS_URL`,
   `CRASH_REPORTS_ORG`, `CRASH_REPORTS_PROJECT` and `CRASH_REPORTS_AUTH_TOKEN` exist and skips the
   steps otherwise, so forks and other publishers build without them. A failed upload warns; the
