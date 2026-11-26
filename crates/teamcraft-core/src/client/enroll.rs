@@ -144,6 +144,9 @@ impl PendingEnrollment {
   /// account is stored only once the server holds everything needed to recover it. What remains
   /// after that (key packages, device list) [`Client::finish_enrollment`] completes on the next
   /// sync.
+  ///
+  /// Once the account is stored this returns the client even if that rest failed: enrolling again
+  /// over a stored account would register a second device (#2444).
   pub async fn complete<A: ServerApi, S: LocalStore>(
     self,
     api: A,
@@ -151,6 +154,21 @@ impl PendingEnrollment {
     clock: Box<dyn Clock>,
     settings: ClientSettings,
     options: EnrollmentOptions,
+  ) -> Result<Client<A, S>, CoreError> {
+    self
+      .complete_as(api, store, clock, settings, options, EnrolledAs::Member)
+      .await
+  }
+
+  /// [`Self::complete`], for a member's device or a meeting guest's.
+  pub(crate) async fn complete_as<A: ServerApi, S: LocalStore>(
+    self,
+    api: A,
+    store: S,
+    clock: Box<dyn Clock>,
+    settings: ClientSettings,
+    options: EnrollmentOptions,
+    enrolled_as: EnrolledAs,
   ) -> Result<Client<A, S>, CoreError> {
     let me = api.me().await?;
     let existing = api.identity_key(me.id).await?;
@@ -294,7 +312,8 @@ impl PendingEnrollment {
     // be (e2ee.md §4.6, joining by external commit).
     let is_linked = matches!(options.secret, EnrollmentSecret::Linked(_));
     // One group of writes: the account and its key bag replace the pending device and the
-    // secrets of a link together (issue #160).
+    // secrets of a link or a guest's key bag together (issues #160, #2444). A guest's device is
+    // marked as one with them, so it never runs as a member's (which accepts any group).
     crate::store::write_group(&client.store, || {
       records::put_json(
         &client.store,
@@ -302,13 +321,25 @@ impl PendingEnrollment {
         super::member_device::KEY_BAG_FROM_LINK_KEY,
         &is_linked,
       )?;
+      if enrolled_as == EnrolledAs::Guest {
+        super::guest::mark_guest_device(&client.store)?;
+      }
       records::save_account(&client.store, &client.account)?;
       records::delete_pending_device(&client.store)?;
-      records::delete_pending_link(&client.store)
+      records::delete_pending_link(&client.store)?;
+      records::delete_pending_guest_secret(&client.store)
     })?;
     // Removal records from the key bag count before the first message is decrypted.
     client.apply_shared_removals()?;
-    client.finish_enrollment().await?;
+    // Key packages and the device list: `full_sync` finishes them if the network goes now. A
+    // refusal that won't pass (a device ID the signed list gives another device) still fails.
+    match client.finish_enrollment().await {
+      Ok(()) => {},
+      Err(error) if error.is_transient() || error.is_sign_in_required() => {
+        tracing::warn!(%error, "enrolled; key packages or the device list follow on the next sync");
+      },
+      Err(error) => return Err(error),
+    }
     Ok(client)
   }
 }
@@ -365,6 +396,14 @@ impl PendingEnrollment {
       },
     }
   }
+}
+
+/// Whose device an enrollment sets up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum EnrolledAs {
+  Member,
+  /// A meeting guest's ephemeral device (e2ee.md §4.6, "Meeting guests").
+  Guest,
 }
 
 /// Whether resuming a link enrollment would fail the same way every time.

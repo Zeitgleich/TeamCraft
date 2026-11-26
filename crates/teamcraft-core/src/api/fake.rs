@@ -1114,6 +1114,12 @@ impl FakeServer {
     self.lock().network_cuts.insert(user, (calls, cut));
   }
 
+  /// Whether a cut armed by [`Self::cut_network_after`] has hit (or none was armed): the calls
+  /// since then got through.
+  pub fn has_network_cut_hit(&self, user: UserId) -> bool {
+    !self.lock().network_cuts.contains_key(&user)
+  }
+
   /// Hands the next registered device the ID `id` (of another device), as a malicious server might.
   pub fn force_next_device_id(&self, id: DeviceId) {
     self.lock().maybe_forced_device_id = Some(id);

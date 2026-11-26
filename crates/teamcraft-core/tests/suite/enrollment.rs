@@ -14,7 +14,7 @@ use teamcraft_core::api::ServerApi;
 use teamcraft_core::api::fake::{FakeServer, FakeServerApi, NetworkCut};
 use teamcraft_core::store::{LocalStore, MemoryStore, Table};
 use teamcraft_core::workspace::RosterRole;
-use teamcraft_core::{Client, CoreError, PendingEnrollment};
+use teamcraft_core::{CoreError, PendingEnrollment};
 
 const CUTS: [NetworkCut; 2] = [NetworkCut::BeforeRequest, NetworkCut::ResponseLost];
 /// More REST calls than an enrollment makes; the loops stop once one gets through uncut.
@@ -29,13 +29,15 @@ async fn a_new_identity_finishes_after_a_cut_at_any_step() {
       let me = api.user_id();
       let store = Arc::new(MemoryStore::new());
       server.cut_network_after(me, calls, cut);
-      if enroll(&api, &store).await.is_ok() {
+      let attempt = enroll(&api, &store).await;
+      if !server.has_network_cut_hit(me) {
+        attempt.unwrap();
         break;
       }
       assert_recoverable(&server, me);
       server.set_offline(me, false);
 
-      let client = restart(&api, &store).await;
+      let client = finish_after_cut(&store, attempt, async || enroll(&api, &store).await).await;
       assert_complete(&server, &api, &client).await;
       let recovered = recover_on_new_device(&api).await;
       assert_eq!(
@@ -58,18 +60,53 @@ async fn recovering_an_identity_finishes_after_a_cut_at_any_step() {
       let me = api.user_id();
       let store = Arc::new(MemoryStore::new());
       server.cut_network_after(me, calls, cut);
-      if enroll(&api, &store).await.is_ok() {
+      let attempt = enroll(&api, &store).await;
+      if !server.has_network_cut_hit(me) {
+        attempt.unwrap();
         break;
       }
       server.set_offline(me, false);
 
-      let laptop = restart(&api, &store).await;
+      let laptop = finish_after_cut(&store, attempt, async || enroll(&api, &store).await).await;
       assert_eq!(laptop.identity_fingerprint(), first.client.identity_fingerprint());
       let mut devices = server.active_devices(me);
       devices.sort();
       let mut expected = vec![first.client.device_id(), laptop.device_id()];
       expected.sort();
       assert_eq!(devices, expected, "{cut:?} after {calls} calls: orphan device");
+    }
+  }
+}
+
+/// A meeting guest's key bag is wrapped with a random secret nobody sees (#2444): a retry after the
+/// identity upload landed must open that bag again, not fail on the identity it can't recover.
+#[tokio::test]
+async fn a_guest_finishes_after_a_cut_at_any_step() {
+  for cut in CUTS {
+    for calls in 0..MAX_CALLS {
+      let server = FakeServer::new();
+      let api = server.add_guest("Guest");
+      let me = api.user_id();
+      let store = Arc::new(MemoryStore::new());
+      server.cut_network_after(me, calls, cut);
+      let attempt = enroll_guest(&api, &store).await;
+      let was_cut = server.has_network_cut_hit(me);
+      assert_recoverable(&server, me);
+      // Also disarms a cut that never hit.
+      server.set_offline(me, false);
+
+      let guest = finish_after_cut(&store, attempt, async || enroll_guest(&api, &store).await).await;
+      assert!(guest.is_guest_device().unwrap(), "{cut:?} after {calls} calls");
+      assert_complete(&server, &api, &guest).await;
+      assert_eq!(
+        store.get(Table::Account, "pending_guest_secret").unwrap(),
+        None,
+        "the guest's secret outlives the enrollment"
+      );
+      if !was_cut {
+        break;
+      }
+      assert!(calls < MAX_CALLS - 1, "enrollment never got through");
     }
   }
 }
@@ -83,12 +120,13 @@ async fn an_interrupted_first_owner_never_leaves_an_unrecoverable_root_of_trust(
       let me = api.user_id();
       let store = Arc::new(MemoryStore::new());
       server.cut_network_after(me, calls, cut);
-      let finished = enroll(&api, &store).await.is_ok();
+      let attempt = enroll(&api, &store).await;
+      let finished = !server.has_network_cut_hit(me);
       // Whatever the server holds after the cut can be recovered with the passphrase.
       assert_recoverable(&server, me);
       server.set_offline(me, false);
 
-      let mut owner = restart(&api, &store).await;
+      let mut owner = finish_after_cut(&store, attempt, async || enroll(&api, &store).await).await;
       owner.publish_roster(&[(me, RosterRole::Owner)]).await.unwrap();
       let root = owner.workspace_root_fingerprint().unwrap();
       assert_eq!(root.as_deref(), Some(owner.identity_fingerprint().as_str()));
@@ -164,14 +202,39 @@ async fn enroll(api: &FakeServerApi, store: &Arc<MemoryStore>) -> Result<TestCli
     .await
 }
 
-/// What the app does when it starts again: open the stored account and sync, or enroll again.
-async fn restart(api: &FakeServerApi, store: &Arc<MemoryStore>) -> TestClient {
-  match Client::open(api.clone(), store.clone(), clock(), settings()).unwrap() {
-    Some(mut client) => {
+/// One enrollment attempt of a meeting guest's device.
+async fn enroll_guest(api: &FakeServerApi, store: &Arc<MemoryStore>) -> Result<TestClient, CoreError> {
+  PendingEnrollment::complete_as_guest(
+    api.clone(),
+    store.clone(),
+    clock(),
+    settings(),
+    "Browser".into(),
+    options(PASSPHRASE).argon2,
+  )
+  .await
+}
+
+/// What the app does after an attempt that met a network cut: a client it got finishes what the
+/// cut left on its first sync. A failed attempt stored no account, so enrolling again, right away
+/// or after a restart, can't register a second device (#2444).
+async fn finish_after_cut(
+  store: &Arc<MemoryStore>,
+  attempt: Result<TestClient, CoreError>,
+  retry: impl AsyncFn() -> Result<TestClient, CoreError>,
+) -> TestClient {
+  match attempt {
+    Ok(mut client) => {
       client.full_sync().await.unwrap();
       client
     },
-    None => enroll(api, store).await.unwrap(),
+    Err(error) => {
+      assert!(
+        store.get(Table::Account, "account").unwrap().is_none(),
+        "the attempt failed ({error}) after storing the account"
+      );
+      retry().await.unwrap()
+    },
   }
 }
 
