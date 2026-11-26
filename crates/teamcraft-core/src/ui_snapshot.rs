@@ -126,22 +126,54 @@ impl SnapshotCache {
     maybe_since: Option<SnapshotCursor>,
     slice: std::time::Duration,
   ) -> SnapshotChanges {
+    let mut slices = Slices::new(backend, slice);
     let maybe_fresh = if self.needs_full_read(&changes) {
       let mut read = FullRead::begin(backend, self.revision + 1);
-      let slice_ms = i64::try_from(slice.as_millis()).unwrap_or(i64::MAX);
-      let mut slice_began_ms = backend.now_ms();
-      while read.step(backend) {
-        if backend.now_ms().saturating_sub(slice_began_ms) >= slice_ms {
-          crate::platform::yield_now().await;
-          slice_began_ms = backend.now_ms();
+      loop {
+        if let Some(response) = read.next() {
+          count_ahead(backend, response, &read.shared, &mut slices).await;
+        }
+        let is_more = read.step(backend);
+        slices.pass(backend).await;
+        if !is_more {
+          break;
         }
       }
       Some(read.finish(backend))
     } else {
+      self.count_ahead_of_update(backend, &changes, &mut slices).await;
       None
     };
     self.refresh_with(backend, changes, security, maybe_fresh);
     self.answer(backend, maybe_since)
+  }
+
+  /// Counts ahead, a step at a time, the entries [`Parts::update`] reads again whose counts would
+  /// read thousands of rows in one go (older history came in, issue #2437).
+  async fn count_ahead_of_update<S: LocalStore>(
+    &self,
+    backend: &CoreChatBackend<S>,
+    changes: &StoreChanges,
+    slices: &mut Slices,
+  ) {
+    let Some(parts) = &self.maybe_parts else {
+      return;
+    };
+    let known: Vec<ConversationId> = changes
+      .conversations
+      .iter()
+      .copied()
+      .filter(|conversation| parts.conversations.contains_key(conversation))
+      .collect();
+    if known.is_empty() {
+      return;
+    }
+    let shared = Shared::read(backend, BTreeMap::new()).with_me(backend);
+    for conversation in known {
+      if let Some(response) = backend.conversation_raw(conversation) {
+        count_ahead(backend, &response, &shared, slices).await;
+      }
+    }
   }
 
   /// What differs for a reader at `maybe_since`, from the parts as they are.
@@ -493,6 +525,11 @@ impl FullRead {
     }
   }
 
+  /// The conversation the next [`Self::step`] reads.
+  fn next(&self) -> Option<&ConversationResponse> {
+    self.remaining.front()
+  }
+
   /// Reads the next conversation's entry; false once none is left.
   fn step<S: LocalStore>(&mut self, backend: &CoreChatBackend<S>) -> bool {
     let Some(response) = self.remaining.pop_front() else {
@@ -556,6 +593,20 @@ impl Shared {
     }
   }
 
+  /// With the user alone: what an entry's counts read of the people (mentions).
+  fn with_me<S: LocalStore>(mut self, backend: &CoreChatBackend<S>) -> Self {
+    let me = backend.me_id();
+    let maybe_summary: Option<UserSummary> = backend.read(records::get_json(
+      backend.store_ref(),
+      Table::Users,
+      &me.to_string(),
+    ));
+    if let Some(summary) = maybe_summary {
+      self.users.insert(me, summary);
+    }
+    self
+  }
+
   /// With the people one conversation's entry names: its members and the user (mentions).
   fn with_people_of<S: LocalStore>(
     &self,
@@ -602,6 +653,47 @@ fn part_of<S: LocalStore>(
     },
     message_count: counts.messages,
     maybe_last_activity: counts.maybe_last_activity,
+  }
+}
+
+/// Counts `response`'s entry ahead of [`part_of`] where that would read thousands of rows in one
+/// go ([`CoreChatBackend::count_ahead`]), handing the thread back between the steps.
+async fn count_ahead<S: LocalStore>(
+  backend: &CoreChatBackend<S>,
+  response: &ConversationResponse,
+  shared: &Shared,
+  slices: &mut Slices,
+) {
+  let maybe_mark = shared.account.unread_mark(response.id);
+  let maybe_me = shared.users.get(&backend.me_id());
+  let Some(mut ahead) = backend.count_ahead(response, maybe_mark, maybe_me, &shared.preferences) else {
+    return;
+  };
+  while backend.count_ahead_step(&mut ahead, response, maybe_mark, maybe_me, &shared.preferences) {
+    slices.pass(backend).await;
+  }
+}
+
+/// Hands the thread back whenever the work since the last time ran for a slice
+/// ([`crate::platform::yield_now`]).
+struct Slices {
+  slice_ms: i64,
+  began_ms: i64,
+}
+
+impl Slices {
+  fn new<S: LocalStore>(backend: &CoreChatBackend<S>, slice: std::time::Duration) -> Self {
+    Self {
+      slice_ms: i64::try_from(slice.as_millis()).unwrap_or(i64::MAX),
+      began_ms: backend.now_ms(),
+    }
+  }
+
+  async fn pass<S: LocalStore>(&mut self, backend: &CoreChatBackend<S>) {
+    if backend.now_ms().saturating_sub(self.began_ms) >= self.slice_ms {
+      crate::platform::yield_now().await;
+      self.began_ms = backend.now_ms();
+    }
   }
 }
 
