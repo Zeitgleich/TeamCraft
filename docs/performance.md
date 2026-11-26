@@ -3649,16 +3649,17 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 7,260,000 B  | fails; warns from 95 % (6.90 MB) |
-| Signed-in first visit: gzip -9 total | 6,370,000 B  | fails; warns from 95 % (6.05 MB) |
+| A guest in a meeting: gzip -9 total  | 6,950,000 B  | fails; warns from 95 % (6.60 MB) |
+| Signed-in first visit: gzip -9 total | 6,100,000 B  | fails; warns from 95 % (5.80 MB) |
 | The call module: gzip -9             | 2,100,000 B  | fails                            |
 | Desktop page's start: uncompressed   | 11,900,000 B | fails                            |
 
 On 2026-11-26 (#2384) the browser's core moved out of the app into a module of its own (`engine`),
 which the desktop app's page never loads ("Desktop on Linux: a smaller binary and less wasm at the
 start"). A browser still loads the same code, now in more files: a guest's meeting went from 6.72 to
-6.85 MB and a signed-in first visit from 5.95 to 6.01 MB, so both budgets were raised to those sizes
-plus about 6 %. The desktop page's own budget counts what it compiles at its start, uncompressed (the
+6.85 MB and a signed-in first visit from 5.95 to 6.01 MB. On main with #2411 they were 6.88 and
+6.03 MB, and both budgets were raised to those sizes plus about 1 % (the maintainer's decision). The
+desktop page's own budget counts what it compiles at its start, uncompressed (the
 app and the signed-in app's pack: 11.32 MB, plus about 5 %).
 
 Before that, both budgets were the sizes after the rarely shown parts left the first visit (#1699, 2026-11-22,

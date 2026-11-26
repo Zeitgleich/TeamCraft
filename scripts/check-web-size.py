@@ -69,10 +69,11 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # Raised by 30 kB to 6.75 MB on 2026-11-25 (#2397), a decision of the maintainer: the core a guest
 # runs in the page hands its thread back in short steps (catalog build, sealing, the snapshot), the
 # page formats times with kept formatters and watches its thread for long tasks.
-# Raised to 7.26 MB on 2026-11-26 (#2384): the browser's core moved out of the app into a module of
-# its own (`engine`), so the desktop app's page no longer compiles it at every start (2.3 MB of wasm,
-# about 9 MiB of its memory). A guest loads the same code in more files: 6.85 MB, plus about 6 %.
-DEFAULT_GUEST_BUDGET_BYTES = 7_260_000
+# Raised to 6.95 MB on 2026-11-26 (#2384), a decision of the maintainer: the browser's core moved out
+# of the app into a module of its own (`engine`), so the desktop app's page no longer compiles it at
+# every start (about 12 MiB of its memory). A guest loads the same code in more files: 6.88 MB, plus
+# about 1 %.
+DEFAULT_GUEST_BUDGET_BYTES = 6_950_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`), and the
 # browser's core, which every browser page that starts a core loads (#2384).
 ENGINE_MODULE = "engine"
@@ -96,9 +97,9 @@ SPLIT_MODULE = re.compile(
 # own; the warning from 95 % (6.65 MB) is the signal to split chunks off. Lowered to 5.95 MB on
 # 2026-11-22 (#1699): 5.61 MB after what moved out of the app and the signed-in app then, plus
 # about 6 % (5 % would warn at once).
-# Raised to 6.37 MB on 2026-11-26 (#2384), with the guest's budget above: 6.01 MB after the browser's
-# core moved into a module of its own, plus about 6 %.
-DEFAULT_BUDGET_BYTES = 6_370_000
+# Raised to 6.10 MB on 2026-11-26 (#2384), with the guest's budget above: 6.03 MB after the browser's
+# core moved into a module of its own, plus about 1 %.
+DEFAULT_BUDGET_BYTES = 6_100_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
 # segmentation is a module of its own that only loads when an effect starts.
@@ -108,7 +109,7 @@ DEFAULT_CALL_MODULE_BUDGET_BYTES = 2_100_000
 CALL_MODULE = "teamcraft-web-calls-*_bg.wasm"
 # What the desktop app's page compiles at its start, uncompressed: the app and the signed-in app's
 # pack. 13.62 MB before the browser's core moved out of the app (#2384, 2026-11-26), 11.32 MB
-# after, plus about 5 %.
+# after (11.52 MB on main the same day), plus about 5 %.
 DEFAULT_DESKTOP_START_BUDGET_BYTES = 11_900_000
 # Lazy files that only load on demand (marked in the list): the background effects' segmentation
 # (#439) and the voice decoder with FEC (#2140), which the call module starts when a voice packet
