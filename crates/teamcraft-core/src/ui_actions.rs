@@ -9,7 +9,7 @@ use teamcraft_client_api::actions::{
 use teamcraft_client_api::canvas::{CanvasMark, CanvasOrigin, CanvasState};
 use teamcraft_client_api::model::{
   Bookmark, ConversationId, IntegrationSource, Message, MessageId, NewIntegrationSource, PENDING_ID_BIT,
-  ThreadId, UserId, is_pending,
+  ThreadId, UserId, is_pending, pending_message_id,
 };
 use teamcraft_client_api::polls::NewPoll;
 use teamcraft_client_api::receipts::{is_delivered, is_read_by_all, seen_by};
@@ -35,6 +35,11 @@ use crate::store::{
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
+/// How many of a feed's newest rows [`CoreChatBackend::find_just_sent`] looks through for a message
+/// that left the outbox while the UI still showed it there: what arrives between a send and the
+/// UI's next read, with room to spare.
+const JUST_SENT_ROWS: usize = 200;
+
 impl<S: LocalStore> CoreChatBackend<S> {
   /// The stored message behind an ID the UI got.
   pub(crate) fn find_stored(
@@ -54,7 +59,7 @@ impl<S: LocalStore> CoreChatBackend<S> {
       }
       MessageSlot::At(message)
     };
-    self
+    let found = self
       .read(
         self
           .store_ref()
@@ -62,7 +67,31 @@ impl<S: LocalStore> CoreChatBackend<S> {
           .map_err(CoreError::from),
       )
       .into_iter()
-      .find(|stored| ui_message_id(stored) == message)
+      .find(|stored| ui_message_id(stored) == message);
+    match found {
+      Some(stored) => Some(stored),
+      None if slot == MessageSlot::Pending => self.find_just_sent(conversation, message),
+      None => None,
+    }
+  }
+
+  /// A message the UI still shows under its outbox ID (`pending`) that the server took meanwhile
+  /// (#2356): the UI learns its server ID with its next read, and a reply, reaction or edit the
+  /// user started on the row before names the outbox ID. It is among the feed's newest rows
+  /// (outbox messages sort last), found by the client ID the outbox ID was derived from.
+  fn find_just_sent(&self, conversation: ConversationId, pending: MessageId) -> Option<StoredMessage> {
+    let store = self.store_ref();
+    let len = self.read(store.feed_len(conversation).map_err(CoreError::from));
+    let start = len.saturating_sub(JUST_SENT_ROWS);
+    self
+      .read(
+        store
+          .feed_rows(conversation, start, len - start)
+          .map_err(CoreError::from),
+      )
+      .into_iter()
+      .rev()
+      .find(|stored| pending_message_id(stored.client_message_id) == pending)
   }
 
   pub(crate) fn ui_set_saved(&self, conversation: ConversationId, message: MessageId, is_saved: bool) {
