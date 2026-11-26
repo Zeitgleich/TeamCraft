@@ -75,7 +75,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not file.startswith(OUT + os.sep) or not os.path.isfile(file):
             self.send_error(404)
             return
-        body = open(file, 'rb').read()
+        with open(file, 'rb') as source:
+            body = source.read()
         self.send_response(200)
         self.send_header('Content-Type', TYPES.get(os.path.splitext(file)[1], 'application/octet-stream'))
         self.send_header('Content-Security-Policy', CSP)
@@ -128,4 +129,5 @@ else:
     try:
         threading.Event().wait()
     except KeyboardInterrupt:
+        # Ctrl-C is how the server is stopped.
         pass

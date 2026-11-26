@@ -17,6 +17,7 @@ use oauth2::{AuthUrl, ClientId, PkceCodeChallenge, RedirectUrl, TokenUrl};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use teamcraft_client_api::oidc_login::{LoginRequest, authorization_url, oidc_client};
+use teamcraft_client_api::server_entry::{HttpPolicy, check_discovery, is_provider_endpoint};
 use teamcraft_core::api::dpop::{
   Authorization, DPOP_ALGORITHM_FOR_DISCOVERY, DPOP_HEADER, DPOP_NONCE_HEADER, DpopAnswer, DpopProofError,
   DpopProver, ProofFallback, SoftwareDpopSigner, TokenEndpointAttempt, is_from_a_cache,
@@ -51,6 +52,10 @@ pub enum AuthError {
   Provider(String),
   #[error("the browser sign-in failed: {0}")]
   Browser(String),
+  /// The refresh token and the authorization code go to the identity provider: only over https
+  /// (plain http on loopback, a provider on this host, for development).
+  #[error("the identity provider is not reached over https: {0}")]
+  InsecureProvider(String),
   #[error("{path}: {source}")]
   File { path: PathBuf, source: std::io::Error },
   /// The sign-in is bound to a key the state directory doesn't hold (any more).
@@ -99,6 +104,7 @@ struct TokenAnswer {
 
 #[derive(Deserialize)]
 struct Discovery {
+  issuer: String,
   authorization_endpoint: String,
   token_endpoint: String,
   #[serde(default)]
@@ -146,14 +152,7 @@ pub async fn login(server_url: &str, state: &Path) -> Result<(), AuthError> {
   let http = http_client()?;
   let server_url = server_url.trim_end_matches('/').to_owned();
   let (info, server_proofs) = server_info(&http, &server_url).await?;
-  let discovery: Discovery = get_json(
-    &http,
-    &format!(
-      "{}/.well-known/openid-configuration",
-      info.sign_in.issuer.trim_end_matches('/')
-    ),
-  )
-  .await?;
+  let discovery = provider_discovery(&http, &info.sign_in.issuer).await?;
   let listener = TcpListener::bind(("127.0.0.1", 0))
     .await
     .map_err(|error| AuthError::Browser(error.to_string()))?;
@@ -382,6 +381,10 @@ async fn refresh(
   if stored.maybe_bound_key.is_some() && maybe_prover.is_none() {
     return Err(AuthError::KeyLost);
   }
+  // The state file is the operator's, but a refresh token never goes out in the clear.
+  if !is_provider_endpoint(&stored.token_url, HttpPolicy::LoopbackOnly) {
+    return Err(AuthError::InsecureProvider(stored.token_url));
+  }
   let answer = post_token(
     http,
     &stored.token_url,
@@ -566,6 +569,34 @@ async fn respond(stream: &mut tokio::net::TcpStream, status: &str, text: &str) {
   drop(stream.write_all(response.as_bytes()).await);
 }
 
+/// The identity provider's discovery document, fetched and checked like the apps do: an https issuer
+/// (plain http on loopback only), the document for exactly that issuer, and https endpoints.
+async fn provider_discovery(http: &reqwest::Client, issuer: &str) -> Result<Discovery, AuthError> {
+  if !is_provider_endpoint(issuer, HttpPolicy::LoopbackOnly) {
+    return Err(AuthError::InsecureProvider(issuer.to_owned()));
+  }
+  let discovery: Discovery = get_json(
+    http,
+    &format!(
+      "{}/.well-known/openid-configuration",
+      issuer.trim_end_matches('/')
+    ),
+  )
+  .await?;
+  check_provider_discovery(issuer, &discovery)?;
+  Ok(discovery)
+}
+
+fn check_provider_discovery(issuer: &str, discovery: &Discovery) -> Result<(), AuthError> {
+  check_discovery(
+    issuer,
+    &discovery.issuer,
+    &[&discovery.authorization_endpoint, &discovery.token_endpoint],
+    HttpPolicy::LoopbackOnly,
+  )
+  .map_err(|error| AuthError::InsecureProvider(error.to_string()))
+}
+
 async fn get_json<T: serde::de::DeserializeOwned>(http: &reqwest::Client, url: &str) -> Result<T, AuthError> {
   http
     .get(url)
@@ -689,6 +720,53 @@ mod tests {
       };
       let result = refresh(&http_client().unwrap(), &dir, stored, None).await;
       assert!(matches!(result, Err(AuthError::KeyLost)));
+      drop(std::fs::remove_dir_all(&dir));
+    }
+  }
+
+  mod provider_transport {
+    use super::*;
+
+    #[test]
+    fn discovery_endpoints_must_be_https_except_on_loopback() {
+      assert!(check_provider_discovery("https://id.example.com", &discovery(&[])).is_ok());
+      let plain = Discovery {
+        token_endpoint: "http://id.example.com/token".into(),
+        ..discovery(&[])
+      };
+      assert!(matches!(
+        check_provider_discovery("https://id.example.com", &plain),
+        Err(AuthError::InsecureProvider(_))
+      ));
+      let other_issuer = Discovery {
+        issuer: "https://other.example.com".into(),
+        ..discovery(&[])
+      };
+      assert!(check_provider_discovery("https://id.example.com", &other_issuer).is_err());
+      let local = Discovery {
+        issuer: "http://127.0.0.1:8080".into(),
+        authorization_endpoint: "http://127.0.0.1:8080/auth".into(),
+        token_endpoint: "http://127.0.0.1:8080/token".into(),
+        dpop_signing_alg_values_supported: Vec::new(),
+      };
+      assert!(check_provider_discovery("http://127.0.0.1:8080", &local).is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_plain_http_issuer_is_refused_before_any_request() {
+      let result = provider_discovery(&http_client().unwrap(), "http://id.example.com").await;
+      assert!(matches!(result, Err(AuthError::InsecureProvider(_))));
+    }
+
+    #[tokio::test]
+    async fn a_refresh_token_never_goes_to_a_plain_http_provider() {
+      let dir = temporary_dir("plain-http");
+      let stored = StoredSignIn {
+        token_url: "http://id.example.com/token".into(),
+        ..stored_sign_in(None)
+      };
+      let result = refresh(&http_client().unwrap(), &dir, stored, None).await;
+      assert!(matches!(result, Err(AuthError::InsecureProvider(_))));
       drop(std::fs::remove_dir_all(&dir));
     }
   }
@@ -844,6 +922,7 @@ mod tests {
 
   fn discovery(algorithms: &[&str]) -> Discovery {
     Discovery {
+      issuer: "https://id.example.com".into(),
       authorization_endpoint: "https://id.example.com/auth".into(),
       token_endpoint: "https://id.example.com/token".into(),
       dpop_signing_alg_values_supported: algorithms.iter().map(|&algorithm| algorithm.to_owned()).collect(),

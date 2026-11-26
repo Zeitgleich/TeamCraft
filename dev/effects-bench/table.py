@@ -25,7 +25,9 @@ def browser(user_agent):
 print('| Browser | Compositing | Total mean / p95 | Picture | Model input | Composite | Frame | Segmentation (worker) | Encoder given / skipped | First chunk | Browser CPU |')
 print('|---|---|---|---|---|---|---|---|---|---|---|')
 for path in paths:
-    for line in open(path):
+    with open(path) as lines:
+        lines = lines.readlines()
+    for line in lines:
         result = json.loads(line)
         name = browser(result.get('userAgent', ''))
         if 'summary' not in result:

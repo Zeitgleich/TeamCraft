@@ -5,7 +5,6 @@ import os
 import pathlib
 import struct
 import tempfile
-import unittest
 import unittest.mock
 from contextlib import redirect_stderr, redirect_stdout
 

@@ -66,7 +66,7 @@ process.exit(0);
 /** The app's line icons by name, read from the `IconName::path` match in icons.rs. */
 function iconPaths(source) {
   const paths = {};
-  const entry = /Self::(\w+) => \{?\s*"((?:[^"\\]|\\\s*)*)"/g;
+  const entry = /Self::(\w+) => \{?\s*"((?:[^"\\]|\\\s)*)"/g;
   for (const [, name, path] of source.matchAll(entry)) {
     paths[name] = path.replace(/\\\s*/g, " ");
   }
