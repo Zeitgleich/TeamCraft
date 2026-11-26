@@ -196,7 +196,7 @@ private const val REFRESH_WAIT_MS = 8_000L
 private const val REFRESH_MIN_MS = 600L
 
 /** What typing the new device's code did. */
-/** How confirming a device link ended. NOT_CONFIRMED: the keys went out but never arrived (#2445). */
+// How confirming a device link ended. NOT_CONFIRMED: the keys went out but never arrived (#2445).
 enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, NOT_CONFIRMED, FAILED }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
