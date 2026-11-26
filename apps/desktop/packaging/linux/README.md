@@ -124,15 +124,18 @@ you set yourself is never changed.
 ### Memory
 
 WebKit releases memory in the page's process once it passes a fraction of a limit, by default the
-machine's RAM (at most 3 GB). The app lowers the limit to 512 MiB; WebKit then releases caches above
-half of it and also JIT code above 70 % (docs/performance.md, "Desktop on Linux: memory pressure and
-the allocator"). The page is never ended for using more. To change it:
+machine's RAM (at most 3 GB). The app sets the limit to 3 GB and releases caches above 169 MiB
+(5.5 %) instead of WebKit's third (docs/performance.md, "Desktop on Linux: memory pressure and the
+allocator"). The strict threshold, above which WebKit also drops JIT code and GPU resources, sits at
+99 %: on WebKitGTK 2.54 that release can deadlock the page's process (#2450), so lowering
+`TEAMCRAFT_WEBVIEW_MEMORY_STRICT` may freeze the window until the app ends the hung page and loads
+it again. The page is never ended for using more. To change it:
 
 | Variable                                 | Default | Meaning                                                    |
 |------------------------------------------|---------|------------------------------------------------------------|
-| `TEAMCRAFT_WEBVIEW_MEMORY_LIMIT_MIB`     | `512`   | The limit in MiB; `0` keeps WebKit's own settings          |
-| `TEAMCRAFT_WEBVIEW_MEMORY_CONSERVATIVE`  | `0.5`   | Fraction of the limit above which caches are released      |
-| `TEAMCRAFT_WEBVIEW_MEMORY_STRICT`        | `0.7`   | Fraction above which JIT code and a full collection follow |
+| `TEAMCRAFT_WEBVIEW_MEMORY_LIMIT_MIB`     | `3072`  | The limit in MiB; `0` keeps WebKit's own settings          |
+| `TEAMCRAFT_WEBVIEW_MEMORY_CONSERVATIVE`  | `0.055` | Fraction of the limit above which caches are released      |
+| `TEAMCRAFT_WEBVIEW_MEMORY_STRICT`        | `0.99`  | Fraction above which JIT code and a full collection follow |
 | `TEAMCRAFT_WEBVIEW_MEMORY_POLL_SECS`     | `10`    | How often WebKit measures, in seconds                      |
 
 ### Rendering

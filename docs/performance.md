@@ -2571,6 +2571,23 @@ and 156–173 ms p95 in all runs (the same within the spread between runs). Each
 `TEAMCRAFT_WEBVIEW_MEMORY_*` variable (`LIMIT_MIB`, 0 for WebKit's own settings; `CONSERVATIVE`,
 `STRICT`; `POLL_SECS`).
 
+**No strict threshold within reach (#2450).** On WebKitGTK 2.54 the strict release deadlocks the
+web process: `WebPage::releaseMemory(Critical::Yes)` waits for the compositor thread, which frees
+its Skia GPU resources under `SkiaGLContext`'s lock, and the flush that starts takes the same lock
+again. The window then stays frozen for good. It happened with the lightbox open: big decoded
+pictures took the page past 512 MiB × 0.7 = 358 MiB. The conservative release
+(`Critical::No`) only purges scratch resources and flushes nothing, and stays `Critical::No` while
+the window is hidden (the page is still in its window). So the default is now a limit of 3072 MiB
+with conservative 0.055 (169 MiB, where the default released before) and strict 0.99 (3041 MiB;
+WebKit's own default would be 1536 MiB). Cost, from the runs above (not run again): the steady
+state doesn't change, since the page sits at about 307 MiB below the old strict 358 MiB, and a
+strict threshold the page stayed above saved at most 6 MiB (the 384 MiB × 0.5 row). What is lost
+is the full collection and the dropped JIT code and GPU resources after a peak: once the lightbox
+closes, its revoked pictures are dead resources the conservative release frees, the rest goes
+with JavaScriptCore's own collections. The shell's watchdog (`webview_watchdog.rs`) ends a web
+process that stops answering anyway: two pings 10 s apart without an answer while the window is
+shown, after which the page loads again.
+
 **The shell's allocator.** A heap profile of the shell during the same run (heaptrack on the debug
 binary, from the start after seeding to the quit, about 13 minutes) found little of the core alive:
 

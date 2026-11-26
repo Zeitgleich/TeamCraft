@@ -32,6 +32,29 @@ pub fn install_hook() {
   }));
 }
 
+/// A problem of the shell that isn't a panic (a hung page it ended, #2450): kept like a panic, so
+/// the page reports it on its next start with the same setting and choice. `message` names what
+/// happened and never holds content.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[track_caller]
+pub fn record_problem(message: &str) {
+  let Some(path) = PENDING_PATH.get() else {
+    return;
+  };
+  let location = std::panic::Location::caller();
+  let pending = PendingPanic {
+    parts: PanicParts {
+      message: message.to_owned(),
+      maybe_location: Some((location.file().to_owned(), location.line(), location.column())),
+      backtrace: String::new(),
+      maybe_script_stack: None,
+    },
+    timestamp_ms: now_ms(),
+    breadcrumbs: breadcrumbs(),
+  };
+  append(path, pending);
+}
+
 /// The redacted debug log, then the shell's last spans and the ones still open: where it hung.
 fn breadcrumbs() -> Vec<String> {
   let mut lines = debug_log::recent_lines();
