@@ -36,6 +36,10 @@ pub fn IdPicker(
   #[prop(into)] value: Signal<String>,
   on_input: Callback<String>,
   #[prop(into, optional)] error: Signal<Option<&'static str>>,
+  /// For channels: the spaces chosen elsewhere in the form (list text of space IDs). When given,
+  /// only channels of these spaces are offered, and none while it is empty.
+  #[prop(into, optional)]
+  in_spaces: Option<Signal<String>>,
 ) -> impl IntoView {
   let state = use_app_state();
   let i18n = use_i18n();
@@ -53,6 +57,7 @@ pub fn IdPicker(
           id: space.id.to_string(),
           name: space.name,
           maybe_context: None,
+          maybe_space_id: None,
           is_pickable: !space.is_archived,
         })
         .collect::<Vec<_>>()
@@ -67,6 +72,7 @@ pub fn IdPicker(
           is_pickable: channel.kind == ConversationKind::Public && !channel.is_archived,
           name: channel.name,
           maybe_context: Some(channel.space_name).filter(|name| !name.is_empty()),
+          maybe_space_id: channel.maybe_space_id.map(|space| space.to_string()),
         })
         .collect::<Vec<_>>()
     }),
@@ -82,8 +88,14 @@ pub fn IdPicker(
     });
   }
   let pills = Memo::new(move |_| chosen.with(|chosen| known.with(|known| chosen_items(chosen, known))));
+  let scope = Memo::new(move |_| in_spaces.map(|spaces| parse_list(&spaces.get())));
+  let needs_spaces = move || scope.with(|scope| scope.as_ref().is_some_and(Vec::is_empty));
   let found = Memo::new(move |_| {
-    chosen.with(|chosen| known.with(|known| filter.with(|text| matches(known, chosen, text, MAX_MATCHES))))
+    chosen.with(|chosen| {
+      known.with(|known| {
+        scope.with(|scope| filter.with(|text| matches(known, chosen, scope.as_deref(), text, MAX_MATCHES)))
+      })
+    })
   });
   let is_searching = move || filter.with(|text| !text.trim().is_empty());
   let set_chosen = move |ids: Vec<String>| on_input.run(list_text(&ids));
@@ -208,7 +220,10 @@ pub fn IdPicker(
           />
         </li>
       </ul>
-      <Show when=move || pills.with(Vec::is_empty) && !is_searching() fallback=|| ()>
+      <Show when=needs_spaces fallback=|| ()>
+        <p class="muted-text small">{move || i18n.t("settings-picker-channels-choose-spaces")}</p>
+      </Show>
+      <Show when=move || pills.with(Vec::is_empty) && !is_searching() && !needs_spaces() fallback=|| ()>
         <p class="muted-text small">{move || i18n.t(empty_key)}</p>
       </Show>
       <ul id=list_id class="forward-list id-picker-matches" role="listbox" hidden=move || !is_searching()>
@@ -245,8 +260,10 @@ pub fn IdPicker(
 struct PickItem {
   id: String,
   name: String,
-  /// The space a channel is in.
+  /// The space a channel is in, by name.
   maybe_context: Option<String>,
+  /// The ID of the space a channel is in; `None` for a space and for a channel outside any.
+  maybe_space_id: Option<String>,
   /// Offered among the matches: not archived, and for channels public. A chosen one that isn't
   /// (archived since) still shows by name.
   is_pickable: bool,
@@ -286,8 +303,14 @@ fn chosen_items(chosen: &[String], known: &[PickItem]) -> Vec<(String, Option<Pi
 }
 
 /// The known items not chosen yet whose name (or space) holds every typed word, ignoring case;
-/// names that start with the words first.
-fn matches(known: &[PickItem], chosen: &[String], typed: &str, limit: usize) -> Vec<PickItem> {
+/// names that start with the words first. With `in_spaces`, only channels of those spaces (by ID).
+fn matches(
+  known: &[PickItem],
+  chosen: &[String],
+  in_spaces: Option<&[String]>,
+  typed: &str,
+  limit: usize,
+) -> Vec<PickItem> {
   let typed = typed.trim().to_lowercase();
   if typed.is_empty() {
     return Vec::new();
@@ -296,6 +319,7 @@ fn matches(known: &[PickItem], chosen: &[String], typed: &str, limit: usize) -> 
   let mut found: Vec<&PickItem> = known
     .iter()
     .filter(|item| item.is_pickable && !chosen.contains(&item.id))
+    .filter(|item| is_in_spaces(item, in_spaces))
     .filter(|item| {
       let haystack = format!(
         "{} {}",
@@ -314,28 +338,58 @@ fn matches(known: &[PickItem], chosen: &[String], typed: &str, limit: usize) -> 
   found.into_iter().take(limit).cloned().collect()
 }
 
+/// Whether the item belongs to one of `spaces`; without a scope, everything does.
+fn is_in_spaces(item: &PickItem, spaces: Option<&[String]>) -> bool {
+  spaces.is_none_or(|spaces| {
+    item
+      .maybe_space_id
+      .as_ref()
+      .is_some_and(|space| spaces.contains(space))
+  })
+}
+
+/// The chosen channels that stay when the spaces change: those not known to be in another space.
+/// A channel the console can't place (not loaded, deleted) stays, so nothing is dropped on a guess.
+pub fn channels_kept(
+  chosen: &[String],
+  in_spaces: &[String],
+  known: &[(String, Option<String>)],
+) -> Vec<String> {
+  chosen
+    .iter()
+    .filter(|id| {
+      known
+        .iter()
+        .find(|(known_id, _)| known_id == *id)
+        .and_then(|(_, maybe_space)| maybe_space.as_ref())
+        .is_none_or(|space| in_spaces.contains(space))
+    })
+    .cloned()
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
 
   #[test]
   fn nothing_is_offered_before_typing() {
-    assert!(matches(&items(), &[], "  ", MAX_MATCHES).is_empty());
+    assert!(matches(&items(), &[], None, "  ", MAX_MATCHES).is_empty());
   }
 
   #[test]
   fn every_word_must_match_the_name_or_space_and_chosen_ones_are_left_out() {
-    let found = matches(&items(), &[], "general", MAX_MATCHES);
+    let found = matches(&items(), &[], None, "general", MAX_MATCHES);
     assert_eq!(names(&found), ["general", "Team general"]);
-    let found = matches(&items(), &["1".to_owned()], "GENERAL", MAX_MATCHES);
+    let found = matches(&items(), &["1".to_owned()], None, "GENERAL", MAX_MATCHES);
     assert_eq!(names(&found), ["Team general"]);
-    let found = matches(&items(), &[], "space b gen", MAX_MATCHES);
+    let found = matches(&items(), &[], None, "space b gen", MAX_MATCHES);
     assert_eq!(names(&found), ["Team general"]);
   }
 
   #[test]
   fn names_that_start_with_the_text_come_first_and_the_list_is_bounded() {
-    let found = matches(&items(), &[], "r", 2);
+    let found = matches(&items(), &[], None, "r", 2);
     assert_eq!(names(&found), ["random", "general"]);
   }
 
@@ -355,23 +409,58 @@ mod tests {
     );
   }
 
+  #[test]
+  fn channels_are_offered_only_from_the_chosen_spaces() {
+    let space_a = ["10".to_owned()];
+    let found = matches(&items(), &[], Some(&space_a), "general", MAX_MATCHES);
+    assert_eq!(names(&found), ["general"]);
+    let both = ["10".to_owned(), "20".to_owned()];
+    let found = matches(&items(), &[], Some(&both), "general", MAX_MATCHES);
+    assert_eq!(names(&found), ["general", "Team general"]);
+    // No space chosen: nothing is offered, and a channel without a space never is.
+    assert!(matches(&items(), &[], Some(&[]), "general", MAX_MATCHES).is_empty());
+    let mut no_space = items();
+    no_space[0].maybe_space_id = None;
+    assert_eq!(
+      names(&matches(&no_space, &[], Some(&both), "general", MAX_MATCHES)),
+      ["Team general"]
+    );
+  }
+
+  #[test]
+  fn changing_the_spaces_drops_only_channels_known_to_be_elsewhere() {
+    let known = [
+      ("1".to_owned(), Some("10".to_owned())),
+      ("2".to_owned(), Some("20".to_owned())),
+      ("3".to_owned(), None),
+    ];
+    let chosen = ["1".to_owned(), "2".to_owned(), "3".to_owned(), "99".to_owned()];
+    // Space 20 was removed: its channel goes; the unplaced and the unknown stay.
+    assert_eq!(
+      channels_kept(&chosen, &["10".to_owned()], &known),
+      ["1", "3", "99"]
+    );
+    assert!(channels_kept(&[], &[], &known).is_empty());
+  }
+
   fn items() -> Vec<PickItem> {
     vec![
-      item("1", "general", "Space A"),
-      item("2", "Team general", "Space B"),
-      item("3", "random", "Space A"),
+      item("1", "general", "Space A", "10"),
+      item("2", "Team general", "Space B", "20"),
+      item("3", "random", "Space A", "10"),
       PickItem {
         is_pickable: false,
-        ..item("4", "general archive", "Space A")
+        ..item("4", "general archive", "Space A", "10")
       },
     ]
   }
 
-  fn item(id: &str, name: &str, space: &str) -> PickItem {
+  fn item(id: &str, name: &str, space: &str, space_id: &str) -> PickItem {
     PickItem {
       id: id.to_owned(),
       name: name.to_owned(),
       maybe_context: Some(space.to_owned()),
+      maybe_space_id: Some(space_id.to_owned()),
       is_pickable: true,
     }
   }

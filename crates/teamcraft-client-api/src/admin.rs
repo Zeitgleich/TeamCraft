@@ -150,6 +150,8 @@ impl From<teamcraft_proto::RetentionSetting> for RetentionOverride {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AdminChannel {
   pub id: ConversationId,
+  /// The space the channel is in; `None` for a conversation outside any space.
+  pub maybe_space_id: Option<SpaceId>,
   pub space_name: String,
   pub name: String,
   pub kind: ConversationKind,
@@ -1186,6 +1188,7 @@ mod tests {
     const NOW: i64 = 100 * 86_400_000;
     let channel = |name: &str, kind, guests, owner: Option<UserId>, last_activity| AdminChannel {
       id: ConversationId::from_snowflake(crate::model::Snowflake::new(1).unwrap()),
+      maybe_space_id: None,
       space_name: "Sales".into(),
       name: name.into(),
       kind,

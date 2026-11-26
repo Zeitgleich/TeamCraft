@@ -2854,6 +2854,7 @@ fn channel_from_wire(
   };
   AdminChannel {
     id: summary.id,
+    maybe_space_id: summary.maybe_space_id,
     space_name: summary
       .maybe_space_id
       .and_then(|space| space_names.get(&space).cloned())
@@ -3263,6 +3264,7 @@ mod tests {
   fn audit_targets_are_named_when_known() {
     let channels = vec![AdminChannel {
       id: id_from_raw(21),
+      maybe_space_id: Some(id_from_raw(4)),
       space_name: "Space A".into(),
       name: "launch".into(),
       kind: ConversationKind::Private,
@@ -3371,6 +3373,7 @@ mod tests {
       false,
     );
     assert_eq!(channel.space_name, "Space A");
+    assert_eq!(channel.maybe_space_id, Some(id_from_raw(4)));
     assert_eq!(channel.retention.maybe_days, Some(30));
     assert_eq!(
       channel.own_retention,

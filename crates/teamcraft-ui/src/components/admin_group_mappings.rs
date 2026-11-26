@@ -1,12 +1,13 @@
 //! Identity provider groups to spaces and public channels (docs/provisioning.md §5), on the console's
 //! settings page: one row per rule, the group's path, and its spaces and channels chosen by name with
-//! the same pickers as the default spaces above (issue #2360). The rule still holds their IDs.
+//! the same pickers as the default spaces above (issue #2360). The rule still holds their IDs. The
+//! channel picker offers only channels of the rule's spaces (issue #2409).
 
 use leptos::prelude::*;
 use teamcraft_proto::{ConversationId, GroupMappingRule, MAX_GROUP_MAPPINGS, Snowflake, SpaceId};
 
 use crate::components::admin_fields::{list_text, parse_list};
-use crate::components::admin_id_picker::{IdPicker, PickKind};
+use crate::components::admin_id_picker::{IdPicker, PickKind, channels_kept};
 use crate::components::admin_save::{SaveBar, use_save_tracker};
 use crate::form_errors::{error_id, focus_first_invalid};
 use crate::i18n::use_i18n;
@@ -143,6 +144,7 @@ pub fn GroupMappingsForm() -> impl IntoView {
 #[component]
 fn RuleRow(key: u64, draft: RwSignal<Vec<RuleDraft>>, show_errors: RwSignal<bool>) -> impl IntoView {
   let i18n = use_i18n();
+  let state = use_app_state();
   let rule = move || {
     draft.with(|rules| {
       rules
@@ -158,6 +160,29 @@ fn RuleRow(key: u64, draft: RwSignal<Vec<RuleDraft>>, show_errors: RwSignal<bool
     } else {
       RuleErrors::default()
     }
+  };
+  // Changing the spaces drops chosen channels the console knows to be in other spaces.
+  let set_spaces = move |text: String| {
+    let known: Vec<(String, Option<String>)> = state.read(|backend| {
+      backend
+        .admin_channels()
+        .into_iter()
+        .chain(backend.admin_referenced_channels())
+        .map(|channel| {
+          (
+            channel.id.to_string(),
+            channel.maybe_space_id.map(|space| space.to_string()),
+          )
+        })
+        .collect()
+    });
+    let spaces = parse_list(&text);
+    draft.update(|rules| {
+      if let Some(rule) = rules.iter_mut().find(|rule| rule.key == key) {
+        rule.channels = list_text(&channels_kept(&parse_list(&rule.channels), &spaces, &known));
+        rule.spaces = text;
+      }
+    });
   };
   let edit = move |change: fn(&mut RuleDraft, String), text: String| {
     draft.update(|rules| {
@@ -185,13 +210,14 @@ fn RuleRow(key: u64, draft: RwSignal<Vec<RuleDraft>>, show_errors: RwSignal<bool
         label="settings-group-mappings-spaces"
         kind=PickKind::Spaces
         value=Signal::derive(move || rule().spaces)
-        on_input=Callback::new(move |text| edit(|rule, text| rule.spaces = text, text))
+        on_input=Callback::new(set_spaces)
         error=Signal::derive(move || errors().maybe_spaces)
       />
       <IdPicker
         id=channels_id
         label="settings-group-mappings-channels"
         kind=PickKind::PublicChannels
+        in_spaces=Signal::derive(move || rule().spaces)
         value=Signal::derive(move || rule().channels)
         on_input=Callback::new(move |text| edit(|rule, text| rule.channels = text, text))
         error=Signal::derive(move || errors().maybe_channels)
