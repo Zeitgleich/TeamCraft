@@ -765,10 +765,21 @@ impl Forwarder {
     })
   }
 
+  /// Ends `owner`'s screen sound on `stream_id`. Another device's screen sound is
+  /// [`ForwardError::ForeignStream`]; one that is no longer published (a takeover or a host ended
+  /// it meanwhile, #2442) is [`ForwardError::UnknownTrack`].
   pub fn unpublish_screen_audio(&mut self, owner: DeviceId, stream_id: StreamId) -> Result<(), ForwardError> {
+    let is_foreign = self
+      .participants
+      .iter()
+      .any(|(device, route)| *device != owner && route.maybe_screen_audio == Some(stream_id));
     let participant = self.participants.get_mut(&owner).ok_or(ForwardError::NotJoined)?;
     if participant.maybe_screen_audio != Some(stream_id) {
-      return Err(ForwardError::ForeignStream(stream_id));
+      return Err(if is_foreign {
+        ForwardError::ForeignStream(stream_id)
+      } else {
+        ForwardError::UnknownTrack(stream_id)
+      });
     }
     participant.maybe_screen_audio = None;
     Ok(())
@@ -2700,6 +2711,11 @@ mod tests {
       );
       forwarder.unpublish_screen_audio(device(1), SCREEN_AUDIO).unwrap();
       assert!(forwarder.screen_audio_tracks().is_empty());
+      // Ended already (a request that crossed a takeover, #2442): nothing to end.
+      assert_eq!(
+        forwarder.unpublish_screen_audio(device(1), SCREEN_AUDIO),
+        Err(ForwardError::UnknownTrack(SCREEN_AUDIO))
+      );
       assert!(
         forwarder
           .route(device(1), &rtp_datagram(SCREEN_AUDIO.0, 0, header()), now)

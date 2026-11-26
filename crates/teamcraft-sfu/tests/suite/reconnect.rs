@@ -523,6 +523,73 @@ mod screen_takeover {
     );
   }
 
+  /// Requests that cross a takeover on their way (#2442): the old sharer stops its share and its
+  /// sound, a viewer resizes and then closes the old share's tile, before they hear of the new
+  /// share. Nothing of it is refused, and the new share goes on for everyone.
+  #[test]
+  fn requests_crossing_a_takeover_are_not_refused() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    network.subscribe(CAROL, alice_screen, 0);
+    network.client_mut(ALICE).engine.publish_screen_audio();
+    network.pump();
+
+    // Bob's share reaches the SFU; Alice and Carol don't know yet.
+    let bob_publication = network.ask_for(BOB, VideoTrackKind::Screen);
+    network.drain_client(BOB);
+    let alice = &mut network.client_mut(ALICE).engine;
+    alice.unpublish_screen_audio();
+    alice.unpublish_video(alice_screen);
+    let carol = &mut network.client_mut(CAROL).engine;
+    carol.set_video_max_layer(alice_screen, 1);
+    carol.subscribe_video(alice_screen, None);
+    network.pump();
+
+    for id in [ALICE, BOB, CAROL] {
+      assert_eq!(refusals(&network, id), Vec::<String>::new(), "{id}");
+    }
+    let bob_screen = network.confirmed(BOB, bob_publication).unwrap();
+    for viewer in [ALICE, CAROL] {
+      assert_eq!(
+        live_screens(&network, viewer),
+        vec![(device(BOB), bob_screen)],
+        "{viewer}"
+      );
+    }
+  }
+
+  /// A viewer's app closes a tile only after the engine heard the track is gone: the engine
+  /// doesn't ask the SFU to stop a track it no longer receives (#2442).
+  #[test]
+  fn closing_the_tile_of_a_share_taken_over_asks_the_sfu_nothing() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    network.subscribe(CAROL, alice_screen, 0);
+    network.publish(BOB, VideoTrackKind::Screen);
+
+    let carol = &mut network.client_mut(CAROL).engine;
+    carol.subscribe_video(alice_screen, None);
+    assert!(
+      !std::iter::from_fn(|| carol.poll_output())
+        .any(|output| matches!(output, EngineOutput::Signal(CallClientMessage::Subscribe { .. })))
+    );
+    network.pump();
+    assert_eq!(refusals(&network, CAROL), Vec::<String>::new());
+  }
+
+  /// The SFU's refusals a client heard.
+  fn refusals(network: &Network, id: i64) -> Vec<String> {
+    network
+      .client(id)
+      .events
+      .iter()
+      .filter_map(|event| match event {
+        CallEngineEvent::Error(error) => Some(error.message.clone()),
+        _ => None,
+      })
+      .collect()
+  }
+
   /// What the client's engine said about its shares being taken over.
   fn taken_over(network: &Network, id: i64) -> Vec<ScreenShareTakeover> {
     network
