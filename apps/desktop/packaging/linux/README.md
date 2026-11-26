@@ -113,12 +113,13 @@ Before GTK starts, the shell checks variables that GTK, WebKitGTK and glibc read
 so this works the same for every package (deb, rpm, AppImage, Flatpak) and from a terminal. A value
 you set yourself is never changed.
 
-| Variable                         | Set to   | Why                                                                                                        |
-|----------------------------------|----------|------------------------------------------------------------------------------------------------------------|
-| `GTK_USE_PORTAL`                 | `1`      | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
-| `WEBKIT_DISABLE_DMABUF_RENDERER` | `1`      | Only with `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"                                                     |
-| `MALLOC_ARENA_MAX`               | `2`      | glibc's allocator gives freed memory back (not when you set `GLIBC_TUNABLES`), see "Memory"                |
-| `MALLOC_TRIM_THRESHOLD_`         | `131072` | The same                                                                                                   |
+| Variable                           | Set to   | Why                                                                                                        |
+|------------------------------------|----------|------------------------------------------------------------------------------------------------------------|
+| `GTK_USE_PORTAL`                   | `1`      | File dialogs through xdg-desktop-portal, the desktop's own dialog (not in Flatpak, which does this anyway) |
+| `WEBKIT_DMABUF_RENDERER_FORCE_SHM` | `1`      | Intel GPU on Wayland, or `TEAMCRAFT_WEBKIT_RENDERER=shared-memory`, see "Rendering"                     |
+| `WEBKIT_DISABLE_DMABUF_RENDERER`   | `1`      | Only with `TEAMCRAFT_WEBKIT_RENDERER=compatible` or `TEAMCRAFT_WEBKIT_DMABUF=0`, see "Rendering"           |
+| `MALLOC_ARENA_MAX`                 | `2`      | glibc's allocator gives freed memory back (not when you set `GLIBC_TUNABLES`), see "Memory"                |
+| `MALLOC_TRIM_THRESHOLD_`           | `131072` | The same                                                                                                   |
 
 ### Memory
 
@@ -136,28 +137,42 @@ the allocator"). The page is never ended for using more. To change it:
 
 ### Rendering
 
-TeamCraft uses WebKitGTK's DMABUF renderer: pages are painted on the GPU and handed to the compositor
-without a copy. Without it WebKitGTK paints into shared memory and the CPU copies every frame,
-which makes animations and the lightbox stutter on large or scaled windows (#805).
+WebKitGTK paints the page on the GPU. How the painted page reaches the compositor is one of three
+renderers; the app picks one before GTK starts (`apps/desktop/src/webview_renderer.rs`):
 
-Version 1.0.8 turned the renderer off for everyone because transitions and animations flickered or
-flashed the window dark with some drivers and compositors (seen with AMD GPUs on KDE Plasma, #687).
-That did not reproduce with Mesa 26.2, WebKitGTK 2.54 and KWin 6.7. If it happens on your system,
-switch to the compatible renderer (shared memory) with either variable:
+| Renderer      | `TEAMCRAFT_WEBKIT_RENDERER` | What happens                                                                                    |
+|---------------|-----------------------------|-------------------------------------------------------------------------------------------------|
+| GPU buffers   | `gpu`                       | The compositor gets the GPU's buffers (DMA-BUF) without a copy. The default.                    |
+| Shared memory | `shared-memory`             | Painted on the GPU, copied into shared memory for the compositor. Default for Intel on Wayland. |
+| Compatible    | `compatible`                | Painted on the CPU. Animations stutter on large windows (#805), call video comes as images.     |
+
+An Intel GPU on Wayland flickered heavily in calls, under GNOME and KDE Plasma alike, where the
+page repaints with every video frame (#2416). There the app uses shared memory: the compositor never imports the driver's
+tiled or compressed buffers. It costs a copy per painted frame, about 6 % of one core more in a
+call at 30 frames a second. Canvas and WebCodecs stay on the GPU, so call video is decoded as
+before. AMD GPUs and X11 keep the GPU buffers; the flicker with AMD GPUs on KDE Plasma (#687) did not
+reproduce with Mesa 26.2, WebKitGTK 2.54 and KWin 6.7.
+
+The log names the renderer in use at every start (`webview renderer`, with the reason, session,
+desktop, GPU vendor and driver, and the WebKitGTK version); "Report a problem" includes it. If the
+window flickers or flashes dark, try the other renderers:
 
 ```sh
-TEAMCRAFT_WEBKIT_DMABUF=0 teamcraft-desktop                # the app sets WebKit's switch for you
-WEBKIT_DISABLE_DMABUF_RENDERER=1 teamcraft-desktop         # WebKit's own switch, kept as you set it
-TEAMCRAFT_WEBKIT_DMABUF=0 ./TeamCraft_amd64.AppImage       # the same for the AppImage
-flatpak run --env=TEAMCRAFT_WEBKIT_DMABUF=0 de.zeitgleich.teamcraft
+TEAMCRAFT_WEBKIT_RENDERER=shared-memory teamcraft-desktop    # GPU painting, shared memory to the compositor
+TEAMCRAFT_WEBKIT_RENDERER=compatible teamcraft-desktop       # CPU painting (TEAMCRAFT_WEBKIT_DMABUF=0 does the same)
+TEAMCRAFT_WEBKIT_RENDERER=gpu teamcraft-desktop              # GPU buffers, also on Intel on Wayland
+WEBKIT_DISABLE_DMABUF_RENDERER=1 teamcraft-desktop           # WebKit's own switches are kept as you set them
+TEAMCRAFT_WEBKIT_RENDERER=shared-memory ./TeamCraft_amd64.AppImage
+flatpak run --env=TEAMCRAFT_WEBKIT_RENDERER=shared-memory de.zeitgleich.teamcraft
 ```
 
 With the compatible renderer, call video comes to the window as JPEG images: WebKitGTK 2.54 kills
 its web process when asked whether WebCodecs decodes a video while the DMABUF renderer is off
 (`WebCore::setGstElementGLContext`, #824), so the app doesn't ask. Pictures cost more CPU this way.
+Shared memory doesn't have this problem.
 
 For a permanent choice, put the variable into the `.desktop` file's `Exec=env …` line or
-`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_DMABUF=0
+`~/.config/environment.d/`, or use `flatpak override --user --env=TEAMCRAFT_WEBKIT_RENDERER=shared-memory
 de.zeitgleich.teamcraft`. Please report the GPU, driver, compositor and scaling when you need it.
 
 ### Dropped files
