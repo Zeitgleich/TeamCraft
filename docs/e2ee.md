@@ -772,9 +772,11 @@ restart) finishes the job (`teamcraft-core::client::enroll`):
    locally; interrupted, the device recovers again (with the new recovery kit, or a legacy
    client's new passphrase, if the new bag reached the server).
 4. **The account is stored locally** only now, marked as unfinished, with the wrapped backup keys
-   it uploaded.
+   it uploaded. A meeting guest's device is marked as one in the same group of writes (§9.5).
 5. **Key packages and the signed device list** are published; an unfinished account does this
-   first on its next sync, then clears the mark. The server picks device IDs, so a device refuses
+   first on its next sync, then clears the mark. Enrollment counts as done once step 4 is: a cut
+   here no longer fails it (enrolling again over the stored account would register a second
+   device, #2444). The server picks device IDs, so a device refuses
    an ID that the signed list already gives another key or lists as revoked: signing the list
    would otherwise drop that device.
 
@@ -2259,7 +2261,9 @@ never by the server's member list:
   - *Identity and credential.* The page enrolls like any device (§3, §3.2): a fresh identity key,
     a device key, the signed device certificate (the MLS `BasicCredential`), key packages and a
     signed device list. The key bag the server requires with a new identity is wrapped with a random
-    passphrase that is never shown or stored: there is no backup and no recovery, a guest who loses
+    passphrase that is never shown. It is kept in the device's store only until the account is (so
+    a retry after a lost response opens that bag again, §3.2, #2444), and goes with an abandoned
+    setup; there is no backup and no recovery, a guest who loses
     the device (cleared site data) loses the guest's place, and the host admits the same link-holder
     again as a new guest. The store is the web client's encrypted store (§9). "Leave the meeting" deletes its
     database (only a guest device accepts that command), and a guest page opened later deletes the

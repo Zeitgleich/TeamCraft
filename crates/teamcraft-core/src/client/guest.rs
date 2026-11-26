@@ -28,6 +28,7 @@ use teamcraft_proto::{
 };
 use zeroize::Zeroizing;
 
+use super::enroll::EnrolledAs;
 use super::meeting_records::lobby_record_key;
 use super::{Client, ClientSettings, EnrollmentOptions, EnrollmentSecret, PendingEnrollment};
 use crate::api::ServerApi;
@@ -113,19 +114,34 @@ impl PendingEnrollment {
     device_name: String,
     argon2: Argon2Settings,
   ) -> Result<Client<A, S>, CoreError> {
-    let mut passphrase = Zeroizing::new([0u8; 32]);
-    OsRng.fill_bytes(passphrase.as_mut());
+    let me = api.me().await?.id;
+    // Stored before anything reaches the server: a retry after the identity and its key bag landed
+    // opens that bag with the same secret (#2444). The account replaces it.
+    let passphrase = match records::load_pending_guest_secret(&store, me)? {
+      Some(stored) => stored,
+      None => {
+        let mut fresh = Zeroizing::new([0u8; 32]);
+        OsRng.fill_bytes(fresh.as_mut());
+        records::save_pending_guest_secret(&store, me, &fresh)?;
+        fresh
+      },
+    };
     let options = EnrollmentOptions {
       device_name,
       secret: EnrollmentSecret::Passphrase(SecretBytes::new(passphrase.to_vec())),
       argon2,
       maybe_attestation: None,
     };
-    let client = Self::new().complete(api, store, clock, settings, options).await?;
-    // A guest's device accepts only a group anchored in the link (`is_founded_by_organizer`).
-    records::put_json(&client.store, Table::SyncState, GUEST_DEVICE_KEY, &true)?;
-    Ok(client)
+    Self::new()
+      .complete_as(api, store, clock, settings, options, EnrolledAs::Guest)
+      .await
   }
+}
+
+/// Marks this store's device as a meeting guest's: it accepts only a group anchored in the link
+/// (`is_founded_by_organizer`). Written with the account, in its group of writes.
+pub(super) fn mark_guest_device(store: &impl LocalStore) -> Result<(), CoreError> {
+  records::put_json(store, Table::SyncState, GUEST_DEVICE_KEY, &true)
 }
 
 impl<A: ServerApi, S: LocalStore> Client<A, S> {

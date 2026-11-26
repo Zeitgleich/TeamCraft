@@ -24,6 +24,7 @@ const KEY_BAG_KEY: &str = "key_bag";
 pub const SYNC_KEY: &str = "sync";
 const PENDING_DEVICE_KEY: &str = "pending_device";
 const PENDING_LINK_KEY: &str = "pending_link";
+const PENDING_GUEST_SECRET_KEY: &str = "pending_guest_secret";
 const ABANDONED_DEVICES_KEY: &str = "abandoned_devices";
 /// At most this many registrations of dropped device key pairs wait to be revoked; older ones are
 /// given up (they stay in the user's device list, where the user can remove them).
@@ -181,6 +182,15 @@ struct PendingDeviceRecord {
   #[zeroize(skip)]
   #[serde(rename = "created_at_ms", default, skip_serializing_if = "Option::is_none")]
   maybe_created_at_ms: Option<i64>,
+}
+
+/// The random secret a meeting guest's enrollment wraps its key bag with (#2444), kept until the
+/// account is stored: a retry after the identity reached the server opens that bag again.
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+struct PendingGuestSecretRecord {
+  #[zeroize(skip)]
+  user_id: UserId,
+  secret: [u8; 32],
 }
 
 /// [`PendingLink`] as stored, protected like [`AccountRecord`].
@@ -385,6 +395,38 @@ pub fn load_pending_link(store: &impl LocalStore) -> Result<Option<PendingLink>,
   }))
 }
 
+/// The secret of `user`'s unfinished guest enrollment, if one is stored (#2444).
+pub fn load_pending_guest_secret(
+  store: &impl LocalStore,
+  user: UserId,
+) -> Result<Option<Zeroizing<[u8; 32]>>, CoreError> {
+  let maybe_record =
+    get_secret_json::<PendingGuestSecretRecord>(store, Table::Account, PENDING_GUEST_SECRET_KEY)?;
+  Ok(
+    maybe_record
+      .filter(|record| record.user_id == user)
+      .map(|record| Zeroizing::new(record.secret)),
+  )
+}
+
+/// Stores the secret a guest enrollment is about to wrap its key bag with, before anything reaches
+/// the server.
+pub fn save_pending_guest_secret(
+  store: &impl LocalStore,
+  user: UserId,
+  secret: &[u8; 32],
+) -> Result<(), CoreError> {
+  let record = PendingGuestSecretRecord {
+    user_id: user,
+    secret: *secret,
+  };
+  put_json(store, Table::Account, PENDING_GUEST_SECRET_KEY, &record)
+}
+
+pub fn delete_pending_guest_secret(store: &impl LocalStore) -> Result<(), CoreError> {
+  Ok(store.delete(Table::Account, PENDING_GUEST_SECRET_KEY)?)
+}
+
 /// Whether the keys of a link wait to be enrolled, without decoding them; the plaintext the store
 /// returned is zeroized at once.
 pub fn has_pending_link(store: &impl LocalStore) -> Result<bool, CoreError> {
@@ -400,7 +442,8 @@ pub fn delete_pending_link(store: &impl LocalStore) -> Result<(), CoreError> {
   Ok(store.delete(Table::Account, PENDING_LINK_KEY)?)
 }
 
-/// Drops what an unfinished enrollment kept, the secrets of a link and the pending device key pair:
+/// Drops what an unfinished enrollment kept, the secrets of a link or a guest's key bag and the
+/// pending device key pair:
 /// the user signed out instead of finishing it (issues #168, #415). Does nothing once the account is
 /// stored. The secrets are gone at once, and the store's free pages are purged so they can't be read
 /// back from its files; the key pair's public key stays ([`AbandonedDevices`]) until the server
@@ -411,6 +454,7 @@ pub fn forget_unfinished_enrollment(store: &impl LocalStore) -> Result<(), CoreE
   }
   write_group(store, || {
     delete_pending_link(store)?;
+    delete_pending_guest_secret(store)?;
     move_pending_device_to_abandoned(store)
   })?;
   Ok(store.purge_freed()?)
@@ -421,7 +465,11 @@ pub fn forget_unfinished_enrollment(store: &impl LocalStore) -> Result<(), CoreE
 /// pair or the registration to revoke, never neither; the store's free pages are purged afterwards.
 /// Returns whether there was a key pair.
 pub fn abandon_pending_device(store: &impl LocalStore) -> Result<bool, CoreError> {
-  let is_abandoned = write_group(store, || move_pending_device_to_abandoned(store))?;
+  let is_abandoned = write_group(store, || {
+    // A guest's key bag secret is of no use without the device: its access is long over.
+    delete_pending_guest_secret(store)?;
+    move_pending_device_to_abandoned(store)
+  })?;
   if is_abandoned {
     store.purge_freed()?;
   }
