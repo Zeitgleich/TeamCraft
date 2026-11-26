@@ -44,7 +44,7 @@ wtransport = { version = "0.7.2", features = ["self-signed", "quinn"] }
 # The descriptor limit, to warn when the fallback's limits exceed it (a safe getrlimit, MIT; the
 # same version is in teamcraft-media's dev-dependencies).
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["resource"] }
+nix = { version = "0.32.0", default-features = false, features = ["resource"] }
 
 [features]
 # End-to-end tests with the desktop app's Linux capture (xdg-desktop-portal + PipeWire); they need
