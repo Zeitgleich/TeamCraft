@@ -158,6 +158,26 @@ async fn audio_switches_mid_call_and_a_missing_device_keeps_the_old_one() {
   assert!(stats.frames_sent > 10, "{stats:?}");
 }
 
+/// #2419: a call whose audio can't start (here an Opus bitrate the encoder refuses; in the field a
+/// microphone or speakers that don't open) fails its join with the reason. It used to answer the
+/// join as joined and end right after, without a word to the user.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_whose_audio_cannot_start_fails_its_join() {
+  let (port, certificate_hash) = start_sfu().await;
+  let engine = CallEngineConfig {
+    user_id: id_of(8),
+    device_id: id_of(8),
+    capabilities: MediaCapabilities::default(),
+    bwe: BweConfig::default(),
+  };
+  let sfu_url = format!("https://[::1]:{port}{CALL_PATH}");
+  let mut config = NativeCallConfig::new(sfu_url, "dev:13:8:8".into(), engine);
+  config.maybe_certificate_hash = Some(certificate_hash);
+  config.opus.bitrate_bps = 0;
+  let error = NativeCall::join(config).await.err();
+  assert!(matches!(error, Some(NativeCallError::Audio(_))), "{error:?}");
+}
+
 /// #986: switching the microphone mid-call keeps it muted; it sends once unmuted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_audio_switch_mid_call_keeps_the_microphone_muted() {

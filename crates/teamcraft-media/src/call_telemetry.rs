@@ -17,13 +17,14 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use teamcraft_client_api::crash_reporting::{
-  CallContext, CallProblem, CallQualitySummary, CallRef, CallReport, CallTransportKind, MAX_CALL_TRAIL,
-  MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified, identifier,
+  CallContext, CallProblem, CallQualitySummary, CallRef, CallReport, CallTransportKind, JoinStage,
+  MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified,
+  identifier,
 };
 use teamcraft_client_api::video_stats::{VideoStatsReport, VideoTrackStats};
 use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
 
-use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, OwnVideoEnd};
+use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, JoinStep, OwnVideoEnd};
 use crate::call_resilience::CallTransport;
 
 /// How often the drivers sample the video stats for the telemetry while joined.
@@ -55,6 +56,12 @@ pub struct TelemetryThresholds {
   pub poor_lossy_samples: u32,
   /// Calls shorter than this are not summed up.
   pub poor_min_duration: Duration,
+  /// A join without secured media (or without `joined`) this long is stalled (#2419): longer
+  /// than a join takes with one restart of the group (a commit deadline of 10 s).
+  pub join_stall: Duration,
+  /// A join left unsecured after at least this long was given up on by the user; shorter is a
+  /// misclick.
+  pub join_given_up: Duration,
 }
 
 /// One call's telemetry, from the join (or the join attempt) to its end.
@@ -86,7 +93,19 @@ pub struct CallTelemetry {
   sfu_codes: Vec<String>,
   trail: Vec<String>,
   summary: SummaryParts,
+  join: JoinWatch,
   pending: Vec<CallReport>,
+}
+
+/// The join's way to secured media (#2419): where it is, and since when it waits with others.
+#[derive(Debug, Clone, Copy)]
+struct JoinWatch {
+  stage: JoinStage,
+  /// When others were first in the call with this device joined and its media not secured yet:
+  /// alone, nobody can take the device into the encryption, so the wait counts from then.
+  maybe_company_since_ms: Option<u64>,
+  has_secured: bool,
+  has_reported: bool,
 }
 
 /// The link as the last stats sample saw it.
@@ -130,6 +149,8 @@ impl Default for TelemetryThresholds {
       poor_reconnects: 3,
       poor_lossy_samples: 10,
       poor_min_duration: Duration::from_secs(30),
+      join_stall: Duration::from_secs(15),
+      join_given_up: Duration::from_secs(5),
     }
   }
 }
@@ -160,6 +181,12 @@ impl CallTelemetry {
       sfu_codes: Vec::new(),
       trail: Vec::new(),
       summary: SummaryParts::default(),
+      join: JoinWatch {
+        stage: JoinStage::SfuJoin,
+        maybe_company_since_ms: None,
+        has_secured: false,
+        has_reported: false,
+      },
       pending: Vec::new(),
     }
   }
@@ -173,15 +200,33 @@ impl CallTelemetry {
           .iter()
           .map(|participant| participant.device_id)
           .collect();
+        if self.join.stage == JoinStage::SfuJoin {
+          self.join.stage = JoinStage::ExternalSender;
+        }
+        self.note_company(now_ms);
         self.note(now_ms, format!("joined ({} devices)", self.devices.len()));
       },
       CallEngineEvent::ParticipantJoined(participant) => {
         self.devices.insert(participant.device_id);
+        self.note_company(now_ms);
         self.note(now_ms, format!("device joined ({} in call)", self.devices.len()));
       },
       CallEngineEvent::ParticipantLeft(device) => {
         self.devices.remove(device);
+        self.note_company(now_ms);
         self.note(now_ms, format!("device left ({} in call)", self.devices.len()));
+      },
+      CallEngineEvent::JoinStep(step) => {
+        let (stage, what) = match step {
+          JoinStep::KeyPackageSent => (JoinStage::Welcome, "key package sent"),
+          JoinStep::AwaitingRoster => (JoinStage::Roster, "waiting for the roster"),
+          JoinStep::CommitSent => (JoinStage::FounderCommit, "committed as the founder"),
+          JoinStep::WelcomeProcessed => (JoinStage::Transition, "welcome processed"),
+        };
+        self.on_join_step(stage, what, now_ms);
+      },
+      CallEngineEvent::KeyBindingWanted { .. } => {
+        self.on_join_step(JoinStage::KeyBinding, "key binding wanted", now_ms);
       },
       CallEngineEvent::ParticipantReconnecting(_) => {
         self.note(now_ms, "another device reconnecting".to_owned())
@@ -195,10 +240,12 @@ impl CallTelemetry {
       },
       CallEngineEvent::TransportChanged(transport) => self.on_transport(*transport, now_ms),
       CallEngineEvent::Secured { epoch, .. } => {
+        self.join.has_secured = true;
         self.maybe_dave_epoch = Some(*epoch);
         self.note(now_ms, format!("secured, epoch {epoch}"));
       },
       CallEngineEvent::EncryptionFailed { retry_after } => {
+        self.join.stage = JoinStage::EncryptionFailed;
         let is_refused = !retry_after.is_zero();
         self.note(
           now_ms,
@@ -328,6 +375,7 @@ impl CallTelemetry {
       // Rounding: jitter is a few to a few hundred milliseconds.
       .map(|jitter| jitter.round() as u32);
     self.watch_streams(report, now_ms);
+    self.check_join(now_ms, false);
   }
 
   /// The call ended with an error, or a join failed (before [`CallEngineEvent::Joined`]): `code` is
@@ -395,8 +443,10 @@ impl CallTelemetry {
     );
   }
 
-  /// The call ended: a summary of a call that went badly, over the thresholds only.
+  /// The call ended: a summary of a call that went badly, over the thresholds only; a join the
+  /// user gave up on before its media was secured (#2419).
   pub fn finish(&mut self, now_ms: u64) {
+    self.check_join(now_ms, true);
     for (_, watch) in &mut self.streams {
       if watch.is_frozen {
         self.summary.frozen_ms += now_ms.saturating_sub(watch.changed_ms);
@@ -429,6 +479,72 @@ impl CallTelemetry {
   /// The reports since the last call, oldest first.
   pub fn take_reports(&mut self) -> Vec<CallReport> {
     std::mem::take(&mut self.pending)
+  }
+
+  /// A step of the join into the call's encryption, before the media was first secured.
+  fn on_join_step(&mut self, stage: JoinStage, what: &str, now_ms: u64) {
+    if self.join.has_secured {
+      return;
+    }
+    self.join.stage = stage;
+    self.note(now_ms, format!("join: {what}"));
+  }
+
+  /// Others came or went: the join's wait counts from when this device first had company.
+  fn note_company(&mut self, now_ms: u64) {
+    if !self.is_joined || self.join.has_secured {
+      return;
+    }
+    if self.devices.is_empty() {
+      self.join.maybe_company_since_ms = None;
+    } else if self.join.maybe_company_since_ms.is_none() {
+      self.join.maybe_company_since_ms = Some(now_ms);
+    }
+  }
+
+  /// Reports a join whose media wasn't secured (#2419) once: one that waits past
+  /// [`TelemetryThresholds::join_stall`], or one the user left (`has_left`) after
+  /// [`TelemetryThresholds::join_given_up`]. Before `joined` the wait counts from the start; after
+  /// it, from when others were in the call. A reconnect's own wait isn't a join's.
+  fn check_join(&mut self, now_ms: u64, has_left: bool) {
+    if self.join.has_reported || self.join.has_secured || self.is_reconnecting {
+      return;
+    }
+    let since_ms = if self.is_joined {
+      let Some(since_ms) = self.join.maybe_company_since_ms else {
+        return;
+      };
+      since_ms
+    } else {
+      self.started_ms
+    };
+    let threshold = if has_left {
+      self.thresholds.join_given_up
+    } else {
+      self.thresholds.join_stall
+    };
+    let waited_ms = now_ms.saturating_sub(since_ms);
+    if waited_ms < millis(threshold) {
+      return;
+    }
+    self.join.has_reported = true;
+    let stage = self.join.stage;
+    let how = if has_left { "left" } else { "still waiting" };
+    self.note(now_ms, format!("join stalled at {} ({how})", stage.as_str()));
+    tracing::warn!(
+      stage = stage.as_str(),
+      waited_ms,
+      has_left,
+      "call join: no secured media"
+    );
+    self.report(
+      now_ms,
+      CallProblem::JoinStalled {
+        stage,
+        waited_s: seconds(waited_ms),
+        has_left,
+      },
+    );
   }
 
   fn on_reconnecting(&mut self, now_ms: u64) {
@@ -1024,6 +1140,138 @@ mod tests {
     }
   }
 
+  /// Joins that don't get their media secured (#2419).
+  mod join_stalls {
+    use super::*;
+
+    /// Joined with others, the key package out, no welcome: reported once the wait passes the
+    /// threshold, with the stage and the steps in the trail; not again.
+    #[test]
+    fn a_join_waiting_for_its_welcome_is_reported_once_with_its_stage() {
+      let mut telemetry = joined_unsecured(2);
+      telemetry.on_event(&CallEngineEvent::JoinStep(JoinStep::KeyPackageSent), 300);
+      telemetry.observe_stats(&stats(0, 0, 0), 12_000);
+      assert!(stalls(&mut telemetry).is_empty(), "not yet");
+      telemetry.observe_stats(&stats(0, 0, 0), 15_000);
+      let reports = stalls(&mut telemetry);
+      assert_eq!(reports.len(), 1);
+      assert_eq!(
+        reports[0].problem,
+        CallProblem::JoinStalled {
+          stage: JoinStage::Welcome,
+          waited_s: 15,
+          has_left: false,
+        }
+      );
+      assert!(
+        reports[0]
+          .trail
+          .contains(&"+0.3 s join: key package sent".to_owned()),
+        "{:?}",
+        reports[0].trail
+      );
+      telemetry.observe_stats(&stats(0, 0, 0), 30_000);
+      telemetry.finish(31_000);
+      assert!(stalls(&mut telemetry).is_empty(), "once per call");
+    }
+
+    /// The user leaving before the media was secured is the report the issue lacked: it says
+    /// they gave up, at which step.
+    #[test]
+    fn leaving_an_unsecured_join_reports_where_it_stood() {
+      let mut telemetry = joined_unsecured(3);
+      telemetry.on_event(&CallEngineEvent::JoinStep(JoinStep::KeyPackageSent), 200);
+      telemetry.on_event(&CallEngineEvent::JoinStep(JoinStep::WelcomeProcessed), 900);
+      telemetry.observe_stats(&stats(0, 0, 0), 6_000);
+      telemetry.finish(8_000);
+      let reports = stalls(&mut telemetry);
+      assert_eq!(reports.len(), 1);
+      assert_eq!(
+        reports[0].problem,
+        CallProblem::JoinStalled {
+          stage: JoinStage::Transition,
+          waited_s: 8,
+          has_left: true,
+        }
+      );
+    }
+
+    #[test]
+    fn a_secured_join_or_a_quick_leave_reports_nothing() {
+      let mut secured = joined_unsecured(2);
+      secured.on_event(&CallEngineEvent::JoinStep(JoinStep::KeyPackageSent), 200);
+      secured.on_event(
+        &CallEngineEvent::Secured {
+          epoch: 2,
+          privacy_code: "12345".to_owned(),
+        },
+        1_500,
+      );
+      secured.observe_stats(&stats(0, 0, 0), 60_000);
+      secured.finish(61_000);
+      assert!(stalls(&mut secured).is_empty());
+
+      let mut misclick = joined_unsecured(2);
+      misclick.finish(2_000);
+      assert!(stalls(&mut misclick).is_empty());
+    }
+
+    /// Alone nobody can take the device in: the wait counts from when somebody came.
+    #[test]
+    fn the_wait_counts_from_when_others_are_there() {
+      let mut telemetry = joined_unsecured(0);
+      telemetry.observe_stats(&stats(0, 0, 0), 60_000);
+      assert!(stalls(&mut telemetry).is_empty(), "alone");
+      telemetry.on_event(
+        &CallEngineEvent::ParticipantJoined(CallParticipant {
+          user_id: UserId::from_snowflake(Snowflake::new(9).unwrap()),
+          device_id: device(9),
+          audio_stream_id: MediaStreamId(109),
+        }),
+        61_000,
+      );
+      telemetry.on_event(&CallEngineEvent::JoinStep(JoinStep::CommitSent), 61_200);
+      telemetry.observe_stats(&stats(0, 0, 0), 70_000);
+      assert!(stalls(&mut telemetry).is_empty(), "nine seconds of company");
+      telemetry.observe_stats(&stats(0, 0, 0), 76_000);
+      let reports = stalls(&mut telemetry);
+      assert_eq!(
+        reports[0].problem,
+        CallProblem::JoinStalled {
+          stage: JoinStage::FounderCommit,
+          waited_s: 15,
+          has_left: false,
+        }
+      );
+    }
+
+    /// No `joined` from the SFU: counted from the start of the join.
+    #[test]
+    fn a_join_the_sfu_never_answers_is_reported_as_such() {
+      let mut telemetry = telemetry();
+      telemetry.on_event(&CallEngineEvent::TransportChanged(CallTransport::Quic), 400);
+      telemetry.observe_stats(&stats(0, 0, 0), 15_000);
+      let reports = stalls(&mut telemetry);
+      assert_eq!(
+        reports[0].problem,
+        CallProblem::JoinStalled {
+          stage: JoinStage::SfuJoin,
+          waited_s: 15,
+          has_left: false,
+        }
+      );
+    }
+
+    /// The join stalls among the reports: the samples' frameless track reports freezes too.
+    fn stalls(telemetry: &mut CallTelemetry) -> Vec<CallReport> {
+      telemetry
+        .take_reports()
+        .into_iter()
+        .filter(|report| matches!(report.problem, CallProblem::JoinStalled { .. }))
+        .collect()
+    }
+  }
+
   mod churn {
     use super::*;
 
@@ -1226,7 +1474,20 @@ mod tests {
     )
   }
 
+  /// Joined with `devices` others and secured at once, as the other tests' calls are.
   fn joined(devices: i64) -> CallTelemetry {
+    let mut telemetry = joined_unsecured(devices);
+    telemetry.on_event(
+      &CallEngineEvent::Secured {
+        epoch: 1,
+        privacy_code: "00000".to_owned(),
+      },
+      0,
+    );
+    telemetry
+  }
+
+  fn joined_unsecured(devices: i64) -> CallTelemetry {
     let mut telemetry = telemetry();
     telemetry.on_event(
       &CallEngineEvent::Joined {

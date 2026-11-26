@@ -486,7 +486,13 @@ impl NativeCallConfig {
 
 impl NativeCall {
   /// Connects, joins and starts sending and playing in the background.
+  ///
+  /// Returns once the call runs: connected, its audio devices open and the join sent. A call that
+  /// can't get that far (a microphone or speakers that don't open, an audio pipeline that can't
+  /// start) fails the join with its error, so the user hears why instead of seeing a call that
+  /// never starts (#2419).
   pub async fn join(config: NativeCallConfig) -> Result<Self, NativeCallError> {
+    let join_started = Instant::now();
     let target = LinkTarget {
       maybe_pinned_hash: config.maybe_certificate_hash,
       resilience: config.resilience,
@@ -500,20 +506,40 @@ impl NativeCall {
         certificate_hashes: config.certificate_hashes.clone(),
         maybe_fallback_url: config.maybe_fallback_url.clone(),
       })
-      .await?;
+      .await
+      .inspect_err(
+        |error| warn!(%error, after_ms = elapsed_ms(join_started), "call join: no connection to the SFU"),
+      )?;
+    info!(
+      transport = ?link.transport(),
+      after_ms = elapsed_ms(join_started),
+      "call join: connected to the SFU"
+    );
     let (commands, command_rx) = mpsc::unbounded_channel();
     let (event_tx, events) = mpsc::unbounded_channel();
     let microphone_level = SharedLevel::default();
     let next_publication = Arc::new(AtomicU32::new(0));
     let video_decoders = config.engine.capabilities.video_decoders.clone();
-    let task = tokio::spawn(run_call(
+    let (started, started_rx) = oneshot::channel();
+    let mut task = tokio::spawn(run_call(
       config,
       link,
       (commands.downgrade(), command_rx),
       event_tx,
       CallMeter::new(microphone_level.clone()),
       Arc::clone(&next_publication),
+      started,
     ));
+    // The task drops `started` unsent when it ends before the join went out: its error is the
+    // join's.
+    if started_rx.await.is_err() {
+      let error = match (&mut task).await {
+        Ok(Err(error)) => error,
+        Ok(Ok(_)) | Err(_) => NativeCallError::TaskEnded,
+      };
+      warn!(%error, after_ms = elapsed_ms(join_started), "call join: the call didn't start");
+      return Err(error);
+    }
     Ok(Self {
       commands,
       events,
@@ -828,6 +854,11 @@ impl NativeCall {
   }
 }
 
+/// Milliseconds since `since`, for the join's steps in the debug log (#2419).
+fn elapsed_ms(since: Instant) -> u64 {
+  u64::try_from(since.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
 /// The system's trusted roots. Android keeps them where rustls-native-certs doesn't look, so it
 /// uses the Mozilla roots (webpki-roots), like the client core's HTTPS on Android.
 #[cfg(not(target_os = "android"))]
@@ -862,6 +893,7 @@ async fn run_call(
   events: mpsc::UnboundedSender<CallEngineEvent>,
   mut meter: CallMeter,
   next_publication: Arc<AtomicU32>,
+  started: oneshot::Sender<()>,
 ) -> Result<CallStats, NativeCallError> {
   let start = Instant::now();
   let mut engine = CallEngine::new(config.engine.clone(), start);
@@ -893,7 +925,11 @@ async fn run_call(
   }
   let mut source = config.source.clone();
   // A remembered device unplugged since gives way to the default: the call still starts (#986).
-  let mut devices = AudioDevices::open(&source, &config.sink, GoneDevice::UseDefault)?;
+  let opening = Instant::now();
+  let mut devices = AudioDevices::open(&source, &config.sink, GoneDevice::UseDefault).inspect_err(
+    |error| warn!(%error, after_ms = elapsed_ms(opening), "call join: the audio devices didn't open"),
+  )?;
+  info!(after_ms = elapsed_ms(opening), "call join: audio devices open");
   let mut sinks = Sinks {
     events,
     mixer,
@@ -926,6 +962,8 @@ async fn run_call(
   let mut maybe_recording: Option<RecordingSink> = None;
   let (encoded_tx, mut encoded_rx) = mpsc::unbounded_channel::<(VideoTrackKind, EncodedVideoFrame)>();
   sinks.flush(&mut engine, &mut capture, connection.sending_link())?;
+  // The join went out: the caller's `join` returns. It may have stopped waiting.
+  let _ = started.send(());
 
   // The sound the call ends with when it is left by choice (the hang-up tone).
   let mut maybe_farewell = None;

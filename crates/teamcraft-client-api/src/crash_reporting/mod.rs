@@ -35,8 +35,8 @@ use thiserror::Error;
 pub use browser_noise::{BrowserNoiseCount, is_resize_observer_loop};
 pub use call::{
   BrowserFamily, BrowserInfo, CallContext, CallEventDetail, CallProblem, CallQualitySummary, CallRef,
-  CallReport, CallReportGate, CallTransportKind, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext,
-  ResumeFailure, SentVideoContext, Unverified, identifier,
+  CallReport, CallReportGate, CallTransportKind, JoinStage, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS,
+  ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified, identifier,
 };
 pub use event::{
   AppInfo, AppPlatform, CrashEvent, CrashLevel, ErrorSource, EventId, InstallationId, StackFrame, WasmCode,

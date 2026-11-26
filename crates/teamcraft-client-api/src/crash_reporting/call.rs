@@ -116,6 +116,39 @@ pub enum CallProblem {
     #[serde(default)]
     maybe_since_picture_s: Option<u32>,
   },
+  /// A join that didn't get the call's media going (#2419): no `joined` from the SFU, or joined
+  /// with others in the call and no secured media, after `waited_s`. Reported once per call, when
+  /// the wait passes the threshold or when the user leaves first (`has_left`: they gave up and
+  /// probably join again). `stage` is the last step the join made.
+  JoinStalled {
+    stage: JoinStage,
+    waited_s: u32,
+    has_left: bool,
+  },
+  #[serde(other)]
+  Unknown,
+}
+
+/// The last step a stalled join made (#2419), in the order a join takes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JoinStage {
+  /// Connected to the SFU, which hasn't answered the join with `joined`.
+  SfuJoin,
+  /// Joined; the SFU's external sender (the start of the encryption) hasn't come.
+  ExternalSender,
+  /// The key package waits for its binding to the device, signed elsewhere.
+  KeyBinding,
+  /// The key package went out; no member committed its proposal, no welcome came.
+  Welcome,
+  /// A DAVE change waits for a newer roster of the call's devices.
+  Roster,
+  /// This device committed as the group's founder; the commit wasn't announced back.
+  FounderCommit,
+  /// The welcome was processed; the switch to the new epoch's key didn't come.
+  Transition,
+  /// The encryption refused this device or gave up on it (`CallEncryptionFailed` says which).
+  EncryptionFailed,
   #[serde(other)]
   Unknown,
 }
@@ -144,6 +177,22 @@ pub enum ResumeFailure {
   NotResumed,
   /// It held a member the call's roster no longer has.
   MemberOffRoster,
+}
+
+impl JoinStage {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::SfuJoin => "sfu_join",
+      Self::ExternalSender => "external_sender",
+      Self::KeyBinding => "key_binding",
+      Self::Welcome => "welcome",
+      Self::Roster => "roster",
+      Self::FounderCommit => "founder_commit",
+      Self::Transition => "transition",
+      Self::EncryptionFailed => "encryption_failed",
+      Self::Unknown => "unknown",
+    }
+  }
 }
 
 impl ResumeFailure {
@@ -353,6 +402,7 @@ impl CallProblem {
       Self::ProtocolError { .. } => "protocol_error",
       Self::PoorCall(_) => "poor_call",
       Self::CaptureStalled { .. } => "capture_stalled",
+      Self::JoinStalled { .. } => "join_stalled",
       Self::Unknown => "unknown",
     }
   }
@@ -369,7 +419,8 @@ impl CallProblem {
       | Self::VideoEncodingFailed { .. }
       | Self::CallFailed { .. }
       | Self::ProtocolError { .. }
-      | Self::CaptureStalled { .. } => CrashLevel::Error,
+      | Self::CaptureStalled { .. }
+      | Self::JoinStalled { has_left: true, .. } => CrashLevel::Error,
       Self::ResumeFailed {
         cause: ResumeFailure::NotResumed,
       }
@@ -378,6 +429,7 @@ impl CallProblem {
       | Self::TransportFallback
       | Self::SfuRejected { .. }
       | Self::PoorCall(_)
+      | Self::JoinStalled { has_left: false, .. }
       | Self::Unknown => CrashLevel::Warning,
     }
   }
@@ -398,6 +450,7 @@ impl CallProblem {
       Self::ProtocolError { .. } => "CallProtocolError",
       Self::PoorCall(_) => "PoorCall",
       Self::CaptureStalled { .. } => "CaptureStalled",
+      Self::JoinStalled { .. } => "CallJoinStalled",
       Self::Unknown => "CallProblem",
     }
   }
@@ -439,6 +492,10 @@ impl CallProblem {
       Self::CaptureStalled { video, window, .. } => {
         parts.push(video.as_str().to_owned());
         parts.push(unusable_reason(window).to_owned());
+      },
+      Self::JoinStalled { stage, has_left, .. } => {
+        parts.push(stage.as_str().to_owned());
+        parts.push(if *has_left { "left" } else { "waiting" }.to_owned());
       },
       _ => {},
     }
@@ -505,6 +562,16 @@ impl CallProblem {
         video.as_str(),
         unusable_reason(window)
       ),
+      Self::JoinStalled {
+        stage,
+        has_left: false,
+        ..
+      } => format!("join stalled: {}", stage.as_str()),
+      Self::JoinStalled {
+        stage,
+        has_left: true,
+        ..
+      } => format!("join stalled, left: {}", stage.as_str()),
       Self::Unknown => "call problem".to_owned(),
     }
   }
@@ -518,6 +585,7 @@ impl CallProblem {
         json!({ "reconnects_in_window": reconnects, "window_s": window_s })
       },
       Self::VideoFreeze { frozen_s, .. } => json!({ "frozen_s": frozen_s }),
+      Self::JoinStalled { waited_s, .. } => json!({ "waited_s": waited_s }),
       Self::PoorCall(summary) => serde_json::to_value(summary).unwrap_or(Value::Null),
       Self::CaptureStalled {
         window,
@@ -967,6 +1035,11 @@ mod tests {
           code: "dave".to_owned(),
           is_joined: true,
         },
+        CallProblem::JoinStalled {
+          stage: JoinStage::Welcome,
+          waited_s: 9,
+          has_left: true,
+        },
       ] {
         assert_eq!(problem.level(), CrashLevel::Error, "{problem:?}");
       }
@@ -981,9 +1054,38 @@ mod tests {
         },
         CallProblem::PoorCall(CallQualitySummary::default()),
         freeze(),
+        CallProblem::JoinStalled {
+          stage: JoinStage::Welcome,
+          waited_s: 15,
+          has_left: false,
+        },
       ] {
         assert_eq!(problem.level(), CrashLevel::Warning, "{problem:?}");
       }
+    }
+
+    /// A stalled join is one issue per stage and outcome, whatever it waited (#2419); the stage
+    /// names the step in the title, and the report reads back from the snapshot's JSON.
+    #[test]
+    fn a_stalled_join_is_grouped_by_its_stage_and_outcome() {
+      let stalled = |waited_s, has_left| CallProblem::JoinStalled {
+        stage: JoinStage::Transition,
+        waited_s,
+        has_left,
+      };
+      assert_eq!(
+        stalled(15, false).fingerprint(),
+        ["call", "join_stalled", "transition", "waiting"]
+      );
+      assert_eq!(stalled(15, true).fingerprint(), stalled(40, true).fingerprint());
+      assert_eq!(stalled(8, true).message(), "join stalled, left: transition");
+      assert_eq!(stalled(8, true).error_type(), "CallJoinStalled");
+      let json = serde_json::to_string(&stalled(8, true)).unwrap();
+      assert!(json.contains(r#""stage":"transition""#), "{json}");
+      let read: CallProblem = serde_json::from_str(&json).unwrap();
+      assert_eq!(read, stalled(8, true));
+      let newer: JoinStage = serde_json::from_str(r#""a_later_step""#).unwrap();
+      assert_eq!(newer, JoinStage::Unknown);
     }
 
     #[test]
