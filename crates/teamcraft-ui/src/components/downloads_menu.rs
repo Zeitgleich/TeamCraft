@@ -6,7 +6,10 @@
 
 use std::collections::{HashMap, HashSet};
 
+use std::time::Duration;
+
 use leptos::html;
+use leptos::leptos_dom::helpers::{TimeoutHandle, set_timeout_with_handle};
 use leptos::prelude::*;
 use teamcraft_client_api::actions::{DownloadControl, DownloadEntry, DownloadState, FileFailure};
 use teamcraft_client_api::admin::format_bytes;
@@ -19,6 +22,7 @@ use crate::components::sheet::MenuSurface;
 use crate::components::top_bar::DownloadsSlot;
 use crate::download_speed::{SpeedMeter, seconds_left};
 use crate::i18n::{I18n, use_i18n};
+use crate::reactive::SetIfAlive;
 use crate::settings;
 use crate::state::{AppState, Overlay, use_app_state};
 
@@ -41,6 +45,24 @@ pub fn DownloadsButton() -> impl IntoView {
   let entries = Memo::new(move |_| listed.with(|listed| listed.entries.clone()));
   let is_shown = Memo::new(move |_| listed.with(|listed| listed.is_shown(was_shown)));
   let is_answered = Memo::new(move |_| listed.with(|listed| listed.is_answered));
+  // What the top bar shows: appearing is at once, going away waits until the list stayed empty
+  // for a while, so whatever makes an answer flip for a moment never moves the bar (#2338).
+  let is_visible = RwSignal::new(is_shown.get_untracked());
+  Effect::new(move |timer: Option<Option<TimeoutHandle>>| {
+    if let Some(handle) = timer.flatten() {
+      handle.clear();
+    }
+    match visibility_step(is_shown.get(), is_visible.get_untracked()) {
+      VisibilityStep::Show => {
+        is_visible.set(true);
+        None
+      },
+      VisibilityStep::HideLater => {
+        set_timeout_with_handle(move || is_visible.set_if_alive(false), HIDE_AFTER_EMPTY).ok()
+      },
+      VisibilityStep::Stay => None,
+    }
+  });
   // Every mount and flip is counted: a flicker seen once in the field shows in the debug log (#2338).
   churn_watch::record(ChurnKind::DownloadsMounted);
   Effect::new(move |previous: Option<bool>| {
@@ -100,7 +122,7 @@ pub fn DownloadsButton() -> impl IntoView {
   };
 
   view! {
-    <Show when=move || is_shown.get() fallback=|| ()>
+    <Show when=move || is_visible.get() fallback=|| ()>
       <div class="downloads">
         <button
           class="icon-btn on-dark downloads-btn"
@@ -130,6 +152,28 @@ pub fn DownloadsButton() -> impl IntoView {
         </Show>
       </div>
     </Show>
+  }
+}
+
+/// How long the list stays empty before the button leaves the top bar. An answer that flips to
+/// empty and back within it (the core busy at the start, #2338) shows no change.
+const HIDE_AFTER_EMPTY: Duration = Duration::from_millis(2_000);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VisibilityStep {
+  /// The list has entries: the button shows now.
+  Show,
+  /// The list is empty while the button shows: it goes once that lasts.
+  HideLater,
+  /// Nothing to do.
+  Stay,
+}
+
+fn visibility_step(is_shown: bool, is_visible: bool) -> VisibilityStep {
+  match (is_shown, is_visible) {
+    (true, _) => VisibilityStep::Show,
+    (false, true) => VisibilityStep::HideLater,
+    (false, false) => VisibilityStep::Stay,
   }
 }
 
@@ -589,6 +633,14 @@ mod tests {
       let waiting = Listed::next(None, None);
       assert!(waiting.is_shown(true));
       assert!(!waiting.is_shown(false));
+    }
+
+    #[test]
+    fn an_empty_list_hides_the_button_only_after_a_while() {
+      assert_eq!(visibility_step(true, false), VisibilityStep::Show);
+      assert_eq!(visibility_step(true, true), VisibilityStep::Show);
+      assert_eq!(visibility_step(false, true), VisibilityStep::HideLater);
+      assert_eq!(visibility_step(false, false), VisibilityStep::Stay);
     }
 
     #[test]
