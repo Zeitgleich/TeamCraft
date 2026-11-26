@@ -53,6 +53,8 @@ mod webview_memory;
 mod webview_menu;
 mod webview_recovery;
 #[cfg(target_os = "linux")]
+mod webview_renderer;
+#[cfg(target_os = "linux")]
 mod webview_scrolling;
 mod webview_spellcheck;
 mod window_chrome;
@@ -88,8 +90,8 @@ use crate::webview_recovery::WebviewRecovery;
 use crate::window_chrome::WindowChromeState;
 
 fn main() -> anyhow::Result<()> {
-  // Before GTK starts: file pickers through xdg-desktop-portal, WebKitGTK without the DMABUF
-  // renderer that flickers on some GPUs (startup_env.rs).
+  // Before GTK starts: file pickers through xdg-desktop-portal, WebKitGTK's renderer for this
+  // GPU and desktop (startup_env.rs, webview_renderer.rs).
   #[cfg(target_os = "linux")]
   startup_env::ensure_startup_environment();
   let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
@@ -103,6 +105,9 @@ fn main() -> anyhow::Result<()> {
     .init();
   // Panics of the shell are kept for the page to report (docs/crash-reports.md).
   crash_reports::install_hook();
+  // Which path the painted page takes to the compositor: the first question about flicker (#2416).
+  #[cfg(target_os = "linux")]
+  webview_renderer::log_renderer();
 
   // No server yet: the account's server is set in `setup`, once the data directory is known.
   // The one read of the OS keychain per start happens when something first asks it for a secret

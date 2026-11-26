@@ -6,13 +6,9 @@
 //! - `GTK_USE_PORTAL=1`: file pickers through xdg-desktop-portal, so Plasma shows its own dialog
 //!   and GNOME its own (#509). WebKitGTK's `<input type=file>` opens a `GtkFileChooserNative`,
 //!   which uses the portal when the variable is set. Flatpak's GTK uses the portal anyway.
-//! - `WEBKIT_DISABLE_DMABUF_RENDERER=1`, only when the user asks for it with
-//!   `TEAMCRAFT_WEBKIT_DMABUF=0`: WebKitGTK's DMABUF renderer is the default again (#805). Without
-//!   it WebKitGTK paints into shared memory and the CPU copies every frame, which made animations
-//!   and the lightbox stutter on a large window. The flicker that led to turning it off for
-//!   everyone (AMD on KDE Plasma, #687, #708) did not show on current Mesa, WebKitGTK and KWin; the
-//!   switch stays for a driver or compositor where it does
-//!   (apps/desktop/packaging/linux/README.md, "Rendering").
+//! - WebKitGTK's renderer (`webview_renderer.rs`): GPU buffers by default (#805), shared memory
+//!   for an Intel GPU on Wayland (`WEBKIT_DMABUF_RENDERER_FORCE_SHM=1`, #2416), the
+//!   compatible renderer when the user asks for it (`WEBKIT_DISABLE_DMABUF_RENDERER=1`).
 //! - `MALLOC_ARENA_MAX=2` and `MALLOC_TRIM_THRESHOLD_=131072`: glibc's allocator keeps what was
 //!   freed in up to eight arenas per core and raises its trim threshold as it goes, so the shell
 //!   held several times the memory it used: 314 MiB in arenas after four hours of 1.0.30, where a
@@ -31,10 +27,9 @@ use std::ffi::OsStr;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+use crate::webview_renderer::{self, RendererInputs};
+
 const PORTAL_VARIABLE: &str = "GTK_USE_PORTAL";
-const DMABUF_VARIABLE: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
-/// The user's way to switch WebKitGTK's DMABUF renderer off: `0` does, anything else leaves it on.
-const DMABUF_CHOICE_VARIABLE: &str = "TEAMCRAFT_WEBKIT_DMABUF";
 /// glibc's own switches for its allocator; any of them set means the user tunes it.
 const TUNABLES_VARIABLE: &str = "GLIBC_TUNABLES";
 const ARENA_MAX_VARIABLE: &str = "MALLOC_ARENA_MAX";
@@ -54,8 +49,7 @@ const WASM_COMPILER_THREADS_VALUE: &str = "4";
 /// What the start found in its environment.
 struct StartEnvironment<'a> {
   maybe_portal: Option<&'a OsStr>,
-  maybe_dmabuf: Option<&'a OsStr>,
-  maybe_dmabuf_choice: Option<&'a OsStr>,
+  renderer: RendererInputs<'a>,
   /// The user tunes glibc's allocator: `GLIBC_TUNABLES` or one of our two variables is set.
   is_allocator_tuned: bool,
   /// The user chose JavaScriptCore's WebAssembly compiler threads.
@@ -70,12 +64,18 @@ struct StartEnvironment<'a> {
 /// default renderer.
 pub fn ensure_startup_environment() {
   let maybe_portal = std::env::var_os(PORTAL_VARIABLE);
-  let maybe_dmabuf = std::env::var_os(DMABUF_VARIABLE);
-  let maybe_dmabuf_choice = std::env::var_os(DMABUF_CHOICE_VARIABLE);
+  let renderer_choice = std::env::var_os(webview_renderer::RENDERER_CHOICE_VARIABLE);
+  let dmabuf_choice = std::env::var_os(webview_renderer::DMABUF_CHOICE_VARIABLE);
+  let dmabuf = std::env::var_os(webview_renderer::DMABUF_VARIABLE);
+  let shared_memory = std::env::var_os(webview_renderer::SHARED_MEMORY_VARIABLE);
   let missing = missing_variables(&StartEnvironment {
     maybe_portal: maybe_portal.as_deref(),
-    maybe_dmabuf: maybe_dmabuf.as_deref(),
-    maybe_dmabuf_choice: maybe_dmabuf_choice.as_deref(),
+    renderer: webview_renderer::system_inputs(
+      renderer_choice.as_deref(),
+      dmabuf_choice.as_deref(),
+      dmabuf.as_deref(),
+      shared_memory.as_deref(),
+    ),
     is_allocator_tuned: [TUNABLES_VARIABLE, ARENA_MAX_VARIABLE, TRIM_THRESHOLD_VARIABLE]
       .iter()
       .any(|name| std::env::var_os(name).is_some()),
@@ -98,7 +98,7 @@ pub fn ensure_startup_environment() {
 }
 
 /// The variables to set before GTK starts: none the user set themselves, the portal outside
-/// Flatpak, the DMABUF switch only when the user chose the compatible renderer, and the
+/// Flatpak, the renderer's switch where it isn't WebKit's default, and the
 /// allocator's unless the user tunes it, and fewer WebAssembly compiler threads on a machine where
 /// JavaScriptCore would start more.
 fn missing_variables(start: &StartEnvironment<'_>) -> Vec<(&'static str, &'static str)> {
@@ -106,10 +106,7 @@ fn missing_variables(start: &StartEnvironment<'_>) -> Vec<(&'static str, &'stati
   if start.maybe_portal.is_none() && !start.is_flatpak {
     missing.push((PORTAL_VARIABLE, "1"));
   }
-  let disables_dmabuf = start.maybe_dmabuf_choice.is_some_and(|value| value == "0");
-  if start.maybe_dmabuf.is_none() && disables_dmabuf {
-    missing.push((DMABUF_VARIABLE, "1"));
-  }
+  missing.extend(webview_renderer::missing_variables(&start.renderer));
   if !start.is_allocator_tuned {
     missing.push((ARENA_MAX_VARIABLE, ARENA_MAX));
     missing.push((TRIM_THRESHOLD_VARIABLE, TRIM_THRESHOLD_BYTES));
@@ -134,37 +131,42 @@ mod tests {
   fn a_plain_start_sets_the_portal_and_the_allocator() {
     let mut expected = vec![(PORTAL_VARIABLE, "1")];
     expected.extend(ALLOCATOR);
-    assert_eq!(
-      missing_variables(&start(None, None, None, false, false)),
-      expected
-    );
+    assert_eq!(missing_variables(&start(None, false, false)), expected);
   }
 
   #[test]
   fn the_users_values_are_kept() {
     let zero = Some(OsStr::new("0"));
-    assert!(missing_variables(&start(zero, zero, zero, true, false)).is_empty());
-    let one = Some(OsStr::new("1"));
-    assert!(missing_variables(&start(one, one, zero, true, false)).is_empty());
+    let kept = StartEnvironment {
+      renderer: RendererInputs {
+        maybe_dmabuf_choice: zero,
+        maybe_dmabuf: zero,
+        ..RendererInputs::default()
+      },
+      ..start(zero, true, false)
+    };
+    assert!(missing_variables(&kept).is_empty());
   }
 
   #[test]
   fn flatpak_needs_no_portal() {
-    assert_eq!(
-      missing_variables(&start(None, None, None, false, true)),
-      ALLOCATOR.to_vec()
-    );
-    assert!(missing_variables(&start(None, None, None, true, true)).is_empty());
+    assert_eq!(missing_variables(&start(None, false, true)), ALLOCATOR.to_vec());
+    assert!(missing_variables(&start(None, true, true)).is_empty());
   }
 
   #[test]
-  fn the_compatible_renderer_can_be_chosen() {
+  fn the_renderers_variables_are_set() {
+    let compatible = StartEnvironment {
+      renderer: RendererInputs {
+        maybe_dmabuf_choice: Some(OsStr::new("0")),
+        ..RendererInputs::default()
+      },
+      ..start(None, true, true)
+    };
     assert_eq!(
-      missing_variables(&start(None, None, Some(OsStr::new("0")), true, true)),
-      vec![(DMABUF_VARIABLE, "1")]
+      missing_variables(&compatible),
+      vec![(webview_renderer::DMABUF_VARIABLE, "1")]
     );
-    // Any other value is not a choice to switch it off.
-    assert!(missing_variables(&start(None, None, Some(OsStr::new("1")), true, true)).is_empty());
   }
 
   #[test]
@@ -172,7 +174,7 @@ mod tests {
     let wasm = (WASM_COMPILER_THREADS_VARIABLE, WASM_COMPILER_THREADS_VALUE);
     let on = |available_threads| StartEnvironment {
       available_threads,
-      ..start(None, None, None, true, true)
+      ..start(None, true, true)
     };
     assert_eq!(missing_variables(&on(24)), vec![wasm]);
     assert_eq!(missing_variables(&on(6)), vec![wasm]);
@@ -186,17 +188,10 @@ mod tests {
     assert!(missing_variables(&tuned).is_empty());
   }
 
-  fn start<'a>(
-    maybe_portal: Option<&'a OsStr>,
-    maybe_dmabuf: Option<&'a OsStr>,
-    maybe_dmabuf_choice: Option<&'a OsStr>,
-    is_allocator_tuned: bool,
-    is_flatpak: bool,
-  ) -> StartEnvironment<'a> {
+  fn start(maybe_portal: Option<&OsStr>, is_allocator_tuned: bool, is_flatpak: bool) -> StartEnvironment<'_> {
     StartEnvironment {
       maybe_portal,
-      maybe_dmabuf,
-      maybe_dmabuf_choice,
+      renderer: RendererInputs::default(),
       is_allocator_tuned,
       is_wasm_compiler_tuned: false,
       available_threads: 4,

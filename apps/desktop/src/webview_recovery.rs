@@ -36,6 +36,8 @@ use teamcraft_client_api::calls::WebviewVideoMode;
 
 use crate::calls::CallHost;
 use crate::tray;
+#[cfg(target_os = "linux")]
+use crate::webview_renderer::DMABUF_VARIABLE;
 
 /// Crashes this close together count as one problem that keeps coming back. A page takes seconds to
 /// load and to show a call's video again, so a crash loop is well inside it.
@@ -54,9 +56,6 @@ const WINDOW_GONE_TIMEOUT: Duration = Duration::from_secs(5);
 /// In the app's config directory: the versions whose WebCodecs killed the page when asked.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 const CRASHED_PROBE_FILE: &str = "webcodecs-crash.json";
-/// WebKitGTK's switch for its DMABUF renderer (`startup_env.rs`); WebKit reads anything but `0` as off.
-#[cfg(target_os = "linux")]
-const DMABUF_VARIABLE: &str = "WEBKIT_DISABLE_DMABUF_RENDERER";
 
 /// What the shell knows about the state of its webview's page.
 pub struct WebviewRecovery {
