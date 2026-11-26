@@ -58,6 +58,7 @@ use wtransport::{ClientConfig, Connection, Endpoint, RecvStream, SendStream};
 
 use crate::audio_codec::{FRAME_SAMPLES_PER_CHANNEL, OpusEncoderConfig};
 use crate::audio_device::{AudioDeviceError, AudioInput, AudioOutput, PlaybackBuffer, open_or_default};
+use crate::audio_diagnostics::{AudioReport, AudioReportClock, PlaybackQueue};
 use crate::audio_io::{AudioDeviceChoice, AudioSink, AudioSource, sine_tone};
 use crate::audio_level::{CallMeter, SharedLevel};
 use crate::audio_pipeline::{AudioPipelineError, CapturePipeline, PlaybackMixer};
@@ -918,6 +919,7 @@ async fn run_call(
   let mut tone_position = 0u64;
   let mut frame_tick = tokio::time::interval(FRAME_INTERVAL);
   let mut timer_tick = tokio::time::interval(TIMER_INTERVAL);
+  let mut audio_report = AudioReportClock::new(start);
   if let Some(prior) = config.maybe_prior_link {
     engine.set_prior_link(prior);
   }
@@ -1073,6 +1075,9 @@ async fn run_call(
       _ = timer_tick.tick() => {
         let now = Instant::now();
         meter.tick(now);
+        if audio_report.is_due(now) {
+          audio_report_of(&mut capture, &mut sinks.mixer, &devices, maybe_processor.as_deref()).log();
+        }
         engine.on_timer(now);
         if connection.is_out_of_time(now) {
           break Err(NativeCallError::ConnectionLost);
@@ -3393,6 +3398,28 @@ impl AudioDevices {
     if self.thread.join().is_err() {
       warn!("audio thread panicked");
     }
+  }
+}
+
+/// The call's sound since the last report, for the debug log (#2418).
+fn audio_report_of(
+  capture: &mut CapturePipeline,
+  mixer: &mut PlaybackMixer,
+  devices: &AudioDevices,
+  maybe_processor: Option<&crate::audio_processing::AudioProcessor>,
+) -> AudioReport {
+  let (microphone, sent) = capture.take_levels();
+  AudioReport {
+    microphone,
+    sent,
+    played: mixer.take_played_level(),
+    maybe_playback: devices.maybe_playback.as_ref().map(|buffer| PlaybackQueue {
+      queued_samples: buffer.len(),
+      underruns: buffer.underruns(),
+    }),
+    echo: maybe_processor
+      .map(|processor| processor.echo_stats())
+      .unwrap_or_default(),
   }
 }
 
