@@ -87,7 +87,8 @@ gh attestation verify oci://ghcr.io/zeitgleich/teamcraft-server:{{version}} --re
 ```
 
 SBOMs: `teamcraft-source-{{version}}.{spdx,cdx}.json` for the source tree, `teamcraft-server-*`,
-`teamcraft-sfu-*`, `teamcraft-bridge-*` and `teamcraft-notetaker-*` for the images.
+`teamcraft-sfu-*`, `teamcraft-bridge-*`, `teamcraft-notetaker-*` and `teamcraft-recorder-*` for the
+images.
 
 ## What's changed
 

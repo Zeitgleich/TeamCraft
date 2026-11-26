@@ -764,7 +764,9 @@ How the apps behave on networks between the user and the server (issue #157):
 `teamcraft-recorder` (#2273, admin.md §3.13, e2ee.md §8.3) records the calls of the conversations
 its bot account is a member of and posts each recording, encrypted, into the call's conversation.
 It is a call participant with the call's keys: **run it on a machine you trust like the people's
-own devices**, not next to the server on an untrusted VPS. One instance per bot account.
+own devices**, not next to the server on an untrusted VPS. One instance per bot account. It runs
+as the image `ghcr.io/zeitgleich/teamcraft-recorder` (containers/README.md); the reference
+deployment has no role for it yet (#2453).
 
 - **Configuration:** `crates/teamcraft-recorder/teamcraft-recorder.example.toml` documents every
   option; each can also be set as `TEAMCRAFT_RECORDER_<SECTION>__<KEY>`. It needs the server's
@@ -969,8 +971,8 @@ carried over. Work through it in this order:
 
 1. **Tell everybody.** All members must re-enroll, so pick a time. The old history stays readable
    only on devices that still hold it.
-2. **Stop** `teamcraft-server`, `teamcraft-sfu`, bridges and the notetaker. Keep a last backup of the
-   old database for the record, but do not restore it.
+2. **Stop** `teamcraft-server`, `teamcraft-sfu`, bridges, the notetaker and the recorder bot. Keep a
+   last backup of the old database for the record, but do not restore it.
 3. **Start from an empty database** (new database or dropped schema; the server migrates it on
    start) and an empty bucket (or a new one: the old objects have no rows any more and are
    ciphertext only). Keep the configuration and secrets, the identity provider and the domain.
@@ -983,8 +985,9 @@ carried over. Work through it in this order:
 6. **The first owner saves the first policy** (Administration → Security). That signs the genesis
    roster with the first owner as root of trust; confirm the proposed owners and admins one by one
    (admin.md §2.3.1, "The first roster"). Members compare the root fingerprint with that owner.
-7. **Re-enroll bridges and the notetaker** (their keys belong to the old workspace), then recreate
-   spaces, channels and memberships; guests are invited again.
+7. **Re-enroll bridges, the notetaker and the recorder bot** (their keys belong to the old
+   workspace), name the recorder bot in the call recording policy again, then recreate spaces,
+   channels and memberships; guests are invited again.
 
 | Kept                                                 | Lost                                                        |
 |------------------------------------------------------|-------------------------------------------------------------|
@@ -1003,9 +1006,9 @@ carried over. Work through it in this order:
   rate limits and the call roster live in the server's memory, and there is no bus between instances
   yet: events published on one instance never reach clients connected to another. Upgrade by
   replacing the instance (a short interruption), not by rolling several.
-- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges and the
-  notetaker. The SFU verifies join tokens the server signs; the token format is versioned with the
-  server. An old server binary refuses to start against a database migrated by a newer one.
+- Order: database backup, new `teamcraft-server`, then `teamcraft-sfu`, then bridges, the
+  notetaker and the recorder bot. The SFU verifies join tokens the server signs; the token format
+  is versioned with the server. An old server binary refuses to start against a database migrated by a newer one.
 - On SIGTERM the server drains: `/readyz` answers 503, every gateway and device-linking socket is
   closed with code 1012 ("service restart"), and the process waits up to `[gateway]
   drain_timeout_secs` (default 10) for the sockets to close before it exits. Give the container a
