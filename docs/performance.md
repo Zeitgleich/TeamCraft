@@ -3659,10 +3659,13 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,950,000 B  | fails; warns from 95 % (6.60 MB) |
-| Signed-in first visit: gzip -9 total | 6,100,000 B  | fails; warns from 95 % (5.80 MB) |
+| A guest in a meeting: gzip -9 total  | 6,880,000 B  | fails; warns from 95 % (6.54 MB) |
+| Signed-in first visit: gzip -9 total | 6,030,000 B  | fails; warns from 95 % (5.73 MB) |
 | The call module: gzip -9             | 2,100,000 B  | fails                            |
 | Desktop page's start: uncompressed   | 11,900,000 B | fails                            |
+
+On 2026-11-27 (#1462) both budgets went down by 70 kB, from 6.95 and 6.10 MB: the service worker
+makes its proofs without the `url` crate (below).
 
 On 2026-11-26 (#2384) the browser's core moved out of the app into a module of its own (`engine`),
 which the desktop app's page never loads ("Desktop on Linux: a smaller binary and less wasm at the
@@ -3705,6 +3708,40 @@ The call module's budget was 1,000,000 B (0.86 MB with the effects' compositors,
 without asking anybody for logs. On 2026-11-20 the module had reached 1.103 MB and failed every web
 pull request; the maintainer raised its budget by 1 MB to 2,100,000 B, and a guest's meeting, which
 includes it, by the same to 7,340,000 B (6,337,154 B then).
+
+#### The service worker's proofs without the `url` crate (#1462, 2026-11-27)
+
+What #1909 (below) left in the worker: `url` with `idna` and the ICU normalizer's data, about 95 kB
+of its code and data before wasm-opt, for one use. `DpopProofDraft::new` reads a request's URL to
+drop its query and fragment from the proof's `htu`. By `twiggy dominators` over a build with names
+nothing else in the worker reaches `Url::parse`. The worker's proofs only go to the TeamCraft
+server, which reads `htu` with `url` itself (`verify_proof`), so the worker cuts it from the URL as
+text (`DpopProofDraft::new_for_own_server`, through `signed_headers_to_own_server`): a URL read
+again from its own serialization is the same URL, and the server decides alike on both, which
+`teamcraft_crypto::dpop`'s tests check for URLs in their normal form and not (case, default port,
+dot segments, a query, a fragment, another origin, a user name). The app's proofs, an identity
+provider's among them, stay normalized (e2ee.md §3.1.2). Which draft a proof gets is a function
+item, not a value matched at run time, so the worker links no `url` for the other.
+
+Release `trunk build` on macOS (trunk 0.22.0, wasm-opt 131, the CI job's commands), `main`
+e1cbea9e with this change, against CI's `main` ad067b31 the hour before (Linux), gzip -9:
+
+| Download                                      | Before      | After       | Delta      |
+|-----------------------------------------------|-------------|-------------|------------|
+| A guest in a meeting (lobby, meeting, calls)  | 6,874,690 B | 6,809,622 B | −65,068 B  |
+| Signed-in first visit                         | 6,014,915 B | 5,943,566 B | −71,349 B  |
+| The service worker (in both)                  | 0.47 MB     | 402,064 B   |            |
+
+The worker alone, built with names and optimized as trunk does (`wasm-bindgen`, `wasm-opt -Oz`), on
+the same tree before and after: 474,296 → 403,983 B gzip -9 (−70,313 B), 1.09 → 0.93 MB
+uncompressed. The app, the signed-in app's pack, the browser's core and the texts did not change
+beyond the two builds' platforms. Both budgets went down by 70 kB.
+
+With this, every candidate of #1462 is done or decided (the console's texts, the worker's REST
+client, the member-only command parts and upkeep rounds, the snapshot reads, the guest's join page
+and the desktop's chrome: the sections below; device linking and the share inbox stay, as #1909's
+list says). Left in the worker: the `Display` texts of the crypto errors (`CoreError`, about 5 kB
+before wasm-opt), not worth a change of their own.
 
 #### Rarely shown parts out of the first visit (#1699, 2026-11-22)
 
@@ -3819,7 +3856,7 @@ from 0.99 to 0.92 MB. Both budgets went down by 30 kB.
 
 Left in the worker: `url` and `idna` (about 46 kB before wasm-opt), which `teamcraft-crypto`'s
 `DpopProofDraft::new` uses to drop a proof's query and fragment from `htu`. Taking them out is a
-change to how proofs are made, for its own review.
+change to how proofs are made, for its own review: done on 2026-11-27 (#1462, above).
 
 #### What only a member's page asks for, out of a guest's meeting (#1462, 2026-11-13)
 

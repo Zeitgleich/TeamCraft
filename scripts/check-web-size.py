@@ -72,8 +72,9 @@ except ImportError:  # Optional: gzip is the budget, brotli is informational.
 # Raised to 6.95 MB on 2026-11-26 (#2384), a decision of the maintainer: the browser's core moved out
 # of the app into a module of its own (`engine`), so the desktop app's page no longer compiles it at
 # every start (about 12 MiB of its memory). A guest loads the same code in more files: 6.88 MB, plus
-# about 1 %.
-DEFAULT_GUEST_BUDGET_BYTES = 6_950_000
+# about 1 %. Lowered by 70 kB to 6.88 MB on 2026-11-27 (#1462): the service worker's proofs without
+# the `url` crate.
+DEFAULT_GUEST_BUDGET_BYTES = 6_880_000
 # The split modules a guest loads once let into a meeting (teamcraft-ui `areas.rs`), and the
 # browser's core, which every browser page that starts a core loads (#2384).
 ENGINE_MODULE = "engine"
@@ -98,8 +99,9 @@ SPLIT_MODULE = re.compile(
 # 2026-11-22 (#1699): 5.61 MB after what moved out of the app and the signed-in app then, plus
 # about 6 % (5 % would warn at once).
 # Raised to 6.10 MB on 2026-11-26 (#2384), with the guest's budget above: 6.03 MB after the browser's
-# core moved into a module of its own, plus about 1 %.
-DEFAULT_BUDGET_BYTES = 6_100_000
+# core moved into a module of its own, plus about 1 %. Lowered by 70 kB to 6.03 MB on 2026-11-27
+# (#1462), with the guest's budget above.
+DEFAULT_BUDGET_BYTES = 6_030_000
 # The call module's gzip -9 size, decimal megabytes: 0.86 MB with the effects' compositors (#439),
 # plus about 15 %; raised to 1.1 MB when the call problem reports (#1762) took it to 1.02 MB. The
 # segmentation is a module of its own that only loads when an effect starts.
