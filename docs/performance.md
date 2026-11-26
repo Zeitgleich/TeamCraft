@@ -2813,6 +2813,73 @@ JIT code). With the app's part down to what the first screen needs, the budget o
 met on Linux: the release build on the GPU sits at about 460–485 MiB, of it about 300 MiB
 WebKit's web process and 75 MiB mapped files of the shell.
 
+### Desktop on Linux: a smaller binary and less wasm at the start (issue #2384)
+
+Same harness, workspace and machine as the section above (`desktop_perf.rs`, large workspace, 40
+channel switches, release build as `desktop-release.yml` builds it, stripped, on the GPU through a
+virtual KWin), measured 2026-11-26 on main db3905bef with rustc 1.100.0. After the switches the app was
+held and its processes read from `/proc/<pid>/smaps`. Runs of the same build differed by up to 10 MiB.
+
+**What the page compiles.** JavaScriptCore keeps about four times a module's bytes for every
+WebAssembly module it compiles, for as long as the page lives: in WebKitGTK's `jsc` shell the app's
+main module (7.8 MB) held 32 MiB with four compiler threads, the same with the system allocator, and
+with the baseline and optimizing compilers switched off. That memory is the module's own data, not
+JIT code, so only fewer bytes compiled shrink it. At its start the desktop page compiled the app and
+the signed-in app's pack, 13.62 MB. The app carried the browser's whole core (`web_core`: the client,
+its store, sync and MLS), which a browser runs in the page or its worker and the desktop page never
+does (its core runs in the shell). The core's start now goes through a split function
+(`areas::run_core`, module `engine`): a browser loads it when it starts its core (`init.js`
+preloads its files on browser pages), the desktop page never. A failed load fails the core's start,
+which the sign-in shows with its retry, as for the other modules; the service worker keeps the
+module with the release's other lazily loaded files.
+
+| Large workspace, after 40 switches      | Before          | After           |
+|-----------------------------------------|-----------------|-----------------|
+| Wasm the desktop page compiles at start | 13.62 MB        | 11.32 MB        |
+| Page (`WebKitWebProcess`), anonymous    | 233.6–234.1 MiB | 222.1–222.7 MiB |
+
+A browser loads the same code, in more files: a guest's meeting 6.72 → 6.85 MB and a signed-in first
+visit 5.95 → 6.01 MB, gzip -9 ("Web bundle size").
+
+**The executable.** The release binary had 88.2 MB of code, 23.3 MB of read-only data and 14.1 MB of
+unwind tables; the start and a session put 53 MiB of it into the shell's resident set (the kernel
+maps code around every page it faults in). By crate, the largest parts are the background effects'
+inference (tract with ndarray and rustfft, about 15 MB of code, which only runs with an effect on), the
+client core (6.2 MB), serde_json (4.1 MB), tokio and the two versions of zbus (ashpd 0.13 and
+0.14). Built differently:
+
+| Release profile (x86_64)   | Mapped sections | Build    | After a new UI bundle | Peak memory |
+|----------------------------|-----------------|----------|-----------------------|-------------|
+| Default (16 codegen units) | 128.3 MB        | 14.8 min | –                     | –           |
+| Thin LTO                   | 131.2 MB        | 13.6 min | –                     | –           |
+| Fat LTO, 16 codegen units  | 119.4 MB        | 25.9 min | 20.3 min              | –           |
+| Fat LTO, 1 codegen unit    | 109.4 MB        | 33.0 min | 20.6 min              | 19.6 GB     |
+| 1 codegen unit per crate   | 110.4 MB        | 17.2 min | 8.2 min               | 10.4 GB     |
+
+"After a new UI bundle" is what the release jobs compile once the UI job's bundle arrived (docs/release.md,
+"Critical path"): with LTO the whole program again. Fat LTO saves no more than one codegen unit per crate
+but links with 19.6 GB, more than the runners have, so the Linux release job builds with
+`CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1`: the executable's mappings went from 52.8–53.5 to 46.9 MiB of
+the shell's memory. `panic = "abort"` is not an option: the core's store rolls back a group of writes
+when one of them panics (`catch_unwind`). `scripts/check-desktop-size.py` keeps the mapped sections
+under a budget in the release job, `scripts/check-web-size.py` the desktop page's start.
+
+| Release on the GPU, large workspace (PSS) | Before (two runs)    | After        |
+|-------------------------------------------|----------------------|--------------|
+| Window shown: whole app                   | 476–482 MiB          | 464 MiB      |
+| Closed to the tray: whole app             | 465–471 MiB          | 451 MiB      |
+| Of it the page (shown)                    | 296–303 MiB          | 285 MiB      |
+| Of it the shell (shown)                   | 154–155 MiB          | 153 MiB      |
+| Channel switch p50 / p95                  | 140–146 / 194–211 ms | 136 / 179 ms |
+| Start to the first channel                | 1.6–2.1 s            | 1.6 s        |
+
+Still about 50–65 MiB above the budget of 400 MiB. What is left: WebKit's own part of the page
+(about 230 MiB with the JavaScript heap and the layers), the compiled wasm the signed-in app's pack
+still brings (11.3 MB, about 45 MiB compiled), and the shell's other libraries. Follow-ups: the
+desktop could load the effects' model as NNEF like the browser (no ONNX parser, rustfft, tract-hir:
+about 3 MB of code), the remaining split areas whose engine parts the desktop never runs
+(`workspace`, `settings`, `admin`, `dialogs`), and the macOS and Windows builds (not measured here).
+
 ### Coming back and bad networks, end to end (issue #972)
 
 `tests/e2e` runs the app as the apps do (the sync runner with its connection supervisor, the
@@ -3582,11 +3649,20 @@ the chunks that load later. The limit:
 
 | Limit                                | Value        | Above it                         |
 |--------------------------------------|--------------|----------------------------------|
-| A guest in a meeting: gzip -9 total  | 6,750,000 B  | fails; warns from 95 % (6.41 MB) |
-| Signed-in first visit: gzip -9 total | 5,950,000 B  | fails; warns from 95 % (5.65 MB) |
+| A guest in a meeting: gzip -9 total  | 6,950,000 B  | fails; warns from 95 % (6.60 MB) |
+| Signed-in first visit: gzip -9 total | 6,100,000 B  | fails; warns from 95 % (5.80 MB) |
 | The call module: gzip -9             | 2,100,000 B  | fails                            |
+| Desktop page's start: uncompressed   | 11,900,000 B | fails                            |
 
-Both budgets are the sizes after the rarely shown parts left the first visit (#1699, 2026-11-22,
+On 2026-11-26 (#2384) the browser's core moved out of the app into a module of its own (`engine`),
+which the desktop app's page never loads ("Desktop on Linux: a smaller binary and less wasm at the
+start"). A browser still loads the same code, now in more files: a guest's meeting went from 6.72 to
+6.85 MB and a signed-in first visit from 5.95 to 6.01 MB. On main with #2411 they were 6.88 and
+6.03 MB, and both budgets were raised to those sizes plus about 1 % (the maintainer's decision). The
+desktop page's own budget counts what it compiles at its start, uncompressed (the
+app and the signed-in app's pack: 11.32 MB, plus about 5 %).
+
+Before that, both budgets were the sizes after the rarely shown parts left the first visit (#1699, 2026-11-22,
 below) plus about 6 %: 6,342,543 and 5,614,660 B. 5 % would have put the warning (95 %) below
 today's sizes. The guest's was raised by 30 kB on 2026-11-25 (#2397, the maintainer's decision):
 the core a guest runs in the page hands its thread back in short steps, and the page keeps its

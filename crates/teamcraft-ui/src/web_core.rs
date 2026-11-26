@@ -1673,11 +1673,23 @@ pub(crate) fn start_in_worker(
   *tokens.maybe_id_token.borrow_mut() = maybe_id_token;
   let (sender, receiver) = mpsc::unbounded();
   let connection = ConnectionStatus::new();
-  let core = Core::new(server_url, user, tokens.clone(), connection.clone(), None);
+  let start = CoreStart {
+    server_url,
+    user,
+    tokens: tokens.clone(),
+    connection: connection.clone(),
+    maybe_lock: None,
+    requests: receiver,
+  };
   let (ended, is_ended) = oneshot::channel();
   WORKER_CORE_ENDED.with(|current| *current.borrow_mut() = Some(is_ended));
   wasm_bindgen_futures::spawn_local(async move {
-    core.run(receiver).await;
+    match crate::areas::run_core(start).await {
+      Ok(running) => running.await,
+      // The requests' receiver went with the start: the page's requests fail as for a core that
+      // stopped, and the page sees the core end below.
+      Err(error) => tracing::error!(%error, "the core's module did not load"),
+    }
     // The page may have stopped waiting.
     let _ = ended.send(());
   });
@@ -1690,6 +1702,33 @@ pub(crate) fn start_in_worker(
     })
   });
   tokens
+}
+
+/// What a core in this page or its worker starts with (`areas::run_core`).
+pub(crate) struct CoreStart {
+  server_url: String,
+  user: UserId,
+  tokens: WebTokens,
+  connection: ConnectionStatus,
+  maybe_lock: Option<OwnerLock>,
+  requests: mpsc::UnboundedReceiver<Request>,
+}
+
+/// Runs the core until it is closed or its requests' sender is dropped. Called through
+/// `areas::run_core`: the engine is in a module of its own, which the desktop app's page never
+/// loads (its core runs in the shell, #2384).
+pub(crate) async fn run_core(start: CoreStart) {
+  let CoreStart {
+    server_url,
+    user,
+    tokens,
+    connection,
+    maybe_lock,
+    requests,
+  } = start;
+  Core::new(server_url, user, tokens, connection, maybe_lock)
+    .run(requests)
+    .await;
 }
 
 /// In the worker: a token from the page for the core's copy.
@@ -1740,12 +1779,24 @@ async fn start_owner(user: UserId, maybe_lock: Option<OwnerLock>) -> Result<(), 
       false => None,
     };
     let connection = ConnectionStatus::new();
-    let core = Core::new(server_url, user, tokens.clone(), connection.clone(), maybe_lock);
+    let start = CoreStart {
+      server_url,
+      user,
+      tokens: tokens.clone(),
+      connection: connection.clone(),
+      maybe_lock,
+      requests: receiver,
+    };
+    // A module that can't load (offline before it was cached, a deploy in between) fails the
+    // start, which the sign-in shows with its retry; the lock went with the start and is free again.
+    let running = crate::areas::run_core(start)
+      .await
+      .map_err(|error| format!("the core's module did not load: {error}"))?;
     watch_worker();
     let generation = std::rc::Rc::new(());
     keep_token_fresh(auth, tokens, Rc::downgrade(&generation), None);
     wasm_bindgen_futures::spawn_local(async move {
-      core.run(receiver).await;
+      running.await;
       drop(generation);
     });
     // Replacing a running core (another account signed in) drops its sender, which stops it.

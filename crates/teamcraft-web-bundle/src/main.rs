@@ -52,6 +52,9 @@ const WASM_OPT_STRIP_DEBUG: &str = "--strip-debug";
 /// The split module every page but a guest's needs at once (teamcraft-ui `areas.rs`): `init.js`
 /// fetches its files next to the app's.
 const SESSION_MODULE: &str = "session";
+/// The browser's core (teamcraft-ui `areas::run_core`, #2384): every browser page that starts its
+/// core loads it, the desktop app's page never does.
+const ENGINE_MODULE: &str = "engine";
 
 fn main() -> Result<()> {
   tracing_subscriber::fmt().with_target(false).without_time().init();
@@ -104,7 +107,12 @@ fn main() -> Result<()> {
     args.staging.join(&names.link_js),
     with_session_pack(&link_script, &pack)?,
   )?;
-  write_init(&args.staging, &names, &initializer, &pack)?;
+  // The engine's files the pack doesn't bring: `init.js` preloads them on browser pages.
+  let engine_files: Vec<String> = module_files(&link_script, ENGINE_MODULE)?
+    .into_iter()
+    .filter(|file| !session_files.contains(file))
+    .collect();
+  write_init(&args.staging, &names, &initializer, &pack, &engine_files)?;
   report(&args.staging, &wasm_files)?;
   Ok(())
 }
@@ -475,10 +483,21 @@ fn copy_hashed(source: &Path, staging: &Path) -> Result<String> {
 
 /// `init.js` (it starts the app; the server's Content-Security-Policy allows no inline scripts) and
 /// the preload links in `index.html`.
-fn write_init(staging: &Path, names: &Names, initializer: &str, pack: &SessionPack) -> Result<()> {
+fn write_init(
+  staging: &Path,
+  names: &Names,
+  initializer: &str,
+  pack: &SessionPack,
+  engine_files: &[String],
+) -> Result<()> {
   let wasm_size = std::fs::metadata(staging.join(&names.main_wasm))?.len();
+  let engine_urls: Vec<String> = engine_files
+    .iter()
+    .map(|file| format!("{PUBLIC_URL}{file}"))
+    .collect();
   let init = INIT_TEMPLATE
     .replace("__SESSION_PACK__", &format!("{PUBLIC_URL}{}", pack.file))
+    .replace("__ENGINE_FILES__", &serde_json::to_string(&engine_urls)?)
     .replace("__MAIN_JS__", &format!("{PUBLIC_URL}{}", names.main_js))
     .replace("__MAIN_WASM__", &format!("{PUBLIC_URL}{}", names.main_wasm))
     .replace("__WASM_SIZE__", &wasm_size.to_string())
@@ -605,8 +624,9 @@ function isPage(bytes) {
 // `parse_guest_link`) or a share link's download page (`/f/<id>#…`, share_link.rs), which never need
 // it. The chunk loader takes them from it; without it, it fetches them one by one.
 const sessionPack = '__SESSION_PACK__';
+const isShareLink = /^\/f\/[A-Za-z0-9_-]+\/?$/.test(location.pathname) && location.hash.length > 1;
 const isGuestLink = (/^\/meeting\/[^/]+\/?$/.test(location.pathname) && /(^#|&)invite=[^&]/.test(location.hash))
-  || (/^\/f\/[A-Za-z0-9_-]+\/?$/.test(location.pathname) && location.hash.length > 1);
+  || isShareLink;
 if (!isGuestLink) {
   mark('session-pack:start');
   globalThis.teamcraftSessionPack = fetch(sessionPack).then(async (response) => {
@@ -622,6 +642,23 @@ if (!isGuestLink) {
   });
   // Nobody may be waiting yet; the chunk loader falls back on the files.
   globalThis.teamcraftSessionPack.catch(() => {});
+}
+
+// The browser's core is a module of its own (`engine`, areas.rs, #2384), which the app loads when it
+// starts its core, a member's and a meeting guest's alike: a browser fetches its files now, next to
+// the app, so that start doesn't wait for one more round trip (the chunk loader's fetch takes them
+// from the preload). The desktop app's page never runs it (its core is in the shell), nor does a
+// share link's download page.
+if (!('__TAURI_INTERNALS__' in globalThis) && !isShareLink) {
+  for (const file of __ENGINE_FILES__) {
+    const link = document.createElement('link');
+    link.rel = 'preload';
+    link.as = 'fetch';
+    link.type = 'application/wasm';
+    link.crossOrigin = 'anonymous';
+    link.href = file;
+    document.head.append(link);
+  }
 }
 
 // The UI's texts (teamcraft-ui i18n.rs): the app carries none, so the language it starts in is
@@ -714,6 +751,22 @@ mod tests {
   #[test]
   fn init_never_judges_a_file_by_its_content_type() {
     assert!(!INIT_TEMPLATE.contains("content-type"));
+  }
+
+  /// The browser's core (#2384) is preloaded on browser pages only: the desktop app's page never
+  /// runs it, and WebKit would hold the fetched bytes for nothing.
+  #[test]
+  fn init_preloads_the_engine_only_outside_the_desktop_app() {
+    let preload = INIT_TEMPLATE
+      .split("__ENGINE_FILES__")
+      .next()
+      .and_then(|before| before.rsplit("\nif (").next())
+      .unwrap_or_default();
+    assert!(
+      preload.contains("!('__TAURI_INTERNALS__' in globalThis)"),
+      "{preload}"
+    );
+    assert!(preload.contains("!isShareLink"), "{preload}");
   }
 
   #[test]

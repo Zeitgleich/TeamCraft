@@ -496,6 +496,18 @@ pub(crate) fn settings_action(
   Ok(Box::pin(crate::web_core::settings_action(client, action)))
 }
 
+/// The browser's core itself (`web_core::run_core`: the client, its store, sync and MLS), in a
+/// module of its own (#2384). A browser's page, or its core's worker, loads it when it starts its
+/// core; the desktop app's page talks to the core in the shell and never does, so its WebKit
+/// doesn't compile the engine (JavaScriptCore keeps about four times a module's bytes for it).
+#[cfg(target_arch = "wasm32")]
+#[wasm_split(engine, wasm_split_path = ::leptos::wasm_split, fallible)]
+pub(crate) fn run_core(
+  start: crate::web_core::CoreStart,
+) -> Result<Pin<Box<dyn Future<Output = ()>>>, SplitLoaderError> {
+  Ok(Box::pin(crate::web_core::run_core(start)))
+}
+
 /// The member-only rounds of the core's upkeep (`Upkeep::run_member_rounds`: signing roles, the
 /// roster and channels' role logs, removing leavers), with the signed-in app: a meeting guest's page
 /// never runs them, so it doesn't download them either (docs/performance.md, "Web bundle size").
