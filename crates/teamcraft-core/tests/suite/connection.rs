@@ -157,6 +157,40 @@ async fn the_app_is_told_of_the_answer_before_a_long_catch_up_ends() {
     .await;
 }
 
+/// Issue #2443: back after the resume window, the full sync takes longer than the server's
+/// heartbeat timeout. The connection keeps heartbeating through it, so the server doesn't close it
+/// and the client doesn't loop through reconnect, full sync, closed.
+#[tokio::test(start_paused = true)]
+async fn a_full_sync_longer_than_the_heartbeat_timeout_keeps_its_connection() {
+  let rig = Rig::start("Nia").await;
+  let timeout = Duration::from_secs(90);
+  let (server_clock, _) = TokioClock::new();
+  rig
+    .server
+    .enforce_heartbeat_timeout(Arc::new(server_clock), timeout);
+  rig
+    .drive(|rig| async move {
+      rig.wait_for(is_connected, Duration::from_secs(5)).await;
+      rig.server.expire_sessions();
+      // Three heartbeat timeouts' worth of catch-up.
+      rig.server.delay_conversation_list(rig.user, 3 * timeout);
+      rig.server.drop_gateways(rig.user);
+      // The refused resume, then `identify` and the full sync on a third socket.
+      rig.wait_for_new_connection(3, Duration::from_secs(10)).await;
+      let beats = rig.server.heartbeat_count();
+      // The whole sync and two more timeouts after it.
+      rig.stay(is_connected, 5 * timeout).await;
+      assert_eq!(rig.server.heartbeat_timeout_count(), 0, "the server dropped it");
+      assert_eq!(rig.server.gateway_connect_count(), 3, "it reconnected");
+      assert!(
+        rig.server.heartbeat_count() >= beats + 10,
+        "{} heartbeats during and after the sync",
+        rig.server.heartbeat_count() - beats
+      );
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn a_network_change_replaces_a_dead_connection_within_five_seconds() {
   let rig = Rig::start("Carol").await;
