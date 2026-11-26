@@ -6,7 +6,9 @@
 //! same short code; once the user confirmed it on the existing device,
 //! [`Client::complete_link_approval`] transfers the backup key and the key bag. The new device
 //! checks that the key bag opens and answers with a receipt; only that receipt makes the existing
-//! device report success, so a lost frame fails on both sides. The wait for it needs no client
+//! device report success. Without one it sends the same sealed frame again a few times
+//! ([`RECEIPT_RESEND_AFTER`]); a transfer that still gets no receipt fails on both sides (issue
+//! #2445). The wait for it needs no client
 //! ([`LinkReceipt`]): apps run it on a task of their own, so their loop goes on meanwhile (#415).
 //! Before it answers, the new device stores the secrets (encrypted like the account, issue #168);
 //! it then enrolls with them ([`crate::EnrollmentSecret::Linked`]). If it stops before the account
@@ -55,9 +57,13 @@ const LINK_PROTOCOL_VERSION: u32 = 2;
 const OFFER_PREFIX: &str = "tclink";
 /// Prefix of a code a signed-in device shows for a new phone, which scans it (issue #998).
 const JOIN_PREFIX: &str = "tcjoin";
-/// How long the existing device waits for the receipt after sending the keys. The new device
-/// answers as soon as it opened the key bag, which takes well under a second.
-const RECEIPT_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long the existing device waits for the receipt after each send of the keys before it sends
+/// them again. The new device answers as soon as it opened the key bag, which takes well under a
+/// second, so silence this long means the frame (or the receipt) got lost on the way.
+const RECEIPT_RESEND_AFTER: Duration = Duration::from_secs(20);
+/// How often the keys go out in all: the first send and the resends. With
+/// [`RECEIPT_RESEND_AFTER`], the existing device gives up after a minute of silence.
+const TRANSFER_SENDS: u32 = 3;
 /// How long the approving device waits for the new device's part of the handshake once both are
 /// in the relay. The new device answers at once; anything slower is a device that went away.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -172,6 +178,10 @@ pub struct LinkApproval<R> {
 /// a task of its own while its loop goes on (issue #415).
 pub struct LinkReceipt<R> {
   approval: LinkApproval<R>,
+  /// The sealed transfer as it went out, sent again verbatim while no receipt comes: the same
+  /// bytes under the same counter nonce, so the new device opens whichever copy arrives first and
+  /// a copy that arrives as well changes nothing (e2ee.md §5).
+  transfer: Vec<u8>,
 }
 
 /// Stops the wait of [`LinkReceipt::detach`] when cancelled or dropped.
@@ -450,7 +460,14 @@ impl<R: RendezvousConnection> NewDeviceLink<R> {
     store: &impl LocalStore,
     device_name: &str,
   ) -> Result<LinkedSecrets, CoreError> {
-    let frame = next_binary(&mut self.connection).await?;
+    // The existing device gave up on the transfer, or the relay ended under it: the keys are not
+    // coming, and the user links again (issue #2445).
+    let frame = next_binary(&mut self.connection)
+      .await
+      .map_err(|error| match error {
+        CoreError::Gateway(_) => CoreError::LinkNotConfirmed,
+        other => other,
+      })?;
     let plaintext = self.channel.open(&frame).map_err(link_error)?;
     let payload: TransferPayload = serde_json::from_slice(plaintext.expose_secret())
       .map_err(|error| CoreError::Corrupt(error.to_string()))?;
@@ -682,18 +699,35 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let plaintext =
       Zeroizing::new(serde_json::to_vec(&payload).map_err(|error| CoreError::Corrupt(error.to_string()))?);
-    let frame = approval.channel.seal(&plaintext).map_err(link_error)?;
-    approval.connection.send_binary(frame).await?;
+    let transfer = approval.channel.seal(&plaintext).map_err(link_error)?;
+    approval.connection.send_binary(transfer.clone()).await?;
     records::save_key_bag(&self.store, &self.account)?;
-    Ok(LinkReceipt { approval })
+    Ok(LinkReceipt { approval, transfer })
   }
 }
 
 impl<R: RendezvousConnection> LinkReceipt<R> {
-  /// The new device's receipt: `Ok` once it confirmed that the key bag opened. A closed relay, a
-  /// garbled frame or a minute of silence fail with [`CoreError::LinkNotConfirmed`].
+  /// The new device's receipt: `Ok` once it confirmed that the key bag opened. Silence sends the
+  /// keys again ([`RECEIPT_RESEND_AFTER`], [`TRANSFER_SENDS`]); a closed relay, a garbled frame or
+  /// a minute of silence fail with [`CoreError::LinkNotConfirmed`].
   pub async fn wait(mut self) -> Result<(), CoreError> {
-    self.approval.wait_for_receipt().await
+    for send in 1..=TRANSFER_SENDS {
+      if send > 1 {
+        tracing::info!(
+          send,
+          "no receipt for the device link transfer yet, sending it again"
+        );
+        if let Err(error) = self.approval.connection.send_binary(self.transfer.clone()).await {
+          tracing::warn!(%error, "could not send the device link transfer again");
+          return Err(CoreError::LinkNotConfirmed);
+        }
+      }
+      if let Some(frame) = self.approval.next_receipt_frame().await? {
+        return self.approval.check_receipt(&frame);
+      }
+    }
+    tracing::warn!("the new device never confirmed the device link transfer");
+    Err(CoreError::LinkNotConfirmed)
   }
 
   /// [`Self::wait`] as a future that borrows nothing, to run on a task of its own beside the app's
@@ -732,23 +766,27 @@ impl Drop for LinkWaitCancel {
 }
 
 impl<R: RendezvousConnection> LinkApproval<R> {
-  /// The new device's receipt; a closed relay, a garbled frame or silence count as failure.
-  async fn wait_for_receipt(&mut self) -> Result<(), CoreError> {
-    let frame = {
-      let receive = Box::pin(next_binary(&mut self.connection));
-      let timeout = Box::pin(platform::sleep(RECEIPT_TIMEOUT));
-      match select(receive, timeout).await {
-        Either::Left((Ok(frame), _)) => frame,
-        Either::Left((Err(error), _)) => {
-          tracing::warn!(%error, "the device link ended without a receipt");
-          return Err(CoreError::LinkNotConfirmed);
-        },
-        Either::Right(((), _)) => return Err(CoreError::LinkNotConfirmed),
-      }
-    };
+  /// The next frame from the new device, or `None` after [`RECEIPT_RESEND_AFTER`] of silence. A
+  /// closed relay counts as failure. Dropping the receive on the timeout loses nothing: a frame is
+  /// only taken off the connection when it is returned.
+  async fn next_receipt_frame(&mut self) -> Result<Option<Vec<u8>>, CoreError> {
+    let receive = Box::pin(next_binary(&mut self.connection));
+    let timeout = Box::pin(platform::sleep(RECEIPT_RESEND_AFTER));
+    match select(receive, timeout).await {
+      Either::Left((Ok(frame), _)) => Ok(Some(frame)),
+      Either::Left((Err(error), _)) => {
+        tracing::warn!(%error, "the device link ended without a receipt");
+        Err(CoreError::LinkNotConfirmed)
+      },
+      Either::Right(((), _)) => Ok(None),
+    }
+  }
+
+  /// What the new device's receipt says; a garbled frame counts as failure.
+  fn check_receipt(&mut self, frame: &[u8]) -> Result<(), CoreError> {
     let plaintext = self
       .channel
-      .open(&frame)
+      .open(frame)
       .map_err(|_| CoreError::LinkNotConfirmed)?;
     let receipt: Receipt =
       serde_json::from_slice(plaintext.expose_secret()).map_err(|_| CoreError::LinkNotConfirmed)?;

@@ -166,6 +166,8 @@ enum CoreFailure: Equatable {
   case linkCodeRejected, linkAttemptEnded
   /// Device linking: not a link code; a code for the other side (issue #998); a code that ran out.
   case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  /// Device linking: the keys went out but never arrived, even sent again (issue #2445). Link again.
+  case linkNotConfirmed
   case other
 
   init(_ error: Error) {
@@ -214,6 +216,8 @@ enum CoreFailure: Equatable {
       self = .linkCodeForSignedInDevice
     } else if name.hasPrefix("linkcodeexpired") {
       self = .linkCodeExpired
+    } else if name.hasPrefix("linknotconfirmed") {
+      self = .linkNotConfirmed
     } else {
       self = .other
     }

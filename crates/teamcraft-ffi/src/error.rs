@@ -62,6 +62,10 @@ pub enum TeamCraftError {
   /// The code ran out, or the device that showed it no longer waits: show a new one.
   #[error("the link code expired")]
   LinkCodeExpired,
+  /// The keys went out but the new device never confirmed them, even after they were sent again,
+  /// or could not open them; on the new device, the keys never came (issue #2445). Link again.
+  #[error("the keys did not arrive on the new device")]
+  LinkNotConfirmed,
   /// The admins haven't answered the recovery request yet; try again later.
   #[error("the recovery request isn't answered yet")]
   RecoveryPending,
@@ -137,6 +141,7 @@ impl From<CoreError> for TeamCraftError {
       CoreError::LinkCodeForNewDevice => Self::LinkCodeForNewDevice,
       CoreError::LinkCodeForSignedInDevice => Self::LinkCodeForSignedInDevice,
       CoreError::LinkCodeExpired | CoreError::LinkPeerGone => Self::LinkCodeExpired,
+      CoreError::LinkNotConfirmed | CoreError::LinkRejected => Self::LinkNotConfirmed,
       CoreError::BugReport(BugReportError::NoRecipients) => Self::BugReportNoRecipients,
       CoreError::BugReport(BugReportError::QueueFull) => Self::BugReportQueueFull,
       other => Self::Core(other.to_string()),
@@ -218,6 +223,16 @@ mod tests {
       TeamCraftError::from(CoreError::Gateway("closed".into())),
       TeamCraftError::Core(_)
     ));
+  }
+
+  #[test]
+  fn an_unconfirmed_link_has_its_own_error() {
+    for error in [CoreError::LinkNotConfirmed, CoreError::LinkRejected] {
+      assert!(matches!(
+        TeamCraftError::from(error),
+        TeamCraftError::LinkNotConfirmed
+      ));
+    }
   }
 
   #[test]

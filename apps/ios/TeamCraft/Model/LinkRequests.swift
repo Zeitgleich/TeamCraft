@@ -36,6 +36,8 @@ enum LinkConfirmResult: Equatable {
   case wrongCode
   /// The last try failed; the new device has to start again.
   case attemptEnded
+  /// The keys went out but never arrived (issue #2445); the new device has to start again.
+  case notConfirmed
   case failed(AppFailure)
 }
 

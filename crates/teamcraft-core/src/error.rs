@@ -117,7 +117,8 @@ pub enum CoreError {
   /// The code expired before another device took it up; the new device shows a new one.
   #[error("nobody took up this code in time; show a new code")]
   LinkCodeExpired,
-  /// The new device never confirmed the transfer (a lost frame, a closed relay or a timeout).
+  /// The new device never confirmed the transfer (a lost frame, a closed relay or a timeout), even
+  /// after the keys were sent again. On the new device: the keys never came (issue #2445).
   #[error("the new device did not confirm that it received the keys; link it again")]
   LinkNotConfirmed,
   /// The link request is gone: another device took it up, the new device gave up, or it expired.

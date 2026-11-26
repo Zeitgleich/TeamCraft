@@ -9,8 +9,9 @@ struct LinkTypedCodeForm: View {
   @Environment(AppModel.self) private var model
 
   let onApproved: () -> Void
-  /// The last try failed; the attempt is over and the new device has to start again.
-  let onEnded: () -> Void
+  /// The attempt is over and the new device has to start again: the last try failed
+  /// (`link_attempt_ended`), or the keys never arrived (`link_not_confirmed`, issue #2445).
+  let onEnded: (_ reason: String) -> Void
   let onCancel: () -> Void
 
   @State private var typed = ""
@@ -65,7 +66,8 @@ struct LinkTypedCodeForm: View {
     case .wrongCode:
       typed = ""
       showAtField(.rejected("link_wrong_code"))
-    case .attemptEnded: onEnded()
+    case .attemptEnded: onEnded("link_attempt_ended")
+    case .notConfirmed: onEnded("link_not_confirmed")
     case .failed(let failure): showAtField(.refused(failure))
     }
     isWorking = false
@@ -86,7 +88,9 @@ struct LinkPromptOverlay: View {
   @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   private enum Notice: Equatable {
-    case approved, ended
+    case approved
+    /// The string key of why the attempt ended.
+    case ended(String)
   }
 
   @State private var maybeNotice: Notice?
@@ -100,7 +104,7 @@ struct LinkPromptOverlay: View {
         card {
           LinkTypedCodeForm(
             onApproved: { maybeNotice = .approved },
-            onEnded: { maybeNotice = .ended },
+            onEnded: { reason in maybeNotice = .ended(reason) },
             onCancel: { Task { await model.cancelLinkApproval() } })
         }
       } else if let prompt = model.linkPrompts.first {
@@ -123,9 +127,9 @@ struct LinkPromptOverlay: View {
       switch notice {
       case .approved:
         Label("approve_done", systemImage: "checkmark.circle").foregroundStyle(Theme.text)
-      case .ended:
+      case .ended(let reason):
         VStack(alignment: .leading, spacing: 8) {
-          Label("link_attempt_ended", systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
+          Label(LocalizedStringKey(reason), systemImage: "exclamationmark.triangle").foregroundStyle(Theme.danger)
           HStack {
             Spacer()
             Button("done") { maybeNotice = nil }.buttonStyle(.bordered)

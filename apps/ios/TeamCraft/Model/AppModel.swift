@@ -15,7 +15,7 @@ enum AppFailure: Error, Equatable {
   /// Refusals of a queued action (`CommandFailure`, #2242), worded by the server's error code.
   case lastChannelAdmin, importInProgress, spaceHasHiddenChannels, forbidden, rateLimited, conflict, notFound, serverTrouble
   case backupOutOfMemory, backupTooNew, backupDamaged
-  case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired
+  case linkCodeInvalid, linkCodeForNewDevice, linkCodeForSignedInDevice, linkCodeExpired, linkNotConfirmed
   /// The session is bound to a device key that is gone (docs/e2ee.md §3.1.2).
   case deviceKeyLost
   /// The identity provider refused the sign-in (issue #1063); `code` is its cleaned `error`.
@@ -42,6 +42,7 @@ enum AppFailure: Error, Equatable {
     case .linkCodeForNewDevice: self = .linkCodeForNewDevice
     case .linkCodeForSignedInDevice: self = .linkCodeForSignedInDevice
     case .linkCodeExpired: self = .linkCodeExpired
+    case .linkNotConfirmed: self = .linkNotConfirmed
     case .notEnrolled, .linkCodeRejected, .linkAttemptEnded, .callEnded, .other: self = .generic
     }
   }
@@ -102,6 +103,7 @@ enum AppFailure: Error, Equatable {
     case .linkCodeForNewDevice: return "link_code_for_new_device"
     case .linkCodeForSignedInDevice: return "link_code_for_signed_in_device"
     case .linkCodeExpired: return "link_code_expired"
+    case .linkNotConfirmed: return "link_not_confirmed"
     case .providerDenied: return "sign_in_provider_denied"
     case .providerAlreadySignedIn: return "sign_in_provider_already_signed_in"
     case .providerMisconfigured(let code): return "sign_in_provider_misconfigured \(code)"
@@ -705,6 +707,10 @@ final class AppModel {
       case .linkAttemptEnded:
         maybeLinkReview = nil
         return .attemptEnded
+      // The keys are gone with the approval: this attempt is over, the new device starts again.
+      case .linkNotConfirmed:
+        maybeLinkReview = nil
+        return .notConfirmed
       case let failure: return .failed(AppFailure(failure))
       }
     }

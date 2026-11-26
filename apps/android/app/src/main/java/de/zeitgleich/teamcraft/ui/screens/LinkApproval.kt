@@ -62,9 +62,13 @@ fun LinkRequestPrompts(viewModel: MainViewModel, modifier: Modifier = Modifier) 
             Text(stringResource(R.string.approve_done))
             Button(onClick = viewModel::closeLinkReview) { Text(stringResource(R.string.back)) }
           } else {
-            val isEnded = review.maybeError == R.string.approve_attempt_ended
-            if (isEnded) {
-              Text(stringResource(R.string.approve_attempt_ended), color = MaterialTheme.colorScheme.error)
+            // The attempt is over: too many wrong codes, or the keys never arrived (#2445). The new
+            // device starts again; it shows the same failure with its own way to link again.
+            val maybeEnded = review.maybeError?.takeIf {
+              it == R.string.approve_attempt_ended || it == R.string.link_not_confirmed
+            }
+            if (maybeEnded != null) {
+              Text(stringResource(maybeEnded), color = MaterialTheme.colorScheme.error)
               OutlinedButton(onClick = viewModel::closeLinkReview) { Text(stringResource(R.string.back)) }
             } else {
               LinkCodeStep(

@@ -673,7 +673,7 @@ struct ApproveLinkView: View {
         Section {
           LinkTypedCodeForm(
             onApproved: { step = .done },
-            onEnded: { restart(with: "link_attempt_ended") },
+            onEnded: { reason in restart(with: LocalizedStringKey(reason)) },
             onCancel: {
               Task { await model.cancelLinkApproval() }
               restart(with: nil)

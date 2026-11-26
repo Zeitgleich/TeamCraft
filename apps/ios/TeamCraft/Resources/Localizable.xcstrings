@@ -11169,6 +11169,22 @@
         }
       }
     },
+    "link_not_confirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The keys did not arrive on the new device. Link it again."
+          }
+        },
+        "de": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Die Schlüssel sind auf dem neuen Gerät nicht angekommen. Verknüpfe es erneut."
+          }
+        }
+      }
+    },
     "link_prompt_title": {
       "localizations": {
         "en": {
