@@ -254,6 +254,9 @@ pub struct CallEngine {
   held_dave: Vec<CallEvent>,
   /// The driver was asked for the roster of the changes held now ([`Self::take_roster_request`]).
   is_roster_requested: bool,
+  /// Media was secured since the last `joined`: the first time is a step of the join, in the debug
+  /// log (#2419); the rekeys after it are not.
+  is_secured_since_joined: bool,
   /// A member failed key verification: media stays off for this call.
   is_compromised: bool,
   /// The call is over for this device whatever happens to the connection: the SFU refused the
@@ -506,6 +509,10 @@ pub enum CallEngineEvent {
   EncryptionFailed {
     retry_after: Duration,
   },
+  /// A step of this device's way into the call's encryption after `joined` (#2419): the drivers'
+  /// telemetry tells from the last one where a join that doesn't secure its media got stuck.
+  /// Nothing for the UI.
+  JoinStep(JoinStep),
   /// This device's DAVE key needs its binding to the device, which is signed elsewhere
   /// ([`CallKeyAuthenticator::signs_later`]): the host signs it and hands it in with
   /// [`CallEngine::key_binding_signed`]; the key package waits for it.
@@ -601,6 +608,24 @@ pub enum CallEngineEvent {
   DecodableVideoCodecs(Vec<VideoCodec>),
   /// The SFU rejected a request.
   Error(ErrorBody),
+}
+
+/// How far this device got into the call's encryption since `joined`, in order
+/// ([`CallEngineEvent::JoinStep`], #2419). `joined` itself and [`CallEngineEvent::Secured`] are
+/// events of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinStep {
+  /// The SFU's external sender came and this device's key package went out: the members (or the
+  /// founder) have to commit its proposal next.
+  KeyPackageSent,
+  /// A DAVE change waits until the driver brought the call's roster up to date: it named a device
+  /// the roster doesn't have yet.
+  AwaitingRoster,
+  /// This device committed proposals before its media was first secured: the group's founder
+  /// commits the second device's proposal.
+  CommitSent,
+  /// The welcome into the group was processed: the switch to the new epoch's key comes next.
+  WelcomeProcessed,
 }
 
 /// Why a held DAVE group wasn't resumed after a rejoin ([`CallEngineEvent::DaveResumeFailed`]).
@@ -936,6 +961,7 @@ impl CallEngine {
       maybe_lost_at: None,
       refreshes_roster: false,
       held_dave: Vec::new(),
+      is_secured_since_joined: false,
       is_roster_requested: false,
       is_compromised: false,
       is_over: false,
@@ -2881,6 +2907,8 @@ impl CallEngine {
     for other in &participants {
       self.add_participant(*other);
     }
+    self.is_secured_since_joined = false;
+    info!(others = participants.len(), "call join: joined");
     self.event(CallEngineEvent::Joined {
       call_id,
       participants,
@@ -4025,6 +4053,8 @@ impl CallEngine {
       maybe_key_binding,
     });
     self.has_sent_key_package = true;
+    info!("call join: DAVE key package sent");
+    self.event(CallEngineEvent::JoinStep(JoinStep::KeyPackageSent));
   }
 
   /// Tells the UI once per DAVE session that this device can't get media keys.
@@ -4063,6 +4093,10 @@ impl CallEngine {
   /// date (a device added to the conversation during the call).
   fn on_dave_change(&mut self, change: CallEvent) -> Result<(), CallEngineError> {
     if !self.held_dave.is_empty() || self.names_unknown_device(&change) {
+      if self.held_dave.is_empty() {
+        info!("call join: a DAVE change waits for the call's roster");
+        self.event(CallEngineEvent::JoinStep(JoinStep::AwaitingRoster));
+      }
       self.held_dave.push(change);
       return Ok(());
     }
@@ -4148,6 +4182,11 @@ impl CallEngine {
         self.verify_members()?;
         // A binding for a device that isn't in the group must not vouch for it later.
         self.keep_member_keys_only()?;
+        info!(
+          has_transition = maybe_transition_id.is_some(),
+          "call join: DAVE welcome processed"
+        );
+        self.event(CallEngineEvent::JoinStep(JoinStep::WelcomeProcessed));
         self.prepare_transition(maybe_transition_id)
       },
       CallEvent::DaveExecuteTransition { transition_id } => self.execute_transition(transition_id),
@@ -4476,6 +4515,13 @@ impl CallEngine {
         commit: Base64Bytes::new(commit.commit),
         maybe_welcome: commit.maybe_welcome.map(Base64Bytes::new),
       });
+      if !self.is_secured_since_joined {
+        info!(
+          epoch,
+          "call join: DAVE proposals committed before the first secured epoch"
+        );
+        self.event(CallEngineEvent::JoinStep(JoinStep::CommitSent));
+      }
     }
     Ok(())
   }
@@ -5291,6 +5337,10 @@ impl CallEngine {
         epoch: epoch.0,
         privacy_code: code.to_owned(),
       };
+      if !self.is_secured_since_joined {
+        self.is_secured_since_joined = true;
+        info!(epoch = epoch.0, "call join: media secured");
+      }
       self.event(event);
       // The group changed: notices that waited for their sender's key can be checked now.
       self.recheck_recording_notices();
@@ -11163,6 +11213,130 @@ mod tests {
 
   /// The device key signs elsewhere (a browser whose core runs in a worker, #2397): the key
   /// package waits for its binding, which the host hands in later.
+  /// The steps of a join into the call's encryption, for the drivers' telemetry (#2419): the
+  /// founder commits the joiner's proposal, the joiner processes the welcome, both are secured.
+  mod join_steps {
+    use super::*;
+
+    #[test]
+    fn a_join_names_each_step_on_its_way_to_secured_media() {
+      let now = Instant::now();
+      let authenticators = authenticators(&[1, 2]);
+      let gateway = DaveExternalSender::new().unwrap();
+      let mut alice = joined_engine(1, &[], &gateway, Some(&authenticators[&1]), now);
+      let mut bob = joined_engine(2, &[1], &gateway, Some(&authenticators[&2]), now);
+      let alice_outputs = drain(&mut alice);
+      assert_eq!(join_steps(&alice_outputs), [JoinStep::KeyPackageSent]);
+      let alice_binding = key_package_in(&alice_outputs).1;
+      let bob_outputs = drain(&mut bob);
+      assert_eq!(join_steps(&bob_outputs), [JoinStep::KeyPackageSent]);
+      let (key_package, bob_binding) = key_package_in(&bob_outputs);
+
+      alice
+        .handle_signal(
+          event(
+            3,
+            CallEvent::ParticipantJoined {
+              participant: participant(2),
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      alice.set_trusted_roster([device(2)]);
+      bob.set_trusted_roster([device(1)]);
+      let proposals = gateway
+        .propose(
+          DaveCallId::from_call(call()),
+          DaveEpoch(0),
+          &[(DaveParticipantId(2), &key_package)],
+          &[],
+        )
+        .unwrap();
+      alice
+        .handle_signal(
+          event(
+            4,
+            dave_proposals(0, proposals, &[1, 2], vec![binding(2, bob_binding.unwrap())]),
+          ),
+          now,
+        )
+        .unwrap();
+      let alice_outputs = drain(&mut alice);
+      assert_eq!(join_steps(&alice_outputs), [JoinStep::CommitSent]);
+      let (commit, welcome) = alice_outputs
+        .into_iter()
+        .find_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::DaveCommit {
+            commit,
+            maybe_welcome,
+            ..
+          }) => Some((commit, maybe_welcome.unwrap())),
+          _ => None,
+        })
+        .unwrap();
+      let welcome = CallEvent::DaveWelcome {
+        welcome,
+        key_bindings: vec![binding(1, alice_binding.unwrap())],
+        maybe_transition_id: None,
+      };
+      bob.handle_signal(event(3, welcome), now).unwrap();
+      let bob_outputs = drain(&mut bob);
+      assert_eq!(join_steps(&bob_outputs), [JoinStep::WelcomeProcessed]);
+      assert!(bob_outputs.iter().any(is_secured_event), "secured by the welcome");
+      assert!(bob.is_secured_since_joined);
+
+      alice
+        .handle_signal(
+          event(
+            5,
+            CallEvent::DaveAnnounceCommit {
+              epoch: 0,
+              commit,
+              maybe_transition_id: None,
+            },
+          ),
+          now,
+        )
+        .unwrap();
+      let alice_outputs = drain(&mut alice);
+      assert!(alice_outputs.iter().any(is_secured_event));
+      assert!(join_steps(&alice_outputs).is_empty());
+    }
+
+    fn join_steps(outputs: &[EngineOutput]) -> Vec<JoinStep> {
+      outputs
+        .iter()
+        .filter_map(|output| match output {
+          EngineOutput::Event(CallEngineEvent::JoinStep(step)) => Some(*step),
+          _ => None,
+        })
+        .collect()
+    }
+
+    fn key_package_in(outputs: &[EngineOutput]) -> (Vec<u8>, Option<Vec<u8>>) {
+      outputs
+        .iter()
+        .find_map(|output| match output {
+          EngineOutput::Signal(CallClientMessage::DaveKeyPackage {
+            key_package,
+            maybe_key_binding,
+          }) => Some((
+            key_package.as_slice().to_vec(),
+            maybe_key_binding
+              .as_ref()
+              .map(|binding| binding.as_slice().to_vec()),
+          )),
+          _ => None,
+        })
+        .unwrap()
+    }
+
+    fn is_secured_event(output: &EngineOutput) -> bool {
+      matches!(output, EngineOutput::Event(CallEngineEvent::Secured { .. }))
+    }
+  }
+
   mod key_binding_signed_later {
     use super::*;
 

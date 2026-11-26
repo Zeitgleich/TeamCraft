@@ -313,9 +313,23 @@ per-packet work, one stats read every 3 s during a call, nothing outside one.
 | `CallFailed`            | error   | The join failed, or the call ended with an error, by the error's variant (`connection_lost`, `browser_webtransport_connect`, `dave`) | the code, `join` or `in_call`  |
 | `CallTransportFallback` | warning | The call runs on the WebSocket fallback                                                                                              | –                              |
 | `CallSfuRejected`       | warning | The SFU refused a request, by its `error_code`                                                                                       | the code                       |
+| `CallJoinStalled`       | either  | A join without secured media: no `joined` within 15 s, or 15 s with others in the call (warning); left unsecured after 5 s (error)   | the stage, `waiting` or `left` |
 | `CallProtocolError`     | error   | `CallEngineError::Protocol` (and a sequence gap): the violation's name from the code                                                 | the name                       |
 | `PoorCall`              | warning | At the end of a call of 30 s or more: 15 s frozen, 3 reconnects or 10 lossy samples (5 % or more downlink loss)                      | –                              |
 | `CaptureStalled`        | error   | An own capture got buffers it couldn't use (5 or more in 5 s, more than pictures): counts by outcome over the window (#1805)          | kind, the most frequent reason |
+
+A stalled join (#2419) is judged by the telemetry from the engine's steps into the call's
+encryption (`CallEngineEvent::JoinStep`): `sfu_join` (no `joined`), `external_sender`,
+`key_binding` (the browser's binding is still being signed), `welcome` (key package sent, nobody
+committed it), `roster` (a DAVE change waits for the call's devices), `founder_commit`,
+`transition` (welcome processed, the key switch didn't come) or `encryption_failed`. The wait
+counts from when others were in the call: alone, nobody can take the device in. One report per
+call, and none once the media was secured; the trail has each step with its time. A user who
+leaves an unsecured join after 5 s or more is reported as `left`: before, the only report of
+such a join was `CallEncryptionFailed` after 60 s, which users who leave and join again never
+reach. The same steps are in the debug log as `call join: …` lines (connected with the transport,
+audio devices open, joined, key package sent, welcome processed, media secured), with the
+connect and device times in milliseconds on the desktop.
 
 A stalled capture (#1805) is judged on the desktop's PipeWire capture, which counts every buffer
 its source hands over by what became of it (`capture_health`): a picture, the cursor only,
