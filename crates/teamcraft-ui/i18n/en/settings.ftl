@@ -1000,6 +1000,7 @@ settings-picker-spaces-none = None chosen: new members start without a space.
 settings-picker-channels-none = None chosen: new members join no extra channel.
 settings-picker-spaces-no-match = No space with that name.
 settings-picker-channels-no-match = No public channel with that name.
+settings-picker-channels-choose-spaces = Choose the spaces first: only public channels of those spaces can be added.
 settings-picker-space-unknown = Unknown space
 settings-picker-channel-unknown = Unknown channel
 settings-picker-remove = Remove { $name }

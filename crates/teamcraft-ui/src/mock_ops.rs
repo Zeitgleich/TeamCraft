@@ -303,21 +303,20 @@ impl AdminBackend for MockBackend {
   }
 
   fn admin_spaces(&self) -> Vec<AdminSpace> {
-    let mut names: Vec<String> = self
+    let mut spaces: Vec<(String, SpaceId)> = self
       .ops
       .borrow()
       .channels
       .iter()
-      .map(|c| c.space_name.clone())
+      .filter_map(|c| Some((c.space_name.clone(), c.maybe_space_id?)))
       .collect();
-    names.sort();
-    names.dedup();
-    names
+    spaces.sort();
+    spaces.dedup();
+    spaces
       .into_iter()
-      .enumerate()
-      .filter(|(_, name)| !name.is_empty())
-      .map(|(index, name)| AdminSpace {
-        id: id_from_raw(900 + index as u64),
+      .filter(|(name, _)| !name.is_empty())
+      .map(|(name, id)| AdminSpace {
+        id,
         name,
         join_policy: teamcraft_proto::JoinPolicy::Open,
         is_archived: false,
@@ -1173,6 +1172,13 @@ fn push_status(
   }
 }
 
+/// The demo's spaces, by name: the console lists them in this order, from `DEMO_SPACE_BASE`.
+fn demo_space_id(name: &str) -> SpaceId {
+  id_from_raw(DEMO_SPACE_BASE + u64::from(name == "Project B"))
+}
+
+const DEMO_SPACE_BASE: u64 = 900;
+
 fn demo_channels(now: TimestampMs, policy: &RetentionPolicy) -> Vec<AdminChannel> {
   // The demo's channels' own settings; the rest follows the instance default.
   let retention = |days: Option<u32>, messages: Option<u32>| RetentionOverride {
@@ -1193,6 +1199,7 @@ fn demo_channels(now: TimestampMs, policy: &RetentionPolicy) -> Vec<AdminChannel
                  own_retention: RetentionOverride,
                  history: HistoryPolicy| AdminChannel {
     id: id_from_raw(id),
+    maybe_space_id: Some(demo_space_id(space)),
     space_name: space.into(),
     name: name.into(),
     kind,

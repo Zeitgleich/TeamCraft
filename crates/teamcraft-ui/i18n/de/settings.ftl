@@ -1000,6 +1000,7 @@ settings-picker-spaces-none = Keine gewählt: Neue Mitglieder starten ohne Space
 settings-picker-channels-none = Keine gewählt: Neue Mitglieder treten keinem Kanal von selbst bei.
 settings-picker-spaces-no-match = Kein Space mit diesem Namen.
 settings-picker-channels-no-match = Kein öffentlicher Kanal mit diesem Namen.
+settings-picker-channels-choose-spaces = Zuerst die Spaces wählen: Nur öffentliche Kanäle dieser Spaces lassen sich hinzufügen.
 settings-picker-space-unknown = Unbekannter Space
 settings-picker-channel-unknown = Unbekannter Kanal
 settings-picker-remove = { $name } entfernen
