@@ -5211,6 +5211,11 @@ impl CallEngine {
       return false;
     }
     self.forget_own_track(stream);
+    // Replacements of it still waiting for their answer (#2417) end with it (#2447): the SFU
+    // publishes none of them, and none is asked for again on a rejoin.
+    self
+      .pending_publications
+      .retain(|pending| pending.maybe_replaces != Some(stream));
     // Its sound went with it at the SFU; an answer to a request still on its way is withdrawn
     // when it comes (`on_screen_audio_published`).
     self.screen_audio = ScreenAudioState::Off;
@@ -9577,6 +9582,7 @@ mod tests {
 
     const SHARE: VideoPublicationId = VideoPublicationId(7);
     const CAMERA: VideoPublicationId = VideoPublicationId(8);
+    const NEXT_SHARE: VideoPublicationId = VideoPublicationId(9);
 
     #[test]
     fn a_taken_over_share_stops_with_its_sound_without_asking_the_sfu() {
@@ -9705,6 +9711,44 @@ mod tests {
         "{outputs:?}"
       );
       assert!(!alice.is_sharing_screen_audio());
+    }
+
+    /// A replacement of the share (#2417) that crossed the takeover ends with the share (#2447):
+    /// the SFU publishes nothing for it, and it is not asked for again after a rejoin.
+    #[test]
+    fn a_replacement_crossing_a_takeover_is_not_asked_for_again() {
+      let now = Instant::now();
+      let mut alice = sharing(now);
+      alice.replace_video(
+        SHARE,
+        NEXT_SHARE,
+        VideoTrackKind::Screen,
+        VideoCodec::H264,
+        layers(2),
+      );
+      drain(&mut alice);
+      alice
+        .handle_signal(event(4, CallEvent::ScreenShareTakenOver(takeover(52))), now)
+        .unwrap();
+      drain(&mut alice);
+
+      alice.connection_lost(now);
+      alice.rejoin("fresh".into(), now);
+      drain(&mut alice);
+      alice
+        .handle_signal(event(1, rejoined_after_takeover(Some(takeover(52)))), now)
+        .unwrap();
+      let outputs = drain(&mut alice);
+      assert!(
+        !outputs.iter().any(|output| matches!(
+          output,
+          EngineOutput::Signal(CallClientMessage::PublishVideo {
+            kind: VideoTrackKind::Screen,
+            ..
+          })
+        )),
+        "{outputs:?}"
+      );
     }
 
     /// Without a takeover (an SFU restart lost the share), the share is published again.
