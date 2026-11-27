@@ -56,7 +56,7 @@ use crate::client::workspace_admin::{ChannelOptions, StoredRoster};
 use crate::client::{ForwardScope, bookmarks_key};
 use crate::clock::Clock;
 pub use crate::entry_tally::EntryNeed;
-use crate::entry_tally::{self, Counted, EntryPass, EntryTally, TallyInputs, UnreadRows};
+use crate::entry_tally::{self, AheadStep, Counted, EntryPass, EntryTally, TallyInputs, UnreadRows};
 use crate::error::CoreError;
 use crate::group_mentions::{may_mention_groups, mentionable_groups, stored_rosters};
 use crate::imported::{Authorship, ImportAdditions, ImportSource, ImportedAuthor, ImportedOrigin};
@@ -78,6 +78,9 @@ const LAST_ACTIVITY_ROWS: usize = 16;
 /// How often the tallies of unread counts that follow the journal are handed to the store at most
 /// ([`CoreChatBackend::keep_followed_tallies_if_due`]).
 const FOLLOWED_KEEP_EVERY_MS: i64 = 5_000;
+/// How often a count ahead starts again when what it counted no longer holds
+/// ([`CoreChatBackend::count_ahead_step`]); after that the count reads the rest in one go.
+const COUNT_AHEAD_STARTS: u32 = 3;
 /// The key prefix of how far a conversation's derived lines were read, in [`Table::SyncState`].
 const LINES_READ_PREFIX: &str = "lines_read/";
 
@@ -1497,47 +1500,23 @@ impl<S: LocalStore> CoreChatBackend<S> {
     need: EntryNeed,
   ) -> EntryCounts {
     let _step = crate::timing::step("entry_counts");
-    let maybe_lines_read = self.lines_read(response.id);
-    let is_unread = self.unread_check_given(response, maybe_mark, maybe_lines_read);
-    let maybe_importer = self.importer();
-    let rules = MentionRules {
-      username: maybe_me
-        .and_then(|me| me.maybe_username.as_deref())
-        .unwrap_or_default(),
-      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
-      first_name_is_mention: preferences.first_name_is_mention,
-      channel_mentions_notify: preferences.channel_mentions_notify,
-      keywords: &preferences.keywords,
-    };
-    let mut memo = self.mentions.borrow_mut();
-    memo.follow(&rules);
-    let mut pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
     let conversation = response.id;
-    let result = match self.kept_feed_version(conversation) {
-      Some(version) => {
-        let maybe_last_read = response
-          .maybe_my_membership
-          .as_ref()
-          .and_then(|membership| membership.maybe_last_read_message_id);
-        let inputs = TallyInputs {
-          version,
-          maybe_importer,
-          unread_key: entry_tally::unread_key(
-            maybe_mark,
-            maybe_last_read,
-            maybe_lines_read,
-            maybe_importer,
-            &rules,
-          ),
-          maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
+    let result = self.with_entry_pass(
+      response,
+      maybe_mark,
+      maybe_me,
+      preferences,
+      |mut pass, maybe_inputs| {
+        let Some(inputs) = maybe_inputs else {
+          return entry_tally::counted_unkept(&self.store, conversation, pass);
         };
         if need == EntryNeed::Unread
           && let Some(unread) = self.followed_unread(conversation, &inputs, &mut pass)
         {
-          return EntryCounts {
+          return Ok(EntryCounts {
             unread,
             ..EntryCounts::default()
-          };
+          });
         }
         // Taken before the scan: what is written meanwhile is decided again on the next read.
         let maybe_cursor = self.store.written_cursor();
@@ -1581,12 +1560,146 @@ impl<S: LocalStore> CoreChatBackend<S> {
           },
         })
       },
-      None => entry_tally::counted_unkept(&self.store, conversation, pass),
-    };
+    );
     result.unwrap_or_else(|error| {
       tracing::error!(%error, "local store read failed");
       EntryCounts::default()
     })
+  }
+
+  /// Starts counting `response`'s entry ahead of [`Self::entry_counts`], for a host whose only
+  /// thread is the UI's (web, issue #2437): where [`Self::entry_counts`] would read thousands of
+  /// rows in one go (older history came in, a rebuilt index, a long absence),
+  /// [`Self::count_ahead_step`] reads them a few hundred at a time and keeps the tally, so the
+  /// count after reads only what came in meanwhile. `None` when it would read few rows anyway, or
+  /// the counts need no full read ([`EntryNeed::Unread`]).
+  pub(crate) fn count_ahead(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> Option<CountAhead> {
+    let maybe_tally = self.ahead_start(response, maybe_mark, maybe_me, preferences);
+    maybe_tally.map(|tally| CountAhead {
+      maybe_tally: Some(tally),
+      starts: 1,
+    })
+  }
+
+  /// Counts the next rows of `ahead` ([`Self::count_ahead`]); false once it is done, its tally
+  /// kept. A count that no longer holds (older rows came in meanwhile) starts again a few times,
+  /// then leaves the rest to [`Self::entry_counts`]. The same arguments as the start, each step.
+  pub(crate) fn count_ahead_step(
+    &self,
+    ahead: &mut CountAhead,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> bool {
+    let _step = crate::timing::step("entry_count_ahead");
+    let Some(tally) = ahead.maybe_tally.take() else {
+      return false;
+    };
+    let step = self.with_entry_pass(
+      response,
+      maybe_mark,
+      maybe_me,
+      preferences,
+      |pass, maybe_inputs| {
+        maybe_inputs.map(|inputs| entry_tally::ahead_step(&self.store, response.id, &inputs, tally, pass))
+      },
+    );
+    match step {
+      Some(Ok(AheadStep::More(next))) => {
+        ahead.maybe_tally = Some(next);
+        true
+      },
+      Some(Ok(AheadStep::Done(done))) => {
+        self.entry_tallies.borrow_mut().insert(response.id, done);
+        self.flush_entry_tallies();
+        false
+      },
+      Some(Ok(AheadStep::Lost)) if ahead.starts < COUNT_AHEAD_STARTS => {
+        ahead.starts += 1;
+        ahead.maybe_tally = self.ahead_start(response, maybe_mark, maybe_me, preferences);
+        ahead.maybe_tally.is_some()
+      },
+      Some(Ok(AheadStep::Lost)) | None => false,
+      Some(Err(error)) => {
+        // The count after reads the store again and says so if it fails.
+        tracing::debug!(%error, "local store read failed, counting in one go");
+        false
+      },
+    }
+  }
+
+  fn ahead_start(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+  ) -> Option<EntryTally> {
+    if self.entry_need != EntryNeed::Everything {
+      return None;
+    }
+    self.with_entry_pass(response, maybe_mark, maybe_me, preferences, |_, maybe_inputs| {
+      let inputs = maybe_inputs?;
+      let maybe_kept = entry_tally::kept_tally(&self.store, response.id);
+      entry_tally::ahead_start(&self.store, response.id, &inputs, maybe_kept).unwrap_or_else(|error| {
+        // The count after reads the store again and says so if it fails.
+        tracing::debug!(%error, "local store read failed, counting in one go");
+        None
+      })
+    })
+  }
+
+  /// Runs `run` with a pass that counts `response`'s rows the way [`Self::entry_counts`] does, and
+  /// what a kept tally must have been counted under (`None` when the store keeps none).
+  fn with_entry_pass<T>(
+    &self,
+    response: &ConversationResponse,
+    maybe_mark: Option<MessageId>,
+    maybe_me: Option<&UserSummary>,
+    preferences: &MentionPreferences,
+    run: impl FnOnce(EntryPass<'_>, Option<TallyInputs>) -> T,
+  ) -> T {
+    let maybe_lines_read = self.lines_read(response.id);
+    let is_unread = self.unread_check_given(response, maybe_mark, maybe_lines_read);
+    let maybe_importer = self.importer();
+    let rules = MentionRules {
+      username: maybe_me
+        .and_then(|me| me.maybe_username.as_deref())
+        .unwrap_or_default(),
+      display_name: maybe_me.map_or("", |me| me.display_name.as_str()),
+      first_name_is_mention: preferences.first_name_is_mention,
+      channel_mentions_notify: preferences.channel_mentions_notify,
+      keywords: &preferences.keywords,
+    };
+    let mut memo = self.mentions.borrow_mut();
+    memo.follow(&rules);
+    let pass = EntryPass::new(self.me, &rules, &mut memo, &is_unread, maybe_importer);
+    let maybe_inputs = self.kept_feed_version(response.id).map(|version| {
+      let maybe_last_read = response
+        .maybe_my_membership
+        .as_ref()
+        .and_then(|membership| membership.maybe_last_read_message_id);
+      TallyInputs {
+        version,
+        maybe_importer,
+        unread_key: entry_tally::unread_key(
+          maybe_mark,
+          maybe_last_read,
+          maybe_lines_read,
+          maybe_importer,
+          &rules,
+        ),
+        maybe_boundary: entry_tally::read_boundary(maybe_mark, maybe_last_read),
+      }
+    });
+    run(pass, maybe_inputs)
   }
 
   /// The unread counts of a conversation a scan counted before, after what the store's journal says
@@ -4725,6 +4838,15 @@ pub(crate) fn has_channel_in(conversations: &[ConversationResponse], space: Spac
 
 pub(crate) fn is_deleted(message: &StoredMessage) -> bool {
   matches!(message.content, MessageContent::Deleted)
+}
+
+/// A count of one conversation's entry ahead of [`CoreChatBackend::entry_counts`], a step at a
+/// time ([`CoreChatBackend::count_ahead`]).
+pub(crate) struct CountAhead {
+  /// Where the next step goes on; `None` once done.
+  maybe_tally: Option<EntryTally>,
+  /// The counts started so far, the first one included.
+  starts: u32,
 }
 
 /// The unread rows of one conversation, counted by a scan and followed since through the store's

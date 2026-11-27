@@ -3648,7 +3648,21 @@ Where the time went, before:
 The steps cost time in total: at 8 ms per step the large store's build took 140 s instead of 37 s
 (every step read the index nodes the node cache had dropped since the last), so the steps are
 40 ms, under a long task; that setting has no large run of its own yet. What stays on the thread
-after this is the UI's own rendering. The structural answer is the core in a worker (#2363), which
+after this is the UI's own rendering.
+
+**One conversation's counts (issue #2437).** After this, production still reported the thread busy
+for 3.2 and 3.6 s at once: one `entry_counts` of a long conversation, at the first snapshot and
+after a page of older history came in during the catch-up (`backlog_read_page`). Older rows (or a
+rebuilt index) leave a conversation's tally behind, and the web counts everything (message count,
+last activity, unread), so the next count read all its rows in one go; slicing between
+conversations didn't help with one of tens of thousands of rows. The sliced snapshot now counts
+such an entry ahead, 256 rows a step with the thread handed back every 8 ms, and keeps the tally,
+so the entry's own count reads only the rows written meanwhile (`count_ahead`). It starts when the
+count would read 512 rows or more: no tally that holds, a new read position far back, or many new
+rows after the tally; a count ahead that older rows overtake starts again, three times at most,
+then the count reads the rest in one go. `perf.rs` gives the long channel a backlog too, measured
+with the CPU slowed down like the catch-up, and checks that no task of it holds the thread for a
+second. The structural answer is the core in a worker (#2363), which
 takes all of this off the page.
 
 ### Web bundle size

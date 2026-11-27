@@ -705,10 +705,12 @@ async fn scroll_through_held_history(
 }
 
 /// Coming back after weeks away from busy channels (issue #1572). Every channel of the first space
-/// but the long one and two quiet ones grows by more than a capped catch-up reads (200 messages),
-/// so the rest of each is read in the background, a page at a time. Meanwhile Carol switches
-/// between the quiet channels, which got nothing new; measured until the browser went quiet.
-/// `PERF_BACKLOG_MESSAGES` sets the messages per busy channel.
+/// but two quiet ones grows by more than a capped catch-up reads (200 messages), so the rest of
+/// each is read in the background, a page at a time. Meanwhile Carol switches between the quiet
+/// channels, which got nothing new; measured until the browser went quiet, with the CPU slowed
+/// down like the catch-up of many conversations. The long channel is busy too: every older page
+/// that comes into it changes the counts of thousands of rows, which the core counts again in
+/// steps (issue #2437). `PERF_BACKLOG_MESSAGES` sets the messages per busy channel.
 async fn come_back_to_busy_channels(
   page: &Page,
   alice: &mut Peer,
@@ -719,17 +721,27 @@ async fn come_back_to_busy_channels(
 ) {
   page.goto("about:blank").await.unwrap();
   let quiet = &seeded.first_space_channels[1..3];
-  let busy = &seeded.channels[3..seeded.first_space_channels.len()];
+  let busy: Vec<ConversationId> = std::iter::once(seeded.channels[0])
+    .chain(
+      seeded.channels[3..seeded.first_space_channels.len()]
+        .iter()
+        .copied(),
+    )
+    .collect();
   // PERF_BACKLOG_MESSAGES=n: a longer absence than the scale's.
   let messages = std::env::var("PERF_BACKLOG_MESSAGES")
     .ok()
     .and_then(|value| value.parse().ok())
     .unwrap_or(scale.backlog_messages);
   for index in 0..messages {
-    for channel in busy {
+    for channel in &busy {
       send(alice, *channel, index).await;
     }
   }
+  page
+    .execute(SetCpuThrottlingRateParams::new(catch_up_cpu_slowdown()))
+    .await
+    .unwrap();
   let started = Instant::now();
   let log = watch_catch_up_log(page, started).await;
   page
@@ -747,6 +759,7 @@ async fn come_back_to_busy_channels(
   report.backlog_switch_ms_p95 = percentile(&times, 95);
   report.backlog_switch_ms_max = times.last().copied().unwrap_or(0.0);
   wait_until_done(page).await;
+  page.execute(SetCpuThrottlingRateParams::new(1.0)).await.unwrap();
   wait_until_browser_settled(profile).await;
   report.seconds_backlog_until_settled = started.elapsed().as_secs_f64();
   let long_tasks = evaluate_value(page, "window.__longTasks || [0, 0, 0]".into()).await;
@@ -847,10 +860,7 @@ async fn come_back_to_many_conversations(
     }
   };
   tokio::join!(alice_writes, bob_writes);
-  let slowdown = std::env::var("PERF_CATCH_UP_CPU_SLOWDOWN")
-    .ok()
-    .and_then(|value| value.parse().ok())
-    .unwrap_or(CATCH_UP_CPU_SLOWDOWN);
+  let slowdown = catch_up_cpu_slowdown();
   // PERF_CATCH_UP_AFTER_BUILD=1: the update that rebuilds the catalog comes with the absence, as
   // when someone opens the app after weeks (issue #2397): the build first, then the catch-up.
   if std::env::var("PERF_CATCH_UP_AFTER_BUILD").is_ok_and(|value| value == "1") {
@@ -925,6 +935,14 @@ async fn come_back_to_many_conversations(
   }
   page.execute(SetCpuThrottlingRateParams::new(1.0)).await.unwrap();
   wait_until_browser_settled(profile).await;
+}
+
+/// How much the CPU is slowed down while a catch-up is measured (`PERF_CATCH_UP_CPU_SLOWDOWN`).
+fn catch_up_cpu_slowdown() -> f64 {
+  std::env::var("PERF_CATCH_UP_CPU_SLOWDOWN")
+    .ok()
+    .and_then(|value| value.parse().ok())
+    .unwrap_or(CATCH_UP_CPU_SLOWDOWN)
 }
 
 async fn measure(page: &Page, seeded: &Seeded, profile: &str, scale: Scale) -> Report {
@@ -2034,6 +2052,11 @@ impl Report {
     assert!(
       self.catalog_build_longest_task_ms < 1000.0,
       "the page's thread was held while the catalog was built: {self:#?}"
+    );
+    // #2437: nor older history coming into a long channel, whose counts are read again.
+    assert!(
+      self.backlog_longest_task_ms < 1000.0,
+      "the page's thread was held while older history came in: {self:#?}"
     );
     // Issue #714: synced within 300 ms of opening; the bound leaves room for a shared machine.
     assert!(

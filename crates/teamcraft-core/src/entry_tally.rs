@@ -53,6 +53,17 @@ const UNREAD_ONLY_FORMAT: u64 = 2;
 const UNREAD_WINDOW_ROWS: usize = 2_000;
 #[cfg(test)]
 const UNREAD_WINDOW_ROWS: usize = 4;
+/// Rows a count ahead reads in one step ([`ahead_step`]): a few milliseconds of the page's thread.
+#[cfg(not(test))]
+const AHEAD_ROWS_PER_STEP: usize = ROWS_PER_READ;
+#[cfg(test)]
+const AHEAD_ROWS_PER_STEP: usize = 3;
+/// Fewer rows than this to read, and [`counted`] reads them in one go: a count ahead isn't worth
+/// its steps ([`ahead_start`]).
+#[cfg(not(test))]
+const AHEAD_MIN_ROWS: usize = 2 * ROWS_PER_READ;
+#[cfg(test)]
+const AHEAD_MIN_ROWS: usize = 4;
 /// The numbers of a tally's record.
 const TALLY_WORDS: usize = 13;
 /// A tally's record: the numbers and the last counted row's client message ID.
@@ -215,6 +226,30 @@ impl<'a> EntryPass<'a> {
 }
 
 impl EntryTally {
+  /// The tally of no rows: where a count of all of them starts.
+  fn empty(inputs: &TallyInputs) -> Self {
+    Self {
+      version: inputs.version,
+      maybe_importer: inputs.maybe_importer,
+      maybe_through: None,
+      rows: 0,
+      messages: 0,
+      maybe_last_activity: None,
+      unread_key: inputs.unread_key,
+      is_unread_only: false,
+      unread_messages: 0,
+      unread_mentions: 0,
+    }
+  }
+
+  /// Whether rows after this tally are counted onto it without deciding its unread counts again
+  /// ([`counted_from`]).
+  fn continues_under(&self, inputs: &TallyInputs) -> bool {
+    !self.is_unread_only
+      && self.unread_key == inputs.unread_key
+      && self.version.edited == inputs.version.edited
+  }
+
   /// Whether this tally holds under `inputs`, its place checked against the store's feed index.
   fn holds(
     &self,
@@ -352,6 +387,79 @@ pub(crate) fn counted(
       Ok(Counted::Kept(counts, tally))
     },
     EntryNeed::Unread => counted_unread(store, conversation, inputs, rows_now, pass, maybe_rows),
+  }
+}
+
+/// What [`ahead_step`] got to.
+pub(crate) enum AheadStep {
+  /// A tally of the rows counted so far: more are left.
+  More(EntryTally),
+  /// A tally of all rows but the few the next [`counted`] reads (pending ones, new ones).
+  Done(EntryTally),
+  /// The tally no longer holds (older rows came in, a rebuilt index, another read position, an
+  /// edit): start again.
+  Lost,
+}
+
+/// Where a count ahead of `conversation`'s counts ([`EntryNeed::Everything`]) starts, for a host
+/// that can't let [`counted`] read thousands of rows in one go (the web page's only thread, issue
+/// #2437): the kept tally where it holds and only rows after it are left, an empty one where all
+/// rows are read again. `None` when [`counted`] reads few rows anyway.
+pub(crate) fn ahead_start(
+  store: &dyn LocalStore,
+  conversation: ConversationId,
+  inputs: &TallyInputs,
+  maybe_kept: Option<EntryTally>,
+) -> Result<Option<EntryTally>, StoreError> {
+  let rows_now = store.feed_len(conversation)?;
+  let maybe_holding = match maybe_kept {
+    Some(kept) if !kept.is_unread_only && kept.holds(store, conversation, inputs, rows_now)? => Some(kept),
+    _ => None,
+  };
+  let (start, rows_left) = match maybe_holding {
+    Some(kept) if kept.continues_under(inputs) => {
+      let rows_left = rows_now - kept.rows;
+      (kept, rows_left)
+    },
+    // The unread counts are decided again from the read position on: as many rows as that are
+    // read in one go, or all of them in steps.
+    Some(_) => {
+      let from = match inputs.maybe_boundary {
+        Some(boundary) => store
+          .feed_ranks(conversation, &[boundary])?
+          .first()
+          .copied()
+          .unwrap_or(0),
+        None => 0,
+      };
+      (EntryTally::empty(inputs), rows_now.saturating_sub(from))
+    },
+    None => (EntryTally::empty(inputs), rows_now),
+  };
+  Ok((rows_left >= AHEAD_MIN_ROWS).then_some(start))
+}
+
+/// Counts the next [`AHEAD_ROWS_PER_STEP`] rows after `tally`, like [`counted`] would after a kept
+/// tally: [`counted`] then reads only the rows the steps didn't.
+pub(crate) fn ahead_step(
+  store: &dyn LocalStore,
+  conversation: ConversationId,
+  inputs: &TallyInputs,
+  tally: EntryTally,
+  pass: EntryPass<'_>,
+) -> Result<AheadStep, StoreError> {
+  let rows_now = store.feed_len(conversation)?;
+  if !tally.continues_under(inputs) || !tally.holds(store, conversation, inputs, rows_now)? {
+    return Ok(AheadStep::Lost);
+  }
+  let from = tally.rows;
+  let end = rows_now.min(from + AHEAD_ROWS_PER_STEP);
+  let (_, next) = counted_from(store, conversation, inputs, tally, end, pass)?;
+  // Pending rows are never kept: a step that got to them leaves them to the read after.
+  if end == rows_now || next.rows == from {
+    Ok(AheadStep::Done(next))
+  } else {
+    Ok(AheadStep::More(next))
   }
 }
 
@@ -842,7 +950,62 @@ mod tests {
     a_damaged_tally_is_counted_again,
     a_tally_older_than_the_new_rows_catches_up,
     a_tally_from_before_a_rewrite_is_not_believed,
+    counted_ahead_the_count_reads_no_whole_feed,
+    older_history_is_counted_ahead,
+    a_few_new_rows_are_not_counted_ahead,
+    a_count_ahead_that_no_longer_holds_starts_again,
+    a_new_read_position_is_counted_ahead,
+    the_unread_counts_alone_are_never_counted_ahead,
   );
+
+  // Issue #2437: what a count would read in one go is read a few rows at a time ahead of it.
+  fn counted_ahead_the_count_reads_no_whole_feed<S: LocalStore>(mut fixture: Fixture<S>) {
+    assert_eq!(fixture.count_ahead(), 2, "six rows, three a step");
+    assert_eq!(fixture.check(), 0);
+    assert_eq!(fixture.counts().messages, FIRST_ROWS as usize);
+  }
+
+  fn older_history_is_counted_ahead<S: LocalStore>(mut fixture: Fixture<S>) {
+    fixture.check();
+    fixture.write(&text(0, PEER, "older, loaded later"));
+    assert!(fixture.count_ahead() > 0);
+    assert_eq!(fixture.check(), 0);
+    assert_eq!(fixture.counts().messages, FIRST_ROWS as usize + 1);
+  }
+
+  fn a_few_new_rows_are_not_counted_ahead<S: LocalStore>(mut fixture: Fixture<S>) {
+    fixture.check();
+    fixture.write(&text(100, PEER, "new"));
+    assert_eq!(fixture.count_ahead(), 0, "the count reads one row");
+    assert_eq!(fixture.check(), 0);
+  }
+
+  fn a_count_ahead_that_no_longer_holds_starts_again<S: LocalStore>(mut fixture: Fixture<S>) {
+    let steps = fixture.count_ahead_with(|fixture, step| {
+      if step == 1 {
+        fixture.write(&text(0, PEER, "older, came in between two steps"));
+      }
+    });
+    assert!(steps > 2, "started again after the older row: {steps}");
+    assert_eq!(fixture.check(), 0);
+    assert_eq!(fixture.counts().messages, FIRST_ROWS as usize + 1);
+  }
+
+  fn a_new_read_position_is_counted_ahead<S: LocalStore>(mut fixture: Fixture<S>) {
+    fixture.check();
+    fixture.set_last_read(Some(1));
+    assert!(fixture.count_ahead() > 0, "five unread rows to decide again");
+    assert_eq!(fixture.check(), 0);
+    fixture.set_last_read(Some(4));
+    assert_eq!(fixture.count_ahead(), 0, "two unread rows: the count reads them");
+    assert_eq!(fixture.check(), 0);
+  }
+
+  fn the_unread_counts_alone_are_never_counted_ahead<S: LocalStore>(fixture: Fixture<S>) {
+    let backend = backend_on(fixture.store.clone()).with_entry_need(EntryNeed::Unread);
+    let maybe_ahead = backend.count_ahead(&fixture.response, None, Some(&me()), &fixture.preferences);
+    assert!(maybe_ahead.is_none(), "they read the newest rows alone");
+  }
 
   fn nothing_changed_reads_no_row<S: LocalStore>(mut fixture: Fixture<S>) {
     assert_eq!(fixture.check(), 1, "the first read counts every row");
@@ -1474,6 +1637,45 @@ mod tests {
       assert_eq!(WHOLE_PASSES.with(std::cell::Cell::get) - before, 1);
     }
 
+    /// Issue #2437: the web's sliced snapshot counts a conversation's entry ahead, a step at a
+    /// time, the first time and when older history came in; its own count reads no whole feed.
+    #[tokio::test]
+    async fn a_sliced_snapshot_counts_ahead_of_its_entries() {
+      let (store, _dir) = sealed_store();
+      let mut fixture = Fixture::new(store);
+      // Listed without a space.
+      let direct = ConversationResponse {
+        maybe_strict: None,
+        kind: teamcraft_proto::ConversationKind::Dm,
+        ..response()
+      };
+      records::put_json(
+        fixture.store.as_ref(),
+        Table::Conversations,
+        &conversation().to_string(),
+        &direct,
+      )
+      .unwrap();
+      let before = WHOLE_PASSES.with(std::cell::Cell::get);
+      let mut cache = SnapshotCache::new(1);
+      let slice = std::time::Duration::from_millis(8);
+      let first = cache
+        .changes_since_sliced(&fixture.backend, StoreChanges::default(), || None, None, slice)
+        .await;
+      let full = first.maybe_full.expect("a first reader gets everything");
+      assert_eq!(full.message_counts, [(conversation(), FIRST_ROWS as usize)]);
+      fixture.write(&text(0, PEER, "older, loaded later"));
+      let changes = StoreChanges {
+        conversations: [conversation()].into(),
+        ..StoreChanges::default()
+      };
+      let update = cache
+        .changes_since_sliced(&fixture.backend, changes, || None, Some(first.cursor), slice)
+        .await;
+      assert_eq!(update.conversations[0].message_count, FIRST_ROWS as usize + 1);
+      assert_eq!(WHOLE_PASSES.with(std::cell::Cell::get) - before, 0);
+    }
+
     #[test]
     fn a_conversation_that_goes_away_takes_its_tally_along() {
       for remove in [
@@ -1674,6 +1876,37 @@ mod tests {
         &self.preferences,
         self.need,
       )
+    }
+
+    /// Counts ahead of the next read, a step at a time: the steps it took, none if it didn't start.
+    fn count_ahead(&mut self) -> usize {
+      self.count_ahead_with(|_, _| {})
+    }
+
+    /// [`Self::count_ahead`], with `between` run after each step (its number, from 1).
+    fn count_ahead_with(&mut self, mut between: impl FnMut(&mut Self, usize)) -> usize {
+      let Some(mut ahead) =
+        self
+          .backend
+          .count_ahead(&self.response, self.maybe_mark, Some(&me()), &self.preferences)
+      else {
+        return 0;
+      };
+      let mut steps = 0;
+      loop {
+        let is_more = self.backend.count_ahead_step(
+          &mut ahead,
+          &self.response,
+          self.maybe_mark,
+          Some(&me()),
+          &self.preferences,
+        );
+        steps += 1;
+        if !is_more {
+          return steps;
+        }
+        between(self, steps);
+      }
     }
 
     fn reopen(&mut self) {
