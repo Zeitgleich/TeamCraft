@@ -40,7 +40,7 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["r
 # The recovery kit page (src/recovery_kit.rs, e2ee.md §6.5.3) for every client, and the QR codes of
 # the kit and the device link code (src/qr.rs): pure Rust, no image support needed. Its text forms
 # of the key are cleared after use. Both were in the tree through the web client and the crypto.
-qrcode = { version = "0.14", default-features = false }
+qrcode = { version = "0.15", default-features = false }
 zeroize = "1.9.1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
