@@ -515,7 +515,13 @@ by E2EE either way. The server and the desktop, web, iOS and Android clients are
 the key, and the identity provider puts the key's thumbprint into the access token (`cnf.jkt`). With
 every request it sends a *proof*: a JWT signed with that key, naming the method (`htm`), the URL
 without query (`htu`), the time (`iat`), a unique ID (`jti`), the hash of the token (`ath`) and the
-server's nonce.
+server's nonce. The app writes `htu` normalized (`DpopProofDraft::new`, with the `url` crate); the
+service worker, whose proofs only go to the TeamCraft server, cuts it from the URL as text before
+its query or fragment (`DpopProofDraft::new_for_own_server`, #1462), which keeps `url` and `idna`
+out of the worker every visitor installs. The server reads `htu` with `url` itself, and a URL read
+again from its own serialization is the same URL, so it decides on both alike (tested in
+`teamcraft_crypto::dpop`). An identity provider may compare `htu` as text, so proofs for it are
+always normalized.
 
 **Why this closes the relay of §3.1.1.** The app signs proofs for the origin it is talking to, so a
 look-alike only ever receives proofs naming its own origin. The real server compares `htu` with
@@ -5094,7 +5100,7 @@ probe doing only the `serde_json` part (2026-11-04):
 | `automerge` 0.6.1                              | +930,498 B   | +284,962 B    | merges per character                |
 | Own op log, last writer wins per block         | a few kB     | a few kB      | one side's typing in the block lost |
 
-Neither CRDT breaks the budget of a signed-in first visit (5.63 MB gzip, docs/performance.md,
+Neither CRDT breaks the budget of a signed-in first visit (6.03 MB gzip, docs/performance.md,
 "Web bundle size"), and the editor doesn't count towards it anyway (below). `yrs` costs less than a
 third of `automerge` and speaks the Yjs format, which has editors and tooling around it. The op
 log would cost nothing, but it loses typing exactly where a meeting's notes are written: several

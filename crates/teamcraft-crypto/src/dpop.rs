@@ -324,31 +324,26 @@ impl DpopProofDraft {
     let mut target = Url::parse(request.target_uri).map_err(|_| DpopError::WrongUri)?;
     target.set_query(None);
     target.set_fragment(None);
+    Ok(Self::with_htu(key, request, target.as_str()))
+  }
 
-    let header = serde_json::json!({
-      "typ": PROOF_TYPE,
-      "alg": DPOP_ALGORITHM,
-      "jwk": {"kty": "EC", "crv": "P-256", "x": key.x, "y": key.y},
-    });
-    let mut claims = serde_json::json!({
-      "jti": random_base64url::<JTI_RANDOM_BYTES>(),
-      "htm": request.method,
-      "htu": target.as_str(),
-      "iat": request.issued_at_unix,
-    });
-    if let Some(token) = request.maybe_access_token {
-      claims["ath"] = serde_json::Value::String(access_token_hash(token));
+  /// As [`Self::new`], with `htu` cut from the request's URL as text, before its query or fragment,
+  /// without reading it as a URL: the `url` crate with `idna` is about 95 kB of the service
+  /// worker's code before wasm-opt, for this alone (#1462). `htu` is then not normalized (case,
+  /// default port, dot segments), so this is for proofs to the TeamCraft server only: it reads `htu`
+  /// with `Url` itself ([`verify_proof`]), and a URL read again from its own serialization is the
+  /// same URL, so it decides exactly as on a proof from [`Self::new`]. An identity provider may
+  /// compare `htu` as text; its proofs go through [`Self::new`].
+  pub fn new_for_own_server(key: &DpopPublicKey, request: &DpopProofRequest<'_>) -> Result<Self, DpopError> {
+    let target = request.target_uri;
+    let htu = target.split(['?', '#']).next().unwrap_or(target);
+    let has_scheme_and_rest = htu
+      .split_once("://")
+      .is_some_and(|(scheme, rest)| !scheme.is_empty() && !rest.is_empty());
+    if !has_scheme_and_rest {
+      return Err(DpopError::WrongUri);
     }
-    if let Some(nonce) = request.maybe_nonce {
-      claims["nonce"] = serde_json::Value::String(nonce.to_owned());
-    }
-    Ok(Self {
-      signing_input: format!(
-        "{}.{}",
-        URL_SAFE_NO_PAD.encode(header.to_string()),
-        URL_SAFE_NO_PAD.encode(claims.to_string())
-      ),
-    })
+    Ok(Self::with_htu(key, request, htu))
   }
 
   /// What the key has to sign.
@@ -363,6 +358,33 @@ impl DpopProofDraft {
       self.signing_input,
       URL_SAFE_NO_PAD.encode(signature)
     ))
+  }
+
+  fn with_htu(key: &DpopPublicKey, request: &DpopProofRequest<'_>, htu: &str) -> Self {
+    let header = serde_json::json!({
+      "typ": PROOF_TYPE,
+      "alg": DPOP_ALGORITHM,
+      "jwk": {"kty": "EC", "crv": "P-256", "x": key.x, "y": key.y},
+    });
+    let mut claims = serde_json::json!({
+      "jti": random_base64url::<JTI_RANDOM_BYTES>(),
+      "htm": request.method,
+      "htu": htu,
+      "iat": request.issued_at_unix,
+    });
+    if let Some(token) = request.maybe_access_token {
+      claims["ath"] = serde_json::Value::String(access_token_hash(token));
+    }
+    if let Some(nonce) = request.maybe_nonce {
+      claims["nonce"] = serde_json::Value::String(nonce.to_owned());
+    }
+    Self {
+      signing_input: format!(
+        "{}.{}",
+        URL_SAFE_NO_PAD.encode(header.to_string()),
+        URL_SAFE_NO_PAD.encode(claims.to_string())
+      ),
+    }
   }
 }
 
@@ -1091,6 +1113,92 @@ mod tests {
 
   mod origins {
     use super::*;
+
+    /// A proof for the TeamCraft server without the `url` crate names the same `htu` for a URL that
+    /// is already in its normal form, and the server decides on it as on the parsed one for any URL.
+    #[test]
+    fn a_proof_for_the_own_server_is_decided_as_a_parsed_one() {
+      let key = DpopSigningKey::generate();
+      for uri in [
+        URI,
+        "https://chat.example.com/api/v1/me?before=8&limit=1",
+        "https://chat.example.com/api/v1/me#part",
+        "https://chat.example.com/api/v1/me?a=1#part",
+        "http://127.0.0.1:8081/api/v1/me",
+      ] {
+        let parsed = own_and_parsed(&key, uri).1;
+        assert_eq!(
+          claims_of(&parsed)["htu"],
+          claims_of(&own_and_parsed(&key, uri).0)["htu"],
+          "{uri}"
+        );
+      }
+      for uri in [
+        URI,
+        "HTTPS://CHAT.EXAMPLE.COM/api/v1/me",
+        "https://chat.example.com:443/api/v1/me?x=1",
+        "https://chat.example.com/api/v1/x/../me",
+        "https://chat.example.com/api/v1/x/%2e%2e/me",
+        "https://chat.example.com/api/v1/you",
+        "https://other.example.com/api/v1/me",
+        "https://user@chat.example.com/api/v1/me",
+        "https://chat.example.com:8443/api/v1/me",
+      ] {
+        let (own, parsed) = own_and_parsed(&key, uri);
+        assert_eq!(
+          check(&own, &bound_to(&key)).is_ok(),
+          check(&parsed, &bound_to(&key)).is_ok(),
+          "{uri}"
+        );
+      }
+    }
+
+    #[test]
+    fn a_proof_for_the_own_server_needs_a_scheme_and_a_host() {
+      let public = DpopSigningKey::generate().public_key();
+      for uri in [
+        "",
+        "/api/v1/me",
+        "chat.example.com/api/v1/me",
+        "://chat.example.com",
+        "https://",
+      ] {
+        let request = DpopProofRequest {
+          method: "GET",
+          target_uri: uri,
+          issued_at_unix: NOW,
+          maybe_access_token: Some(TOKEN),
+          maybe_nonce: None,
+        };
+        assert!(
+          matches!(
+            DpopProofDraft::new_for_own_server(&public, &request),
+            Err(DpopError::WrongUri)
+          ),
+          "{uri}"
+        );
+      }
+    }
+
+    /// Proofs for `uri` from [`DpopProofDraft::new_for_own_server`] and from [`DpopProofDraft::new`].
+    fn own_and_parsed(key: &DpopSigningKey, uri: &str) -> (String, String) {
+      let request = DpopProofRequest {
+        method: "GET",
+        target_uri: uri,
+        issued_at_unix: NOW,
+        maybe_access_token: Some(TOKEN),
+        maybe_nonce: None,
+      };
+      let public = key.public_key();
+      let finish = |draft: DpopProofDraft| {
+        let signature = key.sign_bytes(draft.signing_input());
+        draft.finish(&signature).as_str().to_owned()
+      };
+      (
+        finish(DpopProofDraft::new_for_own_server(&public, &request).unwrap()),
+        finish(DpopProofDraft::new(&public, &request).unwrap()),
+      )
+    }
 
     #[test]
     fn urls_are_compared_after_normalizing() {

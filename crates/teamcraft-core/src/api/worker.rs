@@ -9,7 +9,9 @@
 //! refused for them is made again once, never more. Nothing follows a redirect (the API sends none,
 //! and a proof must not reach another host), and tokens only go to `https://` or a loopback
 //! `http://`. The proof flow is written against [`WorkerTransport`], so it is tested natively
-//! against the server's own proof checks.
+//! against the server's own proof checks. The proofs' `htu` is cut from the URL as text
+//! ([`signed_headers_to_own_server`], #1462): reading it with `url` would bring that crate back for
+//! this alone, and the server normalizes `htu` itself.
 
 use std::future::Future;
 use std::net::IpAddr;
@@ -22,7 +24,9 @@ use teamcraft_proto::{
   ErrorBody, ListMessagesQuery, ListMessagesResponse, MeetingId, SetReadPositionRequest,
 };
 
-use super::dpop::{DPOP_HEADER, DpopAnswer, DpopProver, Learned, is_from_a_cache, signed_headers};
+use super::dpop::{
+  DPOP_HEADER, DpopAnswer, DpopProver, Learned, is_from_a_cache, signed_headers_to_own_server,
+};
 use super::{ApiError, ProvenToken};
 use crate::push_preview::PreviewApi;
 
@@ -155,7 +159,7 @@ impl<T: WorkerTransport> WorkerApi<T> {
     url: &str,
     maybe_body: Option<String>,
   ) -> Result<WorkerAnswer, ApiError> {
-    let signed = signed_headers(self.maybe_prover.as_deref(), &self.token, method, url)
+    let signed = signed_headers_to_own_server(self.maybe_prover.as_deref(), &self.token, method, url)
       .await
       .map_err(ApiError::from)?;
     let mut headers = vec![("Authorization", signed.authorization)];

@@ -214,20 +214,34 @@ impl DpopProver {
     target_uri: &str,
     maybe_access_token: Option<&str>,
   ) -> Result<DpopProof, DpopProofError> {
+    self
+      .proof_for(DpopProofDraft::new, method, target_uri, maybe_access_token)
+      .await
+  }
+
+  /// A proof whose draft `make_draft` makes: [`DpopProofDraft::new`], or
+  /// [`DpopProofDraft::new_for_own_server`] for the TeamCraft server. A function item, not a value
+  /// to match on, so a build that only ever asks for the second (the service worker) links no `url`
+  /// for the first (#1462).
+  async fn proof_for(
+    &self,
+    make_draft: impl Fn(&DpopPublicKey, &DpopProofRequest<'_>) -> Result<DpopProofDraft, DpopError>,
+    method: &str,
+    target_uri: &str,
+    maybe_access_token: Option<&str>,
+  ) -> Result<DpopProof, DpopProofError> {
     let (maybe_nonce, offset) = {
       let state = self.state();
       (state.maybe_nonce.clone(), state.clock_offset_secs)
     };
-    let draft = DpopProofDraft::new(
-      self.signer.public_key(),
-      &DpopProofRequest {
-        method,
-        target_uri,
-        issued_at_unix: now_unix().saturating_add(offset),
-        maybe_access_token,
-        maybe_nonce: maybe_nonce.as_deref(),
-      },
-    )?;
+    let request = DpopProofRequest {
+      method,
+      target_uri,
+      issued_at_unix: now_unix().saturating_add(offset),
+      maybe_access_token,
+      maybe_nonce: maybe_nonce.as_deref(),
+    };
+    let draft = make_draft(self.signer.public_key(), &request)?;
     let signature = self.signer.sign(draft.signing_input()).await?;
     Ok(draft.finish(&signature))
   }
@@ -343,6 +357,35 @@ pub async fn signed_headers(
   method: &str,
   url: &str,
 ) -> Result<SignedHeaders, DpopSendError> {
+  signed_headers_for(DpopProofDraft::new, maybe_prover, token, method, url).await
+}
+
+/// As [`signed_headers`], for a request to the TeamCraft server only: the proof's `htu` is cut from
+/// `url` as text, without the `url` crate (`DpopProofDraft::new_for_own_server`), which the
+/// service worker doesn't carry for it (#1462). The server decides on it as on any other proof.
+pub async fn signed_headers_to_own_server(
+  maybe_prover: Option<&DpopProver>,
+  token: &str,
+  method: &str,
+  url: &str,
+) -> Result<SignedHeaders, DpopSendError> {
+  signed_headers_for(
+    DpopProofDraft::new_for_own_server,
+    maybe_prover,
+    token,
+    method,
+    url,
+  )
+  .await
+}
+
+async fn signed_headers_for(
+  make_draft: impl Fn(&DpopPublicKey, &DpopProofRequest<'_>) -> Result<DpopProofDraft, DpopError>,
+  maybe_prover: Option<&DpopProver>,
+  token: &str,
+  method: &str,
+  url: &str,
+) -> Result<SignedHeaders, DpopSendError> {
   let Authorization::Bound(bound) = Authorization::of(token) else {
     return Ok(SignedHeaders {
       authorization: format!("Bearer {token}"),
@@ -353,7 +396,7 @@ pub async fn signed_headers(
   if prover.thumbprint() != bound {
     return Err(DpopSendError::KeyLost);
   }
-  let proof = prover.proof(method, url, Some(token)).await?;
+  let proof = prover.proof_for(make_draft, method, url, Some(token)).await?;
   Ok(SignedHeaders {
     authorization: format!("DPoP {token}"),
     maybe_proof: Some(proof),
