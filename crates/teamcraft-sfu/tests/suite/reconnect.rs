@@ -558,6 +558,51 @@ mod screen_takeover {
     }
   }
 
+  /// A share that adapts in place (#2417) while another device's share takes it over (#2447):
+  /// the replacement reaches the SFU after the takeover and publishes nothing, so the new share
+  /// goes on for everyone, also after the old sharer rejoins.
+  #[test]
+  fn a_share_adapting_in_place_while_taken_over_stays_ended() {
+    let mut network = Network::with_secured(&[ALICE, BOB, CAROL]);
+    let alice_screen = network.publish(ALICE, VideoTrackKind::Screen);
+    let alice_publication = network.confirmed_publication(ALICE, alice_screen);
+
+    // Bob's share reaches the SFU; Alice steps her share's layers before she hears of it.
+    let bob_publication = network.ask_for(BOB, VideoTrackKind::Screen);
+    network.drain_client(BOB);
+    let client = network.client_mut(ALICE);
+    let replacement = VideoPublicationId(client.next_publication);
+    client.next_publication += 1;
+    client.engine.replace_video(
+      alice_publication,
+      replacement,
+      VideoTrackKind::Screen,
+      VideoCodec::H264,
+      small_layers().into_iter().take(2).collect(),
+    );
+    network.drain_client(ALICE);
+    network.pump();
+
+    let bob_screen = network.confirmed(BOB, bob_publication).unwrap();
+    assert_eq!(network.confirmed(ALICE, replacement), None);
+    for viewer in [ALICE, BOB, CAROL] {
+      assert_eq!(
+        live_screens(&network, viewer),
+        vec![(device(BOB), bob_screen)],
+        "{viewer}"
+      );
+      assert_eq!(refusals(&network, viewer), Vec::<String>::new(), "{viewer}");
+    }
+    assert_eq!(taken_over(&network, BOB), Vec::new());
+
+    // Nothing of the replacement is asked for again when Alice comes back.
+    network.lose(ALICE);
+    assert_eq!(network.rejoin(ALICE), JoinOutcome::Resumed);
+    network.pump();
+    assert_eq!(live_screens(&network, CAROL), vec![(device(BOB), bob_screen)]);
+    assert_eq!(taken_over(&network, BOB), Vec::new());
+  }
+
   /// A viewer's app closes a tile only after the engine heard the track is gone: the engine
   /// doesn't ask the SFU to stop a track it no longer receives (#2442).
   #[test]

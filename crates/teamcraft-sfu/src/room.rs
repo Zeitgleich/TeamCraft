@@ -903,7 +903,9 @@ impl Room {
   /// Publishes `owner`'s track with `layers` in place of its track `replaced` (#2417): the same
   /// stream goes on with the new layers, announced to everyone as published again. A stream that
   /// is no longer such a track (it ended meanwhile) gets a new track as by
-  /// [`Self::publish_video`]; the owner ends the old one then.
+  /// [`Self::publish_video`]; the owner ends the old one then. A replacement of the owner's share
+  /// that another device's share took over publishes nothing (#2447): it crossed the takeover on
+  /// its way, and publishing it would take the share back from the new one.
   #[allow(clippy::too_many_arguments)]
   pub fn replace_video(
     &self,
@@ -926,6 +928,19 @@ impl Room {
       now,
     )?;
     let Some((track, effects)) = maybe_replaced else {
+      let is_taken_over = state
+        .screen_shares_taken_over
+        .get(&owner)
+        .is_some_and(|takeover| takeover.stream_id == replaced);
+      if is_taken_over {
+        debug!(
+          call_id = %self.call_id,
+          participant_id = %owner,
+          stream_id = replaced.0,
+          "replacement of a share taken over; ignored"
+        );
+        return Ok(());
+      }
       drop(state);
       return self.publish_video(owner, kind, codec, layers, maybe_publication_id);
     };
