@@ -77,7 +77,7 @@ image = { version = "0.25.9", default-features = false, features = ["png", "jpeg
 # Upload bodies streamed in chunks, so the bytes sent are counted for the progress (src/api/http.rs).
 reqwest = { workspace = true, features = ["stream"] }
 # SQLCipher: e2ee.md §9. Version matches the libsqlite3-sys already in the lock file (sqlx).
-rusqlite = { version = "0.39", optional = true }
+rusqlite = { version = "0.43", optional = true }
 tokio = { workspace = true, features = ["rt", "time", "sync", "macros"] }
 # Gateway WebSocket on native targets.
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
