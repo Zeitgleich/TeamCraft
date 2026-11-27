@@ -279,7 +279,10 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let (role_log_version, role_log_hash) = self.role_log_mirror(conversation)?;
     let attempts = self.settings.max_commit_attempts.max(1);
     for _ in 0..attempts {
-      let hint = self.api.mls_strict_hint(conversation).await?;
+      let hint = self
+        .api
+        .mls_strict_hint(conversation, &teamcraft_proto::MlsStrictHintQuery::default())
+        .await?;
       let (version, prev_hash) = match &hint.maybe_strict {
         Some(current) if current.is_strict => (current.version.saturating_add(1), hint_hash(current)?),
         // Turning on starts a chain at any version (above the last one the server names).
@@ -393,12 +396,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   ) -> Result<(), CoreError> {
     let change = signed.change();
     let hash = change.hash().map_err(MlsError::from)?;
+    // The signed change goes along: the server keeps it in the chain a device that fell out
+    // carries its roles forward on (e2ee.md §4.6.2, "Falling out in a strict channel").
+    let change_bytes = signed.to_bytes().map_err(MlsError::from)?;
     self.maybe_strict_hint = Some((
       conversation,
       StrictChannelHint {
         is_strict: !change.roles.is_empty(),
         version: change.version,
         hash: Base64Bytes::new(hash.as_bytes().to_vec()),
+        maybe_change: Some(Base64Bytes::new(change_bytes)),
       },
     ));
     Ok(())
@@ -742,7 +749,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     self.hint_strict_roles(conversation, signed)?;
     if self.post_commit(conversation, output, &[]).await?.is_some() {
-      self.note_known_strict_roles(conversation)?;
+      self.note_known_strict_roles(conversation, Some(change.version))?;
       tracing::info!(conversation_id = %conversation, version = change.version, "committed a workspace admin's strict roles change");
       return Ok(false);
     }

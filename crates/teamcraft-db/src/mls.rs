@@ -31,6 +31,16 @@ pub enum CommitOutcome {
   Accepted { new_epoch: u64 },
   /// Somebody else committed for that epoch first.
   EpochConflict { current_epoch: u64 },
+  /// The strict channel's chain holds a change of the hint's version already (e2ee.md §4.6.2):
+  /// nothing was stored. `current_version` is the newest version it holds.
+  StrictVersionConflict { current_version: u64 },
+}
+
+/// One signed roles change of a strict channel's chain as stored ([`Database::strict_changes_after`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredStrictChange {
+  pub version: u64,
+  pub change: Vec<u8>,
 }
 
 /// Result of a strict channel's rewind ([`Database::rewind_mls`]).
@@ -84,7 +94,10 @@ impl Database {
   /// Appends a commit (and the welcomes it creates) if the group is still in `epoch`.
   ///
   /// The epoch counter is advanced with a conditional UPDATE in the same transaction as the insert,
-  /// so of several commits for one epoch exactly one succeeds.
+  /// so of several commits for one epoch exactly one succeeds. A strict hint updates the
+  /// conversation's; with `maybe_strict_change`, the signed roles change goes into the channel's
+  /// chain under the hint's version, tied to the commit (a rewind that drops the commit drops it).
+  /// A version the chain holds already stores nothing ([`CommitOutcome::StrictVersionConflict`]).
   #[allow(clippy::too_many_arguments)]
   pub async fn post_mls_commit(
     &self,
@@ -95,6 +108,7 @@ impl Database {
     welcomes: &[NewMlsMessage<'_>],
     maybe_group_info: Option<&[u8]>,
     maybe_strict: Option<&crate::StrictHint>,
+    maybe_strict_change: Option<&[u8]>,
   ) -> Result<CommitOutcome, DbError> {
     let epoch_db = epoch_to_db(epoch)?;
     let mut tx = self.pool().begin().await?;
@@ -121,15 +135,23 @@ impl Database {
       store_group_info(&mut tx, conversation, new_epoch, group_info).await?;
     }
     if let Some(hint) = maybe_strict {
+      let version = i64::try_from(hint.version).unwrap_or(i64::MAX);
       sqlx::query!(
         "UPDATE conversations SET is_strict = $2, strict_roles_version = $3, strict_roles_hash = $4 WHERE id = $1",
         to_db(conversation),
         hint.is_strict,
-        i64::try_from(hint.version).unwrap_or(i64::MAX),
+        version,
         &hint.hash,
       )
       .execute(&mut *tx)
       .await?;
+      if let Some(change) = maybe_strict_change
+        && !insert_strict_change(&mut tx, conversation, version, change, commit.id).await?
+      {
+        // Dropping the transaction rolls the commit back.
+        let current_version = newest_strict_version_in(&mut tx, conversation).await?;
+        return Ok(CommitOutcome::StrictVersionConflict { current_version });
+      }
     }
     tx.commit().await?;
     Ok(CommitOutcome::Accepted {
@@ -332,6 +354,36 @@ impl Database {
     Ok(row.map(|row| (u64::try_from(row.epoch).unwrap_or(u64::MAX), row.group_info)))
   }
 
+  /// The strict channel's signed roles changes after version `after`, ascending; `limit + 1` rows
+  /// so callers can tell if more exist (e2ee.md §4.6.2, "Falling out in a strict channel").
+  pub async fn strict_changes_after(
+    &self,
+    conversation: ConversationId,
+    after: u64,
+    limit: i64,
+  ) -> Result<Vec<StoredStrictChange>, DbError> {
+    let rows = sqlx::query!(
+      r#"SELECT version, change FROM mls_strict_changes
+         WHERE conversation_id = $1 AND version > $2
+         ORDER BY version ASC LIMIT $3"#,
+      to_db(conversation),
+      i64::try_from(after).unwrap_or(i64::MAX),
+      limit + 1,
+    )
+    .fetch_all(self.pool())
+    .await?;
+    rows
+      .into_iter()
+      .map(|row| {
+        Ok(StoredStrictChange {
+          version: u64::try_from(row.version)
+            .map_err(|_| DbError::InvalidStoredValue("negative strict version".into()))?,
+          change: row.change,
+        })
+      })
+      .collect()
+  }
+
   pub async fn current_epoch(&self, conversation: ConversationId) -> Result<u64, DbError> {
     let epoch = sqlx::query_scalar!(
       "SELECT epoch FROM mls_epoch_heads WHERE conversation_id = $1",
@@ -461,6 +513,41 @@ async fn store_group_info(
   .execute(tx)
   .await?;
   Ok(result.rows_affected() > 0)
+}
+
+/// Keeps a signed roles change in the channel's chain under `version`, tied to its commit;
+/// `false` when the chain holds that version already.
+async fn insert_strict_change(
+  tx: &mut sqlx::PgConnection,
+  conversation: ConversationId,
+  version: i64,
+  change: &[u8],
+  commit: MlsMessageId,
+) -> Result<bool, DbError> {
+  let result = sqlx::query!(
+    r#"INSERT INTO mls_strict_changes (conversation_id, version, change, mls_message_id)
+       VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING"#,
+    to_db(conversation),
+    version,
+    change,
+    to_db(commit),
+  )
+  .execute(tx)
+  .await?;
+  Ok(result.rows_affected() == 1)
+}
+
+async fn newest_strict_version_in(
+  tx: &mut sqlx::PgConnection,
+  conversation: ConversationId,
+) -> Result<u64, DbError> {
+  let version = sqlx::query_scalar!(
+    r#"SELECT COALESCE(max(version), 0) AS "version!" FROM mls_strict_changes WHERE conversation_id = $1"#,
+    to_db(conversation),
+  )
+  .fetch_one(tx)
+  .await?;
+  Ok(u64::try_from(version).unwrap_or(0))
 }
 
 async fn current_epoch_in(tx: &mut sqlx::PgConnection, conversation: ConversationId) -> Result<u64, DbError> {

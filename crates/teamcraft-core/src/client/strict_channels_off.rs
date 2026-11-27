@@ -51,7 +51,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     Ok(())
   }
 
-  pub(super) fn note_known_strict_roles(&mut self, _conversation: ConversationId) -> Result<(), CoreError> {
+  pub(super) fn note_known_strict_roles(
+    &mut self,
+    _conversation: ConversationId,
+    _maybe_change_version: Option<u64>,
+  ) -> Result<(), CoreError> {
     Ok(())
   }
 

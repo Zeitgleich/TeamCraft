@@ -343,6 +343,10 @@ pub struct ClientSettings {
   /// the welcome back should come from an admin of the roles it knew (e2ee.md §4.6.2, "Falling out
   /// in a strict channel").
   pub strict_rejoin_wait: std::time::Duration,
+  /// Most signed roles changes a device that fell out of a strict channel reads from the server's
+  /// chain to carry the roles it knew forward (e2ee.md §4.6.2, "Falling out in a strict channel").
+  /// A longer chain isn't verified: the welcome is judged by the roles it knew, as without a chain.
+  pub max_strict_chain_changes: usize,
   /// How long after this device saw a change the server reports of a channel (archived, made
   /// private, ...) a member's encrypted announcement of it may come and still name who made it
   /// (issue #818), measured on the server's clock from the newest message known then. Later
@@ -721,6 +725,7 @@ impl Default for ClientSettings {
       pending_addition_expiry: std::time::Duration::from_secs(90 * 24 * 60 * 60),
       rejoin_cooldown: std::time::Duration::from_secs(30 * 60),
       strict_rejoin_wait: std::time::Duration::from_secs(7 * 24 * 60 * 60),
+      max_strict_chain_changes: 1024,
       change_announcement_window: std::time::Duration::from_secs(10 * 60),
       removed_sender_retention_leeway: std::time::Duration::from_secs(24 * 60 * 60),
       dm_welcome_timeout: std::time::Duration::from_secs(2 * 60),

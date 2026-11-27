@@ -144,6 +144,13 @@ pub struct PostMlsCommitRequest {
   pub maybe_replaces: Option<MlsMessageId>,
 }
 
+/// Largest signed roles change a commit's strict hint may carry ([`StrictChannelHint::maybe_change`]):
+/// what a device parses of a strict channel's roles (64 roles, the signed entry and headroom).
+pub const MAX_STRICT_CHANGE_BYTES: usize = 8 * 1024;
+/// Most signed roles changes one `GET …/mls/strict?after=` answer holds
+/// ([`MlsStrictHintResponse::changes`]).
+pub const MAX_STRICT_CHANGES_PAGE: usize = 64;
+
 /// What a channel's members told the server about its strict roles (e2ee.md §4.6.2): whether the
 /// channel is strict, and the version and hash of the roles change that made it so (or turned it
 /// off). A hint, never a decision: the group context alone switches strict, and a wrong hint only
@@ -155,11 +162,30 @@ pub struct StrictChannelHint {
   pub version: u64,
   /// Its chain hash (32 bytes): what the next change names as `prev_hash`.
   pub hash: Base64Bytes,
+  /// The signed roles change itself, as it sits in the commit's authenticated data after its
+  /// marker (a `SignedStrictRolesChange`, at most [`MAX_STRICT_CHANGE_BYTES`]). Sent with a roles
+  /// commit; the server keeps it with the commit under `version` for a device that fell out, which
+  /// verifies the chain itself (`GET …/mls/strict?after=`). The server never decides on it, and
+  /// never shows it in the hint. Absent from older apps.
+  #[serde(rename = "change", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_change: Option<Base64Bytes>,
+}
+
+/// Query of `GET /api/v1/conversations/{id}/mls/strict`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct MlsStrictHintQuery {
+  /// Also return the signed roles changes after this version ([`MlsStrictHintResponse::changes`]):
+  /// the version of the roles the device knew. Absent: none.
+  #[serde(rename = "after", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_after: Option<u64>,
 }
 
 /// `GET /api/v1/conversations/{id}/mls/strict`: the group's epoch and the strict hint, for a
 /// workspace owner or admin outside the group who signs a roles change for the members to commit
-/// (e2ee.md §4.6.2, "Role changes while strict"). Members and holders of `manage_members` read it.
+/// (e2ee.md §4.6.2, "Role changes while strict"); with `after`, the signed roles changes the
+/// members committed since, for a device that fell out ("Falling out in a strict channel").
+/// Members, holders of `manage_members` and so anybody who may post a rejoin request read it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct MlsStrictHintResponse {
   /// The group's current epoch (0 before the first commit): what the change is signed for.
@@ -167,6 +193,23 @@ pub struct MlsStrictHintResponse {
   /// Absent while no member told the server anything.
   #[serde(rename = "strict", default, skip_serializing_if = "Option::is_none")]
   pub maybe_strict: Option<StrictChannelHint>,
+  /// With `after`: the signed roles changes the members committed after that version, ascending by
+  /// version, at most [`MAX_STRICT_CHANGES_PAGE`]. Only what commits still in the group's queue
+  /// carried: a rewind drops the changes of the commits it drops. Unverified: the device checks
+  /// every link.
+  #[serde(default, skip_serializing_if = "Vec::is_empty")]
+  pub changes: Vec<StrictChainChange>,
+  /// More changes follow the last one: ask again after its version.
+  #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+  pub has_more: bool,
+}
+
+/// One signed roles change of a strict channel's chain ([`MlsStrictHintResponse::changes`]), as
+/// the committer told it ([`StrictChannelHint::maybe_change`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct StrictChainChange {
+  pub version: u64,
+  pub change: Base64Bytes,
 }
 
 /// `GET /api/v1/conversations/{id}/mls/group-info`: the newest group information a member published,
@@ -225,4 +268,77 @@ pub struct ListMlsMessagesResponse {
   pub has_more: bool,
   /// The conversation's current epoch (0 before the first commit).
   pub current_epoch: u64,
+}
+
+#[cfg(test)]
+mod tests {
+  use serde_json::json;
+
+  use super::*;
+
+  /// The hash of the fixtures: 32 bytes of 7, as base64.
+  const HASH: &str = "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=";
+
+  #[test]
+  fn a_strict_hint_carries_the_signed_change_only_when_given() {
+    let hint = StrictChannelHint {
+      is_strict: true,
+      version: 3,
+      hash: Base64Bytes::new(vec![7; 32]),
+      maybe_change: None,
+    };
+    let plain = json!({"is_strict": true, "version": 3, "hash": HASH});
+    assert_eq!(serde_json::to_value(&hint).unwrap(), plain);
+    // An older app's hint, and what the server shows, decode without it.
+    assert_eq!(serde_json::from_value::<StrictChannelHint>(plain).unwrap(), hint);
+
+    let with_change = StrictChannelHint {
+      maybe_change: Some(Base64Bytes::new(b"signed".to_vec())),
+      ..hint
+    };
+    let json = serde_json::to_value(&with_change).unwrap();
+    assert_eq!(json["change"], "c2lnbmVk");
+    assert_eq!(
+      serde_json::from_value::<StrictChannelHint>(json).unwrap(),
+      with_change
+    );
+  }
+
+  #[test]
+  fn the_strict_answer_lists_changes_only_when_asked() {
+    let bare = MlsStrictHintResponse {
+      epoch: 4,
+      maybe_strict: None,
+      changes: Vec::new(),
+      has_more: false,
+    };
+    assert_eq!(serde_json::to_value(&bare).unwrap(), json!({"epoch": 4}));
+    assert_eq!(
+      serde_json::from_value::<MlsStrictHintResponse>(json!({"epoch": 4})).unwrap(),
+      bare
+    );
+
+    let paged = MlsStrictHintResponse {
+      changes: vec![StrictChainChange {
+        version: 2,
+        change: Base64Bytes::new(b"signed".to_vec()),
+      }],
+      has_more: true,
+      ..bare
+    };
+    assert_eq!(
+      serde_json::to_value(&paged).unwrap(),
+      json!({"epoch": 4, "changes": [{"version": 2, "change": "c2lnbmVk"}], "has_more": true})
+    );
+  }
+
+  #[test]
+  fn the_strict_query_names_the_known_version() {
+    let query = MlsStrictHintQuery { maybe_after: Some(5) };
+    assert_eq!(serde_json::to_value(&query).unwrap(), json!({"after": 5}));
+    assert_eq!(
+      serde_json::to_value(MlsStrictHintQuery::default()).unwrap(),
+      json!({})
+    );
+  }
 }

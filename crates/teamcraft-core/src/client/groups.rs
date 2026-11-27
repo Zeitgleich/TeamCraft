@@ -1707,7 +1707,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       && let Some(pending) = self.group_or_error(conversation)?.pending_commit()
     {
       if is_own && pending.is_commit(message.payload.as_slice()) {
-        // This device's commit, whose answer was lost: the server took it.
+        // This device's commit, whose answer was lost: the server took it. The hint sent with it
+        // names the roles change's version, if it made one (read before the merge forgets it).
+        let maybe_hinted = records::get_json::<PostMlsCommitRequest>(
+          &self.store,
+          Table::AppliedChanges,
+          &pending_post_key(conversation),
+        )?
+        .and_then(|request| request.maybe_strict)
+        .map(|hint| hint.version);
         let update = self.merge_own_commit(conversation, message)?;
         self.remember_member_keys(conversation, &directory, at_ms)?;
         if update.maybe_properties_change.is_some() {
@@ -1719,7 +1727,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             share,
           })?;
         }
-        self.note_known_strict_roles(conversation)?;
+        self.note_known_strict_roles(conversation, maybe_hinted)?;
         return Ok(MlsProgress::Done);
       }
       // Another commit won the epoch.
@@ -1782,6 +1790,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     if result.is_ok() {
       self.remember_member_keys(conversation, &directory, at_ms)?;
     }
+    // The version of a strict roles change the commit made: what an "off" is noted with.
+    let maybe_strict_version = match &result {
+      Ok(GroupEvent::MembershipChanged(update)) => update
+        .maybe_strict_roles_change
+        .as_ref()
+        .map(|signed| signed.change().version),
+      _ => None,
+    };
     match result {
       Ok(GroupEvent::ContentKeys { sender, bundle }) => {
         self.apply_bundle(conversation, bundle, epoch, sender)?;
@@ -1893,7 +1909,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       },
     }
     if message.kind == MlsMessageKind::Commit {
-      self.note_known_strict_roles(conversation)?;
+      self.note_known_strict_roles(conversation, maybe_strict_version)?;
     }
     self.persist_group_at(conversation, message)?;
     Ok(MlsProgress::Done)
@@ -2190,7 +2206,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     match posted {
       Ok(response) => {
         let update = self.merge_own_commit(conversation, &response.commit)?;
-        self.note_known_strict_roles(conversation)?;
+        let maybe_hinted = request.maybe_strict.as_ref().map(|hint| hint.version);
+        self.note_known_strict_roles(conversation, maybe_hinted)?;
         Ok(Some(OwnCommit {
           update,
           at_ms: response.commit.id.snowflake().unix_millis(),
@@ -2256,7 +2273,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
             share,
           })?;
         }
-        Ok(())
+        let maybe_hinted = request.maybe_strict.as_ref().map(|hint| hint.version);
+        self.note_known_strict_roles(conversation, maybe_hinted)
       },
       Err(error) if error.is_epoch_conflict() => Ok(()),
       Err(error) if error.is_transient() => Err(error.into()),

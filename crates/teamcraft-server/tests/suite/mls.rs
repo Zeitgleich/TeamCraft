@@ -655,13 +655,20 @@ mod delivery_over_the_gateway {
 mod strict_hint {
   use super::*;
 
-  fn hint(is_strict: bool, version: u64) -> Value {
+  pub(super) fn hint(is_strict: bool, version: u64) -> Value {
     use base64::Engine;
     let hash = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
     json!({"is_strict": is_strict, "version": version, "hash": hash})
   }
 
-  async fn roles_commit(app: &TestApp, g: &Group, epoch: u64, strict: Value) -> Reply {
+  /// A hint with the signed change, as an app of #2251 sends it (the bytes are opaque here).
+  pub(super) fn chained_hint(version: u64) -> Value {
+    let mut hint = hint(true, version);
+    hint["change"] = json!(b64(&format!("change-{version}")));
+    hint
+  }
+
+  pub(super) async fn roles_commit(app: &TestApp, g: &Group, epoch: u64, strict: Value) -> Reply {
     app
       .post(
         &g.carol,
@@ -744,6 +751,162 @@ mod strict_hint {
       .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
       .await;
     assert_eq!(backlog.body["current_epoch"], 0);
+    app.stop().await;
+  }
+
+  /// The signed roles change travels with the commit's hint and stays in the channel's chain
+  /// (e2ee.md §4.6.2, "Falling out in a strict channel"): a device that fell out reads the changes
+  /// after the version it knew, ascending; the hint itself never shows it.
+  #[tokio::test]
+  async fn a_roles_commit_keeps_its_signed_change_for_the_chain() {
+    let app = app!();
+    let g = group(&app).await;
+    for epoch in 0..3 {
+      let version = epoch + 1;
+      let reply = roles_commit(&app, &g, epoch, chained_hint(version)).await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    // A commit without a hint adds no link.
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 3, json!([])).await;
+    let path = format!("/conversations/{}/mls/strict", g.channel);
+
+    let bare = app.get(&g.dave, &path).await;
+    assert_eq!(bare.body, json!({"epoch": 4, "strict": hint(true, 3)}));
+    let all = app.get(&g.dave, &format!("{path}?after=0")).await;
+    assert_eq!(all.status, StatusCode::OK, "{}", all.body);
+    assert_eq!(
+      all.body["changes"],
+      json!([
+        {"version": 1, "change": b64("change-1")},
+        {"version": 2, "change": b64("change-2")},
+        {"version": 3, "change": b64("change-3")},
+      ])
+    );
+    assert_eq!(all.body.get("has_more"), None);
+    let after_known = app.get(&g.dave, &format!("{path}?after=2")).await;
+    assert_eq!(
+      after_known.body["changes"],
+      json!([{"version": 3, "change": b64("change-3")}])
+    );
+    let nothing_newer = app.get(&g.dave, &format!("{path}?after=3")).await;
+    assert_eq!(nothing_newer.body, json!({"epoch": 4, "strict": hint(true, 3)}));
+    let conversation = app.get(&g.dave, &format!("/conversations/{}", g.channel)).await;
+    assert_eq!(conversation.body["strict"], hint(true, 3));
+    app.stop().await;
+  }
+
+  /// At most 64 changes per answer; `has_more` says to ask again after the last.
+  #[tokio::test]
+  async fn the_chain_is_read_in_pages() {
+    let app = app!();
+    let g = group(&app).await;
+    for epoch in 0..66 {
+      let reply = roles_commit(&app, &g, epoch, chained_hint(epoch + 1)).await;
+      assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    }
+    let path = format!("/conversations/{}/mls/strict", g.channel);
+
+    let first = app.get(&g.carol, &format!("{path}?after=0")).await;
+    let versions = |reply: &Reply| -> Vec<u64> {
+      reply.body["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|change| change["version"].as_u64().unwrap())
+        .collect()
+    };
+    assert_eq!(versions(&first), (1..=64).collect::<Vec<_>>());
+    assert_eq!(first.body["has_more"], true);
+    let second = app.get(&g.carol, &format!("{path}?after=64")).await;
+    assert_eq!(versions(&second), vec![65, 66]);
+    assert_eq!(second.body.get("has_more"), None);
+    app.stop().await;
+  }
+
+  /// A version the chain holds already is a conflict, as for the role log: neither the commit nor
+  /// the change is stored, and the group stays in its epoch.
+  #[tokio::test]
+  async fn a_version_the_chain_holds_is_a_version_conflict() {
+    let app = app!();
+    let g = group(&app).await;
+    roles_commit(&app, &g, 0, chained_hint(1)).await;
+
+    let again = roles_commit(&app, &g, 1, chained_hint(1)).await;
+
+    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
+    assert_eq!(again.error_code(), "version_conflict");
+    assert_eq!(again.body["current_version"], 1, "{}", again.body);
+    let backlog = app
+      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+      .await;
+    assert_eq!(backlog.body["current_epoch"], 1);
+    assert_eq!(kinds(&backlog), vec!["commit"]);
+    // A hint without the change (an older app) is stored as before.
+    let older = roles_commit(&app, &g, 1, hint(true, 1)).await;
+    assert_eq!(older.status, StatusCode::CREATED, "{}", older.body);
+    app.stop().await;
+  }
+
+  #[tokio::test]
+  async fn an_empty_or_oversized_change_is_refused_with_its_commit() {
+    let app = app!();
+    let g = group(&app).await;
+    let mut empty = hint(true, 1);
+    empty["change"] = json!("");
+    let reply = roles_commit(&app, &g, 0, empty).await;
+    assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{}", reply.body);
+    let mut oversized = hint(true, 1);
+    oversized["change"] = json!(b64(&"x".repeat(8 * 1024 + 1)));
+    let reply = roles_commit(&app, &g, 0, oversized).await;
+    assert_eq!(reply.status, StatusCode::PAYLOAD_TOO_LARGE, "{}", reply.body);
+    let mut largest = hint(true, 1);
+    largest["change"] = json!(b64(&"x".repeat(8 * 1024)));
+    let reply = roles_commit(&app, &g, 0, largest).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+    app.stop().await;
+  }
+
+  /// Decision 3 of #2251: a device that fell out (no group, a rejoin request in the queue) reads
+  /// the chain, as its user is still a member. The request is a proposal, which only members and
+  /// holders of `manage_members` post.
+  #[tokio::test]
+  async fn a_member_whose_device_fell_out_reads_the_chain() {
+    let app = app!();
+    let g = group(&app).await;
+    roles_commit(&app, &g, 0, chained_hint(1)).await;
+    let rejoin = app
+      .post(
+        &g.dave,
+        &format!("/conversations/{}/mls/messages", g.channel),
+        json!({"device_id": g.dave_device, "epoch": 1, "kind": "proposal", "payload": b64("rejoin")}),
+      )
+      .await;
+    assert_eq!(rejoin.status, StatusCode::CREATED, "{}", rejoin.body);
+
+    let reply = app
+      .get(
+        &g.dave,
+        &format!("/conversations/{}/mls/strict?after=0", g.channel),
+      )
+      .await;
+
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert_eq!(reply.body["changes"][0]["version"], 1);
+    // Somebody who isn't a member can't post one, and reads nothing.
+    let erin = member("erin");
+    let erin_device = register_device(&app, &erin).await;
+    let refused = app
+      .post(
+        &erin,
+        &format!("/conversations/{}/mls/messages", g.channel),
+        json!({"device_id": erin_device, "epoch": 1, "kind": "proposal", "payload": b64("rejoin")}),
+      )
+      .await;
+    assert!(refused.status.is_client_error(), "{}", refused.body);
+    let outside = app
+      .get(&erin, &format!("/conversations/{}/mls/strict?after=0", g.channel))
+      .await;
+    assert!(outside.status.is_client_error(), "{}", outside.body);
     app.stop().await;
   }
 
@@ -878,6 +1041,45 @@ mod rewind {
       .map(|m| m["payload"].as_str().unwrap().to_owned())
       .collect();
     assert_eq!(payloads, vec![b64("commit-0"), b64("first")]);
+    app.stop().await;
+  }
+
+  /// A rewind drops the commits it rewinds and the roles changes they carried (e2ee.md §4.6.2):
+  /// the chain never holds a change the group no longer has, and the version is free again.
+  #[tokio::test]
+  async fn a_rewind_drops_the_roles_changes_of_the_commits_it_drops() {
+    use super::strict_hint::{chained_hint, roles_commit};
+    let app = strict_app!();
+    let g = group(&app).await;
+    let alice = owner();
+    let alice_device = register_device(&app, &alice).await;
+    roles_commit(&app, &g, 0, chained_hint(1)).await;
+    // The refused commit of epoch 1 carried version 2, and one built on it version 3.
+    roles_commit(&app, &g, 1, chained_hint(2)).await;
+    roles_commit(&app, &g, 2, chained_hint(3)).await;
+    let path = format!("/conversations/{}/mls/strict?after=0", g.channel);
+    assert_eq!(
+      app.get(&g.carol, &path).await.body["changes"]
+        .as_array()
+        .unwrap()
+        .len(),
+      3
+    );
+
+    let reply = rewind(&app, &alice, &g.channel, &alice_device, 1).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
+
+    let chain = app.get(&g.carol, &path).await;
+    assert_eq!(
+      chain.body["changes"],
+      json!([{"version": 1, "change": b64("change-1")}])
+    );
+    let mut other = chained_hint(2);
+    other["change"] = json!(b64("another-change-2"));
+    let next = roles_commit(&app, &g, 2, other).await;
+    assert_eq!(next.status, StatusCode::CREATED, "{}", next.body);
+    let chain = app.get(&g.carol, &path).await;
+    assert_eq!(chain.body["changes"][1]["change"], b64("another-change-2"));
     app.stop().await;
   }
 
