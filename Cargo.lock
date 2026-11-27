@@ -11101,6 +11101,7 @@ dependencies = [
  "sqlite-plugin",
  "tantivy",
  "teamcraft-client-api",
+ "teamcraft-core",
  "teamcraft-crypto",
  "teamcraft-net",
  "teamcraft-proto",

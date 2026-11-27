@@ -153,6 +153,7 @@ pub async fn rewind(
     .rewind_mls(
       conversation,
       request.epoch,
+      request.maybe_replaces,
       request.device_id,
       &commit,
       &welcomes,

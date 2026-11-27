@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use leptos::prelude::*;
-use teamcraft_client_api::actions::{FileTransfer, MessagePriority, WorkspaceEvent};
+use teamcraft_client_api::actions::{AwayChange, FileTransfer, MessagePriority, WorkspaceEvent};
 use teamcraft_client_api::custom_emoji::jumbo_custom_count;
 use teamcraft_client_api::emoji::jumbo_emoji_count;
 use teamcraft_client_api::log::{LogEntry, log_entries};
@@ -1325,6 +1325,15 @@ fn workspace_event_text(
       vec![("name", name_of(*user)), ("by", name_of(*by))],
     ),
     WorkspaceEvent::AdminJoined { user, .. } => ("ws-admin-joined", vec![("name", name_of(*user))]),
+    // A strict channel's add-back (e2ee.md §4.6.2): who is new or gone since this device's tree.
+    WorkspaceEvent::ChangedWhileAway {
+      user,
+      change: AwayChange::Joined,
+    } => ("ws-joined-while-away", vec![("name", name_of(*user))]),
+    WorkspaceEvent::ChangedWhileAway {
+      user,
+      change: AwayChange::Gone,
+    } => ("ws-gone-while-away", vec![("name", name_of(*user))]),
     WorkspaceEvent::Moved { maybe_by, space } if space.is_empty() => by_or_server(
       *maybe_by,
       ("ws-moved-unnamed", "ws-moved-unnamed-unattributed"),
@@ -1623,6 +1632,16 @@ mod tests {
       workspace_event_text(&own, name_of),
       Some(("ws-admin-joined", vec![("name", "Sam".to_owned())]))
     );
+    for (change, key) in [
+      (AwayChange::Joined, "ws-joined-while-away"),
+      (AwayChange::Gone, "ws-gone-while-away"),
+    ] {
+      let line = WorkspaceEvent::ChangedWhileAway { user, change };
+      assert_eq!(
+        workspace_event_text(&line, name_of),
+        Some((key, vec![("name", "Sam".to_owned())]))
+      );
+    }
   }
 
   /// Issue #818: a change the server reports names who made it only when the line does; else it

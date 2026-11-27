@@ -30,8 +30,8 @@ use crate::integration_sources::{SourceAuthority, SourceLedger};
 use crate::read_state;
 use crate::records;
 use crate::store::{
-  BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot, Priority,
-  ReplyAttachment, ReplyRef, StoredMessage, Table,
+  AwayChange, BookmarkItem, ConversationEvent, LocalStore, MessageContent, MessageMeta, MessageSlot,
+  Priority, ReplyAttachment, ReplyRef, StoredMessage, Table,
 };
 use crate::ui_backend::{CoreChatBackend, CoreCommand, ui_message_id};
 
@@ -1319,6 +1319,14 @@ fn workspace_event(event: &ConversationEvent, stored: &StoredMessage) -> Option<
       user: *user,
       maybe_approved_by: is_approved.then_some(actor),
       maybe_added_by: (!is_approved && actor != *user).then_some(actor),
+    },
+    // Derived from the welcome this device opened, never sent (e2ee.md §4.6.2).
+    ConversationEvent::ChangedWhileAway { user, change } => WorkspaceEvent::ChangedWhileAway {
+      user: *user,
+      change: match change {
+        AwayChange::Joined => teamcraft_client_api::actions::AwayChange::Joined,
+        AwayChange::Gone => teamcraft_client_api::actions::AwayChange::Gone,
+      },
     },
     ConversationEvent::Archived => WorkspaceEvent::Archived { maybe_by },
     ConversationEvent::Unarchived => WorkspaceEvent::Unarchived { maybe_by },

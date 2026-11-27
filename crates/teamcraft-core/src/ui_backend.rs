@@ -4768,6 +4768,7 @@ fn system_view(event: &ConversationEvent, sender: UserId) -> (MessageKind, UserI
     | ConversationEvent::MadePublic
     | ConversationEvent::Moved { .. }
     | ConversationEvent::AdminJoined { .. }
+    | ConversationEvent::ChangedWhileAway { .. }
     | ConversationEvent::CallMoved { .. } => (MessageKind::Change, sender),
     ConversationEvent::Call(line) => (
       MessageKind::Call(call_tile(line)),

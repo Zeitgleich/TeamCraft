@@ -340,6 +340,10 @@ ws-pinned = { $by } pinned a message
 ws-admin-joined = { $name } joined this channel as a workspace admin
 ws-admin-joined-approved = { $name } joined this channel as a workspace admin, approved by { $by }
 ws-admin-joined-added = { $name } joined this channel as a workspace admin, added by { $by }
+# A device added back into a strict channel tells who is new or gone since its last tree
+# (e2ee.md §4.6.2, "Falling out in a strict channel").
+ws-joined-while-away = { $name } joined while this device was out of the channel
+ws-gone-while-away = { $name } was no longer in the channel when this device came back
 log-toolbar-label = Log view options
 log-mode-log = Log
 log-mode-chat = Chat

@@ -178,6 +178,8 @@ struct State {
   failing_role_logs: HashSet<ConversationId>,
   /// Per reader and channel, the last role log version the server shows them: a withheld entry.
   withheld_role_logs: HashMap<(UserId, ConversationId), u64>,
+  /// Per reader, the last workspace roster version the server shows them: withheld entries.
+  withheld_rosters: HashMap<UserId, u64>,
   role_log_reads: HashMap<ConversationId, usize>,
   /// Roster entries after this version are shown only once a role log was read: as if they were
   /// published between the two reads.
@@ -894,6 +896,17 @@ impl FakeServer {
       .lock()
       .withheld_role_logs
       .insert((reader, conversation), last_shown);
+  }
+
+  /// Shows `reader` the workspace roster only up to `last_shown` (`None`: all of it again), as a
+  /// server holding back a promotion from one device would (e2ee.md §4.6.2, "Epoch conflicts and
+  /// convergence").
+  pub fn withhold_roster(&self, reader: UserId, maybe_last_shown: Option<u64>) {
+    let mut state = self.lock();
+    match maybe_last_shown {
+      Some(last_shown) => state.withheld_rosters.insert(reader, last_shown),
+      None => state.withheld_rosters.remove(&reader),
+    };
   }
 
   /// The next append to a role log answers 409, as if another admin got there first.
@@ -5203,7 +5216,14 @@ impl ServerApi for FakeServerApi {
           "missing permission manage_channel_roles",
         ));
       }
-      if request.epoch > entry.epoch {
+      // Like the server: only while the refused commit it names still holds the epoch.
+      let is_replaced_gone = request.maybe_replaces.is_some_and(|replaced| {
+        request.epoch < entry.epoch
+          && !entry.mls.iter().any(|message| {
+            message.id == replaced && message.epoch == request.epoch && message.kind == MlsMessageKind::Commit
+          })
+      });
+      if request.epoch > entry.epoch || is_replaced_gone {
         let current_epoch = entry.epoch;
         return Err(ApiError::status(
           409,
@@ -6519,7 +6539,7 @@ impl ServerApi for FakeServerApi {
     kind: &WorkspaceLogKind,
     query: &ListWorkspaceLogQuery,
   ) -> Result<ListWorkspaceLogResponse, ApiError> {
-    self.with(|state, _| {
+    self.with(|state, me| {
       match kind {
         WorkspaceLogKind::Roster => state.roster_log_reads += 1,
         WorkspaceLogKind::Policy => state.policy_log_reads += 1,
@@ -6548,6 +6568,11 @@ impl ServerApi for FakeServerApi {
         && let Some(shown_until) = state.maybe_roster_shown_until_role_log_read
       {
         entries.retain(|entry| entry.version <= shown_until);
+      }
+      if *kind == WorkspaceLogKind::Roster
+        && let Some(last_shown) = state.withheld_rosters.get(&me).copied()
+      {
+        entries.retain(|entry| entry.version <= last_shown);
       }
       let has_more = entries.len() > limit;
       entries.truncate(limit);

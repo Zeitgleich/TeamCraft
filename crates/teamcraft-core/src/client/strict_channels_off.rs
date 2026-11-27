@@ -4,12 +4,12 @@
 //! code are no-ops here, and the module stays out of the bundle.
 
 use teamcraft_crypto::mls::{MlsError, StagedJoin};
-use teamcraft_proto::{ConversationId, MlsMessageResponse, StrictChannelHint};
+use teamcraft_proto::{ConversationId, MlsMessageId, MlsMessageResponse, StrictChannelHint, UserId};
 
 use super::Client;
 use crate::api::ServerApi;
 use crate::error::CoreError;
-use crate::store::LocalStore;
+use crate::store::{AwayChange, LocalStore};
 use crate::trust::PinnedDirectory;
 
 /// Whether the app follows strict channels: not in this build.
@@ -17,7 +17,7 @@ pub(super) const ENABLED: bool = false;
 
 /// Whether a welcome is opened ([`Client::check_strict_welcome`]): always, in this build.
 pub(super) enum StrictWelcome {
-  Open,
+  Open(Vec<(UserId, AwayChange)>),
   #[expect(dead_code, reason = "only strict_channels.rs refuses a welcome")]
   Refused(MlsError),
 }
@@ -34,6 +34,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   pub(super) fn is_strict_rewind(&self, _conversation: ConversationId) -> bool {
     false
+  }
+
+  pub(super) fn strict_rewind_replaces(
+    &mut self,
+    _conversation: ConversationId,
+  ) -> Result<Option<MlsMessageId>, CoreError> {
+    Ok(None)
   }
 
   pub(super) fn persist_strict_stop_at(
@@ -73,7 +80,21 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     _conversation: ConversationId,
     _staged: &StagedJoin,
     _directory: &PinnedDirectory,
+    _is_rejoin: bool,
   ) -> Result<StrictWelcome, CoreError> {
-    Ok(StrictWelcome::Open)
+    Ok(StrictWelcome::Open(Vec::new()))
+  }
+
+  pub(super) fn keep_strict_last_tree(&mut self, _conversation: ConversationId) -> Result<(), CoreError> {
+    Ok(())
+  }
+
+  pub(super) fn note_changed_while_away(
+    &mut self,
+    _conversation: ConversationId,
+    _welcome: MlsMessageId,
+    _lines: &[(UserId, AwayChange)],
+  ) -> Result<(), CoreError> {
+    Ok(())
   }
 }

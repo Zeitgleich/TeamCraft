@@ -486,9 +486,28 @@ pub enum ConversationEvent {
   /// history records it. Never sent: only a line this device derives from the server's record
   /// ([`StoredMessage::maybe_server_change`]) shows it, so a member's message can't make one up.
   Call(CallLine),
+  /// After this device was added back into a strict channel (e2ee.md §4.6.2, "Falling out in a
+  /// strict channel"): `user` is new in the group, or gone from it, since the last tree this device
+  /// held. Never sent: only the line this device derives from the welcome it opened
+  /// ([`StoredMessage::maybe_verified_commit`] names the welcome) shows, so a member's message
+  /// can't make one up.
+  ChangedWhileAway {
+    user: UserId,
+    change: AwayChange,
+  },
   /// From a newer client.
   #[serde(other)]
   Unknown,
+}
+
+/// What a [`ConversationEvent::ChangedWhileAway`] line tells about its user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AwayChange {
+  /// In the group now, not in the device's last tree.
+  Joined,
+  /// In the device's last tree, not in the group now.
+  Gone,
 }
 
 /// A call as its line shows it: who started it, when, and how it stands.
@@ -1917,7 +1936,7 @@ impl StoredMessage {
   pub fn is_hidden(&self) -> bool {
     match &self.content {
       MessageContent::Event {
-        event: ConversationEvent::AdminJoined { .. },
+        event: ConversationEvent::AdminJoined { .. } | ConversationEvent::ChangedWhileAway { .. },
       } => self.maybe_verified_commit.is_none(),
       MessageContent::Event { event } if event.is_server_change() || event.is_call() => {
         self.maybe_server_change.is_none()

@@ -38,7 +38,7 @@ use crate::meeting_standing::MeetingStanding;
 use crate::mls_storage::adopt_mls_entries;
 use crate::records;
 use crate::retry::{RetryPolicy, millis};
-use crate::store::{ConversationEvent, LocalStore, Table};
+use crate::store::{AwayChange, ConversationEvent, LocalStore, Table};
 use crate::trust::{PinnedDirectory, RosterStanding, WorkspaceAuthority};
 use crate::workspace::WorkspaceState;
 
@@ -163,8 +163,7 @@ pub fn dm_setup_status(
 
 /// What became of opening a welcome.
 enum WelcomeJoin {
-  /// With the member whose commit made the welcome.
-  Joined(Box<(ConversationGroup, PinnedDirectory, GroupMember)>),
+  Joined(Box<JoinedWelcome>),
   /// Not for this device or not acceptable; the welcome is done with.
   Rejected(MlsError),
   /// This device's leaf is in the members' tree, but it has no group and can't open the welcome
@@ -172,6 +171,17 @@ enum WelcomeJoin {
   /// and a network error stopped the join, or its key package was deleted already (e2ee.md
   /// §4.3.1) while the server still lists the user in the conversation.
   KeyPackageSpent,
+}
+
+/// A welcome opened and its group joined ([`WelcomeJoin::Joined`]).
+struct JoinedWelcome {
+  group: ConversationGroup,
+  directory: PinnedDirectory,
+  /// The member whose commit made the welcome.
+  sender: GroupMember,
+  /// Who is new or gone since this device's last tree, after an add-back into a strict channel
+  /// (e2ee.md §4.6.2).
+  away_lines: Vec<(UserId, AwayChange)>,
 }
 
 /// The claimed key packages of one user that can go into a commit.
@@ -664,6 +674,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(Base64Bytes::new);
     let request = PostMlsCommitRequest {
       maybe_strict: None,
+      maybe_replaces: None,
       device_id: self.account.device_id,
       epoch,
       commit: Base64Bytes::new(output.commit),
@@ -1723,35 +1734,50 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           .await;
       }
     }
+    let group = self.group_or_error(conversation)?;
+    let is_strict_commit =
+      strict_channels::ENABLED && group.is_strict() && message.kind == MlsMessageKind::Commit;
+    let reads_roster = is_strict_commit
+      && group.strict_roles()?.is_some_and(|roles| {
+        teamcraft_crypto::mls::strict_commit_reads_roster(message.payload.as_slice(), &roles)
+      });
+    if reads_roster {
+      // A change a workspace signer may have made in a strict channel: judged on the newest
+      // roster, read first (e2ee.md §4.6.2, "Workspace signers"). First, not on a retry:
+      // processing spends the epoch's handshake secret, so the commit can't be judged twice. A
+      // failed read holds the entry: the cursor stays and nothing was spent.
+      // Boxed: this rare read would otherwise add its size to every entry's future.
+      Box::pin(self.sync_workspace()).await?;
+    }
     let authority = self.group_authority(conversation, at_ms)?;
     let group = self
       .groups
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let before = group.members()?;
-    let is_strict_commit =
-      strict_channels::ENABLED && group.is_strict() && message.kind == MlsMessageKind::Commit;
-    let mut result =
-      group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
-    if is_strict_commit && result.as_ref().is_err_and(MlsError::is_strict_retry) {
-      // A workspace signer's change in a strict channel: judged on the newest roster, read first
-      // (e2ee.md §4.6.2, "Workspace signers"). A failed read holds the entry: the cursor stays.
-      // Boxed: this rare read would otherwise add its size to every entry's future.
-      Box::pin(self.sync_workspace()).await?;
-      let authority = self.group_authority(conversation, at_ms)?;
-      let group = self
-        .groups
-        .get_mut(&conversation)
-        .ok_or(CoreError::NoGroup(conversation))?;
-      result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
-      if let Err(error) = &result
-        && error.is_strict_retry()
-      {
-        // The roster read, and still none that judges the signer (withheld or stale): this device
-        // can't follow, and is brought back like one that fell out (§4.6.2, "Epoch conflicts").
-        tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "no roster to judge a strict channel's commit by");
-        return Ok(MlsProgress::NeedsBacklog);
-      }
+    let result = group.process_message(&self.provider, message.payload.as_slice(), &directory, &authority);
+    if is_strict_commit
+      && let Err(error) = &result
+      && error.is_strict_retry()
+    {
+      // No roster judges the signer, the newest read included (withheld or stale): this device
+      // can't follow, and is brought back like one that fell out (§4.6.2, "Epoch conflicts and
+      // convergence"). The commit was decrypted, so it can't be judged again on this group: the
+      // cursor goes past it and the device asks to be added back now, as nothing later in the
+      // queue may show it behind.
+      tracing::warn!(conversation_id = %conversation, mls_message_id = %message.id, %error, "no roster to judge a strict channel's commit by; asking to be added back");
+      self.persist_group_at(conversation, message)?;
+      let query = ListMlsMessagesQuery {
+        maybe_after: None,
+        maybe_limit: Some(1),
+      };
+      let current_epoch = self
+        .api
+        .list_mls_messages(conversation, &query)
+        .await?
+        .current_epoch;
+      Box::pin(self.request_rejoin(conversation, current_epoch)).await?;
+      return Ok(MlsProgress::Done);
     }
     if result.is_ok() {
       self.remember_member_keys(conversation, &directory, at_ms)?;
@@ -2124,8 +2150,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .collect(),
       None => Vec::new(),
     };
+    let is_rewind = self.is_strict_rewind(conversation);
+    let maybe_replaces = match is_rewind {
+      true => self.strict_rewind_replaces(conversation)?,
+      false => None,
+    };
     let request = PostMlsCommitRequest {
       maybe_strict: self.take_strict_hint(conversation),
+      maybe_replaces,
       device_id: self.account.device_id,
       epoch,
       commit: Base64Bytes::new(output.commit),
@@ -2136,7 +2168,6 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter(|info| info.len() <= self.settings.max_group_info_bytes)
         .map(Base64Bytes::new),
     };
-    let is_rewind = self.is_strict_rewind(conversation);
     if !is_rewind && self.is_strict_stopped(conversation)? {
       // Stopped at a refused commit: the group is at the last good epoch, and only an admin's
       // continuation goes out from here (e2ee.md §4.6.2, D4). Keys don't rotate, removals wait.
@@ -3026,15 +3057,22 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       if !is_rejoin {
         return self.welcome_handled(welcome);
       }
-      // This device asked to be added back: the welcome replaces the group it can't follow.
+      // This device asked to be added back: the welcome replaces the group it can't follow. In a
+      // strict channel its tree is kept first, to tell who is new or gone once it is back.
+      self.keep_strict_last_tree(conversation)?;
       self.drop_group(conversation)?;
     }
     match self
-      .join_welcome_group(conversation, welcome, maybe_founded_for.as_deref())
+      .join_welcome_group(conversation, welcome, maybe_founded_for.as_deref(), is_rejoin)
       .await?
     {
       WelcomeJoin::Joined(joined) => {
-        let (group, directory, welcome_sender) = *joined;
+        let JoinedWelcome {
+          group,
+          directory,
+          sender: welcome_sender,
+          away_lines,
+        } = *joined;
         // The joining epoch's key: the members switched to it if they shared history from the
         // join on; the committer's bundle says which key is current.
         let key = group.epoch_content_key(&self.provider)?;
@@ -3079,6 +3117,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           client.set_cursor(conversation, welcome.id)
         })?;
         self.note_dm_welcome_joined(conversation)?;
+        self.note_changed_while_away(conversation, welcome.id, &away_lines)?;
         if let Ok(response) = self.api.conversation(conversation).await {
           self.store_conversation(
             &response,
@@ -3122,6 +3161,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     conversation: ConversationId,
     welcome: &MlsMessageResponse,
     maybe_founded_for: Option<&[UserId]>,
+    is_rejoin: bool,
   ) -> Result<WelcomeJoin, CoreError> {
     // Pinned before the welcome is opened, which takes this device's key package: a network error
     // here leaves the welcome for the next try. A conversation the server doesn't let this user
@@ -3209,13 +3249,14 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     // Back into a channel the user's devices knew strict: only from an admin of those roles, or on
     // the user's word (e2ee.md §4.6.2, "Falling out in a strict channel").
     // Boxed: the check may read the roster, which would add its size to every join's future.
-    match Box::pin(self.check_strict_welcome(conversation, &staged, &directory)).await {
-      Ok(StrictWelcome::Open) => {},
-      Ok(StrictWelcome::Refused(error)) => return Ok(WelcomeJoin::Rejected(error)),
-      // Opened already: be added back once the network is there, as for a failed pin.
-      Err(error) if error.is_transient() => return Ok(WelcomeJoin::KeyPackageSpent),
-      Err(error) => return Err(error),
-    }
+    let away_lines =
+      match Box::pin(self.check_strict_welcome(conversation, &staged, &directory, is_rejoin)).await {
+        Ok(StrictWelcome::Open(lines)) => lines,
+        Ok(StrictWelcome::Refused(error)) => return Ok(WelcomeJoin::Rejected(error)),
+        // Opened already: be added back once the network is there, as for a failed pin.
+        Err(error) if error.is_transient() => return Ok(WelcomeJoin::KeyPackageSpent),
+        Err(error) => return Err(error),
+      };
     let group = match staged.complete(&self.provider, &directory) {
       Ok(group) => group,
       Err(error) => return Ok(WelcomeJoin::Rejected(error)),
@@ -3269,7 +3310,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       tracing::info!(conversation_id = %conversation, "joined the DM group that was founded first");
       self.give_up_founded_group(conversation)?;
     }
-    Ok(WelcomeJoin::Joined(Box::new((group, directory, welcome_sender))))
+    Ok(WelcomeJoin::Joined(Box::new(JoinedWelcome {
+      group,
+      directory,
+      sender: welcome_sender,
+      away_lines,
+    })))
   }
 
   /// Whether this device's group is already at or past the welcome's epoch.

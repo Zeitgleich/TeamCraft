@@ -846,6 +846,41 @@ mod rewind {
     app.stop().await;
   }
 
+  /// Two admins continue from the same stop at once (e2ee.md §4.6.2, D4): each names the refused
+  /// commit it replaces, so the second finds the first one's continuation there and gets an epoch
+  /// conflict instead of dropping it.
+  #[tokio::test]
+  async fn a_second_rewind_does_not_drop_the_first_admins_continuation() {
+    let app = strict_app!();
+    let g = group(&app).await;
+    let alice = owner();
+    let alice_device = register_device(&app, &alice).await;
+    commit(&app, &g.carol, &g.channel, &g.carol_device, 0, json!([])).await;
+    let refused = commit(&app, &g.dave, &g.channel, &g.dave_device, 1, json!([])).await;
+    let refused_id = refused.body["commit"]["id"].clone();
+    let continue_from = |payload: &str| json!({"device_id": alice_device, "epoch": 1, "commit": b64(payload), "replaces": refused_id});
+    let path = format!("/conversations/{}/mls/rewind", g.channel);
+
+    let first = app.post(&alice, &path, continue_from("first")).await;
+    assert_eq!(first.status, StatusCode::CREATED, "{}", first.body);
+    let second = app.post(&alice, &path, continue_from("second")).await;
+
+    assert_eq!(second.status, StatusCode::CONFLICT, "{}", second.body);
+    assert_eq!(second.error_code(), "epoch_conflict");
+    let backlog = app
+      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+      .await;
+    let payloads: Vec<String> = backlog.body["messages"]
+      .as_array()
+      .unwrap()
+      .iter()
+      .filter(|m| m["kind"] == "commit")
+      .map(|m| m["payload"].as_str().unwrap().to_owned())
+      .collect();
+    assert_eq!(payloads, vec![b64("commit-0"), b64("first")]);
+    app.stop().await;
+  }
+
   #[tokio::test]
   async fn a_plain_member_may_not_rewind() {
     let app = strict_app!();

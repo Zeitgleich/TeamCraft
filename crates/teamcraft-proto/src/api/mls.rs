@@ -135,6 +135,13 @@ pub struct PostMlsCommitRequest {
   /// server never looks inside the commit, and no member decides on it.
   #[serde(rename = "strict", default, skip_serializing_if = "Option::is_none")]
   pub maybe_strict: Option<StrictChannelHint>,
+  /// For a rewind (`POST …/mls/rewind`, e2ee.md §4.6.2, D4): the refused commit this one replaces,
+  /// where the admin's device stopped. The server rewinds only while that commit still holds the
+  /// epoch; otherwise it is an epoch conflict, so a second admin continuing at the same time
+  /// catches up instead of dropping the first one's continuation. Absent for an ordinary commit
+  /// and from older apps (then any commit of the epoch is replaced).
+  #[serde(rename = "replaces", default, skip_serializing_if = "Option::is_none")]
+  pub maybe_replaces: Option<MlsMessageId>,
 }
 
 /// What a channel's members told the server about its strict roles (e2ee.md §4.6.2): whether the
