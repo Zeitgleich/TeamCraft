@@ -17,14 +17,16 @@ use std::collections::BTreeSet;
 use std::time::Duration;
 
 use teamcraft_client_api::crash_reporting::{
-  CallContext, CallProblem, CallQualitySummary, CallRef, CallReport, CallTransportKind, JoinStage,
-  MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure, SentVideoContext, Unverified,
-  identifier,
+  AudioCodecRole as AudioCodecRoleApi, CallContext, CallProblem, CallQualitySummary, CallRef, CallReport,
+  CallTransportKind, JoinStage, MAX_CALL_TRAIL, MAX_RECEIVED_TRACKS, ReceivedVideoContext, ResumeFailure,
+  SentVideoContext, Unverified, identifier,
 };
 use teamcraft_client_api::video_stats::{VideoStatsReport, VideoTrackStats};
 use teamcraft_proto::{DeviceId, MediaStreamId, VideoCodec, VideoTrackKind};
 
-use crate::call_engine::{CallEngineError, CallEngineEvent, DaveResumeFailure, JoinStep, OwnVideoEnd};
+use crate::call_engine::{
+  AudioCodecRole, CallEngineError, CallEngineEvent, DaveResumeFailure, JoinStep, OwnVideoEnd,
+};
 use crate::call_resilience::CallTransport;
 
 /// How often the drivers sample the video stats for the telemetry while joined.
@@ -343,6 +345,14 @@ impl CallTelemetry {
           now_ms,
           format!("own {} capture gives pictures again", kind.as_str()),
         );
+      },
+      CallEngineEvent::AudioCodecRebuilt(role) => {
+        let codec = match role {
+          AudioCodecRole::Encoder => AudioCodecRoleApi::Encoder,
+          AudioCodecRole::Decoder => AudioCodecRoleApi::Decoder,
+        };
+        self.note(now_ms, format!("audio {} rebuilt after an error", codec.as_str()));
+        self.report(now_ms, CallProblem::AudioCodecRebuilt { codec });
       },
       CallEngineEvent::DecodableVideoCodecs(codecs) => {
         let names: Vec<&str> = codecs.iter().map(VideoCodec::as_str).collect();
@@ -1089,6 +1099,41 @@ mod tests {
       );
       assert_eq!(*window_s, 5);
       assert_eq!((*frames_encoded, *maybe_since_picture_s), (5, Some(41)));
+    }
+
+    /// #2460: rebuilt audio codecs are reported once a call, the first side named, and each
+    /// rebuild is on the trail.
+    #[test]
+    fn a_rebuilt_audio_codec_is_reported_once_a_call() {
+      let mut telemetry = joined(2);
+      telemetry.on_event(
+        &CallEngineEvent::AudioCodecRebuilt(AudioCodecRole::Decoder),
+        3_000,
+      );
+      telemetry.on_event(
+        &CallEngineEvent::AudioCodecRebuilt(AudioCodecRole::Encoder),
+        4_000,
+      );
+      telemetry.on_event(
+        &CallEngineEvent::AudioCodecRebuilt(AudioCodecRole::Decoder),
+        5_000,
+      );
+      let reports = telemetry.take_reports();
+      assert_eq!(reports.len(), 1, "once a call");
+      assert_eq!(
+        reports[0].problem,
+        CallProblem::AudioCodecRebuilt {
+          codec: AudioCodecRoleApi::Decoder
+        }
+      );
+      assert!(
+        reports[0]
+          .trail
+          .iter()
+          .any(|line| line.ends_with("audio decoder rebuilt after an error")),
+        "{:?}",
+        reports[0].trail
+      );
     }
 
     #[test]

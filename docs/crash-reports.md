@@ -317,6 +317,7 @@ per-packet work, one stats read every 3 s during a call, nothing outside one.
 | `CallProtocolError`     | error   | `CallEngineError::Protocol` (and a sequence gap): the violation's name from the code                                                 | the name                       |
 | `PoorCall`              | warning | At the end of a call of 30 s or more: 15 s frozen, 3 reconnects or 10 lossy samples (5 % or more downlink loss)                      | –                              |
 | `CaptureStalled`        | error   | An own capture got buffers it couldn't use (5 or more in 5 s, more than pictures): counts by outcome over the window (#1805)          | kind, the most frequent reason |
+| `CallAudioCodecRebuilt` | warning | WebCodecs closed an audio encoder or decoder after an error; the call built it anew and went on (#2460), once per call                | `encoder` or `decoder`         |
 
 A stalled join (#2419) is judged by the telemetry from the engine's steps into the call's
 encryption (`CallEngineEvent::JoinStep`): `sfu_join` (no `joined`), `external_sender`,
