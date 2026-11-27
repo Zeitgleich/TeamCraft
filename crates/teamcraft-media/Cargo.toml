@@ -309,7 +309,7 @@ rand_core.workspace = true
 
 # The process's CPU time in the camera_scaling_bench example (a safe getrusage).
 [target.'cfg(unix)'.dev-dependencies]
-nix = { version = "0.31.3", default-features = false, features = ["resource"] }
+nix = { version = "0.32.0", default-features = false, features = ["resource"] }
 
 [[bin]]
 name = "teamcraft-call"
