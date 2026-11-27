@@ -3494,22 +3494,28 @@ decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and 
     being used anywhere but after its own predecessor.
 
   A chain also ends wherever the server cuts it. So what the device gets is the end of *a* chain of
-  authorized signatures after the roles it knew, not necessarily the group's. Bounds: two changes
-  continuing the chain at its end, or one signed for a predecessor the chain doesn't hold, refuse it;
-  a welcome with the extension still needs an admin of that end (or a workspace signer); the end is
-  used for that one welcome and never kept, so it can't spread to the user's other devices or hide
-  what a device later sees in its group. The case the design accepted: an admin of the roles the
-  device knew, or of any signed state after them, signs an "off" or new admins that the group didn't
-  take (left or lost their leaf without being demoted, a refused or withheld change), and a hostile
-  server shows it together with a welcome from a group of a member's or its own making, cutting the
-  chain after it and, for an "off", answering a hint that says not strict. The device then joins that
-  group (not strict, or judged by those admins), holding only the people its tree shows, and the
-  lines after the add-back name everybody new or gone. Without the chain the same device would be
-  asked to decide after the wait, with the same tree shown. This is weaker than before for exactly
-  that case, and only with a hostile server. Junk, unchained or unjudgeable links (any member can
-  plant them, one per commit) make the device judge by the roles it knew, as before: they can deny the
-  improvement, not break the rule. Closing it fully takes the epoch's tree, i.e. a member's signed
-  `GroupInfo` of that epoch (option D of #2251), much larger.
+  authorized signatures after the roles it knew, not necessarily the group's. Bounds: two changes of
+  one version that both continue the chain refuse it, wherever they are (a longer branch isn't
+  preferred, so a demoted admin's own branch, signed on from the roles where they still were one,
+  only makes the device judge as before), as does a change signed for a predecessor the chain
+  doesn't hold; a welcome with the extension still needs an admin of that end (or a workspace
+  signer); the end is used for that one welcome and never kept, so it can't spread to the user's
+  other devices or hide what a device later sees in its group. The case the design accepted: an
+  "off" or new admins the group didn't take become the chain's end, and the device joins a group
+  of a member's or the server's making together with a welcome from it (for an "off", only while
+  the hint says not strict). With an honest server that takes an admin of the chain's end signing
+  it (who, as an admin of the roles the device knew, could bring it into a group of theirs before
+  this too), or a change kept with a commit the members refused, until an admin's rewind drops it.
+  Anything else takes a hostile server: cutting the chain, hiding a demotion or a revoking device
+  list, showing a withheld proposal. The device then holds only the people its tree shows, and the
+  lines after the add-back name everybody new or gone; without the chain it would be asked to decide
+  after the wait, with the same tree shown. This is weaker than before for exactly these cases.
+  Any member can deny the improvement, in the safe direction: a planted change for another
+  predecessor, or a second signed change of a version by somebody the previous roles allow (a
+  demoted admin included), refuses the chain; one whose signer can't be judged yet, or links naming
+  more signers than the device reads, leave it unused. The device then judges by the roles it knew,
+  as before. Closing it fully takes the epoch's tree, i.e. a member's signed `GroupInfo` of that
+  epoch (option D of #2251), much larger.
 
 **The owner's decisions.** The owner chose the middle column for all six; the design above assumes it.
 
@@ -3786,15 +3792,19 @@ risks" above.
   an "off", only turning strict on again continues: a workspace signer, a zero `prev_hash`, the next
   version. Changes nobody allowed signed, junk and changes of another conversation are passed over.
   Refused: a change signed for a predecessor the chain doesn't hold (a missing link or a fork), a
-  version none of whose changes continues the chain while later ones follow, two changes continuing
-  it at its end (a fork the next version settles is taken), the highest version, and a newer format.
+  version none of whose changes continues the chain while later ones follow, two changes of one
+  version that both continue it (anywhere: the longer branch isn't preferred), versions past what
+  the server stores (`MAX_STRICT_ROLES_VERSION`, also in the group's verdict), and a newer format.
   A roster or device list the device can't verify yet (`RosterUnknown`, `DeviceListUnknown`) is a
   retry, never a refusal.
 - **What the app does with it** (`client/strict_channels.rs`): before judging a welcome back into a
   channel its user's devices knew strict, the device reads the chain after the known version (pages
   must move forward; at most `max_strict_chain_changes`, 1024) and verifies it version by version,
   reading the device lists of the signers a step reaches (and the roster once a workspace signer
-  signed one), stopping at the first failure. The end judges this welcome only and is never kept. A
+  signed one), stopping at the first failure. Device lists are read only under identity keys the
+  device holds already (pinned, from the account data, the roster's): links name whom they want,
+  so the chain pins nobody on first use, and more than 4 signers of a version or
+  `max_strict_chain_signers` (16) in all leave the chain unused. The end judges this welcome only and is never kept. A
   welcome with the extension is judged by `check_strict_sender` against the chain's end, so an admin
   appointed while the device was away brings it back at once. A welcome without it opens if the chain
   ends in "off" and the server's hint, read with the last page, says strict is off as of that change
@@ -3807,14 +3817,15 @@ risks" above.
   user's devices saw in the group (an "off" included), never the hint's, so the chain stays one
   sequence and a hint a member made up can't fail the commit; an outside signer, who has only the
   hint, takes the next version the server can store.
-- **Tested**: `strict_roles::tests::chain` (junk and unauthorized changes passed over, a fork settled
-  or refused at the end, gaps, disorder and replays, every signer, a revoked or unlisted device, a
+- **Tested**: `strict_roles::tests::chain` (junk and unauthorized changes passed over, a fork
+  anywhere refused, a longer branch included, gaps, disorder and replays, every signer, a revoked or unlisted device, a
   device list under another key, a roster that can't be verified beside a valid change, turning on
   again after "off", the highest version, the signers a step needs); in the core's suite an honest
   "off" while the device was away opening a member's welcome, missed role changes and the new admin's
   welcome opening, off and on again while away, a chain read page by page, junk beside the real
   change, and the hold kept for a withheld roster, a gapped, forged or forked chain (also at its
-  end), an "off" the hint contradicts, a chain too long for the setting, pages that never end or end
+  end), a demoted admin's branch one version longer than the real chain, too many signers, an
+  "off" the hint contradicts, a chain too long for the setting, pages that never end or end
   early; a lost read asking again; the account data taking a turning on again below an "off"'s
   version; in the server's suite storing, paging by commit, a planted change blocking nothing, the
   rewind's cascade and who reads it.

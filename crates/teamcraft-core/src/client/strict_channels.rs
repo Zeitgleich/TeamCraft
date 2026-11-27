@@ -40,7 +40,7 @@ use crate::account_data::KnownStrictRoles;
 use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
-use crate::records;
+use crate::records::{self, PinnedIdentity};
 use crate::store::{AwayChange, ConversationEvent, LocalStore, MessageContent, StoredMessage, Table};
 use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
@@ -109,6 +109,17 @@ struct ChainRead {
 pub(super) struct VerifiedChain {
   end: ChainEnd,
   maybe_hint: Option<StrictChannelHint>,
+}
+
+/// Most distinct signers the changes of one version may name that continue the chain: honest ones
+/// name one, a version the members raced two or three. More is planted, and the chain unusable.
+const MAX_CHAIN_SIGNERS_PER_VERSION: usize = 4;
+
+/// What verifying a chain came to ([`Client::verify_strict_chain`]).
+enum ChainCheck {
+  Verified(Result<ChainEnd, StrictRolesError>),
+  /// Its links name more signers than this device reads for it.
+  TooManySigners,
 }
 
 /// How far a chain's pages were read: before a version, or at a version's change of a commit.
@@ -606,7 +617,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       return Ok(None);
     };
     let verdict = match self.verify_strict_chain(known, &read.links).await {
-      Ok(verdict) => verdict,
+      Ok(ChainCheck::Verified(verdict)) => verdict,
+      Ok(ChainCheck::TooManySigners) => {
+        tracing::warn!(conversation_id = %conversation, "a strict channel's chain names more signers than this device reads");
+        return Ok(None);
+      },
       Err(error) if error.is_transient() => return Err(error),
       Err(error) => {
         tracing::warn!(conversation_id = %conversation, %error, "couldn't verify a strict channel's chain");
@@ -675,12 +690,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
 
   /// Verifies the chain after `known` ([`ChainVerifier`]) one version at a time, reading what each
   /// step needs only for the links it reaches (the device lists of their signers, the roster once
-  /// a workspace signer signed one) and stopping at the first that fails.
+  /// a workspace signer signed one) and stopping at the first that fails. Signers are read only
+  /// under identity keys this device holds already ([`Self::known_directory`]), at most
+  /// [`MAX_CHAIN_SIGNERS_PER_VERSION`] a version and `max_strict_chain_signers` in all: links name
+  /// whom they want, and must not make the device pin or fetch anybody they like.
   async fn verify_strict_chain(
     &mut self,
     known: &StrictRoles,
     links: &[StrictChainChange],
-  ) -> Result<Result<ChainEnd, StrictRolesError>, CoreError> {
+  ) -> Result<ChainCheck, CoreError> {
     let chain: Vec<ChainLink<'_>> = links
       .iter()
       .map(|link| ChainLink {
@@ -695,6 +713,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     let mut rest = chain.as_slice();
     while !rest.is_empty() {
       let needed = verifier.signers_for_next(rest);
+      if needed.users.len() > MAX_CHAIN_SIGNERS_PER_VERSION {
+        return Ok(ChainCheck::TooManySigners);
+      }
       if needed.has_workspace_signer && !has_read_roster {
         self.sync_workspace().await?;
         has_read_roster = true;
@@ -705,11 +726,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .filter_map(|user| convert::user_from_crypto(*user).ok())
         .filter(|user| !signers.contains(user))
         .collect();
+      if signers.len() + new_signers.len() > self.settings.max_strict_chain_signers {
+        return Ok(ChainCheck::TooManySigners);
+      }
       if !new_signers.is_empty() || maybe_directory.is_none() {
-        // Reads the new signers' device lists; the directory then holds every signer's.
-        self.trusted_directory(new_signers.iter().copied()).await?;
+        self.read_known_device_lists(&new_signers).await?;
         signers.extend(new_signers);
-        maybe_directory = Some(self.pin_identities(signers.iter().copied()).await?);
+        maybe_directory = Some(self.known_directory(&signers)?);
       }
       let Some(directory) = &maybe_directory else {
         break;
@@ -718,10 +741,57 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       match verifier.take_next(rest, directory, &authority) {
         Ok(Some(tail)) => rest = tail,
         Ok(None) => break,
-        Err(error) => return Ok(Err(error)),
+        Err(error) => return Ok(ChainCheck::Verified(Err(error))),
       }
     }
-    Ok(verifier.finish())
+    Ok(ChainCheck::Verified(verifier.finish()))
+  }
+
+  /// Reads the device lists of `users` whose identity key this device holds already; nobody is
+  /// pinned on first use for it. A list that doesn't verify is left out (its user's links then
+  /// can't be judged yet).
+  async fn read_known_device_lists(&mut self, users: &[UserId]) -> Result<(), CoreError> {
+    let known = self.known_directory(users)?;
+    for user in users {
+      let Some(identity) = known.pinned_identity(convert::user(*user)) else {
+        continue;
+      };
+      if let Err(error) = self.fetch_device_list(*user, &identity).await {
+        if error.is_transient() {
+          return Err(error);
+        }
+        tracing::warn!(user_id = %user, %error, "refused a device list");
+      }
+    }
+    Ok(())
+  }
+
+  /// What this device holds already about `users`, nobody pinned on first use: the identity keys
+  /// it pinned (or its user's other devices did, in the account data), its own, the roster's, and
+  /// the device lists it stored.
+  fn known_directory(&self, users: &[UserId]) -> Result<PinnedDirectory, CoreError> {
+    let mut pinned = records::pinned_identities(&self.store)?;
+    let shared = self.account_data();
+    for user in users.iter().copied() {
+      let maybe_key = if user == self.account.user_id {
+        Some(*self.account.identity_public_key().as_bytes())
+      } else {
+        shared.pinned_key(user)
+      };
+      if let std::collections::btree_map::Entry::Vacant(slot) = pinned.entry(user)
+        && let Some(public_key) = maybe_key
+      {
+        slot.insert(PinnedIdentity {
+          public_key,
+          maybe_changed_to: None,
+          is_attested: false,
+          maybe_attestation_checked_at_ms: None,
+        });
+      }
+    }
+    let directory = PinnedDirectory::new(&pinned, &self.workspace()?.roster_identities());
+    let lists = self.stored_device_lists(&directory, users);
+    Ok(directory.with_device_lists(lists))
   }
 
   /// The version a change turning the channel strict signs: one above the newest this user's

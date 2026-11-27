@@ -1255,6 +1255,67 @@ mod coming_back {
     .await;
   }
 
+  /// Bob was an admin and is demoted at version 4. He stays a member, and his own commits carry
+  /// changes he signed on from version 3, where he still was one: a branch one version longer than
+  /// the real chain, which an honest server keeps like any (shown here as the server would). The
+  /// fork at version 4 refuses the chain: his welcome is judged by the roles Carol knew, and held.
+  #[tokio::test]
+  async fn a_demoted_admins_longer_branch_keeps_the_hold() {
+    let server = FakeServer::new();
+    let mut team = Team::with_carol_clock(&server, Arc::new(ManualClock::new(1_800_000_000_000))).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_while_carol_is_away(channel).await;
+    let (alice_id, bob_id) = (team.alice.client.user_id(), team.bob.client.user_id());
+    team
+      .alice
+      .client
+      .set_strict_roles(
+        channel,
+        &[(alice_id, StrictRoleKind::Admin), (bob_id, StrictRoleKind::Admin)],
+      )
+      .await
+      .unwrap();
+    settle(&mut [&mut team.alice, &mut team.bob, &mut team.dave]).await;
+    team
+      .alice
+      .client
+      .set_strict_roles(channel, &[(alice_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut team.alice, &mut team.bob, &mut team.dave]).await;
+    team.carol_comes_online(channel).await;
+    team.show_carol_the_roster();
+    let mut shown = server.strict_chain(channel);
+    let both_admins = parse(&shown[2]).change().roles.clone();
+    let branch_fourth = sign_after(&team.bob, &shown[2], both_admins.clone());
+    let branch_fifth = sign_after(&team.bob, &branch_fourth, both_admins);
+    shown.extend([branch_fourth, branch_fifth]);
+    shown.sort_by_key(|link| (link.version, link.commit));
+    server.show_strict_chain(channel, Some(shown));
+
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    let prompt = team.carol.client.strict_rejoin_prompt(channel).unwrap().unwrap();
+    assert_eq!(prompt.hold.sender, bob_id);
+    assert_ne!(
+      epoch_or_zero(&mut team.carol, channel),
+      epoch(&mut team.bob, channel)
+    );
+  }
+
+  /// Links naming more signers than `max_strict_chain_signers` leave the chain unused: the hold
+  /// stays, and the device read nobody's device list beyond that.
+  #[tokio::test]
+  async fn a_chain_naming_too_many_signers_keeps_the_hold() {
+    let settings = teamcraft_core::client::ClientSettings {
+      max_strict_chain_signers: 1,
+      ..quick()
+    };
+    let (_server, mut team, channel) = Team::on_a_long_chain(settings).await;
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+    assert!(team.carol.client.strict_rejoin_prompt(channel).unwrap().is_some());
+  }
+
   /// A member's junk under the next version, beside the real change (the server keeps every
   /// commit's): passed over, and the new admin's welcome still opens.
   #[tokio::test]

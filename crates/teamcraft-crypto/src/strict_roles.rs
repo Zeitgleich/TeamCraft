@@ -41,6 +41,10 @@ pub const MAX_STRICT_ROLES_BYTES: usize = 8 * 1024;
 pub const STRICT_CHANGE_WINDOW_EPOCHS: u64 = 32;
 /// Marks a commit's authenticated data as a [`SignedStrictRolesChange`].
 pub const STRICT_ROLES_AAD_MAGIC: &[u8] = b"TCSR";
+/// The highest version a roles change may carry: what the server stores with its commit (a signed
+/// 64-bit integer). A constant for the verdict, in a group as along the chain: a change above it
+/// could never be committed, so the roles would be stuck.
+pub const MAX_STRICT_ROLES_VERSION: u64 = i64::MAX as u64;
 
 /// A role a strict channel's context names. Members are implicit and never listed.
 #[derive(
@@ -173,11 +177,11 @@ pub enum StrictRolesError {
   /// is missing ([`verify_chain`]).
   #[error("no roles change of version {0} continues the chain, but later ones follow")]
   ChainGap(u64),
-  /// Two signed changes continue the chain at its end and nothing later tells which one the group
-  /// took ([`verify_chain`]).
-  #[error("the roles chain forks at its end")]
+  /// Two signed changes of one version both continue the chain ([`verify_chain`]): the device can't
+  /// tell which one the group took.
+  #[error("the roles chain forks")]
   AmbiguousChain,
-  /// The roles are at the highest version: no change can follow them.
+  /// The roles are at [`MAX_STRICT_ROLES_VERSION`]: no change can follow them.
   #[error("roles version {0} has no next version")]
   VersionExhausted(u64),
   #[error("strict is off; there is nothing to turn off")]
@@ -226,9 +230,8 @@ pub enum ChainEnd {
 #[derive(Clone, Debug)]
 pub struct ChainVerifier {
   conversation_id: ConversationId,
-  /// Where the chain may end after the versions taken so far, all of one version: more than one
-  /// while two signed changes of a version both continue it, until a later version settles which.
-  ends: Vec<ChainEnd>,
+  /// Where the chain ends after the versions taken so far.
+  end: ChainEnd,
 }
 
 /// Who signs the links of the next version that continue the chain, unverified: the users whose
@@ -612,8 +615,9 @@ impl ChainEnd {
 /// Changes nobody of those signed, or that don't parse, are passed over. Refused: a change signed
 /// for a predecessor the chain doesn't hold (a missing link or a fork, [`StrictRolesError::BrokenChain`]),
 /// a version none of whose changes continues the chain while later ones follow
-/// ([`StrictRolesError::ChainGap`]), and two changes continuing the chain at its end
-/// ([`StrictRolesError::AmbiguousChain`]). A device list or roster this device can't verify yet
+/// ([`StrictRolesError::ChainGap`]), and two changes of one version that both continue it
+/// ([`StrictRolesError::AmbiguousChain`]): wherever the chain forks, not only at its end, or an
+/// admin demoted later could sign a branch one longer than the real one and have it taken. A device list or roster this device can't verify yet
 /// is [`StrictRolesError::DeviceListUnknown`] or [`StrictRolesError::RosterUnknown`]: read them
 /// again; nothing is refused for that. Links aren't tied to commits and the epoch window isn't
 /// checked (the device knows neither): a signed change the group never took verifies too, which is
@@ -636,14 +640,13 @@ impl ChainVerifier {
   pub fn new(known: &StrictRoles) -> Self {
     Self {
       conversation_id: known.conversation_id(),
-      ends: vec![ChainEnd::Roles(known.clone())],
+      end: ChainEnd::Roles(known.clone()),
     }
   }
 
   /// The version whose changes the next step takes.
   pub fn next_version(&self) -> Result<u64, StrictRolesError> {
-    let version = self.ends.first().map_or(0, ChainEnd::version);
-    next_version_after(version)
+    next_version_after(self.end.version())
   }
 
   /// Who signs the changes at the front of `rest` that the next step judges: those of the next
@@ -690,17 +693,17 @@ impl ChainVerifier {
     }
     let count = rest.iter().take_while(|link| link.version == next).count();
     let (candidates, tail) = rest.split_at(count);
-    let mut ends: Vec<ChainEnd> = Vec::new();
+    let mut maybe_next: Option<(StrictHash, ChainEnd)> = None;
     let mut maybe_retry = None;
     for link in candidates {
       match self.judge(link, directory, authority)? {
         Candidate::Continues(end) => {
           let hash = end.hash()?;
-          if !ends
-            .iter()
-            .any(|known| known.hash().is_ok_and(|other| other == hash))
-          {
-            ends.push(end);
+          match &maybe_next {
+            None => maybe_next = Some((hash, end)),
+            // The same change carried by two commits.
+            Some((taken, _)) if *taken == hash => {},
+            Some(_) => return Err(StrictRolesError::AmbiguousChain),
           }
         },
         Candidate::Ignored => {},
@@ -714,22 +717,19 @@ impl ChainVerifier {
     if let Some(error) = maybe_retry {
       return Err(error);
     }
-    if ends.is_empty() {
+    let Some((_, end)) = maybe_next else {
       return match tail.first() {
         None => Ok(None),
         Some(_) => Err(StrictRolesError::ChainGap(next)),
       };
-    }
-    self.ends = ends;
+    };
+    self.end = end;
     Ok(Some(tail))
   }
 
-  /// Where the chain ends: one end, or [`StrictRolesError::AmbiguousChain`].
-  pub fn finish(mut self) -> Result<ChainEnd, StrictRolesError> {
-    match (self.ends.pop(), self.ends.is_empty()) {
-      (Some(end), true) => Ok(end),
-      _ => Err(StrictRolesError::AmbiguousChain),
-    }
+  /// Where the chain ends.
+  pub fn finish(self) -> Result<ChainEnd, StrictRolesError> {
+    Ok(self.end)
   }
 
   /// What `link` (of the next version) does to the chain. Only a change of a newer format refuses
@@ -749,35 +749,30 @@ impl ChainVerifier {
     if change.version != link.version || change.conversation_id != self.conversation_id {
       return Ok(Candidate::Ignored);
     }
-    for end in &self.ends {
-      match end {
-        ChainEnd::Roles(previous) if change.prev_hash == previous.hash()? => {
-          return judge_change(previous, &signed, directory, authority);
-        },
-        ChainEnd::Off { .. } if change.prev_hash == StrictHash::ZERO => {
-          return judge_turning_on(&signed, directory, authority);
-        },
-        // Only turning on again continues an "off".
-        ChainEnd::Off { hash, .. } if change.prev_hash == *hash => return Ok(Candidate::Ignored),
-        _ => {},
-      }
+    match &self.end {
+      ChainEnd::Roles(previous) if change.prev_hash == previous.hash()? => {
+        judge_change(previous, &signed, directory, authority)
+      },
+      ChainEnd::Off { .. } if change.prev_hash == StrictHash::ZERO => {
+        judge_turning_on(&signed, directory, authority)
+      },
+      // Only turning on again continues an "off".
+      ChainEnd::Off { hash, .. } if change.prev_hash == *hash => Ok(Candidate::Ignored),
+      // Turning on while strict continues nothing: a group takes it only when strict is off.
+      ChainEnd::Roles(_) if change.prev_hash == StrictHash::ZERO => Ok(Candidate::Ignored),
+      _ => Ok(Candidate::Unchained),
     }
-    // Turning on while strict continues nothing: a group takes it only when strict is off.
-    if change.prev_hash == StrictHash::ZERO {
-      return Ok(Candidate::Ignored);
-    }
-    Ok(Candidate::Unchained)
   }
 
-  /// Whether `signed` (of version `next`) names an end of the chain as its predecessor.
+  /// Whether `signed` (of version `next`) names the end of the chain as its predecessor.
   fn is_successor(&self, signed: &SignedStrictRolesChange, next: u64) -> bool {
     let change = &signed.change;
     change.version == next
       && change.conversation_id == self.conversation_id
-      && self.ends.iter().any(|end| match end {
+      && match &self.end {
         ChainEnd::Roles(previous) => previous.hash().is_ok_and(|hash| hash == change.prev_hash),
         ChainEnd::Off { .. } => change.prev_hash == StrictHash::ZERO,
-      })
+      }
   }
 }
 
@@ -879,10 +874,12 @@ fn parse_link(bytes: &[u8]) -> Result<SignedStrictRolesChange, StrictRolesError>
   })
 }
 
-/// The version after `version`; none after the highest, in a group as along the chain.
+/// The version after `version`; none after [`MAX_STRICT_ROLES_VERSION`], in a group as along the
+/// chain.
 fn next_version_after(version: u64) -> Result<u64, StrictRolesError> {
   version
     .checked_add(1)
+    .filter(|next| *next <= MAX_STRICT_ROLES_VERSION)
     .ok_or(StrictRolesError::VersionExhausted(version))
 }
 

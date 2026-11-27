@@ -695,9 +695,8 @@ mod verdict {
 }
 
 /// A device that fell out carries the roles it knew forward along the changes the server kept
-/// (e2ee.md §4.6.2, "Falling out in a strict channel"): of each version, the changes that continue
-/// the chain and whose signer the previous roles allow; a missing link, a fork or an end the chain
-/// can't settle refuses it.
+/// (e2ee.md §4.6.2, "Falling out in a strict channel"): of each version, the change that continues
+/// the chain and whose signer the previous roles allow; a missing link or a fork refuses it.
 mod chain {
   use super::*;
 
@@ -918,9 +917,11 @@ mod chain {
     ));
   }
 
-  /// A fork the next version settles is taken; one at the chain's end is refused.
+  /// Two changes of one version that both continue the chain refuse it, wherever they are: the
+  /// longer branch isn't taken, or an admin demoted later could sign one a version longer than the
+  /// real one (each link as admin of the one before) and have it win.
   #[test]
-  fn a_fork_is_settled_by_the_next_version_or_refused_at_the_end() {
+  fn a_fork_anywhere_refuses_the_chain() {
     let fixture = Fixture::new();
     let known = fixture.strict();
     let taken = fixture.admin_change(&known, fixture.roles());
@@ -928,14 +929,20 @@ mod chain {
     other_roles.insert(0, role(&fixture.bob, StrictRoleKind::Moderator));
     let refused = fixture.admin_change(&known, other_roles);
     let third = fixture.admin_change(&after(&taken), Vec::new());
+    // Carol's own branch, one longer than the real chain.
+    let branch_third = fixture.admin_change(&after(&refused), fixture.roles());
+    let branch_fourth = fixture.admin_change(&after(&branch_third), Vec::new());
 
-    let end = fixture.verify(&known, &[&refused, &taken, &third]).unwrap();
-    assert_eq!(end.version(), 3);
-    assert_eq!(end.maybe_roles(), None);
-    assert!(matches!(
-      fixture.verify(&known, &[&refused, &taken]),
-      Err(StrictRolesError::AmbiguousChain)
-    ));
+    for chain in [
+      vec![&refused, &taken],
+      vec![&refused, &taken, &third],
+      vec![&taken, &refused, &branch_third, &branch_fourth],
+    ] {
+      assert!(matches!(
+        fixture.verify(&known, &chain),
+        Err(StrictRolesError::AmbiguousChain)
+      ));
+    }
   }
 
   #[test]
@@ -1080,37 +1087,50 @@ mod chain {
     assert_eq!(fixture.verify(&known, &[&signed]).unwrap().version(), 2);
   }
 
-  /// At the highest version nothing follows, in a group as along the chain; turning on there is
-  /// refused too.
+  /// Versions end at what the server stores: nothing follows the highest, in a group as along the
+  /// chain, and turning on there (or above) is refused too.
   #[test]
   fn the_highest_version_has_no_next() {
     let fixture = Fixture::new();
-    let top = fixture
-      .change(u64::MAX, StrictHash::ZERO, StrictSignerRole::Workspace)
+    for version in [MAX_STRICT_ROLES_VERSION, u64::MAX] {
+      let top = fixture
+        .change(version, StrictHash::ZERO, StrictSignerRole::Workspace)
+        .sign(&fixture.alice.device, &fixture.alice.certificate)
+        .unwrap();
+      assert!(matches!(
+        fixture.check(None, &top),
+        Err(StrictRolesError::VersionExhausted(at)) if at == version
+      ));
+    }
+    let below_top = fixture
+      .change(
+        MAX_STRICT_ROLES_VERSION - 1,
+        StrictHash::ZERO,
+        StrictSignerRole::Workspace,
+      )
       .sign(&fixture.alice.device, &fixture.alice.certificate)
       .unwrap();
+    let StrictRolesVerdict::Roles(below_top) = fixture.check(None, &below_top).unwrap() else {
+      panic!("turned off")
+    };
+    let to_top = fixture.admin_change(&below_top, fixture.roles());
+    assert_eq!(to_top.change().version, MAX_STRICT_ROLES_VERSION);
+    assert!(fixture.check(Some(&below_top), &to_top).is_ok());
+    let at_top = after(&to_top);
+    let beyond = fixture.admin_change(&at_top, fixture.roles());
     assert!(matches!(
-      fixture.check(None, &top),
-      Err(StrictRolesError::VersionExhausted(u64::MAX))
+      fixture.check(Some(&at_top), &beyond),
+      Err(StrictRolesError::VersionExhausted(MAX_STRICT_ROLES_VERSION))
     ));
-    let at_top = StrictRoles::for_tests(top);
-    let change = fixture.change(0, at_top.hash().unwrap(), StrictSignerRole::ChannelAdmin);
-    let signed = change
-      .sign(&fixture.carol.device, &fixture.carol.certificate)
-      .unwrap();
-    assert!(matches!(
-      fixture.check(Some(&at_top), &signed),
-      Err(StrictRolesError::VersionExhausted(u64::MAX))
-    ));
-    let bytes = signed.to_bytes().unwrap();
+    let bytes = beyond.to_bytes().unwrap();
     assert!(matches!(
       verify_chain(
         &at_top,
-        &[link(0, &bytes)],
+        &[link(beyond.change().version, &bytes)],
         &fixture.directory,
         &fixture.authority
       ),
-      Err(StrictRolesError::VersionExhausted(u64::MAX))
+      Err(StrictRolesError::VersionExhausted(MAX_STRICT_ROLES_VERSION))
     ));
   }
 
