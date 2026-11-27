@@ -1306,7 +1306,7 @@ async fn does_worker_stream() -> bool {
   let Some(window) = web_sys::window() else {
     return false;
   };
-  if window.navigator().service_worker().controller().is_none() {
+  if crate::service_worker::container().is_none_or(|container| container.controller().is_none()) {
     return false;
   }
   let answer = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(MEDIA_STREAM_READY_PATH)).await;
@@ -5021,7 +5021,9 @@ fn watch_worker() {
   if IS_WATCHING_WORKER.with(|is_watching| is_watching.replace(true)) {
     return;
   }
-  let Some(window) = web_sys::window() else { return };
+  let Some(container) = crate::service_worker::container() else {
+    return;
+  };
   let listener = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::MessageEvent)>::new(
     |event: web_sys::MessageEvent| {
       let kind = js_sys::Reflect::get(&event.data(), &"type".into())
@@ -5045,9 +5047,7 @@ fn watch_worker() {
       }
     },
   );
-  if window
-    .navigator()
-    .service_worker()
+  if container
     .add_event_listener_with_callback("message", listener.as_ref().unchecked_ref())
     .is_ok()
   {
@@ -5165,8 +5165,10 @@ fn notification_labels(locale: crate::i18n::Locale) -> NotificationLabels {
 fn announce_database(name: &str) {
   let name = name.to_owned();
   wasm_bindgen_futures::spawn_local(async move {
-    let Some(window) = web_sys::window() else { return };
-    let Ok(ready) = window.navigator().service_worker().ready() else {
+    let Some(container) = crate::service_worker::container() else {
+      return;
+    };
+    let Ok(ready) = container.ready() else {
       return;
     };
     let Ok(registration) = wasm_bindgen_futures::JsFuture::from(ready).await else {

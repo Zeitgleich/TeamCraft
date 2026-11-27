@@ -360,6 +360,11 @@ The same approach Fluxer announced for its new voice system (see https://fluxer.
   `AudioContext` at its default device's rate (`NotSupportedError` otherwise, Mozilla bug 1674892),
   so with a 44.1 kHz headset the join failed there (#1721); the graph then runs at the browser's
   rate, and the call module resamples the capture to 48 kHz and the mix back (`GraphRate`).
+- Firefox (140 to 159 at least) takes a second `configure()` of a running `AudioEncoder` without an
+  error and keeps the first configuration's Opus bitrate and packet length, so the voice steps
+  (#1893) and the FEC loss percentage never changed there; the call module resets the encoder
+  before it configures it again (#1721). Without `navigator.serviceWorker` (Firefox with service
+  workers turned off, as Tor Browser has it) the page runs without a worker rather than not at all.
 
 ### 6.2 E2EE: DAVE
 

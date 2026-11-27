@@ -117,8 +117,9 @@ pub struct Release(pub RwSignal<ReleaseUpdate>);
 
 /// Follows the service worker's messages and asks for the current state. Browser only.
 pub fn watch(state: RwSignal<BundleState>) {
-  let Some(window) = web_sys::window() else { return };
-  let container = window.navigator().service_worker();
+  let Some(container) = crate::service_worker::container() else {
+    return;
+  };
   let listener = Closure::<dyn FnMut(web_sys::MessageEvent)>::new(move |event: web_sys::MessageEvent| {
     if let Some(next) = BundleState::from_message(&event.data()) {
       state.set_if_alive(next);
@@ -151,8 +152,9 @@ pub fn watch(state: RwSignal<BundleState>) {
 /// Follows the service worker registration for a waiting release and checks for one now and then
 /// (when the page becomes visible, comes back online, and hourly; throttled). Browser only.
 pub fn watch_releases(state: RwSignal<ReleaseUpdate>) {
-  let Some(window) = web_sys::window() else { return };
-  let container = window.navigator().service_worker();
+  let Some(container) = crate::service_worker::container() else {
+    return;
+  };
   let on_controller_change = Closure::<dyn FnMut()>::new(move || {
     // async-ok: a thread-local Cell, not a signal.
     if IS_RELOADING.get() {
@@ -222,7 +224,7 @@ pub fn watch_releases(state: RwSignal<ReleaseUpdate>) {
 /// [`SWITCH_TIMEOUT`]; the page then keeps running and the user can try again.
 pub async fn apply_update() -> Result<(), ActionFailure> {
   IS_RELOADING.set(true);
-  let maybe_registration = match web_sys::window().map(|window| window.navigator().service_worker().ready()) {
+  let maybe_registration = match crate::service_worker::container().map(|container| container.ready()) {
     Some(Ok(ready)) => wasm_bindgen_futures::JsFuture::from(ready)
       .await
       .ok()
@@ -432,7 +434,7 @@ fn wait_promise(duration: Duration) -> js_sys::Promise {
 }
 
 fn has_controller() -> bool {
-  web_sys::window().is_some_and(|window| window.navigator().service_worker().controller().is_some())
+  crate::service_worker::container().is_some_and(|container| container.controller().is_some())
 }
 
 /// Reloads the page (into the newest release).

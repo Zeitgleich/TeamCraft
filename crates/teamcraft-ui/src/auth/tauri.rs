@@ -1276,10 +1276,9 @@ fn page_notification_options(notification: &OsNotification) -> js_sys::Object {
 
 /// `registration.showNotification`; false when the page has no active service worker.
 async fn show_through_worker(title: &str, options: &js_sys::Object) -> bool {
-  let Some(window) = web_sys::window() else {
+  let Some(container) = crate::service_worker::container() else {
     return false;
   };
-  let container = window.navigator().service_worker();
   if container.controller().is_none() {
     return false;
   }
@@ -1310,8 +1309,10 @@ fn close_page_notifications(tags: &[String]) {
 /// Push notifications the service worker showed while no page was open carry the conversation ID
 /// as their tag (`teamcraft_core::web_push`).
 async fn close_service_worker_notifications(tags: &[String]) {
-  let Some(window) = web_sys::window() else { return };
-  let Ok(ready) = window.navigator().service_worker().ready() else {
+  let Some(container) = crate::service_worker::container() else {
+    return;
+  };
+  let Ok(ready) = container.ready() else {
     return;
   };
   let Ok(registration) = JsFuture::from(ready).await else {

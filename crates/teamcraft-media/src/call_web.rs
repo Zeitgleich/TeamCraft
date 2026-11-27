@@ -142,7 +142,8 @@ use crate::video::{EncodedVideoFrame, ScreenProfile, TOP_LAYER, VideoResolution,
 use crate::voice_steps::{VoiceEncoding, VoiceFrame, VoiceStepConfig};
 use crate::web_api::{
   AudioData, AudioDecoder, AudioEncoder, EncodedAudioChunk, QUIC_GLOBAL, WORKLET_SOURCE, WebTransport,
-  WebTransportBidirectionalStream, datagram_writable, dictionary, has_global, missing_for_calls,
+  WebTransportBidirectionalStream, call_features, datagram_writable, dictionary, has_global,
+  missing_for_calls,
 };
 
 /// Audio frame period.
@@ -753,8 +754,14 @@ enum SignalingDecodeError {
 impl WebCall {
   /// Connects, joins and starts sending and playing. Call it from a user gesture (click) so the
   /// browser lets the page start audio.
+  ///
+  /// Each step leaves a line in the log (#1721): which of the call's browser features the browser
+  /// has, the audio graph's rate, the transport, and the step a join failed at, with the time since
+  /// the start. A bug report carries them (docs/bug-reports.md).
   pub async fn join(config: WebCallConfig) -> Result<Self, WebCallError> {
-    ensure_supported()?;
+    let started = Instant::now();
+    info!(features = %call_features(has_global), "call join: starting");
+    ensure_supported().inspect_err(|error| join_step_failed(JoinStep::Support, started, error))?;
     let (inputs, input_rx) = mpsc::unbounded();
     let audio = WebAudio::open(
       &config.source,
@@ -762,7 +769,13 @@ impl WebCall {
       config.maybe_worklet_url.as_deref(),
       &inputs,
     )
-    .await?;
+    .await
+    .inspect_err(|error| join_step_failed(JoinStep::Audio, started, error))?;
+    info!(
+      graph_rate_hz = audio.context.sample_rate(),
+      elapsed_ms = elapsed_ms(started),
+      "call join: audio ready"
+    );
     let sessions = OpenSessions::default();
     let ticket = JoinTicket {
       sfu_url: config.sfu_url.clone(),
@@ -778,7 +791,13 @@ impl WebCall {
       &inputs,
       0,
     )
-    .await?;
+    .await
+    .inspect_err(|error| join_step_failed(JoinStep::Connect, started, error))?;
+    info!(
+      transport = ?transport.kind(),
+      elapsed_ms = elapsed_ms(started),
+      "call join: connected to the SFU"
+    );
     let (event_tx, events) = mpsc::unbounded();
     let (finished_tx, finished) = oneshot::channel();
     let task_inputs = inputs.clone();
@@ -3904,7 +3923,14 @@ impl OpusEncoder {
     self.configure()
   }
 
-  fn configure(&self) -> Result<(), WebCallError> {
+  /// Configures the running encoder anew. Firefox (140 to 159 at least) takes a second
+  /// `configure()` without an error and keeps encoding with the first configuration's bitrate,
+  /// packet length and loss percentage, so its voice never left the step it started on (#1721).
+  /// After a `reset()` it applies the new one, as Chrome does either way; the reset drops at most
+  /// the 20 ms frame still being encoded, and the levels waiting for it.
+  fn configure(&mut self) -> Result<(), WebCallError> {
+    self.encoder.reset().map_err(browser("AudioEncoder"))?;
+    self.levels.clear();
     self
       .encoder
       .configure(&opus_config(
@@ -4573,6 +4599,25 @@ fn codec_error_callback(
       message: js_message(&error),
     });
   })
+}
+
+/// The steps of [`WebCall::join`], as its log names them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinStep {
+  /// WebCodecs audio and the AudioWorklet.
+  Support,
+  /// Microphone, audio graph, worklets, speakers.
+  Audio,
+  /// The session to the SFU (QUIC or the fallback).
+  Connect,
+}
+
+fn join_step_failed(step: JoinStep, started: Instant, error: &WebCallError) {
+  warn!(?step, elapsed_ms = elapsed_ms(started), %error, "call join failed");
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+  u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn ensure_supported() -> Result<(), WebCallError> {

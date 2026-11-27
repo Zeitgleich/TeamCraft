@@ -38,6 +38,7 @@ four-core runner, most of it the browser tests, which share two ports).
 | `calls.rs`              | 1:1 DM call through the server's join tokens and the SFU: device-bound DAVE keys, both sides decode audio, equal privacy codes              |
 | `web_calls.rs`          | Browser and native client in one channel call: call module, DAVE keys signed by the page, audio and camera                                  |
 | `meetings_firefox.rs`   | A guest joins a meeting by its link in Firefox (44.1 kHz sound device), is let in, and shares the call with the organizer (#1721)           |
+| `web_calls_firefox.rs`  | A member signs in through Keycloak in Firefox and shares a channel call with a native client; the app starts in a Firefox without service workers (#1721) |
 | `moderator.rs`          | Channel moderator role: removes members (keys rotate), can't manage roles, properties or the admin                                          |
 | `conversion.rs`         | Public/private conversion: who may, who can join afterwards, newcomers' history, system event, audit                                        |
 | `threads_policy.rs`     | Signed policy: auto-follow default for people who never chose, threaded view switch the server enforces                                     |

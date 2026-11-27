@@ -73,6 +73,8 @@ mod web_animated_images;
 #[cfg(feature = "browser")]
 mod web_calls;
 #[cfg(feature = "browser")]
+mod web_calls_firefox;
+#[cfg(feature = "browser")]
 mod web_directory;
 #[cfg(feature = "browser")]
 mod web_feed_stability;
