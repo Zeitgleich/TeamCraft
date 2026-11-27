@@ -832,7 +832,14 @@ impl Run {
       new_encoder: count(KeyframeCause::NewEncoder),
       forced: count(KeyframeCause::Forced),
       own: count(KeyframeCause::Encoders),
-      built: self.built.iter().filter(|at| after_settle(at)).count(),
+      // The share's own encoders are built with its first frame, which a loaded machine took
+      // until after the first seconds to capture.
+      built: self
+        .built
+        .iter()
+        .skip(self.layers.len())
+        .filter(|at| after_settle(at))
+        .count(),
       republished: self.republished.iter().filter(|at| after_settle(at)).count(),
       asked: self
         .keyframe_requests

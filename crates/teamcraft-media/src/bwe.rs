@@ -22,7 +22,10 @@
 //!   loss and 10 % it holds. Only the loss of packets sent after the last cut to what got through
 //!   counts (that cut answered the loss before it), and only once 30 datagrams were reported. An
 //!   application-limited sender whose path doesn't queue is cut from its estimate, not to what
-//!   got through: that is its own rate (#2192).
+//!   got through: that is its own rate (#2192). What got through, for a cut of an
+//!   application-limited sender to it, is at least the rate at which the path delivered the
+//!   latest burst (a slide, a keyframe): judged after it, the window of what got through held
+//!   mostly the voice that followed (#2218).
 //! - **Application-limited senders** (sending less than half the estimate): the delay of their own
 //!   bursts doesn't end the fast start, nor count as congestion (GCC's "ALR"), unless it lasts
 //!   with more sent than gets through. During the fast start the same holds for every sender: the
@@ -51,6 +54,13 @@ use crate::datagram::TransportSeq;
 const BURST_INTERVAL: Duration = Duration::from_millis(5);
 /// The longest a burst of arrivals counts as one group (GCC: 100 ms).
 const MAX_BURST_DURATION: Duration = Duration::from_millis(100);
+/// The fewest datagrams of a burst (each sent within [`BURST_INTERVAL`] of the one before) whose
+/// arrivals tell what the path carries at once ([`SendSideEstimator::delivered_bps`]): a slide
+/// change or a keyframe, not the voice.
+const MIN_BURST_PACKETS: usize = 8;
+/// The shortest span of a burst's arrivals that tells a rate: arrivals a receiver read at once (a
+/// loaded machine) tell none.
+const MIN_BURST_SPAN: Duration = Duration::from_millis(10);
 /// Packet groups kept in the trendline regression.
 const TRENDLINE_WINDOW: usize = 20;
 /// Smoothing of the accumulated delay before the regression.
@@ -250,6 +260,11 @@ pub struct SendSideEstimator {
   maybe_probed_bps: Option<f64>,
   /// When the last probe padding was sent ([`PROBE_QUEUE_GRACE`]).
   maybe_last_probe_at: Option<Instant>,
+  /// The datagrams sent back to back that the feedback reported so far, while more of them may
+  /// follow.
+  maybe_burst: Option<SentBurst>,
+  /// What the path delivered of the latest burst: its last arrival and the rate (#2218).
+  maybe_burst_delivery: Option<(Instant, f64)>,
 }
 
 /// Receiver side: records arrival times and produces [`TransportFeedback`].
@@ -275,6 +290,17 @@ struct PacketGroup {
   last_sent: Instant,
   first_arrival: Instant,
   last_arrival: Instant,
+}
+
+/// Datagrams sent back to back, each within [`BURST_INTERVAL`] of the one before, as far as the
+/// feedback reported them: what arrived of them, and over how long.
+#[derive(Debug, Clone, Copy)]
+struct SentBurst {
+  last_sent: Instant,
+  arrived: usize,
+  arrived_bytes: usize,
+  /// The first and the last arrival.
+  maybe_arrivals: Option<(Instant, Instant)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -357,6 +383,8 @@ impl SendSideEstimator {
       maybe_first_send_at: None,
       maybe_probed_bps: None,
       maybe_last_probe_at: None,
+      maybe_burst: None,
+      maybe_burst_delivery: None,
     }
   }
 
@@ -419,6 +447,11 @@ impl SendSideEstimator {
       // of a probe burst answers the probe (`limit_to`).
       let is_counted = !sent.is_probe && self.maybe_loss_counts_from.is_none_or(|from| sent.at >= from);
       reported += usize::from(is_counted);
+      if !sent.is_probe {
+        let maybe_arrival =
+          (*maybe_arrival_us).map(|arrival_us| receiver_epoch + Duration::from_micros(arrival_us));
+        self.follow_burst(sent, maybe_arrival);
+      }
       match maybe_arrival_us {
         Some(arrival_us) => {
           let arrival = receiver_epoch + Duration::from_micros(*arrival_us);
@@ -488,6 +521,8 @@ impl SendSideEstimator {
   /// move (#1556). Call it with [`Self::measure_afresh`].
   pub fn forget_sent(&mut self) {
     self.sent.clear();
+    self.maybe_burst = None;
+    self.maybe_burst_delivery = None;
   }
 
   /// The sender starts sending far more than so far (a camera in a call that sent only sound):
@@ -536,6 +571,8 @@ impl SendSideEstimator {
     self.has_grown_recovering = false;
     self.maybe_overuse_since = None;
     self.has_cut_to_delivered = false;
+    self.maybe_burst = None;
+    self.maybe_burst_delivery = None;
   }
 
   /// A probe at the start showed the path carries `capacity_bps` (`crate::join_probe`): the
@@ -697,7 +734,7 @@ impl SendSideEstimator {
         {
           // The queue outlasted the delivered rate's window: what got through is the path's
           // rate, whatever the sender planned.
-          let delivered_bps = self.recent_acked_bps(acked_bps);
+          let delivered_bps = self.delivered_bps(acked_bps, is_app_limited);
           self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * delivered_bps);
           self.maybe_last_decrease_at = Some(now);
           self.note_cut_to_delivered(now);
@@ -755,7 +792,8 @@ impl SendSideEstimator {
       // over more than a second (#2192). Its cut starts from the estimate, as GCC's does. (Its
       // own bursts queue, so a queue tells nothing here.) A link that lost its room loses on:
       // cut again 400 ms later, and once the sender fills the estimate, to what got through.
-      let delivered_based = self.recent_acked_bps(acked_bps) * (1.0 - 0.5 * self.last_loss_ratio);
+      let delivered_based =
+        self.delivered_bps(acked_bps, is_app_limited) * (1.0 - 0.5 * self.last_loss_ratio);
       let loss_based = if is_app_limited && self.queue_delay(now) < LOSS_QUEUE_BOUND {
         delivered_based.max((1.0 - self.last_loss_ratio).max(APP_LIMITED_LOSS_CUT) * self.estimate_bps)
       } else {
@@ -883,6 +921,61 @@ impl SendSideEstimator {
     }
   }
 
+  /// What got through, for a cut to it: what got through lately ([`Self::recent_acked_bps`]), or,
+  /// for an application-limited sender, the rate at which the path delivered the latest burst
+  /// within [`LOSS_WINDOW`] where that is more. A still screen sends a slide at once and then
+  /// little but its voice: when the slide's tail overflowed the bottleneck's queue, the loss was
+  /// judged once its feedback came, and the window of what got through by then held mostly the
+  /// voice. Cut to it, the estimate fell from 2.8 Mbit/s to 40–550 kbit/s on a 3.3 Mbit/s uplink,
+  /// the share's layers were dropped, and a slide never reached the viewer (#2218). What the
+  /// slide got through at once is what the path carries; a link that lost its room delivers the
+  /// next burst at its new rate. A sender that fills its estimate fills the window too: what got
+  /// through lately is the path's rate, and a burst from before a drop held its cut back (a camera
+  /// on LTE fit the link 1.75 s after a drop instead of 1.2 s).
+  fn delivered_bps(&self, acked_bps: f64, is_app_limited: bool) -> f64 {
+    let recent_bps = self.recent_acked_bps(acked_bps);
+    if !is_app_limited {
+      return recent_bps;
+    }
+    let Some(latest) = self.acked.iter().map(|(at, _)| *at).max() else {
+      return recent_bps;
+    };
+    let burst_bps = self
+      .maybe_burst_delivery
+      .filter(|(at, _)| latest.saturating_duration_since(*at) <= LOSS_WINDOW)
+      .map_or(0.0, |(_, bps)| bps);
+    recent_bps.max(burst_bps)
+  }
+
+  /// Follows the bursts of what was sent, in the order it was numbered: `sent` arrived at
+  /// `maybe_arrival`, or was lost. A datagram sent more than [`BURST_INTERVAL`] after the one
+  /// before ends the burst, and one of [`MIN_BURST_PACKETS`] or more tells what the path
+  /// delivered of it at once.
+  fn follow_burst(&mut self, sent: SentPacket, maybe_arrival: Option<Instant>) {
+    if let Some(burst) = self.maybe_burst
+      && sent.at.saturating_duration_since(burst.last_sent) > BURST_INTERVAL
+    {
+      self.maybe_burst = None;
+      if let Some(delivery) = burst.delivery() {
+        self.maybe_burst_delivery = Some(delivery);
+      }
+    }
+    let burst = self.maybe_burst.get_or_insert(SentBurst {
+      last_sent: sent.at,
+      arrived: 0,
+      arrived_bytes: 0,
+      maybe_arrivals: None,
+    });
+    burst.last_sent = burst.last_sent.max(sent.at);
+    if let Some(arrival) = maybe_arrival {
+      burst.arrived += 1;
+      burst.arrived_bytes += sent.bytes;
+      burst.maybe_arrivals = Some(burst.maybe_arrivals.map_or((arrival, arrival), |(first, last)| {
+        (first.min(arrival), last.max(arrival))
+      }));
+    }
+  }
+
   /// Delivered bitrate over the last `window` of arrivals (within [`ACKED_RATE_WINDOW`]).
   fn acked_bps_within(&self, window: Duration) -> f64 {
     let Some(&(latest, _)) = self.acked.iter().max_by_key(|(at, _)| *at) else {
@@ -927,6 +1020,20 @@ impl SendSideEstimator {
       }
       self.sent.remove(&oldest);
     }
+  }
+}
+
+impl SentBurst {
+  /// Its last arrival and the rate at which the path delivered it, if it is long enough to tell:
+  /// what arrived after the first datagram over the span of the arrivals.
+  fn delivery(&self) -> Option<(Instant, f64)> {
+    let (first, last) = self.maybe_arrivals?;
+    let span = last.saturating_duration_since(first);
+    if self.arrived < MIN_BURST_PACKETS || span < MIN_BURST_SPAN {
+      return None;
+    }
+    let after_first = self.arrived_bytes as f64 * (self.arrived - 1) as f64 / self.arrived as f64;
+    Some((last, after_first * 8.0 / span.as_secs_f64()))
   }
 }
 
@@ -1799,6 +1906,77 @@ mod tests {
           "seed {seed}: queue {worst_queue:?}"
         );
       }
+    }
+
+    /// #2218: a still screen sends a slide at once (QUIC sends a picture as fast as its window
+    /// allows) and then little but its voice. A slide larger than the bottleneck's queue loses its
+    /// tail there, on a link with room for the share, and the loss is judged once its feedback
+    /// comes: a few hundred milliseconds after the slide, later on a loaded machine. Cut to what
+    /// got through by then, mostly the voice, the estimate fell from 2.8 Mbit/s to 40–550 kbit/s
+    /// on a 3.3 Mbit/s uplink, the share's layers were dropped, and a slide never reached the
+    /// viewer (`screen_uplink_bursts` on CI). What the slide got through at once is what the path
+    /// carries.
+    #[test]
+    fn a_slide_that_overflows_the_queue_is_no_cut_to_the_voice() {
+      for feedback_delay_ms in [20u64, 300, 600] {
+        let estimate = after_an_overflowing_slide(feedback_delay_ms);
+        assert!(
+          estimate >= 2_000_000,
+          "feedback {feedback_delay_ms} ms late: estimate {estimate}"
+        );
+      }
+    }
+
+    /// The estimate of a still screen on a 3.3 Mbit/s link with a 250 ms queue, after a slide of
+    /// 150 KB, with the voice every 20 ms and feedback every 100 ms that arrives
+    /// `feedback_delay_ms` later.
+    fn after_an_overflowing_slide(feedback_delay_ms: u64) -> u32 {
+      const VOICE_BYTES: usize = 160;
+      const SLIDE_PACKETS: usize = 125;
+      let config = BweConfig {
+        start_bps: 2_900_000,
+        ..BweConfig::default()
+      };
+      let mut estimator = SendSideEstimator::new(config);
+      estimator.set_demand_bps(Some(2_900_000));
+      let mut link = Link::new(3_335_000, 20, 0);
+      link.queue_limit = Duration::from_millis(250);
+      let epoch = Instant::now();
+      let mut recorder = FeedbackRecorder::new(epoch);
+      let mut in_flight: VecDeque<(Instant, TransportSeq)> = VecDeque::new();
+      let mut feedback_in_flight: VecDeque<(Instant, TransportFeedback)> = VecDeque::new();
+      for ms in 0..6_000u64 {
+        let now = epoch + Duration::from_millis(ms);
+        let mut sends = Vec::new();
+        if ms % 20 == 0 {
+          sends.push(VOICE_BYTES);
+        }
+        if ms == 3_000 {
+          sends.extend([PACKET_BYTES; SLIDE_PACKETS]);
+        }
+        for bytes in sends {
+          let seq = estimator.on_send(bytes, now);
+          if let Some(arrival) = link.send(bytes, now) {
+            in_flight.push_back((arrival, seq));
+          }
+        }
+        while in_flight.front().is_some_and(|(at, _)| *at <= now) {
+          if let Some((at, seq)) = in_flight.pop_front() {
+            recorder.on_arrival(seq, at);
+          }
+        }
+        if ms % 100 == 0
+          && let Some(feedback) = recorder.take_feedback(now)
+        {
+          feedback_in_flight.push_back((now + Duration::from_millis(feedback_delay_ms), feedback));
+        }
+        while feedback_in_flight.front().is_some_and(|(at, _)| *at <= now) {
+          if let Some((_, feedback)) = feedback_in_flight.pop_front() {
+            estimator.on_feedback(&feedback, now, epoch);
+          }
+        }
+      }
+      estimator.estimate_bps()
     }
 
     fn sharing(seed: u64) -> Simulation {
