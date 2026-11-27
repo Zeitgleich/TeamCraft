@@ -196,7 +196,8 @@ private const val REFRESH_WAIT_MS = 8_000L
 private const val REFRESH_MIN_MS = 600L
 
 /** What typing the new device's code did. */
-enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, FAILED }
+// How confirming a device link ended. NOT_CONFIRMED: the keys went out but never arrived (#2445).
+enum class LinkConfirmation { CONFIRMED, WRONG_CODE, ATTEMPT_ENDED, NOT_CONFIRMED, FAILED }
 
 class MainViewModel(application: Application) : AndroidViewModel(application) {
   private val graph = TeamCraftApplication.graph(application)
@@ -1864,6 +1865,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       LinkConfirmation.CONFIRMED -> current.copy(maybeError = null, isDone = true)
       LinkConfirmation.WRONG_CODE -> current.copy(maybeError = R.string.approve_code_wrong)
       LinkConfirmation.ATTEMPT_ENDED -> current.copy(maybeError = R.string.approve_attempt_ended, isDone = false)
+      LinkConfirmation.NOT_CONFIRMED -> current.copy(maybeError = R.string.link_not_confirmed, isDone = false)
       LinkConfirmation.FAILED -> current.copy(maybeError = R.string.error_generic)
     }.copy(isConfirming = false)
   }
@@ -1895,6 +1897,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       LinkConfirmation.WRONG_CODE
     } catch (failure: TeamCraftException.LinkAttemptEnded) {
       LinkConfirmation.ATTEMPT_ENDED
+    } catch (failure: TeamCraftException.LinkNotConfirmed) {
+      Log.w(TAG, "the new device did not confirm the keys", failure)
+      LinkConfirmation.NOT_CONFIRMED
     } catch (failure: TeamCraftException) {
       Log.w(TAG, "sending the keys to the new device failed", failure)
       LinkConfirmation.FAILED
@@ -2199,6 +2204,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
       is TeamCraftException.LinkCodeForNewDevice -> R.string.link_code_for_new_device
       is TeamCraftException.LinkCodeForSignedInDevice -> R.string.link_code_for_signed_in_device
       is TeamCraftException.LinkCodeExpired -> R.string.link_code_expired
+      is TeamCraftException.LinkNotConfirmed -> R.string.link_not_confirmed
       is TeamCraftException.OrgRecoveryUnavailable -> R.string.error_org_recovery_unavailable
       is TeamCraftException.BugReportNoRecipients -> R.string.report_error_no_recipients
       is TeamCraftException.BugReportQueueFull -> R.string.report_error_queue_full

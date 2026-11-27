@@ -5747,11 +5747,15 @@ Implemented as (`teamcraft-crypto::rendezvous`, `teamcraft-core` linking):
   (§6). None of this changes what crosses the relay or the server.
 - The transfer carries the backup key and the encrypted key bag (and the protocol version). The new
   device checks that the bag opens with the backup key and answers with a sealed **receipt**
-  (`received` or `rejected`); the existing device reports success only on `received`. A lost
-  transfer frame, a closed relay or 60 seconds without a receipt fail on the existing device, and the
-  new device fails because the transfer never arrives (the relay closes when the existing device
-  gives up). A lost receipt makes the existing device report a failure although the new device has
-  the keys; linking again is harmless. The wait for the receipt holds the relay, not the client
+  (`received` or `rejected`); the existing device reports success only on `received`. After 20
+  seconds without a receipt it sends the transfer frame again, at most twice (issue #2445): the
+  same bytes under the same counter nonce, so nothing new is encrypted under that nonce, the new
+  device opens whichever copy arrives first, and a copy that arrives as well is never read. A
+  closed relay, or 60 seconds without a receipt after three sends, fail on the existing device, and
+  the new device fails because the transfer never arrives (the relay closes when the existing
+  device gives up); both say the keys did not arrive and offer to link again. A lost receipt makes
+  the existing device report a failure although the new device has the keys; linking again is
+  harmless. The wait for the receipt holds the relay, not the client
   (`LinkReceipt`, issue #415): the apps send the keys from their core loop and wait on a task of
   their own (web, desktop and the mobile engine alike), so syncing, sending and reading go on
   meanwhile, and the user's confirmation call answers with the outcome. Content keys the existing

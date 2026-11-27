@@ -465,19 +465,24 @@ private fun ApproveDevice(viewModel: MainViewModel) {
       onApprove = { typed ->
         isConfirming = true
         scope.launch {
-          when (viewModel.confirmLink(typed)) {
+          when (val confirmation = viewModel.confirmLink(typed)) {
             LinkConfirmation.CONFIRMED -> {
               maybeError = null
               isDone = true
             }
             LinkConfirmation.WRONG_CODE -> maybeError = R.string.approve_code_wrong
-            LinkConfirmation.ATTEMPT_ENDED -> {
-              // The new device has to start again: back to the first step.
+            LinkConfirmation.ATTEMPT_ENDED, LinkConfirmation.NOT_CONFIRMED -> {
+              // The attempt is over and the new device has to start again: back to the first step,
+              // whose scan and start buttons link again (#2445).
               isTyping = false
               code = ""
               hasTriedStart = false
               maybeFailure = null
-              maybeError = R.string.approve_attempt_ended
+              maybeError = if (confirmation == LinkConfirmation.ATTEMPT_ENDED) {
+                R.string.approve_attempt_ended
+              } else {
+                R.string.link_not_confirmed
+              }
             }
             LinkConfirmation.FAILED -> maybeError = R.string.error_generic
           }

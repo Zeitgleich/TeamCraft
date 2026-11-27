@@ -5,13 +5,13 @@
 
 use leptos::prelude::*;
 use leptos::task::spawn_local;
-use teamcraft_client_api::failure::ActionFailure;
+use teamcraft_client_api::failure::{ActionFailure, FailureKind};
 use teamcraft_client_api::remote::LinkRequestView;
 use teamcraft_proto::DeviceLinkPlatform;
 
 use crate::areas::{self, Place, lazy_area};
 use crate::components::icons::{Icon, IconName};
-use crate::feedback::report_failure;
+use crate::feedback::{failure_message, report_failure};
 use crate::i18n::{I18n, use_i18n};
 use crate::reactive::{SetIfAlive, UpdateIfAlive};
 use crate::remote_backend;
@@ -241,14 +241,23 @@ fn ActivePrompt(
           </div>
         }
         .into_any(),
-        Step::Failed(message) => view! {
-          <p class="field-error" role="alert">{move || i18n.t("approve-link-failed")}</p>
-          <p class="small mono" translate="no">{message}</p>
-          <div class="link-prompt-actions">
-            <button class="btn" on:click=move |_| close()>{move || i18n.t("close")}</button>
-          </div>
-        }
-        .into_any(),
+        Step::Failed(message) => {
+          // Say what went wrong and what to do, as the Devices dialog does (issue #2445: keys that
+          // never arrived ask to link again, which starts on the new device); the raw text only
+          // when unknown.
+          let failure = ActionFailure::from_wire(&message);
+          let is_known = !matches!(failure.kind, FailureKind::Other);
+          view! {
+            <p class="field-error" role="alert">
+              {move || if is_known { failure_message(i18n, &failure) } else { i18n.t("approve-link-failed") }}
+            </p>
+            {(!is_known).then(|| view! { <p class="small mono" translate="no">{message.clone()}</p> })}
+            <div class="link-prompt-actions">
+              <button class="btn" on:click=move |_| close()>{move || i18n.t("close")}</button>
+            </div>
+          }
+          .into_any()
+        },
       }}
     </section>
   }

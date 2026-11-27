@@ -67,6 +67,10 @@ final class LinkRequestsTests: XCTestCase {
     XCTAssertEqual(CoreFailure(LinkCodeForSignedInDevice()), .linkCodeForSignedInDevice)
     XCTAssertEqual(CoreFailure(LinkCodeExpired()), .linkCodeExpired)
     XCTAssertEqual(AppFailure(.linkCodeForNewDevice).message, "link_code_for_new_device")
+    // Issue #2445: keys that never arrived say so, on both devices.
+    struct LinkNotConfirmed: Error {}
+    XCTAssertEqual(CoreFailure(LinkNotConfirmed()), .linkNotConfirmed)
+    XCTAssertEqual(AppFailure(.linkNotConfirmed).message, "link_not_confirmed")
   }
 
   private func request(_ id: String, secondsLeft: UInt64) -> LinkRequestItem {

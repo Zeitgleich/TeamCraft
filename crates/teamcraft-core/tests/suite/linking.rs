@@ -122,8 +122,10 @@ async fn someone_else_cannot_take_over_the_relay() {
   assert!(laptop_side.is_err(), "no handshake without the right peer");
 }
 
+/// Issue #2445: the frame with the keys gets lost on the way. The existing device hears nothing
+/// back, sends the same sealed frame again, and both devices finish as if nothing happened.
 #[tokio::test(start_paused = true)]
-async fn a_lost_transfer_frame_fails_on_both_devices() {
+async fn a_lost_transfer_frame_is_sent_again_and_the_link_succeeds() {
   let server = FakeServer::new();
   let mut alice = Peer::enroll(&server, "Alice").await;
   let laptop_api = alice.api.clone();
@@ -133,16 +135,67 @@ async fn a_lost_transfer_frame_fails_on_both_devices() {
     NewDeviceLink::connect(&laptop_api, &offer),
     alice.client.start_link_approval(&code)
   );
-  // The frame with the keys never arrives. The phone waits for the receipt, gives up and leaves the
-  // relay; the laptop learns that the transfer is not coming.
   server.lose_relay_frames(1);
   let new_store = Arc::new(MemoryStore::new());
+  let started = tokio::time::Instant::now();
   let (approved, received) = tokio::join!(
     alice.client.complete_link_approval(phone_side.unwrap()),
     laptop_side.unwrap().receive_secrets(&new_store, "Test device")
   );
-  assert!(matches!(approved, Err(CoreError::LinkNotConfirmed)));
-  assert!(received.is_err());
+  approved.unwrap();
+  let secrets = received.unwrap();
+  assert_eq!(
+    started.elapsed(),
+    Duration::from_secs(20),
+    "one resend after 20 s of silence"
+  );
+  let laptop = PendingEnrollment::new()
+    .complete(
+      laptop_api,
+      new_store,
+      clock(),
+      settings(),
+      linked_options(secrets),
+    )
+    .await
+    .unwrap();
+  assert_eq!(laptop.identity_fingerprint(), alice.client.identity_fingerprint());
+}
+
+/// Every copy of the keys gets lost: the existing device gives up after a minute and says so, and
+/// the new device learns that the keys are not coming, instead of waiting for ever.
+#[tokio::test(start_paused = true)]
+async fn a_transfer_lost_every_time_fails_on_both_devices() {
+  let server = FakeServer::new();
+  let mut alice = Peer::enroll(&server, "Alice").await;
+  let laptop_api = alice.api.clone();
+  let offer = LinkOffer::generate();
+  let code = offer.to_code();
+  let (laptop_side, phone_side) = tokio::join!(
+    NewDeviceLink::connect(&laptop_api, &offer),
+    alice.client.start_link_approval(&code)
+  );
+  server.lose_relay_frames(3);
+  let new_store = Arc::new(MemoryStore::new());
+  let started = tokio::time::Instant::now();
+  let (approved, received) = tokio::join!(
+    // The existing device leaves the relay with its failure, which the new device hears.
+    alice.client.complete_link_approval(phone_side.unwrap()),
+    laptop_side.unwrap().receive_secrets(&new_store, "Test device")
+  );
+  assert!(
+    matches!(approved, Err(CoreError::LinkNotConfirmed)),
+    "{approved:?}"
+  );
+  assert_eq!(started.elapsed(), Duration::from_secs(60));
+  assert!(
+    matches!(received, Err(CoreError::LinkNotConfirmed)),
+    "{received:?}"
+  );
+  assert!(
+    !teamcraft_core::records::has_pending_link(&*new_store).unwrap(),
+    "nothing half-received is kept"
+  );
 }
 
 /// Issue #415: the wait for the new device's receipt holds the relay, not the client. The apps run it
