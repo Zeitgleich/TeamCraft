@@ -160,7 +160,16 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "acc8e8f378f5bbd99f5850a95e55cbfd20e14db63d1eee16a060528cf960876e"
 dependencies = [
- "doom-fish-utils",
+ "doom-fish-utils 0.4.1",
+]
+
+[[package]]
+name = "apple-cf"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "799ab3415228df60c174342065a1c8270ddeaaa35770b2e4ec7a3f63def6199c"
+dependencies = [
+ "doom-fish-utils 0.5.0",
 ]
 
 [[package]]
@@ -169,7 +178,7 @@ version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "00a23f6df783ca6a2def6201afc6bd54c1d41454e35552309166432155b544fc"
 dependencies = [
- "doom-fish-utils",
+ "doom-fish-utils 0.4.1",
  "libc",
 ]
 
@@ -640,8 +649,8 @@ version = "0.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57a4713a18aaa716ce93940c125fe63ac346aa2ccd886986b1359abd326b7910"
 dependencies = [
- "apple-cf",
- "doom-fish-utils",
+ "apple-cf 0.11.0",
+ "doom-fish-utils 0.4.1",
  "serde",
  "serde_json",
 ]
@@ -2518,6 +2527,12 @@ dependencies = [
  "crossbeam-queue",
  "futures-util",
 ]
+
+[[package]]
+name = "doom-fish-utils"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ae0c359a5058039843557499a8a8704d8fd8c71f9d02c49aec64a3cf06a4baf"
 
 [[package]]
 name = "dotenvy"
@@ -8939,11 +8954,11 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screencapturekit"
-version = "11.1.2"
+version = "12.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da7669c5c60db0a577c464ddfd111e9823c4572a7966a25b31688bbf7cff3d58"
+checksum = "b5f891b0db00740f80bf876cfb83ae67c1484924be9cbf9d1b4aee87b1511108"
 dependencies = [
- "apple-cf",
+ "apple-cf 0.12.0",
  "apple-metal",
 ]
 
