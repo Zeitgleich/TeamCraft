@@ -22,9 +22,10 @@
 //!   loss and 10 % it holds. Only the loss of packets sent after the last cut to what got through
 //!   counts (that cut answered the loss before it), and only once 30 datagrams were reported. An
 //!   application-limited sender whose path doesn't queue is cut from its estimate, not to what
-//!   got through: that is its own rate (#2192). What got through, for any cut to it, is at least
-//!   the rate at which the path delivered the latest burst (a slide, a keyframe): judged after
-//!   it, the window of what got through held mostly the voice that followed (#2218).
+//!   got through: that is its own rate (#2192). What got through, for a cut of an
+//!   application-limited sender to it, is at least the rate at which the path delivered the
+//!   latest burst (a slide, a keyframe): judged after it, the window of what got through held
+//!   mostly the voice that followed (#2218).
 //! - **Application-limited senders** (sending less than half the estimate): the delay of their own
 //!   bursts doesn't end the fast start, nor count as congestion (GCC's "ALR"), unless it lasts
 //!   with more sent than gets through. During the fast start the same holds for every sender: the
@@ -733,7 +734,7 @@ impl SendSideEstimator {
         {
           // The queue outlasted the delivered rate's window: what got through is the path's
           // rate, whatever the sender planned.
-          let delivered_bps = self.delivered_bps(acked_bps);
+          let delivered_bps = self.delivered_bps(acked_bps, is_app_limited);
           self.estimate_bps = self.estimate_bps.min(self.config.decrease_factor * delivered_bps);
           self.maybe_last_decrease_at = Some(now);
           self.note_cut_to_delivered(now);
@@ -791,7 +792,8 @@ impl SendSideEstimator {
       // over more than a second (#2192). Its cut starts from the estimate, as GCC's does. (Its
       // own bursts queue, so a queue tells nothing here.) A link that lost its room loses on:
       // cut again 400 ms later, and once the sender fills the estimate, to what got through.
-      let delivered_based = self.delivered_bps(acked_bps) * (1.0 - 0.5 * self.last_loss_ratio);
+      let delivered_based =
+        self.delivered_bps(acked_bps, is_app_limited) * (1.0 - 0.5 * self.last_loss_ratio);
       let loss_based = if is_app_limited && self.queue_delay(now) < LOSS_QUEUE_BOUND {
         delivered_based.max((1.0 - self.last_loss_ratio).max(APP_LIMITED_LOSS_CUT) * self.estimate_bps)
       } else {
@@ -919,16 +921,22 @@ impl SendSideEstimator {
     }
   }
 
-  /// What got through, for a cut to it: what got through lately ([`Self::recent_acked_bps`]), or
-  /// the rate at which the path delivered the latest burst within [`LOSS_WINDOW`] where that is
-  /// more. A still screen sends a slide at once and then little but its voice: when the slide's
-  /// tail overflowed the bottleneck's queue, the loss was judged once its feedback came, and the
-  /// window of what got through by then held mostly the voice. Cut to it, the estimate fell from
-  /// 2.8 Mbit/s to 40–550 kbit/s on a 3.3 Mbit/s uplink, the share's layers were dropped, and a
-  /// slide never reached the viewer (#2218). What the slide got through at once is what the
-  /// path carries; a link that lost its room delivers the next burst at its new rate.
-  fn delivered_bps(&self, acked_bps: f64) -> f64 {
+  /// What got through, for a cut to it: what got through lately ([`Self::recent_acked_bps`]), or,
+  /// for an application-limited sender, the rate at which the path delivered the latest burst
+  /// within [`LOSS_WINDOW`] where that is more. A still screen sends a slide at once and then
+  /// little but its voice: when the slide's tail overflowed the bottleneck's queue, the loss was
+  /// judged once its feedback came, and the window of what got through by then held mostly the
+  /// voice. Cut to it, the estimate fell from 2.8 Mbit/s to 40–550 kbit/s on a 3.3 Mbit/s uplink,
+  /// the share's layers were dropped, and a slide never reached the viewer (#2218). What the
+  /// slide got through at once is what the path carries; a link that lost its room delivers the
+  /// next burst at its new rate. A sender that fills its estimate fills the window too: what got
+  /// through lately is the path's rate, and a burst from before a drop held its cut back (a camera
+  /// on LTE fit the link 1.75 s after a drop instead of 1.2 s).
+  fn delivered_bps(&self, acked_bps: f64, is_app_limited: bool) -> f64 {
     let recent_bps = self.recent_acked_bps(acked_bps);
+    if !is_app_limited {
+      return recent_bps;
+    }
     let Some(latest) = self.acked.iter().map(|(at, _)| *at).max() else {
       return recent_bps;
     };
