@@ -6355,6 +6355,49 @@ mod tests {
       assert_eq!(backend.message_count(conversation), 1);
     }
 
+    /// #2356: the UI shows a row under its outbox ID until its next read; a reply the user starts
+    /// on it meanwhile still quotes it after the server took it.
+    #[test]
+    fn a_reply_to_a_row_the_server_took_meanwhile_quotes_it() {
+      let (backend, conversation) = backend();
+      let chosen = ClientMessageId::from_bytes([7; 16]);
+      backend.send_message(outgoing(conversation, "the album", Some(chosen)));
+      let shown_as = pending_message_id(chosen);
+      // What a flush does once the server took it: the outbox entry goes, the message is numbered.
+      let store = backend.store_ref();
+      let entry = records::outbox(store).unwrap().remove(0);
+      store
+        .delete(
+          Table::Outbox,
+          &records::outbox_key(conversation, entry.client_message_id),
+        )
+        .unwrap();
+      let mut sent = store.message(conversation, chosen).unwrap().unwrap();
+      sent.maybe_server_id = Some(id::<MessageId>(500));
+      store.upsert_message(&sent).unwrap();
+
+      let mut reply = outgoing(conversation, "the door", None);
+      reply.maybe_reply_to = Some(shown_as);
+      backend.send_message(reply);
+
+      let replies: Vec<_> = store
+        .messages(conversation, MessageFilter::All)
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.content {
+          MessageContent::Text { body, meta, .. } if body == "the door" => Some(meta),
+          _ => None,
+        })
+        .collect();
+      assert_eq!(replies.len(), 1);
+      let quoted = replies[0]
+        .maybe_reply_to
+        .as_ref()
+        .expect("the reply quotes the row");
+      assert_eq!(quoted.target, chosen);
+      assert_eq!(quoted.excerpt, "the album");
+    }
+
     #[test]
     fn without_an_id_every_message_gets_its_own() {
       let (backend, conversation) = backend();
