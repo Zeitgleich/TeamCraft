@@ -32,7 +32,7 @@ the lockfile. Fuzzing itself stays manual (`run.sh`).
 | `workspace_log`        | signed workspace log entries (random payloads and signatures must fail verification) and the roster/policy chain |
 | `channel_anchor`       | a channel's anchor and properties changes: no panic, size limit held, stable re-encoding, no random signature    |
 | `strict_roles`         | a strict channel's roles and roles changes: no panic, size and role limits held, stable re-encoding, no forgery  |
-| `strict_chain`         | a strict channel's roles chain from the server: no panic, an empty chain keeps the roles, no random link passes  |
+| `strict_chain`         | a strict channel's roles chain from the server, candidates per version: no panic, random links never move it     |
 | `crypto_decoders`      | binary decoders of messages, key bags, wrapped backup keys, membership changes, certificates, call bindings      |
 | `dpop_proof`           | DPoP proofs from the `DPoP` header or a first WebSocket frame, also valid ones with bytes changed: never a panic |
 | `scim`                 | SCIM filters, PATCH paths and operations, user and group resources: no panic, bounded, stable round trip         |

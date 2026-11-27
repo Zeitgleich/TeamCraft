@@ -9,10 +9,10 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, Id, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, MAX_STRICT_CHANGE_BYTES, MAX_STRICT_CHANGES_PAGE, MlsGroupInfoResponse,
-  MlsMessageId, MlsMessageKind, MlsMessageResponse, MlsStrictHintQuery, MlsStrictHintResponse, Permission,
-  PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest, PutMlsGroupInfoRequest, Snowflake,
-  StrictChainChange, StrictChannelHint, UserId,
+  ListMlsMessagesResponse, MAX_STRICT_CHANGE_BYTES, MAX_STRICT_CHANGES_PAGE, MAX_STRICT_HINT_VERSION,
+  MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse, MlsStrictHintQuery,
+  MlsStrictHintResponse, Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
+  PutMlsGroupInfoRequest, Snowflake, StrictChainChange, StrictChannelHint, UserId,
 };
 
 use super::access::{load_conversation, require};
@@ -33,10 +33,13 @@ pub async fn post_commit(
   }
   let checked = check_commit(state, caller, conversation, &request).await?;
   let maybe_strict = request.maybe_strict.as_ref().map(stored_hint).transpose()?;
+  // Only a channel can be strict (e2ee.md §4.6.2): another conversation's change isn't kept.
+  let is_channel = access.view.conversation.kind == ConversationKind::Channel;
   let maybe_strict_change = request
     .maybe_strict
     .as_ref()
     .and_then(|hint| hint.maybe_change.as_ref())
+    .filter(|_| is_channel)
     .map(Base64Bytes::as_slice);
   let (commit, welcomes) = checked.messages(&request);
   let outcome = state
@@ -55,9 +58,6 @@ pub async fn post_commit(
   let new_epoch = match outcome {
     CommitOutcome::Accepted { new_epoch } => new_epoch,
     CommitOutcome::EpochConflict { current_epoch } => return Err(ApiError::EpochConflict { current_epoch }),
-    CommitOutcome::StrictVersionConflict { current_version } => {
-      return Err(ApiError::VersionConflict { current_version });
-    },
   };
   let response = publish_commit(
     state,
@@ -102,7 +102,7 @@ pub async fn strict_hint(
   }
   let epoch = state.database.current_epoch(conversation).await?;
   let (changes, has_more) = match query.maybe_after {
-    Some(after) => strict_changes_page(state, conversation, after).await?,
+    Some(after) => strict_changes_page(state, conversation, after, query.maybe_after_commit).await?,
     None => (Vec::new(), false),
   };
   Ok(MlsStrictHintResponse {
@@ -118,16 +118,18 @@ pub async fn strict_hint(
   })
 }
 
-/// One page of the strict channel's chain after `after`, and whether more follow.
+/// One page of the strict channel's chain after `after` (and `maybe_after_commit`), and whether
+/// more follow.
 async fn strict_changes_page(
   state: &AppState,
   conversation: ConversationId,
   after: u64,
+  maybe_after_commit: Option<MlsMessageId>,
 ) -> Result<(Vec<StrictChainChange>, bool), ApiError> {
   let limit = i64::try_from(MAX_STRICT_CHANGES_PAGE).unwrap_or(i64::MAX);
   let mut rows = state
     .database
-    .strict_changes_after(conversation, after, limit)
+    .strict_changes_after(conversation, after, maybe_after_commit, limit)
     .await?;
   let has_more = rows.len() > MAX_STRICT_CHANGES_PAGE;
   rows.truncate(MAX_STRICT_CHANGES_PAGE);
@@ -135,6 +137,7 @@ async fn strict_changes_page(
     .into_iter()
     .map(|row| StrictChainChange {
       version: row.version,
+      commit: row.commit,
       change: Base64Bytes::new(row.change),
     })
     .collect();
@@ -145,7 +148,7 @@ async fn strict_changes_page(
 /// change of at most [`MAX_STRICT_CHANGE_BYTES`]. The server can't check them against the commit,
 /// and doesn't need to: no decision of its reads them, and devices verify the chain themselves.
 fn stored_hint(hint: &StrictChannelHint) -> Result<StrictHint, ApiError> {
-  if hint.hash.len() != 32 || i64::try_from(hint.version).is_err() {
+  if hint.hash.len() != 32 || hint.version > MAX_STRICT_HINT_VERSION {
     return Err(ApiError::InvalidRequest("a malformed strict hint".into()));
   }
   if let Some(change) = &hint.maybe_change {

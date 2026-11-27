@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT version, change FROM mls_strict_changes\n         WHERE conversation_id = $1 AND version > $2\n         ORDER BY version ASC LIMIT $3",
+  "query": "SELECT version, mls_message_id, change FROM mls_strict_changes\n         WHERE conversation_id = $1 AND (version, mls_message_id) > ($2, $3)\n         ORDER BY version ASC, mls_message_id ASC LIMIT $4",
   "describe": {
     "columns": [
       {
@@ -16,6 +16,17 @@
       },
       {
         "ordinal": 1,
+        "name": "mls_message_id",
+        "type_info": "Int8",
+        "origin": {
+          "Table": {
+            "table": "mls_strict_changes",
+            "name": "mls_message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
         "name": "change",
         "type_info": "Bytea",
         "origin": {
@@ -30,13 +41,15 @@
       "Left": [
         "Int8",
         "Int8",
+        "Int8",
         "Int8"
       ]
     },
     "nullable": [
       false,
+      false,
       false
     ]
   },
-  "hash": "44d59617c30ab4bacc898b25fbcf61012bdee23d6afde9ce38b57afc66549f1d"
+  "hash": "683b440df42efdd0b667327d282d25d38c4dcec494864f0ccb2f7858b66932c4"
 }

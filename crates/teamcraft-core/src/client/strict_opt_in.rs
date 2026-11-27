@@ -32,8 +32,8 @@ use teamcraft_crypto::strict_roles::{
 };
 use teamcraft_proto::Id as _;
 use teamcraft_proto::{
-  Base64Bytes, ConversationId, ConversationKind, ConversationVisibility, DeviceId, MlsMessageKind,
-  MlsMessageResponse, PostMlsMessageRequest, StrictChannelHint, UserId,
+  Base64Bytes, ConversationId, ConversationKind, ConversationVisibility, DeviceId, MAX_STRICT_HINT_VERSION,
+  MlsMessageKind, MlsMessageResponse, PostMlsMessageRequest, StrictChannelHint, UserId,
 };
 
 use super::Client;
@@ -285,8 +285,17 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         .await?;
       let (version, prev_hash) = match &hint.maybe_strict {
         Some(current) if current.is_strict => (current.version.saturating_add(1), hint_hash(current)?),
-        // Turning on starts a chain at any version (above the last one the server names).
-        Some(last) if !roles.is_empty() => (last.version.saturating_add(1), StrictHash::ZERO),
+        // Turning on starts a chain at any version: above the last one the server names, which a
+        // member may have made up, so one the server can store (a gap only costs a device that
+        // fell out the chain, not the change).
+        Some(last) if !roles.is_empty() => (
+          last
+            .version
+            .checked_add(1)
+            .filter(|version| *version <= MAX_STRICT_HINT_VERSION)
+            .unwrap_or(1),
+          StrictHash::ZERO,
+        ),
         None if !roles.is_empty() => (1, StrictHash::ZERO),
         _ => return Err(CoreError::StrictNotNow(conversation, "the channel isn't strict")),
       };

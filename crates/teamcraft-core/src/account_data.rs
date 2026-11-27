@@ -82,13 +82,13 @@ pub struct AccountData {
   /// next newer device puts it back.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub anchor_floors: BTreeMap<String, AnchorFloor>,
-  /// Per conversation ID, the newest strict roles one of the user's devices verified, in its group
-  /// or along the server's chain of signed changes (e2ee.md §4.6.2, "Falling out in a strict
-  /// channel"): a welcome back into a strict channel is opened only from an admin of these, so a
-  /// device that fell out isn't brought into a fork. An entry without roles: strict was turned
-  /// off. Merged by the higher roles version, by the higher epoch where an entry has no version
-  /// ([`KnownStrictRoles::is_newer_than`]). An older app drops the field on upload, and the next
-  /// newer device puts it back.
+  /// Per conversation ID, the newest strict roles one of the user's devices verified in its group
+  /// (e2ee.md §4.6.2, "Falling out in a strict channel"): a welcome back into a strict channel is
+  /// opened only from an admin of these, carried forward along the server's chain of signed changes
+  /// for that welcome alone, so a device that fell out isn't brought into a fork. An entry without
+  /// roles: strict was turned off by a commit the device merged. Merged by the higher epoch: what a
+  /// device saw in its group, never what a chain said. An older app drops the field on upload, and
+  /// the next newer device puts it back.
   #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
   pub strict_roles: BTreeMap<String, KnownStrictRoles>,
   /// When devices left conversations and came back, keyed `conversation/user/device`, in the server
@@ -240,16 +240,17 @@ pub struct SavedSearchEntry {
   pub query: String,
 }
 
-/// Strict roles a device verified in a conversation's group, or carried forward along the
-/// server's chain of signed changes (e2ee.md §4.6.2), as the account data carries them.
+/// Strict roles a device verified in a conversation's group (e2ee.md §4.6.2), as the account data
+/// carries them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KnownStrictRoles {
-  /// The group's epoch they were current in; for roles carried forward along the chain, which
-  /// names no epochs, the epoch of the entry they replaced.
+  /// The group's epoch they were current in: what entries merge by.
   pub epoch: u64,
   /// The version of the roles change they come from: of the change that turned strict off, for an
-  /// entry without roles. Absent where the device didn't see it (an older app's entry, an "off"
-  /// whose change it didn't read); then [`Self::version`] reads it from the roles.
+  /// entry without roles. Never what entries merge by (turning strict on takes any version); the
+  /// version this user's next turning on signs follows it. Absent where the device didn't see it
+  /// (an older app's entry, an "off" whose change it didn't read); then [`Self::version`] reads it
+  /// from the roles.
   #[serde(rename = "version", default, skip_serializing_if = "Option::is_none")]
   pub maybe_version: Option<u64>,
   /// The strict roles extension's content; absent once strict was turned off.
@@ -268,14 +269,11 @@ impl KnownStrictRoles {
     })
   }
 
-  /// Whether these are newer than `other`: the higher version (every change is one up, and a
-  /// device carried forward along the chain doesn't know the epochs), or, where either version is
-  /// unknown or they are the same, the higher epoch.
+  /// Whether these are newer than `other`: seen in a later epoch. Not the higher version: turning
+  /// strict on starts at any version, so an "off" of a high version must not hide roles a later
+  /// turning on set at a low one.
   pub fn is_newer_than(&self, other: &Self) -> bool {
-    match (self.version(), other.version()) {
-      (Some(mine), Some(theirs)) if mine != theirs => mine > theirs,
-      _ => self.epoch > other.epoch,
-    }
+    self.epoch > other.epoch
   }
 }
 
@@ -1265,11 +1263,11 @@ mod tests {
     assert!(!after.grants());
   }
 
-  /// e2ee.md §4.6.2: the roles a device knew merge by version, so roles carried forward along the
-  /// server's chain (which names no epoch) win over older ones a device saw at a later epoch;
-  /// entries without a version (older apps, an "off" whose change wasn't read) by epoch.
+  /// e2ee.md §4.6.2: the roles a device knew merge by the epoch they were seen in, never by their
+  /// version: an "off" of version 6 doesn't hide roles a later turning on set at version 1. The
+  /// version travels along for the next turning on, and an older app's entry has none.
   #[test]
-  fn known_strict_roles_merge_by_version_then_epoch() {
+  fn known_strict_roles_merge_by_epoch_not_version() {
     let conversation = ConversationId::from_snowflake(Snowflake::new(9).unwrap());
     let known = |epoch, maybe_version, has_roles: bool| KnownStrictRoles {
       epoch,
@@ -1278,42 +1276,25 @@ mod tests {
     };
     let mut phone = AccountData::default();
     let mut laptop = AccountData::default();
-    assert!(phone.note_strict_roles(conversation, known(10, Some(5), true)));
-    assert!(laptop.note_strict_roles(conversation, known(30, Some(3), true)));
+    assert!(phone.note_strict_roles(conversation, known(10, Some(6), false)));
+    assert!(laptop.note_strict_roles(conversation, known(30, Some(1), true)));
     assert!(
-      !phone.note_strict_roles(conversation, known(40, Some(4), true)),
-      "an older version, though at a later epoch"
+      !laptop.note_strict_roles(conversation, known(20, Some(7), true)),
+      "a higher version, but seen earlier"
     );
     laptop.merge(&phone, 0);
     phone.merge(&laptop, 0);
     assert_eq!(
       phone.known_strict_roles(conversation),
-      Some(&known(10, Some(5), true))
+      Some(&known(30, Some(1), true))
     );
     assert_eq!(
       laptop.known_strict_roles(conversation),
-      Some(&known(10, Some(5), true))
-    );
-
-    // Without a version on one side: the later epoch.
-    let mut older_app = AccountData::default();
-    older_app.note_strict_roles(conversation, known(50, None, false));
-    phone.merge(&older_app, 0);
-    assert_eq!(
-      phone.known_strict_roles(conversation),
-      Some(&known(50, None, false))
-    );
-    // The same version from two devices: the later epoch.
-    let mut same = AccountData::default();
-    same.note_strict_roles(conversation, known(60, Some(5), true));
-    laptop.merge(&same, 0);
-    assert_eq!(
-      laptop.known_strict_roles(conversation),
-      Some(&known(60, Some(5), true))
+      Some(&known(30, Some(1), true))
     );
 
     let json = serde_json::to_value(&laptop).unwrap();
-    assert_eq!(json["strict_roles"]["9"]["version"], 5);
+    assert_eq!(json["strict_roles"]["9"]["version"], 1);
     assert_eq!(serde_json::from_value::<AccountData>(json).unwrap(), laptop);
     let before = serde_json::json!({"epoch": 7, "roles": "AQ=="});
     assert_eq!(

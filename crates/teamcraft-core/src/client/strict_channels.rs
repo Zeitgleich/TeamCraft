@@ -15,22 +15,24 @@
 //!   opened only from an admin of them; a member's welcome only on the user's word, after
 //!   `strict_rejoin_wait`. Before judging such a welcome, the device carries those roles forward
 //!   along the server's chain of the signed changes it missed (`GET …/mls/strict?after=`,
-//!   [`teamcraft_crypto::strict_roles::verify_chain`]): an admin appointed meanwhile brings it back
-//!   at once, and after a verified "off" any member's welcome without the roles opens. A chain
-//!   that can't be read or doesn't verify changes nothing: the roles it knew judge.
+//!   [`teamcraft_crypto::strict_roles::ChainVerifier`]), for that welcome only: an admin appointed
+//!   meanwhile brings it back at once, and after a verified "off" the server's hint agrees with,
+//!   any member's welcome without the roles opens. A chain that doesn't verify or can't be judged
+//!   yet changes nothing (the roles it knew judge); a read lost on the way is asked again.
 
 use serde::{Deserialize, Serialize};
 use teamcraft_crypto::identity::IdentityPublicKey;
 use teamcraft_crypto::membership::{IdentityDirectory as _, MembershipAction};
 use teamcraft_crypto::mls::{MlsError, StagedJoin};
 use teamcraft_crypto::strict_roles::{
-  ChainEnd, ChainLink, SignedStrictRolesChange, StrictHash, StrictRole, StrictRoleKind, StrictRoles,
-  StrictRolesChange, StrictRolesError, StrictSignerRole, verify_chain,
+  ChainEnd, ChainLink, ChainVerifier, StrictHash, StrictRole, StrictRoleKind, StrictRoles, StrictRolesChange,
+  StrictRolesError, StrictSignerRole,
 };
 use teamcraft_proto::Id as _;
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, ConversationResponse, ConversationVisibility, DeviceId,
-  MlsMessageId, MlsMessageResponse, MlsStrictHintQuery, StrictChainChange, UserId,
+  MAX_STRICT_HINT_VERSION, MlsMessageId, MlsMessageResponse, MlsStrictHintQuery, StrictChainChange,
+  StrictChannelHint, UserId,
 };
 
 use super::Client;
@@ -93,6 +95,27 @@ pub struct StrictRejoinPrompt {
 pub(super) enum StrictWelcome {
   Open(Vec<(UserId, AwayChange)>),
   Refused(MlsError),
+}
+
+/// The signed roles changes the server kept after a version, and its hint with the last page
+/// ([`Client::read_strict_chain`]).
+struct ChainRead {
+  links: Vec<StrictChainChange>,
+  maybe_hint: Option<StrictChannelHint>,
+}
+
+/// Where a verified chain ends, and what the server's hint said with it
+/// ([`Client::strict_chain_end`]).
+pub(super) struct VerifiedChain {
+  end: ChainEnd,
+  maybe_hint: Option<StrictChannelHint>,
+}
+
+/// How far a chain's pages were read: before a version, or at a version's change of a commit.
+#[derive(Clone, Copy)]
+enum ChainCursor {
+  Before(u64),
+  At(u64, MlsMessageId),
 }
 
 /// Whether the app follows strict channels (Cargo.toml, `strict-channels`; `strict_channels_off.rs`).
@@ -213,10 +236,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
           current.version().saturating_add(1),
           current.hash().map_err(MlsError::from)?,
         ),
-        None => (
-          self.next_strict_chain_version(conversation).await?,
-          StrictHash::ZERO,
-        ),
+        None => (self.next_strict_chain_version(conversation), StrictHash::ZERO),
       };
       let (role_log_version, role_log_hash) = self.role_log_mirror(conversation)?;
       let signed = StrictRolesChange {
@@ -493,18 +513,11 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     }
     let known = StrictRoles::from_bytes(known_bytes.as_slice()).map_err(MlsError::from)?;
     let is_strict_welcome = staged.strict_roles()?.is_some();
-    let maybe_end = self.strict_chain_end(conversation, &known).await;
-    if let Some(end) = &maybe_end
-      && end.version() > known.version()
-      // An "off" against a strict welcome: the chain lacks the turning on again, so the "off"
-      // isn't kept (a device that knows "off" opens any welcome).
-      && (end.maybe_roles().is_some() || !is_strict_welcome)
-      && let Err(error) = self.note_strict_chain_end(conversation, end)
-    {
-      tracing::warn!(conversation_id = %conversation, %error, "couldn't keep a strict channel's roles carried forward");
-    }
+    // A read that may pass (the network) comes back as an error: the welcome is opened already,
+    // and the device asks to be added back, as for a failed pin.
+    let maybe_chain = self.strict_chain_end(conversation, &known).await?;
     let verdict = self
-      .judge_strict_welcome(staged, is_strict_welcome, &known, maybe_end.as_ref(), directory)
+      .judge_strict_welcome(staged, is_strict_welcome, &known, maybe_chain.as_ref(), directory)
       .await?;
     let error = match verdict {
       Ok(()) => {
@@ -534,7 +547,9 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// end of the verified chain after it when there is one:
   ///
   /// - without the roles: opened only after a verified "off", from any member, as the channel
-  ///   isn't strict any more;
+  ///   isn't strict any more, and only while the server's hint says so too: the server could cut a
+  ///   chain right after an "off" and hide the turning on again, so this still takes the server's
+  ///   word that nothing followed;
   /// - with the roles: its sender must be an admin of the chain's end (an admin appointed while
   ///   the device was away brings it back), or a workspace signer. Without a verified chain, or
   ///   one ending in "off" while the welcome is strict (its turning on again isn't in the chain),
@@ -544,18 +559,20 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     staged: &StagedJoin,
     is_strict_welcome: bool,
     known: &StrictRoles,
-    maybe_end: Option<&ChainEnd>,
+    maybe_chain: Option<&VerifiedChain>,
     directory: &PinnedDirectory,
   ) -> Result<Result<(), MlsError>, CoreError> {
     if !is_strict_welcome {
-      return Ok(match maybe_end {
-        Some(ChainEnd::Off { .. }) => Ok(()),
+      return Ok(match maybe_chain {
+        Some(chain) if chain.is_off_now() => Ok(()),
         _ => Err(MlsError::UnexpectedMessage(
           "a welcome without the strict roles into a channel known strict",
         )),
       });
     }
-    let judged_by = maybe_end.and_then(ChainEnd::maybe_roles).unwrap_or(known);
+    let judged_by = maybe_chain
+      .and_then(|chain| chain.end.maybe_roles())
+      .unwrap_or(known);
     let mut verdict = staged.check_strict_sender(judged_by, directory, &self.welcome_authority()?);
     if verdict.as_ref().is_err_and(MlsError::is_strict_retry) {
       // A workspace signer's welcome: judged on the newest roster.
@@ -566,149 +583,159 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   }
 
   /// The roles this user's devices knew (`known`), carried forward along the signed roles changes
-  /// the server kept after them (e2ee.md §4.6.2, "Falling out in a strict channel"). `None` when
-  /// the chain can't be read, is longer than `max_strict_chain_changes` or doesn't verify, a roster
-  /// or device list it needs included: then the known roles judge, as without a chain, and the next
-  /// welcome tries again.
+  /// the server kept after them (e2ee.md §4.6.2, "Falling out in a strict channel"), for this
+  /// welcome only: the end is never kept, so it can't hide what a device sees in its group later.
+  /// `Ok(None)` when the chain is longer than `max_strict_chain_changes`, doesn't verify, or needs
+  /// a roster or device list this device can't verify yet: then the known roles judge, as without
+  /// a chain, and the next welcome reads it again. A read that may pass (the network) is an error.
   async fn strict_chain_end(
     &mut self,
     conversation: ConversationId,
     known: &StrictRoles,
-  ) -> Option<ChainEnd> {
-    let result = match self.read_strict_chain(conversation, known.version()).await {
-      Ok(Some(links)) if links.is_empty() => return Some(ChainEnd::Roles(known.clone())),
-      Ok(Some(links)) => self.verify_strict_chain(known, &links).await,
-      Ok(None) => {
-        tracing::warn!(conversation_id = %conversation, max = self.settings.max_strict_chain_changes, "a strict channel's chain is too long to carry the known roles forward");
-        return None;
+  ) -> Result<Option<VerifiedChain>, CoreError> {
+    let maybe_read = match self.read_strict_chain(conversation, known.version()).await {
+      Ok(maybe_read) => maybe_read,
+      Err(error) if error.is_transient() => return Err(error),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "refused the server's pages of a strict channel's chain");
+        return Ok(None);
       },
-      Err(error) => Err(error),
     };
-    let end = match result {
-      Ok(Ok(end)) => end,
-      Ok(Err(error @ (StrictRolesError::RosterUnknown(_) | StrictRolesError::DeviceListUnknown(_)))) => {
-        tracing::info!(conversation_id = %conversation, %error, "a strict channel's chain can't be verified yet");
-        return None;
+    let Some(read) = maybe_read else {
+      tracing::warn!(conversation_id = %conversation, max = self.settings.max_strict_chain_changes, "a strict channel's chain is too long to carry the known roles forward");
+      return Ok(None);
+    };
+    let verdict = match self.verify_strict_chain(known, &read.links).await {
+      Ok(verdict) => verdict,
+      Err(error) if error.is_transient() => return Err(error),
+      Err(error) => {
+        tracing::warn!(conversation_id = %conversation, %error, "couldn't verify a strict channel's chain");
+        return Ok(None);
       },
-      Ok(Err(error)) => {
-        tracing::warn!(conversation_id = %conversation, %error, "refused the server's chain of a strict channel's roles changes");
-        return None;
+    };
+    match verdict {
+      Ok(end) => {
+        tracing::info!(conversation_id = %conversation, from = known.version(), to = end.version(), is_strict = end.maybe_roles().is_some(), "carried a strict channel's known roles forward along its chain");
+        Ok(Some(VerifiedChain {
+          end,
+          maybe_hint: read.maybe_hint,
+        }))
+      },
+      Err(error @ (StrictRolesError::RosterUnknown(_) | StrictRolesError::DeviceListUnknown(_))) => {
+        tracing::info!(conversation_id = %conversation, %error, "a strict channel's chain can't be verified yet");
+        Ok(None)
       },
       Err(error) => {
-        tracing::warn!(conversation_id = %conversation, %error, "couldn't read a strict channel's chain");
-        return None;
+        tracing::warn!(conversation_id = %conversation, %error, "refused the server's chain of a strict channel's roles changes");
+        Ok(None)
       },
-    };
-    tracing::info!(conversation_id = %conversation, from = known.version(), to = end.version(), is_strict = end.maybe_roles().is_some(), "carried a strict channel's known roles forward along its chain");
-    Some(end)
+    }
   }
 
-  /// The signed roles changes the server kept after `after`, ascending, read page by page; `None`
-  /// past `max_strict_chain_changes`.
+  /// The signed roles changes the server kept after version `after`, ascending by version and
+  /// commit, read page by page, with the hint of the last page; `None` past
+  /// `max_strict_chain_changes`. Pages that don't move forward are refused (a corrupt answer).
   async fn read_strict_chain(
     &mut self,
     conversation: ConversationId,
     after: u64,
-  ) -> Result<Option<Vec<StrictChainChange>>, CoreError> {
+  ) -> Result<Option<ChainRead>, CoreError> {
     let max = self.settings.max_strict_chain_changes;
     let mut links: Vec<StrictChainChange> = Vec::new();
-    let mut after = after;
+    let mut cursor = ChainCursor::Before(after);
     loop {
-      let query = MlsStrictHintQuery {
-        maybe_after: Some(after),
-      };
+      let query = cursor.query();
       let page = self.api.mls_strict_hint(conversation, &query).await?;
-      let Some(last) = page.changes.last().map(|change| change.version) else {
-        return Ok(Some(links));
-      };
-      if last <= after {
-        // Pages that don't move forward: verifying what came refuses it.
-        links.extend(page.changes);
-        return Ok(Some(links));
+      for link in &page.changes {
+        if !cursor.is_before(link) {
+          return Err(CoreError::Corrupt(
+            "a strict chain's page that doesn't move forward".into(),
+          ));
+        }
+        cursor = ChainCursor::At(link.version, link.commit);
       }
+      let is_empty = page.changes.is_empty();
       links.extend(page.changes);
       if links.len() > max {
         return Ok(None);
       }
       if !page.has_more {
-        return Ok(Some(links));
+        return Ok(Some(ChainRead {
+          links,
+          maybe_hint: page.maybe_strict,
+        }));
       }
-      after = last;
+      if is_empty {
+        return Err(CoreError::Corrupt(
+          "a strict chain's empty page with more to come".into(),
+        ));
+      }
     }
   }
 
-  /// Verifies the chain after `known` ([`verify_chain`]): on a fresh roster when a workspace signer
-  /// signed a link, with the device lists of every signer read.
+  /// Verifies the chain after `known` ([`ChainVerifier`]) one version at a time, reading what each
+  /// step needs only for the links it reaches (the device lists of their signers, the roster once
+  /// a workspace signer signed one) and stopping at the first that fails.
   async fn verify_strict_chain(
     &mut self,
     known: &StrictRoles,
     links: &[StrictChainChange],
   ) -> Result<Result<ChainEnd, StrictRolesError>, CoreError> {
-    let mut signers = Vec::new();
-    let mut has_workspace_signer = false;
-    for link in links {
-      // A link that doesn't parse is refused by the verification below.
-      let Ok(signed) = SignedStrictRolesChange::from_bytes(link.change.as_slice()) else {
-        continue;
+    let chain: Vec<ChainLink<'_>> = links
+      .iter()
+      .map(|link| ChainLink {
+        version: link.version,
+        change: link.change.as_slice(),
+      })
+      .collect();
+    let mut verifier = ChainVerifier::new(known);
+    let mut signers: Vec<UserId> = Vec::new();
+    let mut has_read_roster = false;
+    let mut maybe_directory: Option<PinnedDirectory> = None;
+    let mut rest = chain.as_slice();
+    while !rest.is_empty() {
+      let needed = verifier.signers_for_next(rest);
+      if needed.has_workspace_signer && !has_read_roster {
+        self.sync_workspace().await?;
+        has_read_roster = true;
+      }
+      let new_signers: Vec<UserId> = needed
+        .users
+        .iter()
+        .filter_map(|user| convert::user_from_crypto(*user).ok())
+        .filter(|user| !signers.contains(user))
+        .collect();
+      if !new_signers.is_empty() || maybe_directory.is_none() {
+        // Reads the new signers' device lists; the directory then holds every signer's.
+        self.trusted_directory(new_signers.iter().copied()).await?;
+        signers.extend(new_signers);
+        maybe_directory = Some(self.pin_identities(signers.iter().copied()).await?);
+      }
+      let Some(directory) = &maybe_directory else {
+        break;
       };
-      has_workspace_signer |= signed.change().signer_role == StrictSignerRole::Workspace;
-      if let Some(user) = signed
-        .claimed_signer()
-        .ok()
-        .and_then(|user| convert::user_from_crypto(user).ok())
-        && !signers.contains(&user)
-      {
-        signers.push(user);
+      let authority = self.welcome_authority()?;
+      match verifier.take_next(rest, directory, &authority) {
+        Ok(Some(tail)) => rest = tail,
+        Ok(None) => break,
+        Err(error) => return Ok(Err(error)),
       }
     }
-    if has_workspace_signer {
-      self.sync_workspace().await?;
-    }
-    let directory = self.trusted_directory(signers).await?;
-    let authority = self.welcome_authority()?;
-    let chain = links.iter().map(|link| ChainLink {
-      version: link.version,
-      change: link.change.as_slice(),
-    });
-    Ok(verify_chain(known, chain, &directory, &authority))
-  }
-
-  /// Keeps the end of a verified chain as the roles this user's devices know (e2ee.md §4.6.2), by
-  /// its version; the chain names no epoch, so the replaced entry's stays.
-  fn note_strict_chain_end(&mut self, conversation: ConversationId, end: &ChainEnd) -> Result<(), CoreError> {
-    let maybe_roles = end
-      .maybe_roles()
-      .map(StrictRoles::to_bytes)
-      .transpose()
-      .map_err(MlsError::from)?
-      .map(Base64Bytes::new);
-    let epoch = self
-      .account_data()
-      .known_strict_roles(conversation)
-      .map_or(0, |known| known.epoch);
-    let known = KnownStrictRoles {
-      epoch,
-      maybe_version: Some(end.version()),
-      maybe_roles,
-    };
-    self.update_account_data(|data, _| data.note_strict_roles(conversation, known))
+    Ok(verifier.finish())
   }
 
   /// The version a change turning the channel strict signs: one above the newest this user's
-  /// devices or the server's hint know, so the server's chain stays one sequence after an "off"
-  /// (`check_change` takes any version for turning on).
-  async fn next_strict_chain_version(&mut self, conversation: ConversationId) -> Result<u64, CoreError> {
-    let maybe_known = self
+  /// devices saw in the group, so the server's chain stays one sequence after an "off"
+  /// (`check_change` takes any version for turning on). Never the server's hint, which any member
+  /// sets: a version it made up could leave nothing to change to, or fail the commit.
+  fn next_strict_chain_version(&self, conversation: ConversationId) -> u64 {
+    self
       .account_data()
       .known_strict_roles(conversation)
-      .and_then(KnownStrictRoles::version);
-    let hint = self
-      .api
-      .mls_strict_hint(conversation, &MlsStrictHintQuery::default())
-      .await?;
-    let maybe_hinted = hint.maybe_strict.map(|hint| hint.version);
-    let newest = maybe_known.into_iter().chain(maybe_hinted).max().unwrap_or(0);
-    Ok(newest.saturating_add(1))
+      .and_then(KnownStrictRoles::version)
+      .and_then(|version| version.checked_add(1))
+      .filter(|version| *version <= MAX_STRICT_HINT_VERSION)
+      .unwrap_or(1)
   }
 
   /// Keeps the users of the conversation's group before it is dropped for a welcome back, if this
@@ -875,6 +902,43 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       WorkspaceAuthority::new(Vec::new(), admins, workspace.policy.admin_self_join.clone())
         .with_roster(roster),
     )
+  }
+}
+
+impl VerifiedChain {
+  /// Whether the chain ends in a verified "off" and the server's hint, read with its last page,
+  /// says strict is off as of that change or later.
+  fn is_off_now(&self) -> bool {
+    match &self.end {
+      ChainEnd::Off { version, .. } => self
+        .maybe_hint
+        .as_ref()
+        .is_some_and(|hint| !hint.is_strict && hint.version >= *version),
+      ChainEnd::Roles(_) => false,
+    }
+  }
+}
+
+impl ChainCursor {
+  fn query(self) -> MlsStrictHintQuery {
+    match self {
+      Self::Before(version) => MlsStrictHintQuery {
+        maybe_after: Some(version),
+        maybe_after_commit: None,
+      },
+      Self::At(version, commit) => MlsStrictHintQuery {
+        maybe_after: Some(version),
+        maybe_after_commit: Some(commit),
+      },
+    }
+  }
+
+  /// Whether `link` comes after this point of the chain.
+  fn is_before(self, link: &StrictChainChange) -> bool {
+    match self {
+      Self::Before(version) => link.version > version,
+      Self::At(version, commit) => (link.version, link.commit) > (version, commit),
+    }
   }
 }
 

@@ -661,6 +661,24 @@ mod strict_hint {
     json!({"is_strict": is_strict, "version": version, "hash": hash})
   }
 
+  /// The chain's links of an answer, as (version, change).
+  pub(super) fn links(reply: &Reply) -> Vec<(u64, String)> {
+    reply.body["changes"]
+      .as_array()
+      .map(|changes| {
+        changes
+          .iter()
+          .map(|change| {
+            (
+              change["version"].as_u64().unwrap(),
+              change["change"].as_str().unwrap().to_owned(),
+            )
+          })
+          .collect()
+      })
+      .unwrap_or_default()
+  }
+
   /// A hint with the signed change, as an app of #2251 sends it (the bytes are opaque here).
   pub(super) fn chained_hint(version: u64) -> Value {
     let mut hint = hint(true, version);
@@ -775,19 +793,12 @@ mod strict_hint {
     let all = app.get(&g.dave, &format!("{path}?after=0")).await;
     assert_eq!(all.status, StatusCode::OK, "{}", all.body);
     assert_eq!(
-      all.body["changes"],
-      json!([
-        {"version": 1, "change": b64("change-1")},
-        {"version": 2, "change": b64("change-2")},
-        {"version": 3, "change": b64("change-3")},
-      ])
+      links(&all),
+      vec![(1, b64("change-1")), (2, b64("change-2")), (3, b64("change-3")),]
     );
     assert_eq!(all.body.get("has_more"), None);
     let after_known = app.get(&g.dave, &format!("{path}?after=2")).await;
-    assert_eq!(
-      after_known.body["changes"],
-      json!([{"version": 3, "change": b64("change-3")}])
-    );
+    assert_eq!(links(&after_known), vec![(3, b64("change-3"))]);
     let nothing_newer = app.get(&g.dave, &format!("{path}?after=3")).await;
     assert_eq!(nothing_newer.body, json!({"epoch": 4, "strict": hint(true, 3)}));
     let conversation = app.get(&g.dave, &format!("/conversations/{}", g.channel)).await;
@@ -807,42 +818,65 @@ mod strict_hint {
     let path = format!("/conversations/{}/mls/strict", g.channel);
 
     let first = app.get(&g.carol, &format!("{path}?after=0")).await;
-    let versions = |reply: &Reply| -> Vec<u64> {
-      reply.body["changes"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|change| change["version"].as_u64().unwrap())
-        .collect()
-    };
+    let versions =
+      |reply: &Reply| -> Vec<u64> { links(reply).into_iter().map(|(version, _)| version).collect() };
     assert_eq!(versions(&first), (1..=64).collect::<Vec<_>>());
     assert_eq!(first.body["has_more"], true);
-    let second = app.get(&g.carol, &format!("{path}?after=64")).await;
+    let last = &first.body["changes"][63]["commit"];
+    let second = app
+      .get(
+        &g.carol,
+        &format!("{path}?after=64&after_commit={}", last.as_str().unwrap()),
+      )
+      .await;
     assert_eq!(versions(&second), vec![65, 66]);
     assert_eq!(second.body.get("has_more"), None);
     app.stop().await;
   }
 
-  /// A version the chain holds already is a conflict, as for the role log: neither the commit nor
-  /// the change is stored, and the group stays in its epoch.
+  /// A member's commit plants junk under the next version first: the admin's real change of that
+  /// version is still taken, and both stay, in commit order, for the device to judge. Nothing a
+  /// member stores blocks a roles change.
   #[tokio::test]
-  async fn a_version_the_chain_holds_is_a_version_conflict() {
+  async fn a_planted_change_blocks_no_roles_change() {
     let app = app!();
     let g = group(&app).await;
     roles_commit(&app, &g, 0, chained_hint(1)).await;
-
-    let again = roles_commit(&app, &g, 1, chained_hint(1)).await;
-
-    assert_eq!(again.status, StatusCode::CONFLICT, "{}", again.body);
-    assert_eq!(again.error_code(), "version_conflict");
-    assert_eq!(again.body["current_version"], 1, "{}", again.body);
-    let backlog = app
-      .get(&g.carol, &format!("/conversations/{}/mls", g.channel))
+    let mut junk = chained_hint(2);
+    junk["change"] = json!(b64("junk-2"));
+    let planted = app
+      .post(
+        &g.dave,
+        &format!("/conversations/{}/mls/commits", g.channel),
+        json!({"device_id": g.dave_device, "epoch": 1, "commit": b64("commit-1"), "strict": junk}),
+      )
       .await;
-    assert_eq!(backlog.body["current_epoch"], 1);
-    assert_eq!(kinds(&backlog), vec!["commit"]);
+    assert_eq!(planted.status, StatusCode::CREATED, "{}", planted.body);
+
+    let real = roles_commit(&app, &g, 2, chained_hint(2)).await;
+
+    assert_eq!(real.status, StatusCode::CREATED, "{}", real.body);
+    let chain = app
+      .get(
+        &g.carol,
+        &format!("/conversations/{}/mls/strict?after=1", g.channel),
+      )
+      .await;
+    assert_eq!(links(&chain), vec![(2, b64("junk-2")), (2, b64("change-2"))]);
+    // The next page starts after the junk's commit, within its version.
+    let junk_commit = chain.body["changes"][0]["commit"].as_str().unwrap().to_owned();
+    let rest = app
+      .get(
+        &g.carol,
+        &format!(
+          "/conversations/{}/mls/strict?after=2&after_commit={junk_commit}",
+          g.channel
+        ),
+      )
+      .await;
+    assert_eq!(links(&rest), vec![(2, b64("change-2"))]);
     // A hint without the change (an older app) is stored as before.
-    let older = roles_commit(&app, &g, 1, hint(true, 1)).await;
+    let older = roles_commit(&app, &g, 3, hint(true, 3)).await;
     assert_eq!(older.status, StatusCode::CREATED, "{}", older.body);
     app.stop().await;
   }
@@ -891,7 +925,7 @@ mod strict_hint {
       .await;
 
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
-    assert_eq!(reply.body["changes"][0]["version"], 1);
+    assert_eq!(links(&reply), vec![(1, b64("change-1"))]);
     // Somebody who isn't a member can't post one, and reads nothing.
     let erin = member("erin");
     let erin_device = register_device(&app, &erin).await;
@@ -1048,7 +1082,7 @@ mod rewind {
   /// the chain never holds a change the group no longer has, and the version is free again.
   #[tokio::test]
   async fn a_rewind_drops_the_roles_changes_of_the_commits_it_drops() {
-    use super::strict_hint::{chained_hint, roles_commit};
+    use super::strict_hint::{chained_hint, links, roles_commit};
     let app = strict_app!();
     let g = group(&app).await;
     let alice = owner();
@@ -1058,28 +1092,22 @@ mod rewind {
     roles_commit(&app, &g, 1, chained_hint(2)).await;
     roles_commit(&app, &g, 2, chained_hint(3)).await;
     let path = format!("/conversations/{}/mls/strict?after=0", g.channel);
-    assert_eq!(
-      app.get(&g.carol, &path).await.body["changes"]
-        .as_array()
-        .unwrap()
-        .len(),
-      3
-    );
+    assert_eq!(links(&app.get(&g.carol, &path).await).len(), 3);
 
     let reply = rewind(&app, &alice, &g.channel, &alice_device, 1).await;
     assert_eq!(reply.status, StatusCode::CREATED, "{}", reply.body);
 
     let chain = app.get(&g.carol, &path).await;
-    assert_eq!(
-      chain.body["changes"],
-      json!([{"version": 1, "change": b64("change-1")}])
-    );
+    assert_eq!(links(&chain), vec![(1, b64("change-1"))]);
     let mut other = chained_hint(2);
     other["change"] = json!(b64("another-change-2"));
     let next = roles_commit(&app, &g, 2, other).await;
     assert_eq!(next.status, StatusCode::CREATED, "{}", next.body);
     let chain = app.get(&g.carol, &path).await;
-    assert_eq!(chain.body["changes"][1]["change"], b64("another-change-2"));
+    assert_eq!(
+      links(&chain),
+      vec![(1, b64("change-1")), (2, b64("another-change-2"))]
+    );
     app.stop().await;
   }
 

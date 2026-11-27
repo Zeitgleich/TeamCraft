@@ -86,6 +86,37 @@ mod turning_on {
     }
   }
 
+  /// Off and on again: the turning on signs the version after the "off", and every member's
+  /// account data takes the new roles.
+  #[tokio::test]
+  async fn strict_on_again_after_off_reaches_every_members_account_data() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol) = three_with_owner(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    let alice_id = alice.client.user_id();
+    alice.client.set_strict_roles(channel, &[]).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    alice
+      .client
+      .set_strict_roles(channel, &[(alice_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      assert_eq!(peer.client.strict_roles(channel).unwrap().unwrap().version(), 3);
+      let known = peer
+        .client
+        .account_data()
+        .known_strict_roles(channel)
+        .cloned()
+        .unwrap();
+      assert!(known.maybe_roles.is_some(), "{}", peer.name);
+      assert_eq!(known.version(), Some(3), "{}", peer.name);
+    }
+  }
+
   #[tokio::test]
   async fn a_member_without_a_workspace_role_cannot_turn_it_on() {
     let server = FakeServer::new();
@@ -630,6 +661,59 @@ mod outside_signer {
     assert_eq!(hint.maybe_strict.map(|hint| hint.version), Some(2));
   }
 
+  /// A member lowered the hint (any member's commit sets it): the outside admin's turning on again
+  /// signs version 1, below the "off" of version 2. Every member still takes the new roles into
+  /// its account data: they merge by the epoch they were seen in, not by version.
+  #[tokio::test]
+  async fn turning_on_again_on_a_lowered_hint_reaches_every_members_account_data() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut dave) = three_and_an_outside_admin(&server).await;
+    let channel = strict_channel(&mut alice, &mut bob, &mut carol).await;
+    let alice_id = alice.client.user_id();
+    alice.client.set_strict_roles(channel, &[]).await.unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    server.set_strict_hint(
+      channel,
+      Some(teamcraft_proto::StrictChannelHint {
+        is_strict: false,
+        version: 0,
+        hash: Base64Bytes::new(vec![0; 32]),
+        maybe_change: None,
+      }),
+    );
+
+    dave
+      .client
+      .set_strict_roles(channel, &[(alice_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    run_until_quiet(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    for peer in [&mut alice, &mut bob, &mut carol] {
+      assert_eq!(
+        peer
+          .client
+          .strict_roles(channel)
+          .unwrap()
+          .map(|roles| roles.version()),
+        Some(1),
+        "{}",
+        peer.name
+      );
+      let known = peer
+        .client
+        .account_data()
+        .known_strict_roles(channel)
+        .cloned()
+        .unwrap();
+      assert!(
+        known.maybe_roles.is_some(),
+        "{}: the \"off\" of version 2 hides nothing",
+        peer.name
+      );
+    }
+  }
+
   /// A member outside the workspace roles signs nothing from outside (D3).
   #[tokio::test]
   async fn a_non_admin_outside_the_group_signs_nothing() {
@@ -1071,9 +1155,6 @@ mod coming_back {
     assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
     assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
     assert!(!team.carol.client.is_strict(channel).unwrap());
-    let known = known_roles(&team.carol, channel);
-    assert_eq!(known.maybe_roles, None, "the chain ended in off");
-    assert_eq!(known.version(), Some(3));
     team.bob.client.send_text(channel, None, "back").await.unwrap();
     settle(&mut [&mut team.bob, &mut team.carol]).await;
     assert_eq!(team.carol.texts(channel).last().map(String::as_str), Some("back"));
@@ -1097,8 +1178,6 @@ mod coming_back {
     assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
     let roles = team.carol.client.strict_roles(channel).unwrap().unwrap();
     assert_eq!(roles.version(), 4);
-    let known = known_roles(&team.carol, channel);
-    assert_eq!(known.version(), Some(4), "carried forward along the chain");
     team
       .bob
       .client
@@ -1165,6 +1244,175 @@ mod coming_back {
     .await;
   }
 
+  /// Another version 3, signed by Alice but never committed, beside the real one at the chain's
+  /// end: nothing later tells which one the group took, so the chain is refused.
+  #[tokio::test]
+  async fn a_chain_forked_at_its_end_keeps_the_hold() {
+    held_on_a_hostile_chain(|team, honest| {
+      let fork = team.change_signed_by_alice_after(&honest[1], &honest[3]);
+      vec![honest[1].clone(), honest[2].clone(), fork]
+    })
+    .await;
+  }
+
+  /// A member's junk under the next version, beside the real change (the server keeps every
+  /// commit's): passed over, and the new admin's welcome still opens.
+  #[tokio::test]
+  async fn junk_beside_the_real_change_does_not_hold_the_welcome() {
+    let server = FakeServer::new();
+    let mut team = Team::with_carol_clock(&server, Arc::new(ManualClock::new(1_800_000_000_000))).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_while_carol_is_away(channel).await;
+    team.alice_hands_the_channel_to_bob(channel).await;
+    team.carol_comes_online(channel).await;
+    team.show_carol_the_roster();
+    let mut shown = server.strict_chain(channel);
+    for link in shown.clone() {
+      shown.push(StrictChainChange {
+        change: Base64Bytes::new(b"junk".to_vec()),
+        commit: commit_after(link.commit, 1),
+        ..link
+      });
+    }
+    shown.sort_by_key(|link| (link.version, link.commit));
+    server.show_strict_chain(channel, Some(shown));
+
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
+  }
+
+  /// Strict off and on again while Carol is out: Alice's turning on signs the version after her
+  /// "off" (`next_strict_chain_version`), so the chain runs on through it, and the new admin's
+  /// welcome opens.
+  #[tokio::test]
+  async fn off_and_on_again_while_away_and_the_new_admins_welcome_opens() {
+    let server = FakeServer::new();
+    let mut team = Team::with_carol_clock(&server, Arc::new(ManualClock::new(1_800_000_000_000))).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_while_carol_is_away(channel).await;
+    let bob_id = team.bob.client.user_id();
+    team.alice.client.set_strict_roles(channel, &[]).await.unwrap();
+    settle(&mut [&mut team.alice, &mut team.bob, &mut team.dave]).await;
+    team
+      .alice
+      .client
+      .set_strict_roles(channel, &[(bob_id, StrictRoleKind::Admin)])
+      .await
+      .unwrap();
+    settle(&mut [&mut team.alice, &mut team.bob, &mut team.dave]).await;
+    assert_eq!(
+      team.bob.client.strict_roles(channel).unwrap().unwrap().version(),
+      4,
+      "turned on again after the \"off\" of version 3"
+    );
+    team.carol_comes_online(channel).await;
+    team.show_carol_the_roster();
+
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
+    assert_eq!(
+      team
+        .carol
+        .client
+        .strict_roles(channel)
+        .unwrap()
+        .unwrap()
+        .version(),
+      4
+    );
+  }
+
+  /// The server cuts the chain right after an "off" while its hint says strict is on: Carol's
+  /// welcome without the roles is held, not opened.
+  #[tokio::test]
+  async fn an_off_the_hint_contradicts_keeps_the_hold() {
+    let server = FakeServer::new();
+    let mut team = Team::with_carol_clock(&server, Arc::new(ManualClock::new(1_800_000_000_000))).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_while_carol_is_away(channel).await;
+    team.alice.client.set_strict_roles(channel, &[]).await.unwrap();
+    settle(&mut [&mut team.alice, &mut team.bob, &mut team.dave]).await;
+    team.carol_comes_online(channel).await;
+    team.show_carol_the_roster();
+    let mut hint = team
+      .bob
+      .api
+      .conversation(channel)
+      .await
+      .unwrap()
+      .maybe_strict
+      .unwrap();
+    hint.is_strict = true;
+    hint.version += 1;
+    server.set_strict_hint(channel, Some(hint));
+
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    let prompt = team.carol.client.strict_rejoin_prompt(channel).unwrap().unwrap();
+    assert_eq!(prompt.hold.sender, team.bob.client.user_id());
+  }
+
+  /// A chain longer than a page is read page by page (Alice's changes, signed but shown by the
+  /// server only, hand the channel to Bob at the 70th); one longer than
+  /// `max_strict_chain_changes`, or a server that never finishes or cuts it, leaves the hold.
+  #[tokio::test]
+  async fn a_long_chain_is_read_page_by_page() {
+    let (_server, mut team, channel) = Team::on_a_long_chain(quick_answers()).await;
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
+  }
+
+  #[tokio::test]
+  async fn a_chain_longer_than_the_setting_keeps_the_hold() {
+    let settings = teamcraft_core::client::ClientSettings {
+      max_strict_chain_changes: 10,
+      ..quick()
+    };
+    let (_server, mut team, channel) = Team::on_a_long_chain(settings).await;
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+    assert!(team.carol.client.strict_rejoin_prompt(channel).unwrap().is_some());
+  }
+
+  #[tokio::test]
+  async fn a_chain_whose_pages_never_end_or_end_early_keeps_the_hold() {
+    use teamcraft_core::api::fake::StrictChainPaging;
+    for paging in [StrictChainPaging::Stuck, StrictChainPaging::EndsEarly] {
+      let (server, mut team, channel) = Team::on_a_long_chain(quick_answers()).await;
+      server.page_strict_chain(paging);
+      run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+      assert!(
+        team.carol.client.strict_rejoin_prompt(channel).unwrap().is_some(),
+        "{paging:?}"
+      );
+    }
+  }
+
+  /// The chain's read is lost on the way: no verdict, so no hold; the device asks to be added back
+  /// again, as after any failed read while opening a welcome.
+  #[tokio::test]
+  async fn a_lost_chain_read_asks_again_instead_of_holding() {
+    let server = FakeServer::new();
+    let mut team = Team::with_carol_clock(&server, Arc::new(ManualClock::new(1_800_000_000_000))).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_while_carol_is_away(channel).await;
+    team.alice_hands_the_channel_to_bob(channel).await;
+    team.carol_comes_online(channel).await;
+    team.show_carol_the_roster();
+    let requests_before = rejoin_requests(&team.bob, channel).await;
+    server.fail_strict_chain_reads(1);
+
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    assert!(!team.carol.client.has_group(channel).unwrap());
+    assert!(rejoin_requests(&team.bob, channel).await > requests_before);
+  }
+
   /// Carol misses Dave's change and Alice handing the channel to Bob, and only Bob answers her
   /// request; her roster is honest again,
   /// but the server shows her `tamper` of the chain (versions 1 to 4) instead: Bob's welcome is
@@ -1184,7 +1432,9 @@ mod coming_back {
       honest.iter().map(|link| link.version).collect::<Vec<_>>(),
       vec![1, 2, 3, 4]
     );
-    server.show_strict_chain(channel, Some(tamper(&team, honest)));
+    let mut shown = tamper(&team, honest);
+    shown.sort_by_key(|link| (link.version, link.commit));
+    server.show_strict_chain(channel, Some(shown));
 
     run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
 
@@ -1469,6 +1719,43 @@ mod coming_back {
       settle(&mut [&mut self.alice, &mut self.bob, &mut self.dave]).await;
     }
 
+    /// Carol (with `carol_settings`) knows the channel strict at version 1 and falls out at Dave's
+    /// change; the server shows her a chain of 70 changes after it, the real version 2 and Alice's
+    /// signed (never committed) changes up to version 71, the last making Bob an admin. Only Bob
+    /// answers her request.
+    async fn on_a_long_chain(
+      carol_settings: teamcraft_core::client::ClientSettings,
+    ) -> (FakeServer, Self, ConversationId) {
+      let server = FakeServer::new();
+      let clock = Arc::new(ManualClock::new(1_800_000_000_000));
+      let carol =
+        Peer::enroll_on_clock(server.add_user("Carol"), "Carol", carol_settings, Box::new(clock)).await;
+      let mut team = Self::with_carol(&server, quick_answers(), carol).await;
+      let channel = team.strict_channel().await;
+      team.dave_changes_the_roles_while_carol_is_away(channel).await;
+      team.carol_comes_online(channel).await;
+      team.show_carol_the_roster();
+      let mut shown = server.strict_chain(channel);
+      let alice_admin = vec![role_of(&team.alice, StrictRoleKind::Admin)];
+      let mut both = vec![
+        role_of(&team.alice, StrictRoleKind::Admin),
+        role_of(&team.bob, StrictRoleKind::Admin),
+      ];
+      both.sort_by_key(|role| role.user_id);
+      for step in 0..69 {
+        let roles = if step == 68 {
+          both.clone()
+        } else {
+          alice_admin.clone()
+        };
+        let previous = shown.last().unwrap().clone();
+        shown.push(sign_after(&team.alice, &previous, roles));
+      }
+      assert_eq!(shown.last().unwrap().version, 71);
+      server.show_strict_chain(channel, Some(shown));
+      (server, team, channel)
+    }
+
     /// Carol's server shows her the roster again: she could judge Dave's change now.
     fn show_carol_the_roster(&self) {
       self
@@ -1506,6 +1793,7 @@ mod coming_back {
     previous: &StrictChainChange,
     roles: Vec<teamcraft_crypto::strict_roles::StrictRole>,
   ) -> StrictChainChange {
+    let previous_commit = previous.commit;
     let previous = parse(previous);
     let change = StrictRolesChange {
       conversation_id: previous.change().conversation_id,
@@ -1521,7 +1809,23 @@ mod coming_back {
     let signed = signer.client.sign_strict_roles_unchecked(change).unwrap();
     StrictChainChange {
       version: signed.change().version,
+      commit: commit_after(previous_commit, 1),
       change: Base64Bytes::new(signed.to_bytes().unwrap()),
+    }
+  }
+
+  /// A commit ID `by` after `commit`, for links a hostile server makes up.
+  fn commit_after(commit: teamcraft_proto::MlsMessageId, by: i64) -> teamcraft_proto::MlsMessageId {
+    teamcraft_proto::MlsMessageId::from_snowflake(
+      teamcraft_proto::Snowflake::new(commit.snowflake().get() + by).unwrap(),
+    )
+  }
+
+  /// Settings of members who answer a rejoin request at once (their app waited already).
+  fn quick_answers() -> teamcraft_core::client::ClientSettings {
+    teamcraft_core::client::ClientSettings {
+      strict_rejoin_wait: std::time::Duration::ZERO,
+      ..quick()
     }
   }
 

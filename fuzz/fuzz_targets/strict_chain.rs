@@ -1,7 +1,6 @@
 //! A strict channel's roles chain as the server hands it to a device that fell out (e2ee.md
 //! §4.6.2, "Falling out in a strict channel", `GET …/mls/strict?after=`): verifying it never
-//! panics, an empty chain ends at the known roles, and no chain of random links verifies, however
-//! the server numbers them.
+//! panics, and no chain of random links moves the known roles, however the server numbers them.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -41,18 +40,16 @@ fuzz_target!(|input: (Vec<u8>, Vec<(u64, Vec<u8>)>, [u8; 32])| {
     return;
   };
   let everyone = Everyone(key);
-  let chain = links.iter().map(|(version, change)| ChainLink {
-    version: *version,
-    change,
-  });
-  let verdict = verify_chain(&known, chain, &everyone, &everyone);
-  if links.is_empty() {
-    assert_eq!(
-      verdict.ok(),
-      Some(ChainEnd::Roles(known)),
-      "an empty chain moved the roles"
-    );
-  } else {
-    assert!(verdict.is_err(), "random links verified as a roles chain");
+  let chain: Vec<ChainLink<'_>> = links
+    .iter()
+    .map(|(version, change)| ChainLink {
+      version: *version,
+      change,
+    })
+    .collect();
+  // Random links are passed over or refuse the chain: none verifies, so it never moves.
+  match verify_chain(&known, &chain, &everyone, &everyone) {
+    Ok(end) => assert_eq!(end, ChainEnd::Roles(known), "random links moved the roles"),
+    Err(_) => assert!(!links.is_empty(), "an empty chain was refused"),
   }
 });
