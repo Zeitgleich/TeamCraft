@@ -72,6 +72,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .map(Base64Bytes::new);
     let request = PostMlsCommitRequest {
       maybe_strict: None,
+      maybe_replaces: None,
       device_id: self.account.device_id,
       epoch,
       commit: Base64Bytes::new(output.commit),

@@ -781,6 +781,519 @@ mod renames {
   }
 }
 
+/// A modified client's commits (e2ee.md §4.6.2, finding 3): Bob's client skips the rule before it
+/// commits (`Client::commit_unchecked_change`, a test hook), and the server takes a commit from any
+/// member. Every honest member refuses it alike and stops; an admin continues.
+mod modified_client {
+  use super::*;
+  use teamcraft_crypto::membership::MembershipAction;
+  use teamcraft_proto::ChannelRole;
+
+  #[tokio::test]
+  async fn a_plain_members_signed_removal_is_refused_alike_and_an_admin_removes_them_and_continues() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut dave) = four_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol, &mut dave]).await;
+    strict(&mut alice, channel).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    let good_epoch = epoch(&mut alice, channel);
+    let (bob_id, carol_id) = (bob.client.user_id(), carol.client.user_id());
+
+    // Bob, a plain member, signs Carol's removal and commits it past his own app's refusal.
+    remove_unchecked(&mut bob, channel, carol_id).await;
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+
+    let mut stops = Vec::new();
+    for peer in [&mut alice, &mut carol, &mut dave] {
+      let stop = peer.client.strict_stop(channel).unwrap();
+      let stop = stop.unwrap_or_else(|| panic!("{} didn't stop", peer.name));
+      assert_eq!(stop.epoch, good_epoch, "{}", peer.name);
+      assert_eq!(stop.maybe_signer, Some(bob_id), "{}", peer.name);
+      assert_eq!(epoch(peer, channel), good_epoch, "{}", peer.name);
+      assert!(
+        peer.client.group_users(channel).unwrap().contains(&carol_id),
+        "{}: Carol stays in the group",
+        peer.name
+      );
+      stops.push(stop.commit_id);
+    }
+    stops.dedup();
+    assert_eq!(stops.len(), 1, "every member stopped at the same commit");
+    assert_eq!(rejoin_requests(&alice, channel).await, 0);
+    assert_eq!(
+      epoch(&mut bob, channel),
+      good_epoch + 1,
+      "Bob's client follows its own commit"
+    );
+
+    // "Remove Bob and continue", through the server's rewind.
+    alice
+      .client
+      .continue_strict_channel(channel, Some(bob_id))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    assert_eq!(server.rewinds(), vec![(channel, good_epoch)]);
+    for peer in [&mut alice, &mut carol, &mut dave] {
+      assert_eq!(peer.client.strict_stop(channel).unwrap(), None, "{}", peer.name);
+      assert_eq!(epoch(peer, channel), good_epoch + 1, "{}", peer.name);
+      let users = peer.client.group_users(channel).unwrap();
+      assert!(
+        !users.contains(&bob_id) && users.contains(&carol_id),
+        "{}: {users:?}",
+        peer.name
+      );
+    }
+    carol.client.send_text(channel, None, "after").await.unwrap();
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+    for peer in [&alice, &dave] {
+      assert_eq!(peer.texts(channel).last().map(String::as_str), Some("after"));
+    }
+  }
+
+  /// A plain member's signed addition of an outsider: refused alike, so nobody shares keys with
+  /// the person Bob let in, and "Continue" without removing anybody ends the stop.
+  #[tokio::test]
+  async fn a_plain_members_signed_addition_is_refused_alike() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut erin) = four_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol]).await;
+    strict(&mut alice, channel).await;
+    settle(&mut [&mut alice, &mut bob, &mut carol]).await;
+    let good_epoch = epoch(&mut alice, channel);
+    let erin_id = erin.client.user_id();
+    // The server lists Erin (it takes a member's word, finding 3); nobody signed her in.
+    server.list_member_unsigned(channel, erin_id, ChannelRole::Member);
+
+    bob
+      .client
+      .commit_unchecked_change(
+        channel,
+        MembershipAction::AddUser {
+          user_id: crypto_user(erin_id),
+          history: teamcraft_crypto::membership::HistoryShare::FromJoin,
+        },
+      )
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut carol, &mut erin]).await;
+
+    for peer in [&mut alice, &mut carol] {
+      assert!(
+        peer.client.strict_stop(channel).unwrap().is_some(),
+        "{}",
+        peer.name
+      );
+      assert!(!peer.client.group_users(channel).unwrap().contains(&erin_id));
+    }
+
+    alice.client.continue_strict_channel(channel, None).await.unwrap();
+    settle(&mut [&mut alice, &mut carol, &mut erin]).await;
+    for peer in [&mut alice, &mut carol] {
+      assert_eq!(peer.client.strict_stop(channel).unwrap(), None, "{}", peer.name);
+      assert_eq!(epoch(peer, channel), good_epoch + 1, "{}", peer.name);
+      assert!(!peer.client.group_users(channel).unwrap().contains(&erin_id));
+    }
+  }
+
+  /// Race and rewind convergence (§4.6.2, "Epoch conflicts and convergence"): two admins of the
+  /// context continue from the same stop at once, one with Bob's removal and one without. The
+  /// first rewind wins; the second must not drop it, or the two admins' groups part.
+  #[tokio::test]
+  async fn two_admins_continuing_at_once_end_in_one_group() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut dave) = four_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol, &mut dave]).await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    alice
+      .client
+      .set_strict_roles(
+        channel,
+        &[
+          (alice_id, StrictRoleKind::Admin),
+          (carol_id, StrictRoleKind::Admin),
+        ],
+      )
+      .await
+      .unwrap();
+    server.set_channel_role_unsigned(channel, carol_id, ChannelRole::Admin);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    let good_epoch = epoch(&mut alice, channel);
+    remove_unchecked(&mut bob, channel, dave.client.user_id()).await;
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+    assert!(alice.client.strict_stop(channel).unwrap().is_some());
+    assert!(carol.client.strict_stop(channel).unwrap().is_some());
+
+    // Alice continues first; Carol, who hasn't seen it yet, a moment later.
+    alice
+      .client
+      .continue_strict_channel(channel, Some(bob_id))
+      .await
+      .unwrap();
+    let result = carol.client.continue_strict_channel(channel, None).await;
+    assert!(result.is_ok(), "the second admin catches up: {result:?}");
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    assert_eq!(server.rewinds(), vec![(channel, good_epoch)], "one rewind");
+    let alice_epoch = epoch(&mut alice, channel);
+    for peer in [&mut alice, &mut carol, &mut dave] {
+      assert_eq!(peer.client.strict_stop(channel).unwrap(), None, "{}", peer.name);
+      assert_eq!(epoch(peer, channel), alice_epoch, "{}", peer.name);
+      assert!(
+        !peer.client.group_users(channel).unwrap().contains(&bob_id),
+        "{}",
+        peer.name
+      );
+    }
+    // One group: each reads the other's message.
+    alice.client.send_text(channel, None, "from alice").await.unwrap();
+    carol.client.send_text(channel, None, "from carol").await.unwrap();
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+    assert!(carol.texts(channel).contains(&"from alice".to_owned()));
+    assert!(alice.texts(channel).contains(&"from carol".to_owned()));
+    assert!(dave.texts(channel).contains(&"from carol".to_owned()));
+  }
+
+  /// Both admins remove Bob at once: the second's removal is already done once it catches up.
+  #[tokio::test]
+  async fn two_admins_removing_the_committer_at_once_end_in_one_group() {
+    let server = FakeServer::new();
+    let (mut alice, mut bob, mut carol, mut dave) = four_with_owner(&server).await;
+    let channel = channel_with(&mut alice, &mut [&mut bob, &mut carol, &mut dave]).await;
+    let (alice_id, bob_id, carol_id) = (
+      alice.client.user_id(),
+      bob.client.user_id(),
+      carol.client.user_id(),
+    );
+    alice
+      .client
+      .set_strict_roles(
+        channel,
+        &[
+          (alice_id, StrictRoleKind::Admin),
+          (carol_id, StrictRoleKind::Admin),
+        ],
+      )
+      .await
+      .unwrap();
+    server.set_channel_role_unsigned(channel, carol_id, ChannelRole::Admin);
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+    remove_unchecked(&mut bob, channel, dave.client.user_id()).await;
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+
+    alice
+      .client
+      .continue_strict_channel(channel, Some(bob_id))
+      .await
+      .unwrap();
+    carol
+      .client
+      .continue_strict_channel(channel, Some(bob_id))
+      .await
+      .unwrap();
+    settle(&mut [&mut alice, &mut bob, &mut carol, &mut dave]).await;
+
+    assert_eq!(server.rewinds().len(), 1, "{:?}", server.rewinds());
+    let alice_epoch = epoch(&mut alice, channel);
+    for peer in [&mut carol, &mut dave] {
+      assert_eq!(epoch(peer, channel), alice_epoch, "{}", peer.name);
+      assert_eq!(peer.client.strict_stop(channel).unwrap(), None, "{}", peer.name);
+    }
+    carol.client.send_text(channel, None, "one group").await.unwrap();
+    settle(&mut [&mut alice, &mut carol, &mut dave]).await;
+    assert_eq!(alice.texts(channel).last().map(String::as_str), Some("one group"));
+  }
+
+  async fn remove_unchecked(peer: &mut Peer, channel: ConversationId, user: teamcraft_proto::UserId) {
+    peer
+      .client
+      .commit_unchecked_change(
+        channel,
+        MembershipAction::RemoveUser {
+          user_id: crypto_user(user),
+        },
+      )
+      .await
+      .unwrap();
+  }
+}
+
+/// Falling out of a strict channel and coming back (e2ee.md §4.6.2, "Falling out in a strict
+/// channel", and the table's withheld roster): Carol's server withholds the roster that makes Dave
+/// a workspace admin, so she can't judge his roles change, reads the roster, still can't and asks
+/// to be added back. An admin's welcome is opened at once; a plain member's is held until the
+/// user decides after `strict_rejoin_wait`.
+mod coming_back {
+  use super::*;
+  use std::sync::Arc;
+  use teamcraft_core::clock::ManualClock;
+  use teamcraft_core::store::{
+    AwayChange, ConversationEvent, LocalStore as _, MessageContent, MessageFilter,
+  };
+
+  #[tokio::test]
+  async fn a_withheld_roster_makes_a_device_fall_out_and_an_admins_welcome_brings_it_back() {
+    let server = FakeServer::new();
+    let mut team = Team::new(&server, quick()).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_carol_cannot_judge(channel).await;
+
+    // Carol is behind, not stopped, and asked to be added back.
+    assert_eq!(team.carol.client.strict_stop(channel).unwrap(), None);
+    assert_ne!(
+      epoch_or_zero(&mut team.carol, channel),
+      epoch(&mut team.alice, channel)
+    );
+    assert!(rejoin_requests(&team.alice, channel).await >= 1);
+
+    // While Carol is out, Alice removes Bob; then she answers. Her welcome, an admin's of the roles
+    // Carol knew, is opened at once.
+    let bob_id = team.bob.client.user_id();
+    team.alice.client.remove_member(channel, bob_id).await.unwrap();
+    run_until_quiet(&mut [&mut team.alice, &mut team.carol]).await;
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.alice, channel));
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    // A line tells Carol who is gone since her last tree; nobody is new.
+    assert_eq!(away_lines(&team.carol, channel), vec![(bob_id, AwayChange::Gone)]);
+    let roles = team.carol.client.strict_roles(channel).unwrap().unwrap();
+    assert_eq!(
+      roles.version(),
+      2,
+      "the roles she couldn't judge come with the welcome"
+    );
+    team
+      .alice
+      .client
+      .send_text(channel, None, "welcome back")
+      .await
+      .unwrap();
+    settle(&mut [&mut team.alice, &mut team.carol]).await;
+    assert_eq!(
+      team.carol.texts(channel).last().map(String::as_str),
+      Some("welcome back")
+    );
+  }
+
+  #[tokio::test]
+  async fn a_plain_members_welcome_is_held_until_the_user_takes_it_after_the_wait() {
+    let server = FakeServer::new();
+    let carol_clock = Arc::new(ManualClock::new(1_800_000_000_000));
+    let mut team = Team::with_carol_clock(&server, carol_clock.clone()).await;
+    let channel = team.strict_channel().await;
+    team.dave_changes_the_roles_carol_cannot_judge(channel).await;
+    let bob_id = team.bob.client.user_id();
+
+    // Only Bob is online; his app waited `strict_rejoin_wait` already (his settings).
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+    let prompt = team.carol.client.strict_rejoin_prompt(channel).unwrap().unwrap();
+    assert_eq!(prompt.hold.sender, bob_id);
+    assert!(!prompt.is_due, "the wait for an admin isn't over");
+    assert!(
+      prompt.hold.joined.is_empty() && prompt.hold.gone.is_empty(),
+      "{prompt:?}"
+    );
+    assert!(team.carol.client.accept_strict_rejoin(channel).await.is_err());
+
+    carol_clock.advance(i64::try_from(quick().strict_rejoin_wait.as_millis()).unwrap());
+    let prompt = team.carol.client.strict_rejoin_prompt(channel).unwrap().unwrap();
+    assert!(prompt.is_due);
+    // Members answer a device again only after `rejoin_cooldown` (issue #149), by the server's time.
+    server.advance_clock(quick().rejoin_cooldown + std::time::Duration::from_secs(60));
+    team.carol.client.accept_strict_rejoin(channel).await.unwrap();
+    run_until_quiet(&mut [&mut team.bob, &mut team.carol]).await;
+
+    assert_eq!(team.carol.client.strict_rejoin_prompt(channel).unwrap(), None);
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.bob, channel));
+    assert!(
+      away_lines(&team.carol, channel).is_empty(),
+      "the same people as before"
+    );
+    team
+      .bob
+      .client
+      .send_text(channel, None, "on your word")
+      .await
+      .unwrap();
+    settle(&mut [&mut team.bob, &mut team.carol]).await;
+    assert_eq!(
+      team.carol.texts(channel).last().map(String::as_str),
+      Some("on your word")
+    );
+  }
+
+  /// The roster that made Dave an admin reached Carol's server but not yet her device, and Dave
+  /// removes Bob as a workspace admin: Carol reads the roster before she judges the commit, not
+  /// after (processing it spends the epoch's secret), and follows the group.
+  #[tokio::test]
+  async fn a_device_whose_roster_lags_reads_it_before_judging_a_workspace_admins_removal() {
+    let server = FakeServer::new();
+    let mut team = Team::new(&server, quick()).await;
+    let channel = team.strict_channel().await;
+    let server_roster = team.alice.client.workspace().unwrap().roster.version;
+    let (alice_id, bob_id, carol_id, dave_id) = (
+      team.alice.client.user_id(),
+      team.bob.client.user_id(),
+      team.carol.client.user_id(),
+      team.dave.client.user_id(),
+    );
+    server.withhold_roster(carol_id, Some(server_roster));
+    team
+      .alice
+      .client
+      .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+      .await
+      .unwrap();
+    team.settle().await;
+    // Honest again, but Carol's device hasn't read the roster since.
+    server.withhold_roster(carol_id, None);
+    team.dave.client.full_sync().await.unwrap();
+
+    team
+      .dave
+      .client
+      .admin_remove_member(channel, bob_id)
+      .await
+      .unwrap();
+    run_until_quiet(&mut [&mut team.alice, &mut team.carol, &mut team.dave]).await;
+
+    assert_eq!(team.carol.client.strict_stop(channel).unwrap(), None);
+    assert_eq!(epoch(&mut team.carol, channel), epoch(&mut team.alice, channel));
+    assert!(!team.carol.client.group_users(channel).unwrap().contains(&bob_id));
+  }
+
+  /// Alice owns the workspace and is the channel's admin; Dave becomes a workspace admin in a
+  /// roster Carol's server never shows her. Bob is a plain member.
+  struct Team {
+    alice: Peer,
+    bob: Peer,
+    carol: Peer,
+    dave: Peer,
+  }
+
+  impl Team {
+    async fn new(server: &FakeServer, settings: teamcraft_core::client::ClientSettings) -> Self {
+      let carol = Peer::enroll_with_settings(server, "Carol", settings.clone()).await;
+      Self::with_carol(server, settings, carol).await
+    }
+
+    async fn with_carol_clock(server: &FakeServer, clock: Arc<ManualClock>) -> Self {
+      let carol = Peer::enroll_on_clock(server.add_user("Carol"), "Carol", quick(), Box::new(clock)).await;
+      // Bob's app has waited `strict_rejoin_wait` already: he answers a request at once.
+      let settings = teamcraft_core::client::ClientSettings {
+        strict_rejoin_wait: std::time::Duration::ZERO,
+        ..quick()
+      };
+      Self::with_carol(server, settings, carol).await
+    }
+
+    async fn with_carol(
+      server: &FakeServer,
+      settings: teamcraft_core::client::ClientSettings,
+      carol: Peer,
+    ) -> Self {
+      let alice = Peer::enroll_with_settings(server, "Alice", quick()).await;
+      let bob = Peer::enroll_with_settings(server, "Bob", settings).await;
+      let dave = Peer::enroll_with_settings(server, "Dave", quick()).await;
+      let mut team = Self {
+        alice,
+        bob,
+        carol,
+        dave,
+      };
+      let alice_id = team.alice.client.user_id();
+      team
+        .alice
+        .client
+        .publish_roster(&[(alice_id, RosterRole::Owner)])
+        .await
+        .unwrap();
+      for peer in [&mut team.bob, &mut team.carol, &mut team.dave] {
+        peer.client.full_sync().await.unwrap();
+      }
+      team
+    }
+
+    async fn strict_channel(&mut self) -> ConversationId {
+      let channel = channel_with(
+        &mut self.alice,
+        &mut [&mut self.bob, &mut self.carol, &mut self.dave],
+      )
+      .await;
+      strict(&mut self.alice, channel).await;
+      self.settle().await;
+      channel
+    }
+
+    /// The roster making Dave an admin is withheld from Carol; Dave signs the roles as a workspace
+    /// admin of it (Bob a moderator), and everybody but Carol takes it.
+    async fn dave_changes_the_roles_carol_cannot_judge(&mut self, channel: ConversationId) {
+      let server_roster = self.alice.client.workspace().unwrap().roster.version;
+      let (alice_id, bob_id, dave_id) = (
+        self.alice.client.user_id(),
+        self.bob.client.user_id(),
+        self.dave.client.user_id(),
+      );
+      self
+        .carol
+        .api
+        .server()
+        .withhold_roster(self.carol.client.user_id(), Some(server_roster));
+      self
+        .alice
+        .client
+        .publish_roster(&[(alice_id, RosterRole::Owner), (dave_id, RosterRole::Admin)])
+        .await
+        .unwrap();
+      self.settle().await;
+      self.dave.client.full_sync().await.unwrap();
+      self
+        .dave
+        .client
+        .set_strict_roles(
+          channel,
+          &[
+            (alice_id, StrictRoleKind::Admin),
+            (bob_id, StrictRoleKind::Moderator),
+          ],
+        )
+        .await
+        .unwrap();
+      settle(&mut [&mut self.alice, &mut self.bob, &mut self.dave]).await;
+      settle(&mut [&mut self.carol]).await;
+    }
+
+    async fn settle(&mut self) {
+      settle(&mut [&mut self.alice, &mut self.bob, &mut self.carol, &mut self.dave]).await;
+    }
+  }
+
+  /// The lines the device shows for who is new or gone since its last tree.
+  fn away_lines(peer: &Peer, channel: ConversationId) -> Vec<(teamcraft_proto::UserId, AwayChange)> {
+    peer
+      .store
+      .messages(channel, MessageFilter::TopLevel)
+      .unwrap()
+      .into_iter()
+      .filter(|message| !message.is_hidden())
+      .filter_map(|message| match message.content {
+        MessageContent::Event {
+          event: ConversationEvent::ChangedWhileAway { user, change },
+        } => Some((user, change)),
+        _ => None,
+      })
+      .collect()
+  }
+
+  fn epoch_or_zero(peer: &mut Peer, channel: ConversationId) -> u64 {
+    peer.client.mls_epoch(channel).unwrap().unwrap_or(0)
+  }
+}
+
 /// Lets every client process its gateway frames and run its pending steps (a strict channel's
 /// answers, leaf refreshes and delegated commits retry after an epoch was taken) until nothing
 /// moves any more.
@@ -833,6 +1346,14 @@ fn crypto_conversation(id: ConversationId) -> teamcraft_crypto::ids::Conversatio
 /// Alice owns the workspace (a signed roster), so she may turn channels strict (D3).
 async fn three_with_owner(server: &FakeServer) -> (Peer, Peer, Peer) {
   three_with_owner_settings(server, common::settings()).await
+}
+
+/// [`three_with_owner`] and Dave, a fourth member without a workspace role.
+async fn four_with_owner(server: &FakeServer) -> (Peer, Peer, Peer, Peer) {
+  let (alice, bob, carol) = three_with_owner(server).await;
+  let mut dave = Peer::enroll(server, "Dave").await;
+  dave.client.full_sync().await.unwrap();
+  (alice, bob, carol, dave)
 }
 
 /// [`three_with_owner`] with other client settings.
@@ -900,6 +1421,7 @@ async fn post_garbage_commit(
 ) -> teamcraft_proto::MlsMessageId {
   let request = PostMlsCommitRequest {
     maybe_strict: None,
+    maybe_replaces: None,
     device_id: peer.client.device_id(),
     epoch,
     commit: Base64Bytes::new(vec![0x00, 0x01, 0x00, 0x03, 0xde, 0xad, 0xbe, 0xef]),

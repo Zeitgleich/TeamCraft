@@ -877,8 +877,25 @@ pub enum WorkspaceEvent {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     room_name: String,
   },
+  /// After this device was added back into a strict channel (e2ee.md §4.6.2, "Falling out in a
+  /// strict channel"): `user` is new in the group, or gone from it, since the last tree this device
+  /// held. Derived by this device from the welcome it opened, never sent.
+  ChangedWhileAway {
+    user: UserId,
+    change: AwayChange,
+  },
   #[serde(other)]
   Unknown,
+}
+
+/// What [`WorkspaceEvent::ChangedWhileAway`] tells about its user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AwayChange {
+  /// In the group now, not in the device's last tree.
+  Joined,
+  /// In the device's last tree, not in the group now.
+  Gone,
 }
 
 fn is_zero(value: &u32) -> bool {

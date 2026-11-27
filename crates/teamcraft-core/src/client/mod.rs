@@ -94,6 +94,8 @@ mod strict_view;
 mod sync;
 mod sync_progress;
 mod sync_trace;
+#[cfg(all(feature = "test-hooks", not(target_arch = "wasm32")))]
+mod test_hooks;
 mod thread_turns;
 #[cfg(feature = "ui")]
 mod ui_commands;

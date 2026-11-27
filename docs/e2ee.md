@@ -3662,13 +3662,51 @@ independent crypto review of these points is still asked for before any app swit
   was made before (or never noted) uploads a whole new stock with `replaces_stock` once; the server
   drops the device's unused regular packages in the same transaction. Packages claimed before stay
   with their claimers. An older server ignores the field.
-- **Not yet** (#1924's follow-up): a role log "off" as permission for a welcome without the
-  extension, the held welcome's tree diff as timeline lines after an add-back, the server's early
-  refusal from the commit's authenticated data, end-to-end tests that need a modified client's commit
-  in the core suite (a plain member's signed removal refused alike, race and rewind convergence,
-  mixed versions) and the withheld-roster retry ending in an admin's welcome, the UI (#1897), and the
-  independent crypto review asked for above. Until then the feature stays off and no channel turns
-  strict.
+
+**Modified clients, convergence and the add-back** (#2251, `strict-channels` still off). In
+`teamcraft-core` (`client/strict_channels.rs`, `client/groups.rs`), `teamcraft-server` and the UI:
+
+- **Tests with a modified client** (`tests/suite/strict_channels.rs`): the core's `test-hooks` feature,
+  only ever a dev-dependency of its own suite, gives `Client::commit_unchecked_change`, which commits
+  a signed change without the committer's verdict (`teamcraft_crypto::mls::test_hooks::
+  set_unchecked_commits`), as a modified client could (finding 3); `FakeServer::withhold_roster` shows
+  one reader an older roster. Tested: a plain member's signed removal or addition refused alike by
+  every member, "Remove {name} and continue" and "Continue" through the rewind, two admins continuing
+  at once, a withheld roster making a device fall out and an admin's welcome bringing it back, and a
+  member's welcome held until the user takes it after `strict_rejoin_wait`.
+- **Two admins continuing at once.** A rewind names the refused commit it replaces (`replaces`, the
+  stop's queue entry). The server rewinds only while that commit still holds the epoch; otherwise it
+  answers an epoch conflict, and the second admin catches up: the first one's commit for the stopped
+  epoch ends its stop, and its own removal is then done already or an ordinary commit. Before, the
+  second rewind dropped the first one's continuation, which its committer and the members who had
+  merged it already were past, and the group parted. A rewind without the field (an older app)
+  replaces any commit of the epoch, as before.
+- **The roster is read before a workspace signer's commit is processed, not after.** openmls spends
+  the epoch's handshake secret when it decrypts a commit, so judging the same commit again on the
+  same group fails ("deleted to preserve forward secrecy"), and the retry stopped the device instead.
+  The app now decides from the authenticated data, which MLS sends unencrypted, whether the commit
+  may be judged on the roster (`mls::strict_commit_reads_roster`: a roles change signed as a workspace
+  signer, a rename or move, and a membership change by somebody the context doesn't name as an admin,
+  except leaving), reads the roster first and processes the commit once, as the design says. A
+  roster that still doesn't judge the signer makes the device go past the entry and ask to be added
+  back at once. This also closes a stop on an honest server: a removal by a workspace admin promoted
+  just before was judged on the device's older roster and refused (`Refused`, not a retry, since a
+  membership change names no roster version), and nobody else stopped to continue from.
+- **A welcome back is checked also when the device kept its group.** Dropping the group for the
+  welcome dropped the record of the rejoin request with it, so the welcome's sender wasn't checked
+  and any member's welcome was opened at once. The check now takes the rejoin from its caller.
+- **Who is new or gone after an add-back.** When a device that knew the channel strict drops its
+  group for a welcome back, it keeps the group's users (until a welcome is opened, also across held
+  ones). After it is back, from an admin's welcome or on the user's word, it writes a line for every
+  user new in the tree or gone from it (`ConversationEvent::ChangedWhileAway`, derived from the
+  welcome it opened; a member's message of that kind stays hidden). A held welcome's `joined` and
+  `gone` are against that tree too; before, the dropped group left them against none. Desktop and web
+  show the lines (`ws-joined-while-away`, `ws-gone-while-away`); Android and iOS pass over the event
+  until they render it (#2464).
+- **Not yet**: a role log "off" (or the chain of roles changes) as permission for a welcome without
+  the extension (#2251, a proposal for decision), the server's early refusal from the commit's
+  authenticated data, the lines above on Android and iOS (#2464), and the independent crypto review
+  asked for above. Until then the feature stays off and no channel turns strict.
 
 ### 4.6.3 Noticing a withheld channel role change (issue #876)
 

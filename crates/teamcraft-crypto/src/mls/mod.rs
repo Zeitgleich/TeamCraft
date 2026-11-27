@@ -33,13 +33,18 @@ pub use rejoin::{RejoinRequest, SignedRejoinRequest, VerifiedRejoinRequest};
 pub use stored_key_packages::{StoredKeyPackage, delete_key_package, key_package_ref, stored_key_packages};
 pub use strict_ready::{SignedStrictReady, StrictAsk, StrictReady};
 
-use crate::channel_anchor::{AnchorError, CHANNEL_ANCHOR_EXTENSION_TYPE, PropertiesChangeError};
+use crate::channel_anchor::{
+  AnchorError, CHANNEL_ANCHOR_EXTENSION_TYPE, PROPERTIES_CHANGE_AAD_MAGIC, PropertiesChangeError,
+};
 use crate::identity::{DeviceKeyPair, IdentityError, SignedDeviceCertificate, VerifiedDevice};
 use crate::ids::{ConversationId, DeviceId, UserId};
 use crate::membership::{
   ChangeId, IdentityDirectory, MembershipAction, MembershipError, SignedMembershipChange,
 };
-use crate::strict_roles::{STRICT_ROLES_EXTENSION_TYPE, StrictRolesError};
+use crate::strict_roles::{
+  STRICT_ROLES_AAD_MAGIC, STRICT_ROLES_EXTENSION_TYPE, SignedStrictRolesChange, StrictRoleKind, StrictRoles,
+  StrictRolesError, StrictSignerRole,
+};
 
 /// The only ciphersuite: X25519, ChaCha20-Poly1305, SHA-256, Ed25519 (matches the device keys).
 pub const CIPHERSUITE: Ciphersuite = Ciphersuite::MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519;
@@ -262,6 +267,49 @@ pub fn users_named_in_change(message: &[u8]) -> Vec<UserId> {
   vec![target, signed.signer_user()]
 }
 
+/// Whether a commit in a strict channel with `roles` may be judged on the workspace roster (e2ee.md
+/// §4.6.2, "Workspace signers"), so the app reads the roster **before** it processes the commit:
+/// processing decrypts it, which spends the epoch's handshake secret, and the same group can't
+/// process the commit a second time. Read from the authenticated data, which MLS sends unencrypted,
+/// and verified by nothing here: a wrong answer costs a roster read, or a retry the app treats as
+/// falling out. True for a roles change signed as a workspace signer, any rename or move, and a
+/// membership change signed by somebody the roles don't name as an admin, except leaving.
+pub fn strict_commit_reads_roster(message: &[u8], roles: &StrictRoles) -> bool {
+  let Ok(protocol) =
+    MlsMessageIn::tls_deserialize_exact(message).map(MlsMessageIn::try_into_protocol_message)
+  else {
+    return false;
+  };
+  let Ok(ProtocolMessage::PrivateMessage(private)) = protocol else {
+    return false;
+  };
+  let aad = private.aad();
+  if let Some(signed) = aad.strip_prefix(STRICT_ROLES_AAD_MAGIC) {
+    return SignedStrictRolesChange::from_bytes(signed)
+      .is_ok_and(|signed| signed.change().signer_role == StrictSignerRole::Workspace);
+  }
+  if aad.starts_with(PROPERTIES_CHANGE_AAD_MAGIC) {
+    return true;
+  }
+  if aad.is_empty() || aad.starts_with(group::REJOIN_AAD_MAGIC) {
+    return false;
+  }
+  let Ok(signed) = SignedMembershipChange::from_bytes(aad) else {
+    return false;
+  };
+  let signer = signed.signer_user();
+  let is_admin = roles
+    .role_of(signer)
+    .is_some_and(|role| role.role == StrictRoleKind::Admin);
+  let is_leaving = match *signed.unverified().action() {
+    MembershipAction::RemoveUser { user_id } | MembershipAction::RemoveDevice { user_id, .. } => {
+      user_id == signer
+    },
+    MembershipAction::AddUser { .. } => false,
+  };
+  !is_admin && !is_leaving
+}
+
 /// The capabilities every leaf of this device announces: the channel anchor (e2ee.md §4.6.5,
 /// "Who can be in an anchored group"), so the device can be added to anchored groups, plus
 /// `extra`. Without it openmls refuses the leaf wherever a group requires the anchor.
@@ -288,13 +336,15 @@ pub fn announces_strict_roles() -> bool {
   ANNOUNCES_STRICT_ROLES && !test_hooks::is_legacy_leaves()
 }
 
-/// Hooks for other crates' tests of mixed versions (feature `test-hooks`, never in an app).
+/// Hooks for other crates' tests of mixed versions and modified clients (feature `test-hooks`,
+/// never in an app).
 #[cfg(feature = "test-hooks")]
 pub mod test_hooks {
   use std::cell::Cell;
 
   thread_local! {
     static IS_LEGACY_LEAVES: Cell<bool> = const { Cell::new(false) };
+    static IS_UNCHECKED_COMMITS: Cell<bool> = const { Cell::new(false) };
   }
 
   /// While set, the leaves and key packages made on this thread don't announce strict channels,
@@ -306,11 +356,27 @@ pub mod test_hooks {
   pub(crate) fn is_legacy_leaves() -> bool {
     IS_LEGACY_LEAVES.with(Cell::get)
   }
+
+  /// While set, [`super::ConversationGroup::commit_membership_change`] on this thread commits a
+  /// signed change without judging its signer, as a modified client could (e2ee.md §4.6.2,
+  /// finding 3): the members judge it as they would any commit. The change's own checks against
+  /// the commit (who is added or removed) still hold, so the commit is what it claims.
+  pub fn set_unchecked_commits(is_unchecked: bool) {
+    IS_UNCHECKED_COMMITS.with(|cell| cell.set(is_unchecked));
+  }
+
+  pub(crate) fn is_unchecked_commits() -> bool {
+    IS_UNCHECKED_COMMITS.with(Cell::get)
+  }
 }
 
 #[cfg(not(feature = "test-hooks"))]
 mod test_hooks {
   pub(crate) fn is_legacy_leaves() -> bool {
+    false
+  }
+
+  pub(crate) fn is_unchecked_commits() -> bool {
     false
   }
 }

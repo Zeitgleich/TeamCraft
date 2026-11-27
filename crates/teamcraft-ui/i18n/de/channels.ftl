@@ -340,6 +340,10 @@ ws-pinned = { $by } hat eine Nachricht angeheftet
 ws-admin-joined = { $name } ist diesem Kanal als Workspace-Admin beigetreten
 ws-admin-joined-approved = { $name } ist diesem Kanal als Workspace-Admin beigetreten, zugelassen von { $by }
 ws-admin-joined-added = { $name } ist diesem Kanal als Workspace-Admin beigetreten, hinzugefügt von { $by }
+# A device added back into a strict channel tells who is new or gone since its last tree
+# (e2ee.md §4.6.2, "Falling out in a strict channel").
+ws-joined-while-away = { $name } ist hinzugekommen, während dieses Gerät nicht im Kanal war
+ws-gone-while-away = { $name } war nicht mehr im Kanal, als dieses Gerät zurückkam
 log-toolbar-label = Optionen der Protokollansicht
 log-mode-log = Protokoll
 log-mode-chat = Chat

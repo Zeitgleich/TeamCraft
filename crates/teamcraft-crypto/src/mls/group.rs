@@ -43,7 +43,7 @@ use crate::strict_roles::{
 const GROUP_ID_PREFIX: &[u8] = b"teamcraft/conversation/";
 /// Marks a commit's authenticated data as a [`SignedRejoinRequest`] (a signed membership change
 /// starts with its version byte, never with this).
-const REJOIN_AAD_MAGIC: &[u8] = b"TCRJ";
+pub(super) const REJOIN_AAD_MAGIC: &[u8] = b"TCRJ";
 /// How many epochs after signing a membership change may still be committed (if nothing changed its
 /// target user meanwhile). A constant rather than a setting: every member must decide the same way,
 /// or the group splits.
@@ -685,8 +685,13 @@ impl ConversationGroup {
     directory: &impl IdentityDirectory,
     authority: &impl MembershipAuthority,
   ) -> Result<CommitOutput, MlsError> {
-    // Honest clients never commit what they would refuse (e2ee.md §4.6.2).
-    let change = &self.authorize_signed_change(signed_change, directory, authority)?;
+    // Honest clients never commit what they would refuse (e2ee.md §4.6.2); only a test plays a
+    // modified client that does (`test_hooks::set_unchecked_commits`, never in an app).
+    let change = &if super::test_hooks::is_unchecked_commits() {
+      signed_change.unverified().clone()
+    } else {
+      self.authorize_signed_change(signed_change, directory, authority)?
+    };
     let mut validated_key_packages = Vec::with_capacity(key_packages.len());
     let mut proposed = ProposedMembership::default();
     for bytes in key_packages {

@@ -1184,3 +1184,53 @@ fn alone_turn_on(alice: &Client) -> SignedStrictRolesChange {
   .sign(&alice.user.device, &alice.user.certificate)
   .unwrap()
 }
+
+/// Which commits the app reads the roster for before it processes them (e2ee.md §4.6.2, "Workspace
+/// signers"): told from the authenticated data alone, since processing spends the epoch's secret.
+mod reads_roster {
+  use super::*;
+  use crate::mls::strict_commit_reads_roster;
+  use crate::strict_roles::STRICT_ROLES_AAD_MAGIC;
+
+  #[test]
+  fn only_for_a_signer_the_context_does_not_name_as_admin() {
+    let mut world = StrictWorld::new();
+    let roles = world.group(BOB).strict_roles().unwrap().unwrap();
+    let cases = [
+      // A workspace signer's removal, and a moderator's (who may be a workspace signer too).
+      (world.signed(ALICE, remove(BOB)), true),
+      (world.signed(DAVE, remove(BOB)), true),
+      // An admin of the context, and somebody leaving.
+      (world.signed(CAROL, remove(BOB)), false),
+      (world.signed(BOB, remove(BOB)), false),
+    ];
+    for (signed, expected) in cases {
+      let commit = world.raw_commit(CAROL, &[], &[BOB], signed.to_bytes().unwrap());
+      assert_eq!(
+        strict_commit_reads_roster(&commit, &roles),
+        expected,
+        "signed by {}",
+        signed.signer_user().get()
+      );
+    }
+    let leaf_refresh = world.raw_commit(BOB, &[], &[], Vec::new());
+    assert!(!strict_commit_reads_roster(&leaf_refresh, &roles));
+  }
+
+  #[test]
+  fn for_a_roles_change_signed_as_a_workspace_signer() {
+    let mut world = StrictWorld::new();
+    let roles = world.group(BOB).strict_roles().unwrap().unwrap();
+    for (signer, expected) in [(ALICE, true), (CAROL, false)] {
+      let change = world.roles_change(signer, world.roles());
+      let mut aad = STRICT_ROLES_AAD_MAGIC.to_vec();
+      aad.extend_from_slice(&change.to_bytes().unwrap());
+      let commit = world.raw_commit(BOB, &[], &[], aad);
+      assert_eq!(
+        strict_commit_reads_roster(&commit, &roles),
+        expected,
+        "signer {signer}"
+      );
+    }
+  }
+}

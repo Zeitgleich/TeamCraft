@@ -34,6 +34,9 @@ strict-channels = ["teamcraft-crypto/strict-channels"]
 integration = []
 # Test kits for other crates' tests (`api::black_hole`: Happy Eyeballs with a black-holed IPv6).
 test-support = []
+# Hooks for this crate's own tests (`client::test_hooks`): a modified client's commits in strict
+# channels (e2ee.md §4.6.2). Only ever a dev-dependency feature; no app turns it on.
+test-hooks = ["teamcraft-crypto/test-hooks"]
 
 [dependencies]
 teamcraft-proto.workspace = true
@@ -208,6 +211,9 @@ crc32fast = "1.5.0"
 # Strict channels (e2ee.md §4.6.2, tests/suite/strict_channels.rs): the tests' leaves announce the
 # capability, which the apps don't yet (issue #1896); `test-hooks` plays apps from before (#1924).
 teamcraft-crypto = { path = "../teamcraft-crypto", features = ["strict-channels", "test-hooks"] }
+# This crate's own test hooks for its suite (`client::test_hooks`, tests/suite/strict_channels.rs):
+# a dev-dependency only, so no build of an app carries them.
+teamcraft-core = { path = ".", default-features = false, features = ["test-hooks"] }
 tokio = { workspace = true, features = ["rt", "macros", "time", "test-util"] }
 # The call view the apps keep from the call events, for the roster tests (tests/suite/calls.rs).
 teamcraft-client-api = { path = "../teamcraft-client-api" }

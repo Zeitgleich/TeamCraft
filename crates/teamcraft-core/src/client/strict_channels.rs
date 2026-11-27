@@ -34,7 +34,7 @@ use crate::api::ServerApi;
 use crate::convert;
 use crate::error::CoreError;
 use crate::records;
-use crate::store::{LocalStore, Table};
+use crate::store::{AwayChange, ConversationEvent, LocalStore, MessageContent, StoredMessage, Table};
 use crate::trust::{PinnedDirectory, WorkspaceAuthority};
 
 /// Where this device stopped in a strict channel (e2ee.md §4.6.2, D4): the refused commit and why.
@@ -83,9 +83,10 @@ pub struct StrictRejoinPrompt {
   pub is_due: bool,
 }
 
-/// Whether a welcome is opened ([`Client::check_strict_welcome`]).
+/// Whether a welcome is opened ([`Client::check_strict_welcome`]): with the lines for who is new
+/// or gone since this device's last tree, after an add-back into a channel it knew strict.
 pub(super) enum StrictWelcome {
-  Open,
+  Open(Vec<(UserId, AwayChange)>),
   Refused(MlsError),
 }
 
@@ -420,25 +421,34 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
   /// workspace signer, or on the user's word ([`Self::accept_strict_rejoin`]); a welcome without
   /// the roles only after this device saw strict turned off. Called after the welcome was staged,
   /// before it is completed.
+  /// `is_rejoin`: this device asked to be added back (its group was dropped for the welcome
+  /// already, and with it the record of the request).
   pub(super) async fn check_strict_welcome(
     &mut self,
     conversation: ConversationId,
     staged: &StagedJoin,
     directory: &PinnedDirectory,
+    is_rejoin: bool,
   ) -> Result<StrictWelcome, CoreError> {
     let maybe_known = self
       .account_data()
       .known_strict_roles(conversation)
       .and_then(|known| known.maybe_roles.clone());
     let Some(known_bytes) = maybe_known else {
-      return Ok(StrictWelcome::Open);
+      return Ok(StrictWelcome::Open(Vec::new()));
     };
     // Only a device that fell out: a further device of the user joins like any (any member adds
     // it, §4.6.2 "A device's further devices don't change"), and has nothing it could have refused.
-    let has_fallen_out = self.has_group(conversation)? || self.has_requested_rejoin(conversation)?;
+    let has_fallen_out =
+      is_rejoin || self.has_group(conversation)? || self.has_requested_rejoin(conversation)?;
     if !has_fallen_out {
-      return Ok(StrictWelcome::Open);
+      return Ok(StrictWelcome::Open(Vec::new()));
     }
+    let mut tree = Vec::new();
+    for user in staged.claimed_users()? {
+      tree.push(convert::user_from_crypto(user)?);
+    }
+    let maybe_last = self.strict_last_tree(conversation)?;
     let maybe_hold =
       records::get_json::<StrictRejoinHold>(&self.store, Table::AppliedChanges, &hold_key(conversation))?;
     if maybe_hold.as_ref().is_some_and(|hold| hold.is_accepted) {
@@ -446,7 +456,7 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       self
         .store
         .delete(Table::AppliedChanges, &hold_key(conversation))?;
-      return Ok(StrictWelcome::Open);
+      return Ok(StrictWelcome::Open(self.away_lines(maybe_last.as_deref(), &tree)));
     }
     let known = StrictRoles::from_bytes(known_bytes.as_slice()).map_err(MlsError::from)?;
     let verdict = if staged.strict_roles()?.is_none() {
@@ -467,19 +477,12 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
         self
           .store
           .delete(Table::AppliedChanges, &hold_key(conversation))?;
-        return Ok(StrictWelcome::Open);
+        return Ok(StrictWelcome::Open(self.away_lines(maybe_last.as_deref(), &tree)));
       },
       Err(error) => error,
     };
     let sender = convert::user_from_crypto(staged.sender()?.user_id)?;
-    let mut tree = Vec::new();
-    for user in staged.claimed_users()? {
-      tree.push(convert::user_from_crypto(user)?);
-    }
-    let last = match self.group(conversation)? {
-      Some(_) => self.group_users(conversation)?,
-      None => Vec::new(),
-    };
+    let last = maybe_last.unwrap_or_default();
     let hold = StrictRejoinHold {
       sender,
       first_held_at_ms: maybe_hold.map_or(self.now_ms(), |hold| hold.first_held_at_ms),
@@ -491,6 +494,65 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     tracing::warn!(conversation_id = %conversation, %error, "held a welcome back into a strict channel");
     self.note_strict_view(conversation)?;
     Ok(StrictWelcome::Refused(error))
+  }
+
+  /// Keeps the users of the conversation's group before it is dropped for a welcome back, if this
+  /// user's devices knew the channel strict: what the device shows who is new or gone against once
+  /// it is back (e2ee.md §4.6.2, "Falling out in a strict channel"). Kept until a welcome is
+  /// opened, also across held ones.
+  pub(super) fn keep_strict_last_tree(&mut self, conversation: ConversationId) -> Result<(), CoreError> {
+    let is_known_strict = self
+      .account_data()
+      .known_strict_roles(conversation)
+      .is_some_and(|known| known.maybe_roles.is_some());
+    if !is_known_strict || !self.has_group(conversation)? {
+      return Ok(());
+    }
+    let users = self.group_users(conversation)?;
+    records::put_json(
+      &self.store,
+      Table::AppliedChanges,
+      &last_tree_key(conversation),
+      &users,
+    )
+  }
+
+  /// Writes a line for each of `lines` after this device was added back into the conversation
+  /// with `welcome` (e2ee.md §4.6.2): derived here from the welcome it opened, its ID made from the
+  /// welcome and the user, so the line is written once. Forgets the last tree.
+  pub(super) fn note_changed_while_away(
+    &mut self,
+    conversation: ConversationId,
+    welcome: MlsMessageId,
+    lines: &[(UserId, AwayChange)],
+  ) -> Result<(), CoreError> {
+    self
+      .store
+      .delete(Table::AppliedChanges, &last_tree_key(conversation))?;
+    for &(user, change) in lines {
+      self.store.upsert_message(&StoredMessage {
+        conversation_id: conversation,
+        client_message_id: away_line_id(welcome, user),
+        maybe_server_id: None,
+        sender_user_id: user,
+        maybe_thread_id: None,
+        sent_at_ms: welcome.snowflake().unix_millis(),
+        content: MessageContent::Event {
+          event: ConversationEvent::ChangedWhileAway { user, change },
+        },
+        is_edited: false,
+        edits: Vec::new(),
+        maybe_edit_id: None,
+        is_pinned: false,
+        maybe_verified_commit: Some(welcome),
+        maybe_server_change: None,
+        maybe_unreadable: None,
+      })?;
+    }
+    if !lines.is_empty() {
+      tracing::info!(conversation_id = %conversation, mls_message_id = %welcome, lines = lines.len(), "noted who is new or gone since this device's last tree");
+    }
+    Ok(())
   }
 
   /// Turning strict on only for a private channel (e2ee.md §4.6.2): never a DM, a meeting chat,
@@ -516,9 +578,15 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       .get_mut(&conversation)
       .ok_or(CoreError::NoGroup(conversation))?;
     let output = group.commit_leaf_refresh(&self.provider, &self.account.device)?;
-    match self.post_commit(conversation, output, &[]).await? {
-      Some(_) => Ok(()),
-      None => Err(CoreError::StrictNotNow(
+    if self.post_commit(conversation, output, &[]).await?.is_some() {
+      return Ok(());
+    }
+    // Another admin continued first (two at once, §4.6.2 "Epoch conflicts and convergence"):
+    // their commit for the stopped epoch ends this device's stop once it is merged.
+    self.sync_mls(conversation).await?;
+    match self.strict_stop(conversation)? {
+      None => Ok(()),
+      Some(_) => Err(CoreError::StrictNotNow(
         conversation,
         "the server holds no later epoch to continue from",
       )),
@@ -533,6 +601,38 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     };
     let hash = <[u8; 32]>::try_from(head.hash.as_slice()).map_or(StrictHash::ZERO, StrictHash::from_bytes);
     Ok((head.version, hash))
+  }
+
+  /// The users of the group this device held before it was dropped for a welcome back
+  /// ([`Self::keep_strict_last_tree`]), or of the group it still holds.
+  fn strict_last_tree(&mut self, conversation: ConversationId) -> Result<Option<Vec<UserId>>, CoreError> {
+    if let Some(users) =
+      records::get_json::<Vec<UserId>>(&self.store, Table::AppliedChanges, &last_tree_key(conversation))?
+    {
+      return Ok(Some(users));
+    }
+    match self.group(conversation)? {
+      Some(_) => Ok(Some(self.group_users(conversation)?)),
+      None => Ok(None),
+    }
+  }
+
+  /// Who is new in `tree` and who is gone from `maybe_last`, this user left out; nothing when
+  /// this device doesn't know its last tree (a line for everybody would say nothing).
+  fn away_lines(&self, maybe_last: Option<&[UserId]>, tree: &[UserId]) -> Vec<(UserId, AwayChange)> {
+    let Some(last) = maybe_last else {
+      return Vec::new();
+    };
+    let me = self.account.user_id;
+    let joined = tree
+      .iter()
+      .filter(|user| **user != me && !last.contains(user))
+      .map(|user| (*user, AwayChange::Joined));
+    let gone = last
+      .iter()
+      .filter(|user| **user != me && !tree.contains(user))
+      .map(|user| (*user, AwayChange::Gone));
+    joined.chain(gone).collect()
   }
 
   /// Whether this user is the only admin of the roles this device knew for the conversation:
@@ -569,4 +669,16 @@ fn stop_key(conversation: ConversationId) -> String {
 
 pub(super) fn hold_key(conversation: ConversationId) -> String {
   format!("strict-hold:{conversation}")
+}
+
+fn last_tree_key(conversation: ConversationId) -> String {
+  format!("strict-last-tree:{conversation}")
+}
+
+/// A line's ID made from the welcome and the user ([`Client::note_changed_while_away`]).
+fn away_line_id(welcome: MlsMessageId, user: UserId) -> teamcraft_proto::ClientMessageId {
+  let mut bytes = [0u8; 16];
+  bytes[..8].copy_from_slice(&welcome.snowflake().get().to_be_bytes());
+  bytes[8..].copy_from_slice(&user.snowflake().get().to_be_bytes());
+  teamcraft_proto::ClientMessageId::from_bytes(bytes)
 }

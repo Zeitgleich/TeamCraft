@@ -143,12 +143,15 @@ impl Database {
   /// with `audit`, in one transaction. Entries of `epoch` itself other than its commit (proposals,
   /// key messages, the welcomes into it) stay: they belong to the last good epoch. A group already
   /// in `epoch` takes the commit like [`Self::post_mls_commit`]; one behind it is an epoch
-  /// conflict. An epoch past `bounds` changes nothing.
+  /// conflict. An epoch past `bounds` changes nothing. With `maybe_replaces`, only while that
+  /// commit still holds `epoch`: another admin's continuation that came first is an epoch
+  /// conflict, not dropped.
   #[allow(clippy::too_many_arguments)]
   pub async fn rewind_mls(
     &self,
     conversation: ConversationId,
     epoch: u64,
+    maybe_replaces: Option<MlsMessageId>,
     sender: DeviceId,
     commit: &NewMlsMessage<'_>,
     welcomes: &[NewMlsMessage<'_>],
@@ -185,6 +188,24 @@ impl Database {
     .await?;
     if is_too_old {
       return Ok(RewindOutcome::TooFarBack { current_epoch });
+    }
+    if let Some(replaced) = maybe_replaces
+      && current > epoch_db
+    {
+      let is_replaced_there = sqlx::query_scalar!(
+        r#"SELECT EXISTS (
+             SELECT 1 FROM mls_messages
+             WHERE conversation_id = $1 AND epoch = $2 AND kind = 'commit' AND id = $3
+           ) AS "is_replaced_there!""#,
+        to_db(conversation),
+        epoch_db,
+        to_db(replaced),
+      )
+      .fetch_one(&mut *tx)
+      .await?;
+      if !is_replaced_there {
+        return Ok(RewindOutcome::EpochConflict { current_epoch });
+      }
     }
     let dropped = sqlx::query!(
       r#"DELETE FROM mls_messages
