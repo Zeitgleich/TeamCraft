@@ -17,7 +17,6 @@ use teamcraft_client_api::backend::ChatBackend;
 use teamcraft_client_api::model::{
   Conversation as ConversationView, ConversationKind as ConversationKindView, UserId,
 };
-use teamcraft_client_api::notify::{MentionRules, is_mentioned};
 use teamcraft_core::api::dpop::DpopProver;
 use teamcraft_core::api::{AccessTokenSource, ApiError, HttpRendezvous, HttpServerApi, ServerApi};
 use teamcraft_core::client::NewDeviceLink;
@@ -29,12 +28,10 @@ use teamcraft_core::client::{
 use teamcraft_core::clock::{Clock as _, SystemClock};
 use teamcraft_core::composer_preview::ComposerFetches;
 use teamcraft_core::connection::{ConnectionStatus, NetworkChanges};
-use teamcraft_core::notified;
-use teamcraft_core::notify_rules::load_mention_preferences;
 use teamcraft_core::pending_work::PendingWork;
 use teamcraft_core::prefetch::load_segment_prefetch;
 use teamcraft_core::push_guard;
-use teamcraft_core::push_preview::{PreviewGap, PushPreview, is_read, push_preview};
+use teamcraft_core::push_preview::{PreviewGap, PushPreview, push_preview};
 use teamcraft_core::push_probe::{PROBE_OVERLAY_BYTES, probe_push};
 use teamcraft_core::records;
 use teamcraft_core::runner::{ClientJob, RunnerCommand, RunnerHandle, RunnerSettings, SyncRunner};
@@ -52,16 +49,21 @@ use teamcraft_crypto::recovery_key::RecoveryKey;
 use teamcraft_crypto::secret::{SecretBytes, SymmetricKey};
 use teamcraft_proto::{
   CallJoinTokenResponse, ConversationId, CreateCallJoinTokenRequest, DeviceActivity, DeviceId, Id, PushKind,
-  PushWakeUp,
 };
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::{JoinHandle, LocalSet};
+use tracing::Instrument as _;
 
 use crate::calls::{CallHub, CallPreparation, RunningCalls};
 use crate::device_proofs::{DeviceKeyProofs, DeviceProofKey};
 use crate::error::TeamCraftError;
 use crate::logging::LIFECYCLE;
-use crate::perf_jobs;
+use crate::logging::{self, JobClock};
+use crate::perf_jobs::{self, PerfJobKind};
+use crate::push_lane::{
+  PushEngineAnswer, PushEnginePart, PushEngineWait, PushLane, SyncRunning, is_ring_answered, log_push_opened,
+  notification_of, record_push, store_or_server_preview,
+};
 use crate::reads::{ReadLanes, ReadQueue};
 use crate::server_pool::ServerPool;
 use crate::store_threads::StoreHold;
@@ -86,7 +88,7 @@ const SEGMENT_PLAN_LIMITS: SealedStoreLimits = SealedStoreLimits {
   max_index_node_bytes: 512 * 1024,
 };
 
-const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
+pub(crate) const READ_LANE_LIMITS: SealedStoreLimits = SealedStoreLimits {
   max_entry_bytes: 4 * 1024 * 1024,
   max_message_bytes: 2 * 1024 * 1024,
   max_index_node_bytes: 1024 * 1024,
@@ -104,10 +106,10 @@ const OPEN_CLIENT_WORK: &str = "open_client";
 const PURGE_BEFORE_SUSPEND: Duration = Duration::from_secs(1);
 /// The longest a wake-up is worked on before its notification is shown with what is known by then.
 /// FCM gives a high-priority message about 10 s; the app hands over to expedited work at 8 s.
-const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
+pub(crate) const PUSH_PREVIEW_BUDGET: Duration = Duration::from_secs(7);
 /// The part of [`PUSH_PREVIEW_BUDGET`] for fetching and decrypting the message alone; the rest is
 /// for catching the conversation up if that fails.
-const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
+pub(crate) const PUSH_FETCH_BUDGET: Duration = Duration::from_secs(4);
 /// What must be left of [`PUSH_PREVIEW_BUDGET`] to start following the groups, which can't be cut
 /// short once begun.
 const PUSH_FOLLOW_MIN_LEFT: Duration = Duration::from_secs(2);
@@ -138,6 +140,31 @@ const LOOP_STABLE_AFTER: Duration = Duration::from_secs(300);
 pub(crate) type LocalFuture<'a, T> = Pin<Box<dyn Future<Output = T> + 'a>>;
 /// Work for the engine thread.
 pub(crate) type Job = Box<dyn for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, ()> + Send>;
+
+/// `job` as work for the engine thread that is timed and named like every job of the app (a
+/// lane-blocked report names it), and where its answer comes.
+pub(crate) fn timed_job<R, F>(job: F) -> (Job, oneshot::Receiver<Result<R, TeamCraftError>>)
+where
+  R: Send + 'static,
+  F: for<'a> FnOnce(&'a mut Engine) -> LocalFuture<'a, Result<R, TeamCraftError>> + Send + 'static,
+{
+  let (reply, answer) = oneshot::channel();
+  let queued = std::time::Instant::now();
+  let timing = perf_jobs::queued(PerfJobKind::EngineQueue, std::any::type_name::<F>());
+  let boxed: Job = Box::new(move |engine| {
+    Box::pin(async move {
+      let span = timing.span();
+      let running = timing.start();
+      let clock = JobClock::start();
+      let result = job(engine).instrument(span).await;
+      logging::slow_job(std::any::type_name::<F>(), clock.started() - queued, clock.ran());
+      running.done();
+      // The caller may have given up waiting (cancelled coroutine); nothing to tell it then.
+      let _ = reply.send(result);
+    })
+  });
+  (boxed, answer)
+}
 
 pub(crate) type Api = HttpServerApi<ForeignTokens>;
 pub(crate) type Store = TrackedStore<LaneStore>;
@@ -173,6 +200,10 @@ pub(crate) struct Engine {
   maybe_device_id: Option<DeviceId>,
   /// One push registration at a time, beside the sync loop and the jobs ([`PushRegistrar`]).
   push_turn: Rc<tokio::sync::Mutex<()>>,
+  /// Where the app's pushes are opened, beside this thread (issue #2441).
+  push_lane: Arc<PushLane>,
+  /// Whether a sync loop runs, for the push lane, which can't look at [`Self::client`].
+  sync_running: SyncRunning,
   /// Sync loops that died since one last ran for [`LOOP_STABLE_AFTER`].
   loop_deaths: u32,
   maybe_loop_started: Option<tokio::time::Instant>,
@@ -225,15 +256,15 @@ pub(crate) struct SyncSignals {
 
 /// Where a push's preview spent its time, for the `push opened` line: durations only.
 #[derive(Clone, Copy, Debug, Default)]
-struct PushTimes {
+pub(crate) struct PushTimes {
   /// Waiting for the app's access token (a refresh may ask the identity provider).
-  auth_wait: Duration,
+  pub(crate) auth_wait: Duration,
   /// Fetching and decrypting the message (a connection to the server first, after a pause).
-  fetch: Duration,
+  pub(crate) fetch: Duration,
   /// The app's own client catching the conversation up.
-  catch_up: Duration,
+  pub(crate) catch_up: Duration,
   /// The notification extension's probe.
-  probe: Duration,
+  pub(crate) probe: Duration,
 }
 
 /// The new device's wait in the relay ([`Engine::wait_for_link_peer`]): a task on the engine thread
@@ -270,6 +301,11 @@ pub(crate) struct EngineStart {
 #[derive(Clone)]
 pub(crate) struct EngineThreads {
   pub(crate) jobs: mpsc::UnboundedSender<Job>,
+  /// The pushes' part on the engine, taken before the jobs ([`PushLane`], issue #2441).
+  pub(crate) push_jobs: mpsc::UnboundedSender<Job>,
+  /// Where the app's pushes are opened, beside the engine. Weak: the engine owns it, so its store
+  /// connection closes with the engine's (a reset renames the files once every connection let go).
+  pub(crate) push_lane: std::sync::Weak<PushLane>,
   pub(crate) reads: ReadQueue,
   /// The server for requests that run on the HTTP runtime and need nothing of the engine.
   pub(crate) http: Arc<ServerPool>,
@@ -335,14 +371,14 @@ pub(crate) enum PushOpening {
 impl PushOpening {
   /// Whether this opening asks the server for the read position: only a late look of the app's own
   /// client, while it isn't syncing (the gateway keeps it fresh then).
-  fn refreshes_read_position(self, reader: PushReader, is_client_idle: bool) -> bool {
+  pub(crate) fn refreshes_read_position(self, reader: PushReader, is_client_idle: bool) -> bool {
     self == Self::LateLook && reader == PushReader::App && is_client_idle
   }
 
   /// Whether this opening asks the server how a ring ended (issue #1257): only a late look of the
   /// app at a ring. Unlike the read position, also while the sync runs: the gateway doesn't replay
   /// a ring that ended.
-  fn asks_how_a_ring_ended(self, reader: PushReader, kind: &PushKind) -> bool {
+  pub(crate) fn asks_how_a_ring_ended(self, reader: PushReader, kind: &PushKind) -> bool {
     self == Self::LateLook && reader == PushReader::App && *kind == PushKind::Call
   }
 }
@@ -364,7 +400,7 @@ impl PushReader {
   /// Whether the client catches the push's conversation up (welcomes, MLS backlog, messages)
   /// when the preview couldn't read the message: only the app's own, and only while it isn't
   /// syncing (the sync loop brings the message itself).
-  fn catches_up(self, needs_catch_up: bool, is_client_idle: bool) -> bool {
+  pub(crate) fn catches_up(self, needs_catch_up: bool, is_client_idle: bool) -> bool {
     self == Self::App && needs_catch_up && is_client_idle
   }
 
@@ -376,7 +412,7 @@ impl PushReader {
 
 /// Whether a push asks the server for its message, after the store's preview.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PushFetch {
+pub(crate) enum PushFetch {
   /// The store's preview is what a fetch would show too.
   NotNeeded,
   /// The sync loop runs and brings the message itself; the app fills the notification in from the
@@ -386,7 +422,7 @@ enum PushFetch {
 }
 
 impl PushFetch {
-  fn of(needs_server: bool, is_sync_running: bool) -> Self {
+  pub(crate) fn of(needs_server: bool, is_sync_running: bool) -> Self {
     match (needs_server, is_sync_running) {
       (false, _) => Self::NotNeeded,
       (true, true) => Self::LeftToSync,
@@ -397,7 +433,7 @@ impl PushFetch {
 
 /// What came of asking the app for an access token for a push.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum PushAccess {
+pub(crate) enum PushAccess {
   /// Nothing to fetch: not asked.
   NotAsked,
   Supplied,
@@ -410,14 +446,14 @@ enum PushAccess {
 
 impl PushAccess {
   /// Whether more requests would only fail or wait for the same refresh again.
-  fn is_missing(self) -> bool {
+  pub(crate) fn is_missing(self) -> bool {
     matches!(self, Self::Missing | Self::TimedOut)
   }
 }
 
 /// A preview whose message couldn't be read in time: a missing message is the timeout's fault; a
 /// policy or setting cut stays as it is.
-fn timed_out(mut preview: PushPreview) -> PushPreview {
+pub(crate) fn timed_out(mut preview: PushPreview) -> PushPreview {
   if matches!(
     preview.maybe_gap,
     Some(PreviewGap::NoSession | PreviewGap::NotDecrypted)
@@ -518,7 +554,7 @@ fn is_readable(preview: &PushPreview) -> bool {
 }
 
 /// What kind of error it was, for a log line that is exported: never its text.
-fn error_class(error: &TeamCraftError) -> &'static str {
+pub(crate) fn error_class(error: &TeamCraftError) -> &'static str {
   match error {
     TeamCraftError::Network(_) => "network",
     TeamCraftError::SignedOut => "signed_out",
@@ -545,6 +581,7 @@ pub(crate) fn spawn(
   let recovery_start = start.duplicate();
   let (ready, opened) = std::sync::mpsc::channel();
   let (jobs, mut queue) = mpsc::unbounded_channel::<Job>();
+  let (push_jobs, mut push_queue) = mpsc::unbounded_channel::<Job>();
   let own_jobs = jobs.downgrade();
   std::thread::Builder::new()
     .name("teamcraft-engine".into())
@@ -579,9 +616,9 @@ pub(crate) fn spawn(
             return;
           }
           drop(recovery_start);
-          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
+          let _ = ready.send(Ok(engine.handles()));
         } else {
-          let _ = ready.send(Ok((engine.reads.clone(), engine.side_http.clone())));
+          let _ = ready.send(Ok(engine.handles()));
           let opening_started_ms = perf_jobs::now_ms();
           let opened = engine.finish_opening();
           // The jobs queued meanwhile waited for it (issue #2225: "Engine lane blocked: unknown").
@@ -600,17 +637,30 @@ pub(crate) fn spawn(
           }
           drop(recovery_start);
         }
-        while let Some(job) = queue.recv().await {
+        // A push waits for the job that runs, never for the ones queued before it (issue #2441).
+        loop {
+          let job = tokio::select! {
+            biased;
+            Some(job) = push_queue.recv() => job,
+            Some(job) = queue.recv() => job,
+            else => break,
+          };
           job(&mut engine).await;
         }
         engine.stop_runner().await;
       });
     })
     .map_err(|error| OpenError::Failed(TeamCraftError::Core(error.to_string())))?;
-  let (reads, http) = opened
+  let (reads, http, push_lane) = opened
     .recv()
     .map_err(|_| OpenError::Failed(TeamCraftError::EngineStopped))??;
-  Ok(EngineThreads { jobs, reads, http })
+  Ok(EngineThreads {
+    jobs,
+    push_jobs,
+    push_lane,
+    reads,
+    http,
+  })
 }
 
 /// A step of opening the engine, with a panic turned into an error that says where it happened.
@@ -790,6 +840,7 @@ impl Engine {
       is_memory_constrained,
     };
     let read_lanes = lanes.read_lanes();
+    let push_store = lanes.open(READ_LANE_LIMITS, LaneWrites::Allowed);
     let store = engine_store;
     let maybe_account = records::load_account(&store).map_err(open_error)?;
     let reads = ReadQueue::start(
@@ -810,6 +861,14 @@ impl Engine {
       HttpServerApi::new(server_url, tokens.clone()),
       &signals.network,
     ));
+    let sync_running = SyncRunning::default();
+    let push_lane = Arc::new(PushLane::new(
+      push_store,
+      tokens.clone(),
+      side_http.clone(),
+      sync_running.clone(),
+      hold.clone(),
+    ));
     let mut engine = Self {
       is_memory_constrained,
       maybe_push_gateway_url,
@@ -828,6 +887,8 @@ impl Engine {
       shared_downloads,
       maybe_device_id: None,
       push_turn: Rc::default(),
+      push_lane,
+      sync_running,
       loop_deaths: 0,
       maybe_loop_started: None,
       identity_fingerprint: String::new(),
@@ -1211,12 +1272,14 @@ impl Engine {
     }));
     runner.share_connection_status(self.signals.connection.clone());
     let notice = LoopDeathNotice(self.maybe_jobs.clone());
+    let running = self.sync_running.mark();
     // Boxed: the future that owns it is moved by value into its timing below, and a client is too
     // big to pass around on a debug build's stack.
     let runner = Box::new(runner);
     // Its steps run on this thread between the jobs: a job that waits for one names it.
     let task = tokio::task::spawn_local(EngineWork::new(SYNC_LOOP_WORK, async move {
       let _notice = notice;
+      let _running = running;
       runner.run().await
     }));
     self.client = ClientSlot::Running { handle, task };
@@ -1507,6 +1570,9 @@ impl Engine {
     &self.calls
   }
 
+  /// What to do for a push, all of it on this thread: the notification extension's way (iOS), which
+  /// runs in a process of its own where nothing else holds the engine. The app's pushes are opened
+  /// beside the engine instead ([`PushLane::notification`], issue #2441).
   pub(crate) async fn notification_for_push(
     &mut self,
     payload: Vec<u8>,
@@ -1524,95 +1590,73 @@ impl Engine {
         .push_preview_within_budget(&payload, reader, &mut times)
         .await?
     };
-    // Why a notification said less, and how long it took: IDs and reasons only (security.md), so
-    // an exported diagnostics log shows how often each path is taken.
-    if opening != PushOpening::StoreOnly {
-      tracing::info!(
-        target: LIFECYCLE,
-        ?opening,
-        gap = ?preview.maybe_gap,
-        ran_ms = opened_at.elapsed().as_millis(),
-        auth_wait_ms = times.auth_wait.as_millis(),
-        fetch_ms = times.fetch.as_millis(),
-        catch_up_ms = times.catch_up.as_millis(),
-        probe_ms = times.probe.as_millis(),
-        is_client_idle = matches!(self.client, ClientSlot::Idle(_)),
-        "push opened"
-      );
-    }
-    // A later look asks the server how far this user has read: the sync doesn't run in the
-    // background, and a `dismiss` may come after this. Best effort; the store's position else.
     let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
-    if opening.refreshes_read_position(reader, is_client_idle)
-      && let ClientSlot::Idle(client) = &mut self.client
-    {
-      let refreshed = tokio::time::timeout(
-        PUSH_FETCH_BUDGET,
-        client.push_refresh_conversation(preview.wake_up.conversation_id),
-      )
-      .await;
-      if !matches!(refreshed, Ok(Ok(()))) {
-        tracing::debug!("read position not refreshed for a push");
-      }
-    }
-    let is_ring_answered = self.is_ring_answered(&preview.wake_up, opening, reader).await;
-    let is_read = is_read(&self.store, &preview.wake_up);
-    let now_ms = SystemClock.now_ms();
-    let store = &self.store;
-    // A retry is the same push again: counting it would skew the received count and the delay.
-    if opening == PushOpening::Received {
-      push_guard::record_received(store, &preview.wake_up, now_ms);
-    }
-    let is_duplicate = push_guard::is_duplicate(store, &preview.wake_up)?;
-    let maybe_suppression =
-      push_guard::local_suppression(store, &preview.wake_up, now_ms, utc_offset_minutes)?;
-    // Opening the conversation from this notification shows what it showed (issue #1065).
-    if let Err(error) = notified::remember(store, &preview) {
-      tracing::debug!(%error, "notified message not kept");
-    }
-    let mut notification: PushNotification = preview.into();
-    notification.is_duplicate = is_duplicate;
-    notification.is_read = is_read;
-    notification.maybe_suppression = maybe_suppression.map(Into::into);
-    notification.is_ring_answered = is_ring_answered;
-    if !notification.is_mention
-      && let (Some(text), Ok(backend)) = (&notification.maybe_text, self.backend())
-    {
-      let me = backend.me();
-      // Read from the store, where the actions' thread keeps them (issue #2225); a broken record
-      // only costs the preferences.
-      let preferences = load_mention_preferences(&self.store).unwrap_or_default();
-      notification.is_mention = is_mentioned(
-        text,
-        &MentionRules {
-          username: &me.username,
-          display_name: &me.display_name,
-          first_name_is_mention: preferences.first_name_is_mention,
-          channel_mentions_notify: preferences.channel_mentions_notify,
-          keywords: &preferences.keywords,
-        },
+    if opening != PushOpening::StoreOnly {
+      log_push_opened(
+        opening,
+        &preview,
+        opened_at,
+        &times,
+        PushEngineWait::OnEngine,
+        is_client_idle,
       );
     }
-    Ok(notification)
+    if opening.refreshes_read_position(reader, is_client_idle) {
+      self.refresh_read_position(preview.wake_up.conversation_id).await;
+    }
+    let is_ring_answered = is_ring_answered(&self.api(), &preview.wake_up, opening, reader).await;
+    let now_ms = SystemClock.now_ms();
+    let is_duplicate = record_push(&self.store, &preview, opening, now_ms)?;
+    notification_of(
+      &self.store,
+      preview,
+      is_duplicate,
+      is_ring_answered,
+      utc_offset_minutes,
+      now_ms,
+    )
   }
 
-  /// Whether a ring looked at late was answered on another device, as the server's call history says
-  /// (issue #1257). Only a late look of the app asks: a ring opened as it arrives rings, and the
-  /// answer costs up to [`PUSH_FETCH_BUDGET`]. Best effort: `false`, a missed call, when the server
-  /// doesn't answer in time.
-  async fn is_ring_answered(&self, wake_up: &PushWakeUp, opening: PushOpening, reader: PushReader) -> bool {
-    let Some(call) = wake_up.maybe_call_id else {
-      return false;
+  /// The part of an app's push that only this thread can do (issue #2441): catching the
+  /// conversation up with the app's own client, and a late look's read position. Each needs the
+  /// client idle (no sync loop) and is bounded: the catch-up by `deadline`, the read position by
+  /// [`PUSH_FETCH_BUDGET`].
+  pub(crate) async fn push_on_engine(
+    &mut self,
+    payload: &[u8],
+    preview: PushPreview,
+    part: PushEnginePart,
+    deadline: tokio::time::Instant,
+  ) -> Result<PushEngineAnswer, TeamCraftError> {
+    let _step = teamcraft_core::timing::step("push_on_engine");
+    let mut times = PushTimes::default();
+    let preview = if part.catches_up {
+      self
+        .catch_up_preview(payload, preview, PushReader::App, deadline, &mut times)
+        .await?
+    } else {
+      preview
     };
-    if !opening.asks_how_a_ring_ended(reader, &wake_up.kind) {
-      return false;
+    if part.refreshes_read_position && matches!(self.client, ClientSlot::Idle(_)) {
+      self.refresh_read_position(preview.wake_up.conversation_id).await;
     }
-    let api = self.api();
-    let answered = tokio::time::timeout(PUSH_FETCH_BUDGET, push_guard::is_ring_answered(&api, call)).await;
-    if !matches!(answered, Ok(Ok(_))) {
-      tracing::debug!("call history not read for a late ring");
+    Ok(PushEngineAnswer {
+      preview,
+      catch_up: times.catch_up,
+    })
+  }
+
+  /// A later look asks the server how far this user has read: the sync doesn't run in the
+  /// background, and a `dismiss` may come after this. Best effort; the store's position else.
+  async fn refresh_read_position(&mut self, conversation: ConversationId) {
+    let ClientSlot::Idle(client) = &mut self.client else {
+      return;
+    };
+    let refreshed =
+      tokio::time::timeout(PUSH_FETCH_BUDGET, client.push_refresh_conversation(conversation)).await;
+    if !matches!(refreshed, Ok(Ok(()))) {
+      tracing::debug!("read position not refreshed for a push");
     }
-    matches!(answered, Ok(Ok(true)))
   }
 
   /// The preview of a wake-up within [`PUSH_PREVIEW_BUDGET`], so the push service's time for the
@@ -1626,50 +1670,23 @@ impl Engine {
   ) -> Result<PushPreview, TeamCraftError> {
     let started = tokio::time::Instant::now();
     let deadline = started + PUSH_PREVIEW_BUDGET;
-    // The store first: a message the sync already brought needs no token and no connection, which
-    // after a pause costs the radio's wake-up, DNS, TCP and TLS (issue #1662).
-    let stored = push_preview::<Api>(&self.store, None, payload).await?;
     let is_sync_running = matches!(self.client, ClientSlot::Running { .. });
-    let (mut preview, access) = match PushFetch::of(stored.needs_server(), is_sync_running) {
-      PushFetch::NotNeeded => (stored, PushAccess::NotAsked),
-      PushFetch::LeftToSync => {
-        tracing::info!(target: LIFECYCLE, "push left to the running sync");
-        (stored, PushAccess::NotAsked)
-      },
-      PushFetch::Fetch => {
-        self
-          .fetch_for_push(payload, stored, started + PUSH_FETCH_BUDGET, times)
-          .await?
-      },
-    };
-    // The app's own client may catch the conversation up: a conversation this device was just
-    // added to, or keys that changed while the app was closed. Not while the sync loop runs: it
-    // brings the message itself, and taking the client would cut its connection. Never in a
-    // notification extension ([`PushReader::Extension`]). Not without a token either: every
-    // request would ask the app for one again and fail, which is no sign-out.
-    let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
-    if reader.catches_up(preview.needs_catch_up(), is_client_idle)
-      && !access.is_missing()
-      && let ClientSlot::Idle(client) = &mut self.client
-    {
-      let conversation = preview.wake_up.conversation_id;
-      let catch_up_started = tokio::time::Instant::now();
-      let caught = catch_up_for_push(client, conversation, deadline).await;
-      times.catch_up = catch_up_started.elapsed();
-      if let Err(error) = caught {
-        // The class only: an error's text can carry what a server said.
-        let cause = error_class(&error);
-        tracing::info!(target: LIFECYCLE, cause, conversation_id = %conversation, "push catch-up stopped");
-      }
-      let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
-      // The store-only preview names `NoSession` while the message is still missing: then the
-      // first try's reason stays (a failed decryption, a timeout), with any names the catch-up
-      // learned.
-      if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
-        preview = caught_up;
-      } else {
-        preview = with_names_of(preview, caught_up);
-      }
+    let (mut preview, access) = store_or_server_preview(
+      &self.store,
+      &self.http,
+      &self.tokens,
+      payload,
+      started,
+      is_sync_running,
+      times,
+    )
+    .await?;
+    // Not without a token: every request would ask the app for one again and fail, which is no
+    // sign-out.
+    if !access.is_missing() {
+      preview = self
+        .catch_up_preview(payload, preview, reader, deadline, times)
+        .await?;
     }
     if reader.probes(preview.needs_catch_up()) && !access.is_missing() {
       let probe_started = tokio::time::Instant::now();
@@ -1681,48 +1698,44 @@ impl Engine {
     Ok(preview)
   }
 
-  /// The preview with the message fetched from the server, within `fetch_deadline` for the token
-  /// and the fetch together: a slow token refresh leaves less time for the fetch instead of adding
-  /// to it, so a push never holds the engine longer than [`PUSH_FETCH_BUDGET`] here. Without a
-  /// token in time `stored` stays, the store's preview, and the app tries again later.
-  async fn fetch_for_push(
-    &self,
+  /// `preview` after the app's own client caught the conversation up, where that may help: a
+  /// conversation this device was just added to, or keys that changed while the app was closed.
+  /// Not while the sync loop runs: it brings the message itself, and taking the client would cut
+  /// its connection. Never in a notification extension ([`PushReader::Extension`]).
+  async fn catch_up_preview(
+    &mut self,
     payload: &[u8],
-    stored: PushPreview,
-    fetch_deadline: tokio::time::Instant,
+    preview: PushPreview,
+    reader: PushReader,
+    deadline: tokio::time::Instant,
     times: &mut PushTimes,
-  ) -> Result<(PushPreview, PushAccess), TeamCraftError> {
-    let auth_started = tokio::time::Instant::now();
-    let access = match tokio::time::timeout_at(fetch_deadline, self.tokens.fresh_token()).await {
-      Ok(Ok(_)) => PushAccess::Supplied,
-      Ok(Err(_)) => PushAccess::Missing,
-      Err(_elapsed) => PushAccess::TimedOut,
-    };
-    times.auth_wait = auth_started.elapsed();
-    if access.is_missing() {
-      // Either way the store's preview stays: a refresh that failed for now (offline, Doze, the
-      // identity provider slow) is retried later, and the app signs out itself when its session ends.
-      tracing::info!(target: LIFECYCLE, ?access, "no access token for the push");
-      let preview = if access == PushAccess::TimedOut {
-        timed_out(stored)
-      } else {
-        stored
-      };
-      return Ok((preview, access));
+  ) -> Result<PushPreview, TeamCraftError> {
+    let is_client_idle = matches!(self.client, ClientSlot::Idle(_));
+    if !reader.catches_up(preview.needs_catch_up(), is_client_idle) {
+      return Ok(preview);
     }
-    let api = self.api();
-    // Cancel-safe: the preview only reads the store.
-    let fetch_started = tokio::time::Instant::now();
-    let fetched =
-      tokio::time::timeout_at(fetch_deadline, push_preview(&self.store, Some(&api), payload)).await;
-    times.fetch = fetch_started.elapsed();
-    let preview = match fetched {
-      Ok(result) => result?,
-      Err(_elapsed) => timed_out(stored),
+    let ClientSlot::Idle(client) = &mut self.client else {
+      return Ok(preview);
     };
-    Ok((preview, access))
+    let conversation = preview.wake_up.conversation_id;
+    let catch_up_started = tokio::time::Instant::now();
+    let caught = catch_up_for_push(client, conversation, deadline).await;
+    times.catch_up = catch_up_started.elapsed();
+    if let Err(error) = caught {
+      // The class only: an error's text can carry what a server said.
+      let cause = error_class(&error);
+      tracing::info!(target: LIFECYCLE, cause, conversation_id = %conversation, "push catch-up stopped");
+    }
+    let caught_up = push_preview::<Api>(&self.store, None, payload).await?;
+    // The store-only preview names `NoSession` while the message is still missing: then the
+    // first try's reason stays (a failed decryption, a timeout), with any names the catch-up
+    // learned.
+    if caught_up.maybe_gap != Some(PreviewGap::NoSession) {
+      Ok(caught_up)
+    } else {
+      Ok(with_names_of(preview, caught_up))
+    }
   }
-
   /// The preview of a wake-up the extension couldn't read, after catching its conversation up on a
   /// probe (issue #839): an overlay over the store that is dropped afterwards, and the server
   /// through a read-only API. Nothing is saved and nothing is sent; the app processes the same
@@ -2094,6 +2107,15 @@ impl Engine {
   /// sign-out; the sealed store stays).
   pub(crate) fn delete_plaintext_files(&self) -> Result<(), TeamCraftError> {
     delete_plaintext_dirs([self.download_dir.as_path(), self.upload_staging_dir.as_path()])
+  }
+
+  /// What the app's handle keeps of an opened engine besides its job queues.
+  fn handles(&self) -> (ReadQueue, Arc<ServerPool>, std::sync::Weak<PushLane>) {
+    (
+      self.reads.clone(),
+      self.side_http.clone(),
+      Arc::downgrade(&self.push_lane),
+    )
   }
 
   pub(crate) fn backend(&self) -> Result<&CoreChatBackend<Store>, TeamCraftError> {
@@ -2847,7 +2869,7 @@ mod tests {
     use teamcraft_core::push_preview::PUSH_KEY_RECORD;
     use teamcraft_core::store::Table;
     use teamcraft_crypto::push::seal_wakeup;
-    use teamcraft_proto::{Base64Bytes, MessageId, Snowflake};
+    use teamcraft_proto::{Base64Bytes, MessageId, PushWakeUp, Snowflake};
 
     use teamcraft_core::api::fake::FakeServer;
     use teamcraft_crypto::backup::Argon2Settings;
@@ -3083,6 +3105,64 @@ mod tests {
       .await;
     }
 
+    /// Issue #2441 (GlitchTip TEAMCRAFT-4I, 1A, G): a push that arrives while a long job holds the
+    /// engine opens beside it within the app's time instead of waiting for the job. Its part on the
+    /// engine (the catch-up) is dropped, and the engine goes on with its queue after the job.
+    ///
+    /// Real time: the engine runs on a thread of its own, the push on the HTTP runtime.
+    #[tokio::test]
+    async fn a_push_during_a_long_engine_job_opens_within_its_time() {
+      let directory = TestDir::new("push-busy-engine");
+      let (threads, payload) = spawned_engine_with_push(&directory).await;
+      let release = hold_engine(&threads).await;
+      let started = std::time::Instant::now();
+
+      let (notification, engine) = threads
+        .push_lane
+        .upgrade()
+        .unwrap()
+        .as_ref()
+        .clone()
+        .open(threads.push_jobs.clone(), payload, 0, PushOpening::Received)
+        .await
+        .unwrap();
+
+      assert_eq!(engine, PushEngineWait::Busy);
+      assert!(
+        started.elapsed() < crate::push_lane::PUSH_ENGINE_START_WAIT + PUSH_FETCH_BUDGET,
+        "took {:?}",
+        started.elapsed()
+      );
+      assert!(
+        notification.maybe_gap.is_some(),
+        "shown with what is known, tried again later"
+      );
+      drop(release);
+      let (job, answer) = timed_job(|engine| Box::pin(async move { Ok(engine.maybe_device_id.is_some()) }));
+      threads.jobs.send(job).unwrap();
+      assert!(answer.await.unwrap().unwrap(), "the engine goes on");
+    }
+
+    /// The engine's part of a push, when the engine is free for it: the app's client catches the
+    /// conversation up (here it can't reach the server, which only shortens the try).
+    #[tokio::test]
+    async fn a_push_the_engine_is_free_for_is_caught_up_on_it() {
+      let directory = TestDir::new("push-free-engine");
+      let (threads, payload) = spawned_engine_with_push(&directory).await;
+
+      let (_notification, engine) = threads
+        .push_lane
+        .upgrade()
+        .unwrap()
+        .as_ref()
+        .clone()
+        .open(threads.push_jobs.clone(), payload, 0, PushOpening::Received)
+        .await
+        .unwrap();
+
+      assert_eq!(engine, PushEngineWait::Answered);
+    }
+
     /// Tokens as an app hands them over: none (signed out, or a refresh that failed), and on
     /// request a refresh that doesn't end until the returned guard goes.
     #[derive(Default)]
@@ -3201,6 +3281,18 @@ mod tests {
       listener: Listener,
       tokens: Arc<dyn TokenProvider>,
     ) -> Engine {
+      let start = enrolled_start(directory, listener, tokens).await;
+      let mut engine = opened_store(start);
+      engine.open_client().map_err(|_| "client did not open").unwrap();
+      engine
+    }
+
+    /// What opens the engine on a store where the device enrolled earlier.
+    async fn enrolled_start(
+      directory: &TestDir,
+      listener: Listener,
+      tokens: Arc<dyn TokenProvider>,
+    ) -> EngineStart {
       let config = AppConfig {
         server_url: UNREACHABLE_SERVER.into(),
         data_dir: directory.path().to_string_lossy().into_owned(),
@@ -3241,9 +3333,34 @@ mod tests {
         .await
         .unwrap();
       drop(client);
-      let mut engine = opened_store(start);
-      engine.open_client().map_err(|_| "client did not open").unwrap();
-      engine
+      start
+    }
+
+    /// A running engine on an enrolled store, and a push of a message the store doesn't have.
+    async fn spawned_engine_with_push(directory: &TestDir) -> (EngineThreads, Vec<u8>) {
+      let start = enrolled_start(directory, Listener::default(), Arc::new(Token)).await;
+      let payload = sealed_message_push(&opened_store(start.duplicate()));
+      let threads = spawn(&start, Box::new(|_, _, _| {}), StoreHold::detached())
+        .map_err(|_| "engine did not open")
+        .unwrap();
+      (threads, payload)
+    }
+
+    /// Holds the engine with a job that runs until the returned sender goes, like a long backlog
+    /// read; returns once it runs.
+    async fn hold_engine(threads: &EngineThreads) -> oneshot::Sender<()> {
+      let (release, released) = oneshot::channel::<()>();
+      let (running, runs) = oneshot::channel();
+      let job: Job = Box::new(move |_engine| {
+        Box::pin(async move {
+          let _ = running.send(());
+          // Ends when the test drops its sender.
+          let _ = released.await;
+        })
+      });
+      threads.jobs.send(job).unwrap();
+      runs.await.unwrap();
+      release
     }
 
     fn opened_store(start: EngineStart) -> Engine {

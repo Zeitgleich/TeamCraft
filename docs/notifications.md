@@ -471,8 +471,8 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    (issue #1670). A message this device can't read yet (a key or a sender's device it doesn't know)
    goes on as if the wake-up carried none.
 2. Otherwise, while the sync loop runs (the app in the foreground), nothing more: the sync brings the
-   message, and the app fills the placeholder in from the store (`notification_from_store`). A push
-   then holds the engine for milliseconds instead of a fetch on a connection that may be cold.
+   message, and the app fills the placeholder in from the store (`notification_from_store`), instead
+   of a fetch on a connection that may be cold.
 3. Otherwise it fetches and decrypts the one message, reading nothing else. The wait for the app's
    access token and the fetch share 4 s: a slow token refresh leaves less time for the fetch rather
    than adding to it. Without a token the store's preview stays and the app tries again later. The
@@ -489,6 +489,18 @@ audio, file name). How the core gets there, within `PUSH_PREVIEW_BUDGET` (7 s; F
    store in memory and a read-only API that are thrown away afterwards, within 14 s and 4 MB of
    writes (`notification_probe_for_push`, issue #839; e2ee.md §7.2). With less than 12 MB of memory
    to spare it stops after step 3 (`notification_preview_for_push`).
+
+**A push never waits for the engine (issue #2441).** The app's pushes are opened on a lane of their
+own: the store through a read connection of its own, the token and the fetch (steps 1 to 3) on the
+HTTP runtime, so a long job on the engine (a backlog read, a catch-up of another conversation) neither
+delays the notification nor is held up by the push's network waits. Only step 4 needs the engine,
+which owns the app's client: it goes on a queue the engine takes before its other jobs, and if the
+engine hasn't started on it within 1.5 s (a job still runs) the push goes on without it, shows what
+it has and is retried later like any timeout. The push's writes (the diagnostics, which messages were
+shown, what the notification showed) wait at most 1 s for the store's writer; past that the
+notification shows and the writes follow. The `push opened` line names how the push fared with the
+engine (`engine`: not asked, answered, busy, stuck, failed). The iOS notification extension runs in a
+process of its own, where nothing else holds the engine, and keeps opening its pushes there.
 
 Whatever is known by then is shown: "New message" under the sender's name when the text could not be
 read, never nothing. `PushNotification.maybe_gap` says why less was shown (no session, not decrypted,
