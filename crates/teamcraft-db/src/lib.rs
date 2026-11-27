@@ -137,6 +137,7 @@ pub use meeting_notice::{MeetingNoticeDismissal, MeetingNoticeKind, MeetingNotic
 pub use message::{HistoryQuery, NewMessage, StoreOutcome, StoredMessage};
 pub use mls::{
   CommitOutcome, MlsBacklogQuery, NewMlsMessage, PostOutcome, RewindBounds, RewindOutcome, StoredMlsMessage,
+  StoredStrictChange,
 };
 pub use notification::{DeliveryRow, ReceiptRow, StoredSpaceNotifications, StoredUserSettings};
 pub use oidc_sync::{

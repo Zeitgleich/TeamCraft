@@ -8,10 +8,11 @@
 //! last [`SignedStrictRolesChange`], which verifies on its own: the roles, their version and the
 //! chain hash, signed by a channel admin of the context or by a workspace owner or admin.
 //!
-//! This module is the pure part: the encoding, the hash chain, signing, and the two verdicts,
-//! [`StrictRoles::check_change`] (who may change the roles) and [`membership_verdict`] (who may
-//! add or remove whom). Where the extension sits in the group, and how a commit's signer is tied
-//! to a leaf, is [`crate::mls::ConversationGroup`]'s.
+//! This module is the pure part: the encoding, the hash chain, signing, and the verdicts,
+//! [`StrictRoles::check_change`] (who may change the roles), [`membership_verdict`] (who may add
+//! or remove whom) and [`verify_chain`] (the roles a device that fell out carries forward along the
+//! changes the server kept). Where the extension sits in the group, and how a commit's signer is
+//! tied to a leaf, is [`crate::mls::ConversationGroup`]'s.
 
 use sha2::{Digest, Sha256};
 use tls_codec::{DeserializeBytes as _, Serialize as _, TlsDeserializeBytes, TlsSerialize, TlsSize, VLBytes};
@@ -40,6 +41,10 @@ pub const MAX_STRICT_ROLES_BYTES: usize = 8 * 1024;
 pub const STRICT_CHANGE_WINDOW_EPOCHS: u64 = 32;
 /// Marks a commit's authenticated data as a [`SignedStrictRolesChange`].
 pub const STRICT_ROLES_AAD_MAGIC: &[u8] = b"TCSR";
+/// The highest version a roles change may carry: what the server stores with its commit (a signed
+/// 64-bit integer). A constant for the verdict, in a group as along the chain: a change above it
+/// could never be committed, so the roles would be stuck.
+pub const MAX_STRICT_ROLES_VERSION: u64 = i64::MAX as u64;
 
 /// A role a strict channel's context names. Members are implicit and never listed.
 #[derive(
@@ -163,6 +168,22 @@ pub enum StrictRolesError {
   /// commit back and read the roster again; it isn't refused for that.
   #[error("roster version {0} can't be verified yet")]
   RosterUnknown(u64),
+  /// The signed device list of a channel admin who signed a link of the chain ([`verify_chain`])
+  /// can't be verified yet, or doesn't name the signing device: read it again; nothing is refused
+  /// for it.
+  #[error("the device list of {0} can't be verified yet")]
+  DeviceListUnknown(UserId),
+  /// No change of this version continues the chain, but changes of later versions follow: a link
+  /// is missing ([`verify_chain`]).
+  #[error("no roles change of version {0} continues the chain, but later ones follow")]
+  ChainGap(u64),
+  /// Two signed changes of one version both continue the chain ([`verify_chain`]): the device can't
+  /// tell which one the group took.
+  #[error("the roles chain forks")]
+  AmbiguousChain,
+  /// The roles are at [`MAX_STRICT_ROLES_VERSION`]: no change can follow them.
+  #[error("roles version {0} has no next version")]
+  VersionExhausted(u64),
   #[error("strict is off; there is nothing to turn off")]
   NotStrict,
   /// Only channels: a meeting chat never becomes strict (and DMs and the notes are the caller's
@@ -182,6 +203,55 @@ pub enum StrictRolesVerdict {
   Roles(StrictRoles),
   /// Strict is turned off: the extension goes.
   Off,
+}
+
+/// One link of a strict channel's roles chain as the server keeps it (`GET …/mls/strict`, e2ee.md
+/// §4.6.2): the version it was stored under and the [`SignedStrictRolesChange`]'s bytes, unparsed.
+/// The server keeps every commit's change, so a version can have several: a member's junk, a
+/// change the group refused, the one it took.
+#[derive(Clone, Copy, Debug)]
+pub struct ChainLink<'a> {
+  pub version: u64,
+  pub change: &'a [u8],
+}
+
+/// Where a verified roles chain ends ([`verify_chain`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChainEnd {
+  /// Strict, with these roles: the known ones when the chain held nothing after them.
+  Roles(StrictRoles),
+  /// Strict was turned off by the change of this version, whose chain hash is `hash`.
+  Off { version: u64, hash: StrictHash },
+}
+
+/// Verifies a strict channel's roles chain one version at a time ([`verify_chain`] does it at
+/// once), so the caller reads what a step needs ([`Self::signers_for_next`]: the signers' device
+/// lists, the roster) only for the links it reaches, and stops at the first that fails.
+#[derive(Clone, Debug)]
+pub struct ChainVerifier {
+  conversation_id: ConversationId,
+  /// Where the chain ends after the versions taken so far.
+  end: ChainEnd,
+}
+
+/// Who signs the links of the next version that continue the chain, unverified: the users whose
+/// identity and device list the step needs, and whether it needs a fresh roster.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChainSigners {
+  pub users: Vec<UserId>,
+  pub has_workspace_signer: bool,
+}
+
+/// What one link of the next version does to the chain.
+enum Candidate {
+  Continues(ChainEnd),
+  /// Not a change the previous roles allow (junk, another conversation, an unauthorized signer):
+  /// passed over.
+  Ignored,
+  /// Signed for a predecessor the chain doesn't hold: a link is missing, or the chain forks.
+  Unchained,
+  /// Its signer can't be judged yet.
+  Retry(StrictRolesError),
 }
 
 impl StrictRolesChange {
@@ -389,6 +459,8 @@ impl StrictRoles {
         if change.roles.is_empty() {
           return Err(StrictRolesError::NotStrict);
         }
+        // Turning on at the highest version would leave the roles nothing to change to.
+        next_version_after(change.version)?;
         if change.prev_hash != StrictHash::ZERO {
           return Err(StrictRolesError::BrokenChain);
         }
@@ -397,7 +469,7 @@ impl StrictRoles {
         }
       },
       Some(current) => {
-        let expected = current.version().saturating_add(1);
+        let expected = next_version_after(current.version())?;
         if change.version != expected {
           return Err(StrictRolesError::WrongVersion {
             expected,
@@ -412,30 +484,13 @@ impl StrictRoles {
     match change.signer_role {
       StrictSignerRole::ChannelAdmin => {
         let current = maybe_current.ok_or(StrictRolesError::NotStrict)?;
-        let claimed = signed.claimed_signer_or_nobody();
-        let role = current
-          .role_of(claimed)
-          .filter(|role| role.role == StrictRoleKind::Admin)
-          .ok_or(StrictRolesError::NotAllowed(claimed))?;
-        if change.roster_version != 0 {
-          return Err(StrictRolesError::NotAllowed(claimed));
-        }
-        let device = signed.verify_signature(&OneKey {
-          user_id: role.user_id,
-          key: role.identity_key,
-        })?;
+        let device = signed.verify_as_admin_of(current)?;
         if !has_leaf(&device, leaves) {
-          return Err(StrictRolesError::NotAllowed(claimed));
+          return Err(StrictRolesError::NotAllowed(device.user_id()));
         }
       },
       StrictSignerRole::Workspace => {
-        let device = signed.verify_signature(directory)?;
-        let user = device.user_id();
-        match authority.workspace_signer(user, change.roster_version, Judged::Newest) {
-          Standing::Confirmed => {},
-          Standing::Unknown => return Err(StrictRolesError::RosterUnknown(change.roster_version)),
-          Standing::Refused => return Err(StrictRolesError::NotAllowed(user)),
-        }
+        signed.verify_as_workspace_signer(directory, authority, Judged::Newest)?
       },
     }
     if change.roles.is_empty() {
@@ -478,6 +533,354 @@ impl SignedStrictRolesChange {
   fn claimed_signer_or_nobody(&self) -> UserId {
     self.claimed_signer().unwrap_or(UserId::new(0))
   }
+
+  /// Verifies the change as signed by an admin of `previous`: under the identity key those roles
+  /// name, with no roster. Returns the signing device; whether it may sign (a leaf, a listing) is
+  /// the caller's to check.
+  fn verify_as_admin_of(&self, previous: &StrictRoles) -> Result<VerifiedDevice, StrictRolesError> {
+    let claimed = self.claimed_signer_or_nobody();
+    let role = previous
+      .role_of(claimed)
+      .filter(|role| role.role == StrictRoleKind::Admin)
+      .ok_or(StrictRolesError::NotAllowed(claimed))?;
+    if self.change.roster_version != 0 {
+      return Err(StrictRolesError::NotAllowed(claimed));
+    }
+    self.verify_signature(&OneKey {
+      user_id: role.user_id,
+      key: role.identity_key,
+    })
+  }
+
+  /// Verifies the change as signed by a workspace owner or admin of the roster it names, judged
+  /// `judged`.
+  fn verify_as_workspace_signer(
+    &self,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+    judged: Judged,
+  ) -> Result<(), StrictRolesError> {
+    let device = self.verify_signature(directory)?;
+    let user = device.user_id();
+    match authority.workspace_signer(user, self.change.roster_version, judged) {
+      Standing::Confirmed => Ok(()),
+      Standing::Unknown => Err(StrictRolesError::RosterUnknown(self.change.roster_version)),
+      Standing::Refused => Err(StrictRolesError::NotAllowed(user)),
+    }
+  }
+}
+
+impl ChainEnd {
+  /// The version of the change the chain ends with.
+  pub fn version(&self) -> u64 {
+    match self {
+      Self::Roles(roles) => roles.version(),
+      Self::Off { version, .. } => *version,
+    }
+  }
+
+  /// The roles at the end; `None` once strict is off.
+  pub fn maybe_roles(&self) -> Option<&StrictRoles> {
+    match self {
+      Self::Roles(roles) => Some(roles),
+      Self::Off { .. } => None,
+    }
+  }
+
+  /// The chain hash of the change the chain ends with.
+  fn hash(&self) -> Result<StrictHash, StrictRolesError> {
+    match self {
+      Self::Roles(roles) => roles.hash(),
+      Self::Off { hash, .. } => Ok(*hash),
+    }
+  }
+}
+
+/// Carries the roles a device knew (`known`) forward along the signed changes the server kept
+/// after them, ascending by version (e2ee.md §4.6.2, "Falling out in a strict channel"), for a
+/// device that missed the commits that made them. A version may have several changes (the server
+/// keeps every commit's); of each, the chain takes those that continue it (the next version, the
+/// previous change's hash as `prev_hash`, this conversation, stored under their own version) and
+/// whose signer the previous roles allow:
+///
+/// - a channel admin of the previous roles: certified by the identity key those roles name, and
+///   the signing device named and not revoked on that user's newest signed device list, signed by
+///   that same key. "A role counts only with a leaf" needs the tree of the commit's epoch, which
+///   such a device doesn't have; the listing stands in for it (the residual cases are in e2ee.md);
+/// - a workspace owner or admin of the roster the change names ([`Judged::AsNamed`]; the caller
+///   reads a fresh roster first);
+/// - after strict was turned off, only turning it on again: a workspace signer, a zero
+///   `prev_hash`, roles with an admin.
+///
+/// Changes nobody of those signed, or that don't parse, are passed over. Refused: a change signed
+/// for a predecessor the chain doesn't hold (a missing link or a fork, [`StrictRolesError::BrokenChain`]),
+/// a version none of whose changes continues the chain while later ones follow
+/// ([`StrictRolesError::ChainGap`]), and two changes of one version that both continue it
+/// ([`StrictRolesError::AmbiguousChain`]): wherever the chain forks, not only at its end, or an
+/// admin demoted later could sign a branch one longer than the real one and have it taken. A device list or roster this device can't verify yet
+/// is [`StrictRolesError::DeviceListUnknown`] or [`StrictRolesError::RosterUnknown`]: read them
+/// again; nothing is refused for that. Links aren't tied to commits and the epoch window isn't
+/// checked (the device knows neither): a signed change the group never took verifies too, which is
+/// what e2ee.md's residual risks are about.
+pub fn verify_chain(
+  known: &StrictRoles,
+  links: &[ChainLink<'_>],
+  directory: &impl IdentityDirectory,
+  authority: &impl MembershipAuthority,
+) -> Result<ChainEnd, StrictRolesError> {
+  let mut verifier = ChainVerifier::new(known);
+  let mut rest = links;
+  while let Some(tail) = verifier.take_next(rest, directory, authority)? {
+    rest = tail;
+  }
+  verifier.finish()
+}
+
+impl ChainVerifier {
+  pub fn new(known: &StrictRoles) -> Self {
+    Self {
+      conversation_id: known.conversation_id(),
+      end: ChainEnd::Roles(known.clone()),
+    }
+  }
+
+  /// The version whose changes the next step takes.
+  pub fn next_version(&self) -> Result<u64, StrictRolesError> {
+    next_version_after(self.end.version())
+  }
+
+  /// Who signs the changes at the front of `rest` that the next step judges: those of the next
+  /// version that continue the chain, unverified.
+  pub fn signers_for_next(&self, rest: &[ChainLink<'_>]) -> ChainSigners {
+    let mut signers = ChainSigners::default();
+    let Ok(next) = self.next_version() else {
+      return signers;
+    };
+    for link in rest.iter().take_while(|link| link.version == next) {
+      let Ok(signed) = parse_link(link.change) else {
+        continue;
+      };
+      if !self.is_successor(&signed, next) {
+        continue;
+      }
+      signers.has_workspace_signer |= signed.change.signer_role == StrictSignerRole::Workspace;
+      if let Ok(user) = signed.claimed_signer()
+        && !signers.users.contains(&user)
+      {
+        signers.users.push(user);
+      }
+    }
+    signers
+  }
+
+  /// Takes the changes of the next version from the front of `rest` and returns what follows them;
+  /// `None` once the chain ends (nothing left, or no change of the next version continues it).
+  pub fn take_next<'r, 'a>(
+    &mut self,
+    rest: &'r [ChainLink<'a>],
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<Option<&'r [ChainLink<'a>]>, StrictRolesError> {
+    let Some(first) = rest.first() else {
+      return Ok(None);
+    };
+    let next = self.next_version()?;
+    if first.version != next {
+      return Err(StrictRolesError::WrongVersion {
+        expected: next,
+        offered: first.version,
+      });
+    }
+    let count = rest.iter().take_while(|link| link.version == next).count();
+    let (candidates, tail) = rest.split_at(count);
+    let mut maybe_next: Option<(StrictHash, ChainEnd)> = None;
+    let mut maybe_retry = None;
+    for link in candidates {
+      match self.judge(link, directory, authority)? {
+        Candidate::Continues(end) => {
+          let hash = end.hash()?;
+          match &maybe_next {
+            None => maybe_next = Some((hash, end)),
+            // The same change carried by two commits.
+            Some((taken, _)) if *taken == hash => {},
+            Some(_) => return Err(StrictRolesError::AmbiguousChain),
+          }
+        },
+        Candidate::Ignored => {},
+        Candidate::Unchained => return Err(StrictRolesError::BrokenChain),
+        Candidate::Retry(error) => {
+          maybe_retry.get_or_insert(error);
+        },
+      }
+    }
+    // A change whose signer can't be judged yet may be the one the group took.
+    if let Some(error) = maybe_retry {
+      return Err(error);
+    }
+    let Some((_, end)) = maybe_next else {
+      return match tail.first() {
+        None => Ok(None),
+        Some(_) => Err(StrictRolesError::ChainGap(next)),
+      };
+    };
+    self.end = end;
+    Ok(Some(tail))
+  }
+
+  /// Where the chain ends.
+  pub fn finish(self) -> Result<ChainEnd, StrictRolesError> {
+    Ok(self.end)
+  }
+
+  /// What `link` (of the next version) does to the chain. Only a change of a newer format refuses
+  /// it here: this app can't judge it.
+  fn judge(
+    &self,
+    link: &ChainLink<'_>,
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<Candidate, StrictRolesError> {
+    let signed = match parse_link(link.change) {
+      Ok(signed) => signed,
+      Err(StrictRolesError::MustUpdate) => return Err(StrictRolesError::MustUpdate),
+      Err(_) => return Ok(Candidate::Ignored),
+    };
+    let change = &signed.change;
+    if change.version != link.version || change.conversation_id != self.conversation_id {
+      return Ok(Candidate::Ignored);
+    }
+    match &self.end {
+      ChainEnd::Roles(previous) if change.prev_hash == previous.hash()? => {
+        judge_change(previous, &signed, directory, authority)
+      },
+      ChainEnd::Off { .. } if change.prev_hash == StrictHash::ZERO => {
+        judge_turning_on(&signed, directory, authority)
+      },
+      // Only turning on again continues an "off".
+      ChainEnd::Off { hash, .. } if change.prev_hash == *hash => Ok(Candidate::Ignored),
+      // Turning on while strict continues nothing: a group takes it only when strict is off.
+      ChainEnd::Roles(_) if change.prev_hash == StrictHash::ZERO => Ok(Candidate::Ignored),
+      _ => Ok(Candidate::Unchained),
+    }
+  }
+
+  /// Whether `signed` (of version `next`) names the end of the chain as its predecessor.
+  fn is_successor(&self, signed: &SignedStrictRolesChange, next: u64) -> bool {
+    let change = &signed.change;
+    change.version == next
+      && change.conversation_id == self.conversation_id
+      && match &self.end {
+        ChainEnd::Roles(previous) => previous.hash().is_ok_and(|hash| hash == change.prev_hash),
+        ChainEnd::Off { .. } => change.prev_hash == StrictHash::ZERO,
+      }
+  }
+}
+
+/// A change of `previous`: signed by an admin of it (listed) or a workspace signer as named.
+fn judge_change(
+  previous: &StrictRoles,
+  signed: &SignedStrictRolesChange,
+  directory: &impl IdentityDirectory,
+  authority: &impl MembershipAuthority,
+) -> Result<Candidate, StrictRolesError> {
+  if signed.change.check_roles().is_err() {
+    return Ok(Candidate::Ignored);
+  }
+  let verdict = match signed.change.signer_role {
+    StrictSignerRole::ChannelAdmin => signed
+      .verify_as_admin_of(previous)
+      .and_then(|device| listed_signer(&device, directory)),
+    StrictSignerRole::Workspace => signed.verify_as_workspace_signer(directory, authority, Judged::AsNamed),
+  };
+  candidate_after(signed, verdict)
+}
+
+/// Turning strict on again after an "off": a workspace signer as named, with roles.
+fn judge_turning_on(
+  signed: &SignedStrictRolesChange,
+  directory: &impl IdentityDirectory,
+  authority: &impl MembershipAuthority,
+) -> Result<Candidate, StrictRolesError> {
+  let change = &signed.change;
+  if change.roles.is_empty()
+    || change.check_roles().is_err()
+    || change.signer_role != StrictSignerRole::Workspace
+  {
+    return Ok(Candidate::Ignored);
+  }
+  let verdict = signed.verify_as_workspace_signer(directory, authority, Judged::AsNamed);
+  candidate_after(signed, verdict)
+}
+
+/// The signing device of an admin's change is named and not revoked on its user's newest device
+/// list, and that list is the one signed by the identity key the roles name.
+fn listed_signer(
+  device: &VerifiedDevice,
+  directory: &impl IdentityDirectory,
+) -> Result<(), StrictRolesError> {
+  let user = device.user_id();
+  let standing = if directory.pinned_identity(user).as_ref() == Some(device.identity_key()) {
+    directory.device_listing(device, 0, Judged::Newest)
+  } else {
+    Standing::Unknown
+  };
+  match standing {
+    Standing::Confirmed => Ok(()),
+    Standing::Unknown => Err(StrictRolesError::DeviceListUnknown(user)),
+    Standing::Refused => Err(StrictRolesError::NotAllowed(user)),
+  }
+}
+
+/// Where the chain ends after `signed`, once its signer's `verdict` is in.
+fn candidate_after(
+  signed: &SignedStrictRolesChange,
+  verdict: Result<(), StrictRolesError>,
+) -> Result<Candidate, StrictRolesError> {
+  match verdict {
+    Ok(()) => {},
+    Err(error @ (StrictRolesError::RosterUnknown(_) | StrictRolesError::DeviceListUnknown(_))) => {
+      return Ok(Candidate::Retry(error));
+    },
+    Err(_) => return Ok(Candidate::Ignored),
+  }
+  let change = &signed.change;
+  if change.roles.is_empty() {
+    return Ok(Candidate::Continues(ChainEnd::Off {
+      version: change.version,
+      hash: change.hash()?,
+    }));
+  }
+  let next = StrictRoles {
+    format: STRICT_ROLES_FORMAT,
+    last_change: signed.clone(),
+  };
+  if next.admins().next().is_none() {
+    return Ok(Candidate::Ignored);
+  }
+  Ok(Candidate::Continues(ChainEnd::Roles(next)))
+}
+
+/// A link's change; an unknown value is a role or signer kind a newer app wrote.
+fn parse_link(bytes: &[u8]) -> Result<SignedStrictRolesChange, StrictRolesError> {
+  if bytes.len() > MAX_STRICT_ROLES_BYTES {
+    return Err(StrictRolesError::TooLarge {
+      size: bytes.len(),
+      max: MAX_STRICT_ROLES_BYTES,
+    });
+  }
+  SignedStrictRolesChange::tls_deserialize_exact_bytes(bytes).map_err(|error| match error {
+    tls_codec::Error::UnknownValue(_) => StrictRolesError::MustUpdate,
+    other => StrictRolesError::Malformed(other),
+  })
+}
+
+/// The version after `version`; none after [`MAX_STRICT_ROLES_VERSION`], in a group as along the
+/// chain.
+fn next_version_after(version: u64) -> Result<u64, StrictRolesError> {
+  version
+    .checked_add(1)
+    .filter(|next| *next <= MAX_STRICT_ROLES_VERSION)
+    .ok_or(StrictRolesError::VersionExhausted(version))
 }
 
 impl StrictHash {

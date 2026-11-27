@@ -5,7 +5,7 @@ use utoipa::OpenApi;
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
-use teamcraft_proto::ListMlsMessagesQuery;
+use teamcraft_proto::{ListMlsMessagesQuery, MlsStrictHintQuery};
 
 use crate::handlers;
 use crate::state::AppState;
@@ -44,5 +44,5 @@ pub(super) fn routes() -> OpenApiRouter<AppState> {
 
 /// Schemas in the document that no documented route names: query parameters.
 #[derive(OpenApi)]
-#[openapi(components(schemas(ListMlsMessagesQuery)))]
+#[openapi(components(schemas(ListMlsMessagesQuery, MlsStrictHintQuery)))]
 struct Schemas;

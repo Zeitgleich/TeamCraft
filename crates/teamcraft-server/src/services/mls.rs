@@ -9,9 +9,10 @@ use teamcraft_db::{
 };
 use teamcraft_proto::{
   Base64Bytes, ConversationId, ConversationKind, DeviceId, ErrorCode, GatewayEvent, Id, ListMlsMessagesQuery,
-  ListMlsMessagesResponse, MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse,
+  ListMlsMessagesResponse, MAX_STRICT_CHANGE_BYTES, MAX_STRICT_CHANGES_PAGE, MAX_STRICT_HINT_VERSION,
+  MlsGroupInfoResponse, MlsMessageId, MlsMessageKind, MlsMessageResponse, MlsStrictHintQuery,
   MlsStrictHintResponse, Permission, PostMlsCommitRequest, PostMlsCommitResponse, PostMlsMessageRequest,
-  PutMlsGroupInfoRequest, Snowflake, StrictChannelHint, UserId,
+  PutMlsGroupInfoRequest, Snowflake, StrictChainChange, StrictChannelHint, UserId,
 };
 
 use super::access::{load_conversation, require};
@@ -32,6 +33,14 @@ pub async fn post_commit(
   }
   let checked = check_commit(state, caller, conversation, &request).await?;
   let maybe_strict = request.maybe_strict.as_ref().map(stored_hint).transpose()?;
+  // Only a channel can be strict (e2ee.md §4.6.2): another conversation's change isn't kept.
+  let is_channel = access.view.conversation.kind == ConversationKind::Channel;
+  let maybe_strict_change = request
+    .maybe_strict
+    .as_ref()
+    .and_then(|hint| hint.maybe_change.as_ref())
+    .filter(|_| is_channel)
+    .map(Base64Bytes::as_slice);
   let (commit, welcomes) = checked.messages(&request);
   let outcome = state
     .database
@@ -43,6 +52,7 @@ pub async fn post_commit(
       &welcomes,
       checked.maybe_group_info(&request),
       maybe_strict.as_ref(),
+      maybe_strict_change,
     )
     .await?;
   let new_epoch = match outcome {
@@ -71,12 +81,17 @@ pub async fn post_commit(
 }
 
 /// The group's epoch and what its members told the server about its strict roles (e2ee.md §4.6.2),
-/// for a workspace owner or admin outside the group who signs the next roles change. Members read
-/// it, and so do those who may post an admin's proposal into the group (`manage_members`).
+/// for a workspace owner or admin outside the group who signs the next roles change; with `after`,
+/// the signed roles changes the members committed after that version, for a device that fell out
+/// ("Falling out in a strict channel"). Members read it, and so do those who may post an admin's
+/// proposal into the group (`manage_members`). A device that fell out asks to be added back with a
+/// proposal, which only those two may post: its user is still a member, whether or not its device
+/// has a group.
 pub async fn strict_hint(
   state: &AppState,
   caller: &AuthenticatedUser,
   conversation: ConversationId,
+  query: MlsStrictHintQuery,
 ) -> Result<MlsStrictHintResponse, ApiError> {
   let access = load_conversation(state, caller, conversation).await?;
   if access.view.conversation.kind != ConversationKind::Channel {
@@ -86,6 +101,10 @@ pub async fn strict_hint(
     require(state, caller, Permission::ManageMembers, &access.target())?;
   }
   let epoch = state.database.current_epoch(conversation).await?;
+  let (changes, has_more) = match query.maybe_after {
+    Some(after) => strict_changes_page(state, conversation, after, query.maybe_after_commit).await?,
+    None => (Vec::new(), false),
+  };
   Ok(MlsStrictHintResponse {
     epoch,
     maybe_strict: access
@@ -94,14 +113,53 @@ pub async fn strict_hint(
       .maybe_strict
       .as_ref()
       .map(super::convert::strict_hint),
+    changes,
+    has_more,
   })
 }
 
-/// A commit's strict hint as stored: a 32-byte hash and a version the database holds. The server
-/// can't check it against the commit, and doesn't need to: no decision reads it.
+/// One page of the strict channel's chain after `after` (and `maybe_after_commit`), and whether
+/// more follow.
+async fn strict_changes_page(
+  state: &AppState,
+  conversation: ConversationId,
+  after: u64,
+  maybe_after_commit: Option<MlsMessageId>,
+) -> Result<(Vec<StrictChainChange>, bool), ApiError> {
+  let limit = i64::try_from(MAX_STRICT_CHANGES_PAGE).unwrap_or(i64::MAX);
+  let mut rows = state
+    .database
+    .strict_changes_after(conversation, after, maybe_after_commit, limit)
+    .await?;
+  let has_more = rows.len() > MAX_STRICT_CHANGES_PAGE;
+  rows.truncate(MAX_STRICT_CHANGES_PAGE);
+  let changes = rows
+    .into_iter()
+    .map(|row| StrictChainChange {
+      version: row.version,
+      commit: row.commit,
+      change: Base64Bytes::new(row.change),
+    })
+    .collect();
+  Ok((changes, has_more))
+}
+
+/// A commit's strict hint as stored: a 32-byte hash and a version the database holds, and a signed
+/// change of at most [`MAX_STRICT_CHANGE_BYTES`]. The server can't check them against the commit,
+/// and doesn't need to: no decision of its reads them, and devices verify the chain themselves.
 fn stored_hint(hint: &StrictChannelHint) -> Result<StrictHint, ApiError> {
-  if hint.hash.len() != 32 || i64::try_from(hint.version).is_err() {
+  if hint.hash.len() != 32 || hint.version > MAX_STRICT_HINT_VERSION {
     return Err(ApiError::InvalidRequest("a malformed strict hint".into()));
+  }
+  if let Some(change) = &hint.maybe_change {
+    if change.is_empty() {
+      return Err(ApiError::InvalidRequest("an empty strict roles change".into()));
+    }
+    if change.len() > MAX_STRICT_CHANGE_BYTES {
+      return Err(ApiError::PayloadTooLarge(format!(
+        "a strict roles change exceeds {MAX_STRICT_CHANGE_BYTES} bytes"
+      )));
+    }
   }
   Ok(StrictHint {
     is_strict: hint.is_strict,

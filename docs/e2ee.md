@@ -3403,12 +3403,14 @@ signer from the authenticated data.
 **Falling out in a strict channel.** A device that missed commits for another reason (a restored
 backup, a bug) still asks to be added back, since it has nothing to refuse. Its welcome now has to
 come from a channel admin or workspace admin of its newest verified snapshot (the context it knew,
-carried forward along the role log's signatures), or it isn't opened: anything else is finding 2 again.
-Other members answer only after `strict_rejoin_wait` (client, 7 days), and then the device asks its
-user: it shows who is in that tree against its last tree, and joins on their word. It does this at
-once when its own user is the only admin it knows of, because nobody else could answer. A welcome
-without the extension is taken only if the role log shows a signed "off". After any add-back the
-device shows a line for everyone new or gone since its last tree.
+carried forward along the signed roles changes the server keeps, "The chain of roles changes" below),
+or it isn't opened: anything else is finding 2 again. Other members answer only after
+`strict_rejoin_wait` (client, 7 days), and then the device asks its user: it shows who is in that tree
+against its last tree, and joins on their word. It does this at once when its own user is the only
+admin it knows of, because nobody else could answer. A welcome without the extension is taken only if
+the device saw strict turned off in its group, or a verified chain ends in "off" and the server's hint
+says strict is off too. After any add-back the device shows a line for everyone new or gone since its
+last tree.
 
 **Expired or lost admins, no admin left** (D5).
 
@@ -3474,6 +3476,46 @@ decided in §4.6.5: an anchor in its own extension (`0xF7C1`) from epoch 0, and 
   still make one device differ (admin.md §2.3 bounds how long).
 - A device that fell out and whose user takes a member's word after the wait can be brought into a
   tree nobody authorized. It shows who is in it first.
+- **The chain of roles changes proves signatures, not commits** (#2251). A device that fell out
+  verifies that each link was signed by somebody the previous link's roles allowed; it can't tell
+  whether the group ever took it. Links aren't tied to commits (the server could show any signed
+  change it ever saw), the 32-epoch window isn't checked (the device doesn't know the epochs), and "a
+  role counts only with a leaf" needs the tree of the commit's epoch, which the device doesn't have:
+  the stand-in is "the signing device is listed and not revoked on its user's newest device list the
+  device holds". So these verify although the group never took them:
+  - a change the members refused, whose commit the server kept (an admin without a leaf, a change
+    made stale by a demotion that came first, a commit stopped at and never rewound);
+  - a change signed for a predecessor and then beaten to its epoch, or an outside signer's proposal
+    the server kept from the members (its version and `prev_hash` came from the server's hint, so a
+    hostile server picks what it continues);
+  - a change of an admin whose device was revoked by a device list the server withholds from this
+    device;
+  - an old signed change shown again in its place: the version and the hash chain only stop it from
+    being used anywhere but after its own predecessor.
+
+  A chain also ends wherever the server cuts it. So what the device gets is the end of *a* chain of
+  authorized signatures after the roles it knew, not necessarily the group's. Bounds: two changes of
+  one version that both continue the chain refuse it, wherever they are (a longer branch isn't
+  preferred, so a demoted admin's own branch, signed on from the roles where they still were one,
+  only makes the device judge as before), as does a change signed for a predecessor the chain
+  doesn't hold; a welcome with the extension still needs an admin of that end (or a workspace
+  signer); the end is used for that one welcome and never kept, so it can't spread to the user's
+  other devices or hide what a device later sees in its group. The case the design accepted: an
+  "off" or new admins the group didn't take become the chain's end, and the device joins a group
+  of a member's or the server's making together with a welcome from it (for an "off", only while
+  the hint says not strict). With an honest server that takes an admin of the chain's end signing
+  it (who, as an admin of the roles the device knew, could bring it into a group of theirs before
+  this too), or a change kept with a commit the members refused, until an admin's rewind drops it.
+  Anything else takes a hostile server: cutting the chain, hiding a demotion or a revoking device
+  list, showing a withheld proposal. The device then holds only the people its tree shows, and the
+  lines after the add-back name everybody new or gone; without the chain it would be asked to decide
+  after the wait, with the same tree shown. This is weaker than before for exactly these cases.
+  Any member can deny the improvement, in the safe direction: a planted change for another
+  predecessor, or a second signed change of a version by somebody the previous roles allow (a
+  demoted admin included), refuses the chain; one whose signer can't be judged yet, or links naming
+  more signers than the device reads, leave it unused. The device then judges by the roles it knew,
+  as before. Closing it fully takes the epoch's tree, i.e. a member's signed `GroupInfo` of that
+  epoch (option D of #2251), much larger.
 
 **The owner's decisions.** The owner chose the middle column for all six; the design above assumes it.
 
@@ -3568,9 +3610,9 @@ independent crypto review of these points is still asked for before any app swit
   This version takes an empty commit in every group, strict or not; older apps refuse it, as designed.
   `leaves_without_strict` lists the devices that still block turning on (D6).
 - **The welcome's sender** (`StagedJoin::check_strict_sender`) is checked against the roles the device
-  knew, not the welcome's own context: an admin of those with a leaf certified under the named key, or a
-  workspace signer. Bob's modified client, having committed a refused addition, can't bring Dave back
-  into its fork (tested).
+  knew (carried forward along the chain of roles changes, #2251), not the welcome's own context: an
+  admin of those with a leaf certified under the named key, or a workspace signer. Bob's modified
+  client, having committed a refused addition, can't bring Dave back into its fork (tested).
 - **The capability** is announced only with the `strict-channels` feature (always in the crate's own
   tests). An app turns it on once it implements stopping, the ready step and the welcome check.
 - **Renames and moves** (§4.6.5, D5, #1924): in a strict channel the properties verdict reads the
@@ -3617,10 +3659,13 @@ independent crypto review of these points is still asked for before any app swit
   a workspace signer at the newest roster's version, D3), mirrors the role log head, and commits it
   after reading the roster. Only for a private channel (`NotStrictCapable` for DMs, meeting chats, the
   notes and public channels); a strict channel isn't converted to public before strict is off.
-- **The roles a device knew** go to the account data (`strict_roles`, merged by the higher epoch; an
-  entry without roles once a merged commit turned strict off) after every merged commit. A device
-  that fell out (it has the group or asked to be added back) opens a welcome back only after
-  `check_strict_sender` against them, or one without the extension only if it saw strict turned off.
+- **The roles a device knew** go to the account data (`strict_roles`; an entry without roles once a
+  merged commit turned strict off) after every merged commit, with the roles change's version, and
+  merge by the higher epoch, never by version: turning strict on takes any version, so an "off" of a
+  high version must not hide roles a later turning on set at a low one. The version only sets the
+  next turning on of this user's apps. A device that fell out (it has the group or asked to be added
+  back) opens a welcome back only after `check_strict_sender` against them, carried forward along the
+  chain for that welcome (below), or one without the extension only if it saw strict turned off.
   Otherwise the welcome is refused and held (`StrictRejoinHold`, with who is new and gone against its
   last tree); `strict_rejoin_prompt` says when the user may decide (`strict_rejoin_wait`, 7 days, or
   at once when the user is the only known admin) and `accept_strict_rejoin` asks again and takes the
@@ -3659,8 +3704,9 @@ independent crypto review of these points is still asked for before any app swit
   roster to read first or a leaf still lacking the capability keeps it for later. A wrong hint only
   gets the change refused.
 - **The hint**: a roles commit carries `strict` (`is_strict`, the change's `version` and chain
-  `hash`) in `POST …/mls/commits`; the server stores it on the conversation in the commit's transaction
-  (migration `0110`), shows it as `strict` in the conversation and tells the members
+  `hash`, and since #2251 the signed `change` itself) in `POST …/mls/commits`; the server stores it on
+  the conversation in the commit's transaction (migration `0110`; the change goes into the chain,
+  below), shows it as `strict` in the conversation (without the change) and tells the members
   (`ConversationUpdate`). The server refuses to make a channel public while the hint says strict
   (409), as the apps do; a rewind never carries one. Nothing decides on it: the context alone switches
   strict.
@@ -3709,10 +3755,80 @@ independent crypto review of these points is still asked for before any app swit
   `gone` are against that tree too; before, the dropped group left them against none. Desktop and web
   show the lines (`ws-joined-while-away`, `ws-gone-while-away`); Android and iOS pass over the event
   until they render it (#2464).
-- **Not yet**: a role log "off" (or the chain of roles changes) as permission for a welcome without
-  the extension (#2251, a proposal for decision), the server's early refusal from the commit's
-  authenticated data, the lines above on Android and iOS (#2464), and the independent crypto review
-  asked for above. Until then the feature stays off and no channel turns strict.
+- **Not yet**: the server's early refusal from the commit's authenticated data, the lines above on
+  Android and iOS (#2464), and the independent crypto review asked for above. Until then the feature
+  stays off and no channel turns strict.
+
+**The chain of roles changes** (#2251, the owner's option A; `strict-channels` still off). Before, a
+device that knew a channel strict and fell out opened a welcome without the extension only if one of
+its user's devices had merged the "off", and judged a welcome with it by the roles it knew. So an
+honest "off" while all of the user's devices were away ended in the 7-day wait and a decision the user
+couldn't judge, and so did an admin appointed while the device was away. Now the server keeps the signed
+changes, and the device verifies them itself. What this does and doesn't prove is under "Residual
+risks" above.
+
+- **What the server keeps** (migration `0115`, `mls_strict_changes`): the committer sends the
+  `SignedStrictRolesChange` (as in the commit's authenticated data after its marker, at most 8 KiB) as
+  the hint's `change`; for a channel, the server stores it under the hint's version in the commit's
+  transaction, tied to the commit (`mls_message_id` in the primary key, `ON DELETE CASCADE`). Every
+  commit's change is kept, so a version can have several (the one the group took, ones it refused, a
+  member's junk): nothing a member stores blocks a roles change. A rewind drops the commits from its
+  epoch on, and with them the changes they carried. A hint without the change (an older app) adds no
+  link, so the chain has a gap there. The server never decides on the bytes.
+- **What it shows**: `GET …/mls/strict?after={version}` adds `changes` (`version`, `commit`,
+  `change`), ascending by version and commit from `after + 1`, at most 64 per answer with `has_more`;
+  the next page names the last change's version and commit (`after`, `after_commit`). Readable by
+  members and holders of `manage_members`, as before. A device that fell out asks to be added back
+  with a proposal, which only those may post, and membership is per user, so its user reads the chain
+  whether or not its device has a group (the owner's decision 3; no further rule was needed).
+- **What the device verifies** (`teamcraft_crypto::strict_roles::ChainVerifier`, pure, one version
+  at a time; `verify_chain` at once; fuzz target `strict_chain`): of each version, the changes that
+  parse, name this conversation, are stored under their own version and name an end of the chain as
+  their predecessor (`prev_hash`; after an "off", a zero one), and whose signer the previous roles
+  allow: a channel admin of them, certified by the identity key they name, whose signing device is
+  listed and not revoked on that user's newest signed device list, signed by that same key (the
+  owner's decision 2: the device-list check, not workspace signers only); or a workspace owner or
+  admin of the roster the change names, `Judged::AsNamed`, on a roster the device reads first. After
+  an "off", only turning strict on again continues: a workspace signer, a zero `prev_hash`, the next
+  version. Changes nobody allowed signed, junk and changes of another conversation are passed over.
+  Refused: a change signed for a predecessor the chain doesn't hold (a missing link or a fork), a
+  version none of whose changes continues the chain while later ones follow, two changes of one
+  version that both continue it (anywhere: the longer branch isn't preferred), versions past what
+  the server stores (`MAX_STRICT_ROLES_VERSION`, also in the group's verdict), and a newer format.
+  A roster or device list the device can't verify yet (`RosterUnknown`, `DeviceListUnknown`) is a
+  retry, never a refusal.
+- **What the app does with it** (`client/strict_channels.rs`): before judging a welcome back into a
+  channel its user's devices knew strict, the device reads the chain after the known version (pages
+  must move forward; at most `max_strict_chain_changes`, 1024) and verifies it version by version,
+  reading the device lists of the signers a step reaches (and the roster once a workspace signer
+  signed one), stopping at the first failure. Device lists are read only under identity keys the
+  device holds already (pinned, from the account data, the roster's): links name whom they want,
+  so the chain pins nobody on first use, and more than 4 signers of a version or
+  `max_strict_chain_signers` (16) in all leave the chain unused. The end judges this welcome only and is never kept. A
+  welcome with the extension is judged by `check_strict_sender` against the chain's end, so an admin
+  appointed while the device was away brings it back at once. A welcome without it opens if the chain
+  ends in "off" and the server's hint, read with the last page, says strict is off as of that change
+  or later: the server could cut a chain right after an "off" and hide the turning on again, so this
+  takes the server's word that nothing followed (and an older app's turning on, which sends no
+  change, shows in the hint). A read that may pass (the network) is retried like a failed pin: the
+  device asks to be added back again. A chain that is too long, doesn't move forward, doesn't verify
+  or can't be judged yet, or one ending in "off" while the welcome is strict, leaves the judgment by
+  the known roles and the hold as before. Turning strict on signs the version after the newest this
+  user's devices saw in the group (an "off" included), never the hint's, so the chain stays one
+  sequence and a hint a member made up can't fail the commit; an outside signer, who has only the
+  hint, takes the next version the server can store.
+- **Tested**: `strict_roles::tests::chain` (junk and unauthorized changes passed over, a fork
+  anywhere refused, a longer branch included, gaps, disorder and replays, every signer, a revoked or unlisted device, a
+  device list under another key, a roster that can't be verified beside a valid change, turning on
+  again after "off", the highest version, the signers a step needs); in the core's suite an honest
+  "off" while the device was away opening a member's welcome, missed role changes and the new admin's
+  welcome opening, off and on again while away, a chain read page by page, junk beside the real
+  change, and the hold kept for a withheld roster, a gapped, forged or forked chain (also at its
+  end), a demoted admin's branch one version longer than the real chain, too many signers, an
+  "off" the hint contradicts, a chain too long for the setting, pages that never end or end
+  early; a lost read asking again; the account data taking a turning on again below an "off"'s
+  version; in the server's suite storing, paging by commit, a planted change blocking nothing, the
+  rewind's cascade and who reads it.
 
 ### 4.6.3 Noticing a withheld channel role change (issue #876)
 

@@ -1382,9 +1382,11 @@ impl<T: AccessTokenSource> ServerApi for HttpServerApi<T> {
   async fn mls_strict_hint(
     &self,
     conversation: ConversationId,
+    query: &teamcraft_proto::MlsStrictHintQuery,
   ) -> Result<teamcraft_proto::MlsStrictHintResponse, ApiError> {
+    let parameters = query_string(&[("after", query.maybe_after.map(|after| after.to_string()))]);
     self
-      .get(&format!("/conversations/{conversation}/mls/strict"))
+      .get(&format!("/conversations/{conversation}/mls/strict{parameters}"))
       .await
   }
 

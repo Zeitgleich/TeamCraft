@@ -694,6 +694,569 @@ mod verdict {
   }
 }
 
+/// A device that fell out carries the roles it knew forward along the changes the server kept
+/// (e2ee.md §4.6.2, "Falling out in a strict channel"): of each version, the change that continues
+/// the chain and whose signer the previous roles allow; a missing link or a fork refuses it.
+mod chain {
+  use super::*;
+
+  #[test]
+  fn an_empty_chain_ends_at_the_known_roles() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let end = fixture.verify(&known, &[]).unwrap();
+    assert_eq!(end, ChainEnd::Roles(known.clone()));
+    assert_eq!(end.version(), 1);
+    assert_eq!(end.maybe_roles(), Some(&known));
+  }
+
+  #[test]
+  fn an_admins_changes_carry_the_roles_forward_and_turn_strict_off() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let mut roles = fixture.roles();
+    roles.insert(0, role(&fixture.bob, StrictRoleKind::Moderator));
+    let promoted = fixture.admin_change(&known, roles.clone());
+    let second = after(&promoted);
+    let off = fixture.admin_change(&second, Vec::new());
+
+    let end = fixture.verify(&known, &[&promoted]).unwrap();
+    assert_eq!(end, ChainEnd::Roles(second.clone()));
+    assert_eq!(end.maybe_roles().unwrap().roles(), roles.as_slice());
+    let end = fixture.verify(&known, &[&promoted, &off]).unwrap();
+    assert_eq!(
+      end,
+      ChainEnd::Off {
+        version: 3,
+        hash: hash_of(&off)
+      }
+    );
+    assert_eq!(end.maybe_roles(), None);
+  }
+
+  /// A workspace signer is judged by the roster the change names, not the newest one: the device
+  /// judges a change made while it was away.
+  #[test]
+  fn a_workspace_signer_is_judged_as_named() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let by_alice = fixture.workspace_change(&known, vec![role(&fixture.bob, StrictRoleKind::Admin)]);
+
+    let end = verify_using(
+      &known,
+      &[&by_alice],
+      &fixture.directory,
+      &OnlyAsNamed(fixture.alice.user_id),
+    )
+    .unwrap();
+    assert_eq!(end.version(), 2);
+    assert_eq!(
+      end
+        .maybe_roles()
+        .unwrap()
+        .role_of(fixture.bob.user_id)
+        .unwrap()
+        .role,
+      StrictRoleKind::Admin
+    );
+  }
+
+  /// "Unknown" holds: the roster or the admin's device list can't be verified yet. Nothing is
+  /// refused for it; the caller reads them again.
+  #[test]
+  fn an_unverifiable_roster_or_device_list_is_a_retry() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let by_alice = fixture.workspace_change(&known, fixture.roles());
+    assert!(matches!(
+      verify_using(&known, &[&by_alice], &fixture.directory, &UnknownRoster),
+      Err(StrictRolesError::RosterUnknown(1))
+    ));
+    let by_carol = fixture.admin_change(&known, fixture.roles());
+    let unlisted = Listing(&fixture.directory, Standing::Unknown);
+    assert!(matches!(
+      verify_using(&known, &[&by_carol], &unlisted, &fixture.authority),
+      Err(StrictRolesError::DeviceListUnknown(user)) if user == fixture.carol.user_id
+    ));
+  }
+
+  /// A change whose signer can't be judged yet may be the one the group took: a valid change of
+  /// the same version beside it doesn't settle the step.
+  #[test]
+  fn an_unjudgeable_change_beside_a_valid_one_is_a_retry() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let by_carol = fixture.admin_change(&known, fixture.roles());
+    let by_alice = fixture.workspace_change(&known, fixture.roles());
+    assert!(matches!(
+      verify_using(
+        &known,
+        &[&by_carol, &by_alice],
+        &fixture.directory,
+        &UnknownRoster
+      ),
+      Err(StrictRolesError::RosterUnknown(1))
+    ));
+  }
+
+  /// The device list counts only under the identity key the roles name: one this device pinned
+  /// differently (a key change, or a server's invention) says nothing about the admin's device.
+  #[test]
+  fn a_device_list_under_another_key_is_a_retry() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let by_carol = fixture.admin_change(&known, fixture.roles());
+    let other = TestUser::new(CAROL);
+    let pinned = vec![&fixture.alice, &fixture.bob, &fixture.dave, &other];
+    let repinned = TestDirectory::with(&pinned);
+    assert!(matches!(
+      verify_using(&known, &[&by_carol], &repinned, &fixture.authority),
+      Err(StrictRolesError::DeviceListUnknown(user)) if user == fixture.carol.user_id
+    ));
+  }
+
+  /// Changes nobody allowed signed are passed over: the chain ends before them. A revoked admin
+  /// device, a moderator, a member, a workspace admin signing as channel admin, an admin demoted
+  /// in the chain, an impostor's key: none moves the roles.
+  #[test]
+  fn changes_nobody_allowed_signed_are_passed_over() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let revoked = Listing(&fixture.directory, Standing::Refused);
+    let by_carol = fixture.admin_change(&known, Vec::new());
+    assert_eq!(
+      verify_using(&known, &[&by_carol], &revoked, &fixture.authority).unwrap(),
+      ChainEnd::Roles(known.clone())
+    );
+    let change = fixture.change(2, known.hash().unwrap(), StrictSignerRole::ChannelAdmin);
+    for user in [&fixture.dave, &fixture.bob, &fixture.alice, &TestUser::new(CAROL)] {
+      let signed = change.clone().sign(&user.device, &user.certificate).unwrap();
+      assert_eq!(
+        fixture.verify(&known, &[&signed]).unwrap(),
+        ChainEnd::Roles(known.clone()),
+        "{:?}",
+        user.user_id
+      );
+    }
+    let mut as_workspace = change;
+    as_workspace.signer_role = StrictSignerRole::Workspace;
+    let by_member = as_workspace
+      .sign(&fixture.bob.device, &fixture.bob.certificate)
+      .unwrap();
+    assert_eq!(
+      fixture.verify(&known, &[&by_member]).unwrap(),
+      ChainEnd::Roles(known.clone())
+    );
+    // Carol hands the channel to Dave, then signs again as if she were still its admin.
+    let to_dave = fixture.admin_change(&known, vec![role(&fixture.dave, StrictRoleKind::Admin)]);
+    let after_dave = after(&to_dave);
+    let by_carol_again = fixture.admin_change(&after_dave, Vec::new());
+    assert_eq!(
+      fixture.verify(&known, &[&to_dave, &by_carol_again]).unwrap(),
+      ChainEnd::Roles(after_dave)
+    );
+  }
+
+  /// A member plants junk beside the real change, or before it (the server keeps every commit's):
+  /// passed over, the real change is taken, and nothing blocks the chain.
+  #[test]
+  fn junk_beside_the_real_change_is_passed_over() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let real = fixture.admin_change(&known, fixture.roles());
+    let real_bytes = real.to_bytes().unwrap();
+    let mut foreign = fixture.change(2, known.hash().unwrap(), StrictSignerRole::ChannelAdmin);
+    foreign.conversation_id = ConversationId::new(43);
+    let foreign = foreign
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap()
+      .to_bytes()
+      .unwrap();
+    let mut tampered = fixture.admin_change(&known, Vec::new());
+    tampered.change.role_log_version += 1;
+    let tampered = tampered.to_bytes().unwrap();
+    let mislabelled = fixture
+      .admin_change(&after(&real), Vec::new())
+      .to_bytes()
+      .unwrap();
+    let links = [
+      link(2, b"junk"),
+      link(2, &foreign),
+      link(2, &tampered),
+      link(2, &mislabelled),
+      link(2, &real_bytes),
+      link(2, &real_bytes),
+    ];
+    let end = verify_chain(&known, &links, &fixture.directory, &fixture.authority).unwrap();
+    assert_eq!(end, ChainEnd::Roles(after(&real)), "the real one, once");
+  }
+
+  /// A change signed for a predecessor the chain doesn't hold: the chain misses a link or forks,
+  /// and is refused rather than ended there.
+  #[test]
+  fn a_change_for_another_predecessor_refuses_the_chain() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let second_change = fixture.admin_change(&known, fixture.roles());
+    let third_change = fixture.admin_change(&after(&second_change), Vec::new());
+    let mut other_roles = fixture.roles();
+    other_roles.insert(0, role(&fixture.bob, StrictRoleKind::Moderator));
+    // Another version 2, signed by the admin, that the third change doesn't continue.
+    let fork = fixture.admin_change(&known, other_roles);
+    assert!(matches!(
+      fixture.verify(&known, &[&fork, &third_change]),
+      Err(StrictRolesError::BrokenChain)
+    ));
+    let unchained = fixture
+      .change(2, StrictHash::from_bytes([9; 32]), StrictSignerRole::ChannelAdmin)
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap();
+    assert!(matches!(
+      fixture.verify(&known, &[&unchained]),
+      Err(StrictRolesError::BrokenChain)
+    ));
+  }
+
+  /// Two changes of one version that both continue the chain refuse it, wherever they are: the
+  /// longer branch isn't taken, or an admin demoted later could sign one a version longer than the
+  /// real one (each link as admin of the one before) and have it win.
+  #[test]
+  fn a_fork_anywhere_refuses_the_chain() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let taken = fixture.admin_change(&known, fixture.roles());
+    let mut other_roles = fixture.roles();
+    other_roles.insert(0, role(&fixture.bob, StrictRoleKind::Moderator));
+    let refused = fixture.admin_change(&known, other_roles);
+    let third = fixture.admin_change(&after(&taken), Vec::new());
+    // Carol's own branch, one longer than the real chain.
+    let branch_third = fixture.admin_change(&after(&refused), fixture.roles());
+    let branch_fourth = fixture.admin_change(&after(&branch_third), Vec::new());
+
+    for chain in [
+      vec![&refused, &taken],
+      vec![&refused, &taken, &third],
+      vec![&taken, &refused, &branch_third, &branch_fourth],
+    ] {
+      assert!(matches!(
+        fixture.verify(&known, &chain),
+        Err(StrictRolesError::AmbiguousChain)
+      ));
+    }
+  }
+
+  #[test]
+  fn gaps_replays_and_disorder_are_refused() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let second_change = fixture.admin_change(&known, fixture.roles());
+    let third_change = fixture.admin_change(&after(&second_change), Vec::new());
+    // The second change left out.
+    assert!(matches!(
+      fixture.verify(&known, &[&third_change]),
+      Err(StrictRolesError::WrongVersion {
+        expected: 2,
+        offered: 3
+      })
+    ));
+    // Only junk at version 2, then a third change.
+    let third_bytes = third_change.to_bytes().unwrap();
+    let links = [link(2, b"junk"), link(3, &third_bytes)];
+    assert!(matches!(
+      verify_chain(&known, &links, &fixture.directory, &fixture.authority),
+      Err(StrictRolesError::ChainGap(2))
+    ));
+    // The change that set the known roles, again.
+    assert!(matches!(
+      fixture.verify(&known, &[&fixture.turn_on()]),
+      Err(StrictRolesError::WrongVersion { .. })
+    ));
+    // Out of order.
+    let second_bytes = second_change.to_bytes().unwrap();
+    let links = [link(3, &third_bytes), link(2, &second_bytes)];
+    assert!(matches!(
+      verify_chain(&known, &links, &fixture.directory, &fixture.authority),
+      Err(StrictRolesError::WrongVersion { .. })
+    ));
+  }
+
+  /// After "off", the chain goes on only where strict is turned on again: by a workspace signer,
+  /// from a zero hash, at the next version.
+  #[test]
+  fn after_off_only_turning_it_on_again_continues() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let off = fixture.admin_change(&known, Vec::new());
+    let off_end = ChainEnd::Off {
+      version: 2,
+      hash: hash_of(&off),
+    };
+    let mut again = fixture.change(3, StrictHash::ZERO, StrictSignerRole::Workspace);
+    let on_again = again
+      .clone()
+      .sign(&fixture.alice.device, &fixture.alice.certificate)
+      .unwrap();
+    let end = fixture.verify(&known, &[&off, &on_again]).unwrap();
+    assert_eq!(end.version(), 3);
+    assert_eq!(end.maybe_roles().unwrap().roles(), fixture.roles().as_slice());
+
+    let by_carol = again
+      .clone()
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap();
+    assert_eq!(fixture.verify(&known, &[&off, &by_carol]).unwrap(), off_end);
+    again.prev_hash = hash_of(&off);
+    let chained_to_off = again
+      .clone()
+      .sign(&fixture.alice.device, &fixture.alice.certificate)
+      .unwrap();
+    assert_eq!(fixture.verify(&known, &[&off, &chained_to_off]).unwrap(), off_end);
+    again.prev_hash = StrictHash::ZERO;
+    again.roles = Vec::new();
+    let off_again = again
+      .clone()
+      .sign(&fixture.alice.device, &fixture.alice.certificate)
+      .unwrap();
+    assert_eq!(fixture.verify(&known, &[&off, &off_again]).unwrap(), off_end);
+    // A turning on while strict continues nothing.
+    again.version = 2;
+    again.roles = fixture.roles();
+    let while_strict = again
+      .sign(&fixture.alice.device, &fixture.alice.certificate)
+      .unwrap();
+    assert_eq!(
+      fixture.verify(&known, &[&while_strict]).unwrap(),
+      ChainEnd::Roles(known.clone())
+    );
+  }
+
+  #[test]
+  fn unordered_and_adminless_roles_are_passed_over() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let mut change = fixture.change(2, known.hash().unwrap(), StrictSignerRole::ChannelAdmin);
+    change.roles.reverse();
+    let unordered = change
+      .clone()
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap();
+    change.roles = vec![role(&fixture.dave, StrictRoleKind::Moderator)];
+    let adminless = change
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap();
+    for signed in [&unordered, &adminless] {
+      assert_eq!(
+        fixture.verify(&known, &[signed]).unwrap(),
+        ChainEnd::Roles(known.clone())
+      );
+    }
+  }
+
+  /// Junk is passed over, but a change of a newer format may be the real one: the app has to
+  /// update.
+  #[test]
+  fn oversized_links_are_passed_over_and_newer_ones_refuse() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let oversized = vec![0; MAX_STRICT_ROLES_BYTES + 1];
+    let links = [link(2, &oversized)];
+    assert_eq!(
+      verify_chain(&known, &links, &fixture.directory, &fixture.authority).unwrap(),
+      ChainEnd::Roles(known.clone())
+    );
+    let mut newer = fixture.admin_change(&known, fixture.roles()).to_bytes().unwrap();
+    assert_eq!(newer[SIGNER_ROLE_OFFSET], StrictSignerRole::ChannelAdmin as u8);
+    newer[SIGNER_ROLE_OFFSET] = 9;
+    let links = [link(2, &newer)];
+    assert!(matches!(
+      verify_chain(&known, &links, &fixture.directory, &fixture.authority),
+      Err(StrictRolesError::MustUpdate)
+    ));
+  }
+
+  /// No epoch window: the device doesn't know the epochs.
+  #[test]
+  fn a_change_signed_in_any_epoch_continues_the_chain() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let mut change = fixture.change(2, known.hash().unwrap(), StrictSignerRole::ChannelAdmin);
+    change.signed_for_epoch = EPOCH + 10 * STRICT_CHANGE_WINDOW_EPOCHS;
+    let signed = change
+      .sign(&fixture.carol.device, &fixture.carol.certificate)
+      .unwrap();
+    assert_eq!(fixture.verify(&known, &[&signed]).unwrap().version(), 2);
+  }
+
+  /// Versions end at what the server stores: nothing follows the highest, in a group as along the
+  /// chain, and turning on there (or above) is refused too.
+  #[test]
+  fn the_highest_version_has_no_next() {
+    let fixture = Fixture::new();
+    for version in [MAX_STRICT_ROLES_VERSION, u64::MAX] {
+      let top = fixture
+        .change(version, StrictHash::ZERO, StrictSignerRole::Workspace)
+        .sign(&fixture.alice.device, &fixture.alice.certificate)
+        .unwrap();
+      assert!(matches!(
+        fixture.check(None, &top),
+        Err(StrictRolesError::VersionExhausted(at)) if at == version
+      ));
+    }
+    let below_top = fixture
+      .change(
+        MAX_STRICT_ROLES_VERSION - 1,
+        StrictHash::ZERO,
+        StrictSignerRole::Workspace,
+      )
+      .sign(&fixture.alice.device, &fixture.alice.certificate)
+      .unwrap();
+    let StrictRolesVerdict::Roles(below_top) = fixture.check(None, &below_top).unwrap() else {
+      panic!("turned off")
+    };
+    let to_top = fixture.admin_change(&below_top, fixture.roles());
+    assert_eq!(to_top.change().version, MAX_STRICT_ROLES_VERSION);
+    assert!(fixture.check(Some(&below_top), &to_top).is_ok());
+    let at_top = after(&to_top);
+    let beyond = fixture.admin_change(&at_top, fixture.roles());
+    assert!(matches!(
+      fixture.check(Some(&at_top), &beyond),
+      Err(StrictRolesError::VersionExhausted(MAX_STRICT_ROLES_VERSION))
+    ));
+    let bytes = beyond.to_bytes().unwrap();
+    assert!(matches!(
+      verify_chain(
+        &at_top,
+        &[link(beyond.change().version, &bytes)],
+        &fixture.directory,
+        &fixture.authority
+      ),
+      Err(StrictRolesError::VersionExhausted(MAX_STRICT_ROLES_VERSION))
+    ));
+  }
+
+  /// The step-by-step verifier names the signers a step needs, of the links that continue the
+  /// chain only.
+  #[test]
+  fn a_step_names_the_signers_it_needs() {
+    let fixture = Fixture::new();
+    let known = fixture.strict();
+    let by_carol = fixture.admin_change(&known, fixture.roles()).to_bytes().unwrap();
+    let by_alice = fixture
+      .workspace_change(&known, fixture.roles())
+      .to_bytes()
+      .unwrap();
+    let unchained = fixture
+      .change(2, StrictHash::from_bytes([9; 32]), StrictSignerRole::ChannelAdmin)
+      .sign(&fixture.dave.device, &fixture.dave.certificate)
+      .unwrap()
+      .to_bytes()
+      .unwrap();
+    let verifier = ChainVerifier::new(&known);
+    let links = [link(2, &by_carol), link(2, &unchained), link(3, &by_alice)];
+    assert_eq!(
+      verifier.signers_for_next(&links),
+      ChainSigners {
+        users: vec![fixture.carol.user_id],
+        has_workspace_signer: false,
+      }
+    );
+    let links = [link(2, &by_alice), link(2, &by_carol)];
+    assert_eq!(
+      verifier.signers_for_next(&links),
+      ChainSigners {
+        users: vec![fixture.alice.user_id, fixture.carol.user_id],
+        has_workspace_signer: true,
+      }
+    );
+  }
+
+  impl Fixture {
+    fn verify(
+      &self,
+      known: &StrictRoles,
+      chain: &[&SignedStrictRolesChange],
+    ) -> Result<ChainEnd, StrictRolesError> {
+      verify_using(known, chain, &self.directory, &self.authority)
+    }
+
+    /// A change of `current` by Alice, a workspace admin.
+    fn workspace_change(&self, current: &StrictRoles, roles: Vec<StrictRole>) -> SignedStrictRolesChange {
+      let mut change = self.change(
+        current.version() + 1,
+        current.hash().unwrap(),
+        StrictSignerRole::Workspace,
+      );
+      change.roles = roles;
+      change.sign(&self.alice.device, &self.alice.certificate).unwrap()
+    }
+  }
+
+  /// Where the signer role byte of an encoded change sits: after the conversation, the version,
+  /// the previous hash and the epoch.
+  const SIGNER_ROLE_OFFSET: usize = 8 + 8 + 32 + 8;
+
+  /// [`verify_chain`] over `chain`, each change stored under its own version.
+  fn verify_using(
+    known: &StrictRoles,
+    chain: &[&SignedStrictRolesChange],
+    directory: &impl IdentityDirectory,
+    authority: &impl MembershipAuthority,
+  ) -> Result<ChainEnd, StrictRolesError> {
+    let bytes: Vec<(u64, Vec<u8>)> = chain
+      .iter()
+      .map(|signed| (signed.change().version, signed.to_bytes().unwrap()))
+      .collect();
+    let links: Vec<ChainLink<'_>> = bytes
+      .iter()
+      .map(|(version, change)| link(*version, change))
+      .collect();
+    verify_chain(known, &links, directory, authority)
+  }
+
+  fn link(version: u64, change: &[u8]) -> ChainLink<'_> {
+    ChainLink { version, change }
+  }
+
+  /// The roles `signed` sets, unchecked: what the next change continues.
+  fn after(signed: &SignedStrictRolesChange) -> StrictRoles {
+    StrictRoles::for_tests(signed.clone())
+  }
+
+  fn hash_of(signed: &SignedStrictRolesChange) -> StrictHash {
+    signed.change().hash().unwrap()
+  }
+
+  /// A directory whose device lists answer `.1` for every device.
+  struct Listing<'a>(&'a TestDirectory, Standing);
+
+  impl IdentityDirectory for Listing<'_> {
+    fn pinned_identity(&self, user_id: UserId) -> Option<IdentityPublicKey> {
+      self.0.pinned_identity(user_id)
+    }
+
+    fn device_listing(&self, _device: &VerifiedDevice, _list_version: u64, _judged: Judged) -> Standing {
+      self.1
+    }
+  }
+
+  /// One workspace admin, confirmed only when judged as of the named roster.
+  struct OnlyAsNamed(UserId);
+
+  impl MembershipAuthority for OnlyAsNamed {
+    fn is_authorized(&self, _: UserId, _: ConversationId, _: &MembershipAction) -> bool {
+      true
+    }
+
+    fn workspace_signer(&self, user_id: UserId, _roster_version: u64, judged: Judged) -> Standing {
+      match (user_id == self.0, judged) {
+        (true, Judged::AsNamed) => Standing::Confirmed,
+        (true, Judged::Newest) => Standing::Unknown,
+        (false, _) => Standing::Refused,
+      }
+    }
+  }
+}
+
 /// A roster this device can't verify yet.
 struct UnknownRoster;
 

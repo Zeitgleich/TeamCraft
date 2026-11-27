@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO mls_strict_changes (conversation_id, version, mls_message_id, change)\n       VALUES ($1, $2, $3, $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Bytea"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "458f9044f0e60fbe33acb3a3e435223a0ef85dac283253f2677ad43a14eecea8"
+}

@@ -43,6 +43,7 @@ fuzz_target!(|data: &[u8]| {
   check::<ListPresenceQuery>(data);
   check::<ListThreadsQuery>(data);
   check::<ListWorkspaceLogQuery>(data);
+  check::<MlsStrictHintQuery>(data);
   check::<PostMlsCommitRequest>(data);
   check::<PostMlsMessageRequest>(data);
   check::<PutKeyBagRequest>(data);

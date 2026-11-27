@@ -80,6 +80,7 @@ use teamcraft_proto::{
 use teamcraft_proto::{
   ListThreadsQuery, ListThreadsResponse, ThreadFollowReason, ThreadId, ThreadSummary, UnreadResponse,
 };
+use teamcraft_proto::{MAX_STRICT_CHANGES_PAGE, MlsStrictHintQuery, StrictChainChange, StrictChannelHint};
 use teamcraft_proto::{NotificationSettings, PushKind, PushMode, TestPushOutcome, TestPushResponse};
 
 use super::{ApiError, GatewayConnection, RendezvousConnection, RendezvousFrame, ServerApi};
@@ -284,6 +285,13 @@ struct State {
   next_connection: u64,
   /// The rewinds of strict channels the server took, with the epoch each went back to.
   rewinds: Vec<(ConversationId, u64)>,
+  /// A hostile server's chain of a strict channel's roles changes, shown instead of the one its
+  /// members committed (`show_strict_chain`).
+  shown_strict_chains: HashMap<ConversationId, Vec<StrictChainChange>>,
+  /// How the chain's pages are served (`page_strict_chain`).
+  strict_chain_paging: StrictChainPaging,
+  /// Reads of a chain (`GET …/mls/strict?after=`) that fail as on a lost connection.
+  failing_strict_chain_reads: u32,
   stock_replacements: Vec<DeviceId>,
   /// Users with workspace admin rights (permission checks only; trust comes from the roster).
   admins: HashSet<UserId>,
@@ -560,6 +568,19 @@ struct StoredKeyPackage {
   expires_at_ms: i64,
 }
 
+/// How the fake serves a strict channel's chain of roles changes ([`FakeServer::page_strict_chain`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StrictChainPaging {
+  /// Pages of `MAX_STRICT_CHANGES_PAGE`, as the server.
+  #[default]
+  Honest,
+  /// The first page again whatever the cursor, always with more to come: a hostile server that
+  /// never lets a reader finish.
+  Stuck,
+  /// The first page only, saying nothing follows: a hostile server that cuts the chain.
+  EndsEarly,
+}
+
 struct Conversation {
   response: ConversationResponse,
   /// Member and the MLS entry ID before they joined (they see later entries only).
@@ -580,6 +601,9 @@ struct Conversation {
   ballot_boxes: BTreeMap<MessageId, FakeBallotBox>,
   /// The newest MLS group information and the epoch it is for.
   maybe_group_info: Option<(u64, Base64Bytes)>,
+  /// A strict channel's signed roles changes, every commit's, ascending by version and commit
+  /// (e2ee.md §4.6.2): like the server's chain, a rewind drops what its dropped commits carried.
+  strict_changes: Vec<StrictChainChange>,
   /// The signed channel role log (issue #380), oldest first.
   role_log: Vec<teamcraft_proto::ChannelRoleLogEntryResponse>,
   /// The creator of a channel created anchored: the only one whose first role entry is taken.
@@ -2076,6 +2100,44 @@ impl FakeServer {
   /// §4.6.2, D4).
   pub fn rewinds(&self) -> Vec<(ConversationId, u64)> {
     self.lock().rewinds.clone()
+  }
+
+  /// The strict channel's signed roles changes as its members committed them, ascending (e2ee.md
+  /// §4.6.2, "Falling out in a strict channel").
+  pub fn strict_chain(&self, conversation: ConversationId) -> Vec<StrictChainChange> {
+    self
+      .lock()
+      .conversations
+      .get(&conversation)
+      .map(|entry| entry.strict_changes.clone())
+      .unwrap_or_default()
+  }
+
+  /// How the chain's pages are served from now on.
+  pub fn page_strict_chain(&self, paging: StrictChainPaging) {
+    self.lock().strict_chain_paging = paging;
+  }
+
+  /// The next `reads` reads of a chain fail as on a lost connection.
+  pub fn fail_strict_chain_reads(&self, reads: u32) {
+    self.lock().failing_strict_chain_reads = reads;
+  }
+
+  /// Sets the channel's strict hint, as any member's commit can.
+  pub fn set_strict_hint(&self, conversation: ConversationId, maybe_hint: Option<StrictChannelHint>) {
+    if let Some(entry) = self.lock().conversations.get_mut(&conversation) {
+      entry.response.maybe_strict = maybe_hint;
+    }
+  }
+
+  /// Like a hostile server, `GET …/mls/strict?after=` answers from `maybe_chain` instead of the
+  /// chain the members committed (forged, gapped or forked links); `None` is honest again.
+  pub fn show_strict_chain(&self, conversation: ConversationId, maybe_chain: Option<Vec<StrictChainChange>>) {
+    let mut state = self.lock();
+    match maybe_chain {
+      Some(chain) => state.shown_strict_chains.insert(conversation, chain),
+      None => state.shown_strict_chains.remove(&conversation),
+    };
   }
 
   /// The devices that replaced their whole key package stock so far, in order (e2ee.md §4.6.2,
@@ -5143,6 +5205,22 @@ impl ServerApi for FakeServerApi {
         ));
       }
       let entry = state.member_conversation_mut(conversation, me)?;
+      // Like the server: a roles commit's signed change goes into a channel's chain under the
+      // hint's version, beside any other commit's of that version (e2ee.md §4.6.2).
+      let is_channel = entry.response.kind == ConversationKind::Channel;
+      if let Some(hint) = &request.maybe_strict
+        && let Some(change) = &hint.maybe_change
+        && is_channel
+      {
+        entry.strict_changes.push(StrictChainChange {
+          version: hint.version,
+          commit: commit_id,
+          change: change.clone(),
+        });
+        entry
+          .strict_changes
+          .sort_by_key(|link| (link.version, link.commit));
+      }
       entry.epoch += 1;
       entry.mls.push(commit.clone());
       let new_epoch = entry.epoch;
@@ -5152,7 +5230,10 @@ impl ServerApi for FakeServerApi {
       // Like the server: a roles commit's strict hint, stored with it (e2ee.md §4.6.2).
       let is_hinted = request.maybe_strict.is_some();
       if let Some(hint) = &request.maybe_strict {
-        entry.response.maybe_strict = Some(hint.clone());
+        entry.response.maybe_strict = Some(StrictChannelHint {
+          maybe_change: None,
+          ..hint.clone()
+        });
       }
       let members: Vec<UserId> = entry.members.keys().copied().collect();
       if is_hinted {
@@ -5235,6 +5316,9 @@ impl ServerApi for FakeServerApi {
       entry.mls.retain(|message| {
         message.epoch < epoch || (message.epoch == epoch && message.kind != MlsMessageKind::Commit)
       });
+      // The chain loses what the dropped commits carried, as the server's cascade does.
+      let kept: HashSet<MlsMessageId> = entry.mls.iter().map(|message| message.id).collect();
+      entry.strict_changes.retain(|link| kept.contains(&link.commit));
       entry.epoch = epoch;
       if entry
         .maybe_group_info
@@ -5312,13 +5396,21 @@ impl ServerApi for FakeServerApi {
     })
   }
 
-  /// Like the server: members, and instance admins outside the group.
+  /// Like the server: members, and instance admins outside the group; with `after`, a page of the
+  /// chain (or what a hostile server shows instead, `show_strict_chain`).
   async fn mls_strict_hint(
     &self,
     conversation: ConversationId,
+    query: &MlsStrictHintQuery,
   ) -> Result<teamcraft_proto::MlsStrictHintResponse, ApiError> {
     self.with(|state, me| {
       let is_admin = state.admins.contains(&me);
+      if query.maybe_after.is_some() && state.failing_strict_chain_reads > 0 {
+        state.failing_strict_chain_reads -= 1;
+        return Err(ApiError::Network("fake server: the chain's read was lost".into()));
+      }
+      let maybe_shown = state.shown_strict_chains.get(&conversation).cloned();
+      let paging = state.strict_chain_paging;
       let entry = state.conversation(conversation)?;
       if !entry.members.contains_key(&me) && !is_admin {
         return Err(ApiError::status(
@@ -5327,9 +5419,40 @@ impl ServerApi for FakeServerApi {
           "missing permission manage_members",
         ));
       }
+      let (changes, has_more) = match query.maybe_after {
+        Some(after) => {
+          let chain = maybe_shown.unwrap_or_else(|| entry.strict_changes.clone());
+          let cursor = (after, query.maybe_after_commit);
+          let mut later: Vec<StrictChainChange> = chain
+            .into_iter()
+            .filter(|link| {
+              paging == StrictChainPaging::Stuck
+                || match cursor {
+                  (version, Some(commit)) => (link.version, link.commit) > (version, commit),
+                  (version, None) => link.version > version,
+                }
+            })
+            .collect();
+          let has_more = match paging {
+            StrictChainPaging::Honest => later.len() > MAX_STRICT_CHANGES_PAGE,
+            StrictChainPaging::Stuck => true,
+            StrictChainPaging::EndsEarly => false,
+          };
+          later.truncate(MAX_STRICT_CHANGES_PAGE);
+          (later, has_more)
+        },
+        None => (Vec::new(), false),
+      };
+      // The hint never shows the change, as the server's.
+      let maybe_strict = entry.response.maybe_strict.clone().map(|hint| StrictChannelHint {
+        maybe_change: None,
+        ..hint
+      });
       Ok(teamcraft_proto::MlsStrictHintResponse {
         epoch: entry.epoch,
-        maybe_strict: entry.response.maybe_strict.clone(),
+        maybe_strict,
+        changes,
+        has_more,
       })
     })
   }
@@ -8397,6 +8520,7 @@ impl State {
         pinned: HashSet::new(),
         ballot_boxes: BTreeMap::new(),
         maybe_group_info: None,
+        strict_changes: Vec::new(),
         role_log: Vec::new(),
         maybe_anchored_founder: None,
       },

@@ -164,6 +164,8 @@ pub fn strict_hint(hint: &teamcraft_db::StrictHint) -> teamcraft_proto::StrictCh
     is_strict: hint.is_strict,
     version: hint.version,
     hash: Base64Bytes::new(hint.hash.clone()),
+    // The signed change stays in the chain (`GET …/mls/strict?after=`), not in the hint.
+    maybe_change: None,
   }
 }
 
