@@ -2011,7 +2011,8 @@ pub struct CodecSupport {
 /// (#1793: Firefox on Linux says it encodes H.264 and then refuses every frame), AV1 where
 /// WebCodecs says it encodes a standard screen share's top layer (1440p at 30 fps, in real time),
 /// VP9 where it does so in hardware (#1733) or H.264 can't be encoded, each only where a test frame
-/// encodes; and each codec where it decodes it. A browser that doesn't answer gets H.264 only.
+/// encodes; and each codec where `isConfigSupported` says it decodes it (#2461). A browser that
+/// doesn't answer gets H.264 only.
 pub(super) async fn codec_support() -> CodecSupport {
   if let Some(support) = CODEC_SUPPORT.with_borrow(Clone::clone) {
     return support;
@@ -2050,18 +2051,53 @@ async fn check_codec_support() -> CodecSupport {
   if !encodes_h264 {
     warn!("the browser can't encode H.264 here; video goes out in AV1 or VP9");
   }
-  let mut decoders = vec![VideoCodec::H264];
-  for (codec, name) in [(VideoCodec::Vp9, VP9_CODEC), (VideoCodec::Av1, AV1_CODEC)] {
-    if let Ok(config) = dictionary(&[("codec", JsValue::from_str(name))])
-      && is_supported(VideoDecoder::is_config_supported(&config)).await
-    {
-      decoders.insert(0, codec);
-    }
+  let decodes = DecoderSupport {
+    h264: decodes_codec(H264_CODEC).await,
+    vp9: decodes_codec(VP9_CODEC).await,
+    av1: decodes_codec(AV1_CODEC).await,
+  };
+  if !decodes.h264 {
+    warn!("the browser can't decode H.264 here; others' video comes in AV1 or VP9");
   }
+  let decoders = announced_decoders(decodes);
   CodecSupport {
     encoders: announced_encoders(encodes_h264, share_encoders),
     decoders,
     share_encoders,
+  }
+}
+
+/// Which codecs `VideoDecoder.isConfigSupported` says the browser decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DecoderSupport {
+  h264: bool,
+  vp9: bool,
+  av1: bool,
+}
+
+/// The video decoders a browser announces, best first: each codec it says it decodes (#2461:
+/// Firefox on Linux without FFmpeg doesn't decode H.264, and an announced codec gives black
+/// tiles). A browser that decodes none still announces H.264, the codec every client sends, as an
+/// announcement can't be empty.
+fn announced_decoders(support: DecoderSupport) -> Vec<VideoCodec> {
+  let mut decoders = Vec::new();
+  if support.av1 {
+    decoders.push(VideoCodec::Av1);
+  }
+  if support.vp9 {
+    decoders.push(VideoCodec::Vp9);
+  }
+  if support.h264 || decoders.is_empty() {
+    decoders.push(VideoCodec::H264);
+  }
+  decoders
+}
+
+/// Whether `VideoDecoder.isConfigSupported` accepts `codec`'s string.
+async fn decodes_codec(codec: &str) -> bool {
+  match dictionary(&[("codec", JsValue::from_str(codec))]) {
+    Ok(config) => is_supported(VideoDecoder::is_config_supported(&config)).await,
+    Err(_) => false,
   }
 }
 
@@ -2925,6 +2961,19 @@ pub(super) mod effects {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn decoders_leave_out_h264_when_the_browser_cannot_decode_it() {
+    let support = |h264, vp9, av1| announced_decoders(DecoderSupport { h264, vp9, av1 });
+    assert_eq!(support(false, true, false), vec![VideoCodec::Vp9]);
+    assert_eq!(support(false, true, true), vec![VideoCodec::Av1, VideoCodec::Vp9]);
+    assert_eq!(
+      support(true, true, true),
+      vec![VideoCodec::Av1, VideoCodec::Vp9, VideoCodec::H264]
+    );
+    // Nothing decodes (or the browser doesn't answer): H.264 rather than an empty announcement.
+    assert_eq!(support(false, false, false), vec![VideoCodec::H264]);
+  }
+
   use std::cell::RefCell;
   use std::collections::HashSet;
   use std::rc::Rc;

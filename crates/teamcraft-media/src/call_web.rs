@@ -1127,7 +1127,7 @@ pub fn request_screen(profile: &ScreenProfile, has_sound: bool) -> Result<Promis
 }
 
 /// What this browser encodes and decodes of the video codecs a call may use (#565), for the
-/// call's [`MediaCapabilities`]: H.264 always (what every client sends and takes), AV1 where
+/// call's [`MediaCapabilities`]: H.264 where a test frame encodes and its decoding is supported (#2461), AV1 where
 /// WebCodecs offers it for a screen share's top layer (encoder) and at all (decoder).
 pub async fn video_codec_support() -> video::CodecSupport {
   video::codec_support().await
