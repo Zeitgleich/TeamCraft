@@ -81,6 +81,10 @@ extern "C" {
   #[wasm_bindgen(method, catch)]
   pub fn reset(this: &AudioEncoder) -> Result<(), JsValue>;
 
+  /// `"unconfigured"`, `"configured"` or `"closed"`: WebCodecs closes a codec after an error.
+  #[wasm_bindgen(method, getter)]
+  pub fn state(this: &AudioEncoder) -> String;
+
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &AudioEncoder) -> Result<(), JsValue>;
 
@@ -95,6 +99,10 @@ extern "C" {
 
   #[wasm_bindgen(method, catch)]
   pub fn decode(this: &AudioDecoder, chunk: &EncodedAudioChunk) -> Result<(), JsValue>;
+
+  /// `"unconfigured"`, `"configured"` or `"closed"`: WebCodecs closes a codec after an error.
+  #[wasm_bindgen(method, getter)]
+  pub fn state(this: &AudioDecoder) -> String;
 
   #[wasm_bindgen(method, catch)]
   pub fn close(this: &AudioDecoder) -> Result<(), JsValue>;

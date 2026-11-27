@@ -120,8 +120,8 @@ use crate::audio_level::{CallMeter, DEFAULT_VOICE_THRESHOLD_DBOV, SharedLevel, m
 use crate::call_auth::{CallKeyAuthenticator, CallKeyError};
 use crate::call_cues::{CallCue, CuePlayer, StatusCues};
 use crate::call_engine::{
-  AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats, EngineOutput,
-  OwnVideoEnd, RecordingAdmission, RecordingConsentRule,
+  AudioCodecRole, AudioOrigin, CallEngine, CallEngineConfig, CallEngineError, CallEngineEvent, CallStats,
+  EngineOutput, OwnVideoEnd, RecordingAdmission, RecordingConsentRule,
 };
 use crate::call_resilience::{
   CallTransport, Jitter, JoinTicket, JoinTicketError, ReconnectSchedule, RejoinPacer, ResilienceConfig,
@@ -174,6 +174,11 @@ const PRIMING_PACKETS: usize = 3;
 /// A thin copy whose encoder failed starts again this much later (#1893 step 3): soon, but not
 /// once per microphone frame while the browser refuses it.
 const THIN_VOICE_RESTART_AFTER: Duration = Duration::from_secs(1);
+/// WebCodecs closes an audio codec after an error; the call builds it anew (#2460), at most this
+/// often per codec: one that fails each time costs a rebuild a second, not one per 20 ms frame.
+const AUDIO_CODEC_REBUILD_EVERY: Duration = Duration::from_secs(1);
+/// A WebCodecs codec's `state` once it closed (after an error, or `close()`).
+const CODEC_CLOSED: &str = "closed";
 /// Opus bitrate for voice.
 const OPUS_BITRATE_BPS: u32 = 32_000;
 /// Opus bitrate of a shared screen's sound: music and video sound need more than speech (as on
@@ -434,11 +439,14 @@ enum Input {
     stream: RemoteStream,
     samples: Vec<f32>,
   },
-  /// A codec reported an error that only needs logging (audio codecs, drawing a video frame).
+  /// A codec reported an error that only needs logging (drawing a video frame), or an audio codec
+  /// that WebCodecs closed with it: that one is built anew where it is next used (#2460).
   CodecFailed {
     context: &'static str,
     message: String,
   },
+  /// A closed audio codec was built anew (#2460): the call's crash reports hear of it.
+  AudioCodecRebuilt(AudioCodecRole),
   /// A pulse of the audio clock or the page timer: periodic work that fell due runs.
   Pulse,
   VideoEncoded {
@@ -696,8 +704,17 @@ struct OpusEncoder {
   /// Levels of 20 ms frames handed to the encoder whose packets have not arrived yet (FIFO).
   levels: VecDeque<AudioLevel>,
   timestamp_us: f64,
+  /// Where the outputs of an encoder built anew go.
+  inputs: mpsc::UnboundedSender<Input>,
+  rebuilds: RebuildGate,
   _output: Closure<dyn FnMut(EncodedAudioChunk)>,
   _error: Closure<dyn FnMut(JsValue)>,
+}
+
+/// Paces the rebuilds of one closed audio codec ([`AUDIO_CODEC_REBUILD_EVERY`], #2460).
+#[derive(Debug, Default, Clone, Copy)]
+struct RebuildGate {
+  maybe_last_at: Option<Instant>,
 }
 
 /// A remote device's microphone or shared screen sound.
@@ -716,6 +733,7 @@ struct RemoteAudio {
   /// The packets WebCodecs decoded last, oldest first: they prime the voice worker's decoder when
   /// the stream moves over to it (#2140).
   recent: VecDeque<Vec<u8>>,
+  rebuilds: RebuildGate,
 }
 
 /// Who decodes a remote stream: WebCodecs, or for a voice once a packet went missing, the voice
@@ -1687,6 +1705,12 @@ impl CallState<'_> {
         }
       },
       Input::CodecFailed { context, message } => warn!(context, %message, "codec error"),
+      Input::AudioCodecRebuilt(role) => {
+        // The app may have stopped listening; the call goes on.
+        let _ = self
+          .events
+          .unbounded_send(CallEngineEvent::AudioCodecRebuilt(role));
+      },
       Input::Pulse => return self.on_pulse(engine, audio).await,
       Input::VideoEncoded {
         kind,
@@ -3854,6 +3878,39 @@ fn detach_port(node: &AudioWorkletNode) {
 
 impl OpusEncoder {
   fn new(inputs: &mpsc::UnboundedSender<Input>, profile: OpusProfile) -> Result<Self, WebCallError> {
+    let bitrate_bps = profile.bitrate_bps();
+    let config = opus_config(profile, bitrate_bps, VoiceFrame::Ms20, OPUS_LOSS_FLOOR_PERCENT)?;
+    let (encoder, output, error) = Self::open(inputs, profile, &config)?;
+    Ok(Self {
+      encoder,
+      profile,
+      planned_loss_percent: OPUS_LOSS_FLOOR_PERCENT,
+      bitrate_bps,
+      frame: VoiceFrame::Ms20,
+      pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
+      levels: VecDeque::new(),
+      timestamp_us: 0.0,
+      inputs: inputs.clone(),
+      rebuilds: RebuildGate::default(),
+      _output: output,
+      _error: error,
+    })
+  }
+
+  /// A configured WebCodecs encoder whose packets arrive as [`Input::Encoded`], with its callbacks.
+  #[allow(clippy::type_complexity)]
+  fn open(
+    inputs: &mpsc::UnboundedSender<Input>,
+    profile: OpusProfile,
+    config: &Object,
+  ) -> Result<
+    (
+      AudioEncoder,
+      Closure<dyn FnMut(EncodedAudioChunk)>,
+      Closure<dyn FnMut(JsValue)>,
+    ),
+    WebCallError,
+  > {
     let sender = inputs.clone();
     let output = Closure::<dyn FnMut(EncodedAudioChunk)>::new(move |chunk: EncodedAudioChunk| {
       let bytes = Uint8Array::new_with_length(chunk.byte_length());
@@ -3879,27 +3936,8 @@ impl OpusEncoder {
     ])
     .map_err(browser("AudioEncoder"))?;
     let encoder = AudioEncoder::new(&init).map_err(browser("AudioEncoder"))?;
-    let bitrate_bps = profile.bitrate_bps();
-    encoder
-      .configure(&opus_config(
-        profile,
-        bitrate_bps,
-        VoiceFrame::Ms20,
-        OPUS_LOSS_FLOOR_PERCENT,
-      )?)
-      .map_err(browser("AudioEncoder"))?;
-    Ok(Self {
-      encoder,
-      profile,
-      planned_loss_percent: OPUS_LOSS_FLOOR_PERCENT,
-      bitrate_bps,
-      frame: VoiceFrame::Ms20,
-      pending: Vec::with_capacity(2 * FRAME_SAMPLES_PER_CHANNEL),
-      levels: VecDeque::new(),
-      timestamp_us: 0.0,
-      _output: output,
-      _error: error,
-    })
+    encoder.configure(config).map_err(browser("AudioEncoder"))?;
+    Ok((encoder, output, error))
   }
 
   /// Plans in-band FEC for the loss measured on the uplink; reconfigures only on real changes.
@@ -3929,6 +3967,10 @@ impl OpusEncoder {
   /// After a `reset()` it applies the new one, as Chrome does either way; the reset drops at most
   /// the 20 ms frame still being encoded, and the levels waiting for it.
   fn configure(&mut self) -> Result<(), WebCallError> {
+    if self.is_closed() {
+      // The next frame builds it anew with this configuration (#2460).
+      return Ok(());
+    }
     self.encoder.reset().map_err(browser("AudioEncoder"))?;
     self.levels.clear();
     self
@@ -3953,8 +3995,13 @@ impl OpusEncoder {
       .unwrap_or(AudioLevel::SILENCE)
   }
 
-  /// Encodes every complete 20 ms frame; the encoded bytes arrive as [`Input::Encoded`].
+  /// Encodes every complete 20 ms frame; the encoded bytes arrive as [`Input::Encoded`]. An
+  /// encoder WebCodecs closed after an error is built anew first; until it may be, the samples
+  /// are a gap in the sound.
   fn push(&mut self, samples: &[f32]) -> Result<(), WebCallError> {
+    if !self.reopen_if_closed(Instant::now())? {
+      return Ok(());
+    }
     self.pending.extend_from_slice(samples);
     while self.pending.len() >= FRAME_SAMPLES_PER_CHANNEL {
       let frame: Vec<f32> = self.pending.drain(..FRAME_SAMPLES_PER_CHANNEL).collect();
@@ -3980,6 +4027,53 @@ impl OpusEncoder {
       result.map_err(browser("AudioEncoder"))?;
     }
     Ok(())
+  }
+
+  /// Builds the encoder anew, with the configuration it had, where WebCodecs closed it after an
+  /// error (#2460): `false` while that has to wait ([`AUDIO_CODEC_REBUILD_EVERY`]). Frames the
+  /// closed one hadn't encoded are gone with it.
+  fn reopen_if_closed(&mut self, now: Instant) -> Result<bool, WebCallError> {
+    if !self.is_closed() {
+      return Ok(true);
+    }
+    if !self.rebuilds.admit(now) {
+      return Ok(false);
+    }
+    let config = opus_config(
+      self.profile,
+      self.bitrate_bps,
+      self.frame,
+      self.planned_loss_percent,
+    )?;
+    let (encoder, output, error) = Self::open(&self.inputs, self.profile, &config)?;
+    // The closed encoder runs no callback any more: its error callback ran as it closed.
+    self.encoder = encoder;
+    self._output = output;
+    self._error = error;
+    self.levels.clear();
+    warn!(profile = ?self.profile, "the audio encoder closed after an error; built anew");
+    let _ = self
+      .inputs
+      .unbounded_send(Input::AudioCodecRebuilt(AudioCodecRole::Encoder));
+    Ok(true)
+  }
+
+  fn is_closed(&self) -> bool {
+    self.encoder.state() == CODEC_CLOSED
+  }
+}
+
+impl RebuildGate {
+  /// Whether a rebuild may run at `now`; one that may is counted.
+  fn admit(&mut self, now: Instant) -> bool {
+    if self
+      .maybe_last_at
+      .is_some_and(|last| now.saturating_duration_since(last) < AUDIO_CODEC_REBUILD_EVERY)
+    {
+      return false;
+    }
+    self.maybe_last_at = Some(now);
+    true
   }
 }
 
@@ -4174,6 +4268,7 @@ impl RemoteAudio {
       decoding_samples: 0,
       maybe_last_packet: None,
       recent: VecDeque::with_capacity(PRIMING_PACKETS),
+      rebuilds: RebuildGate::default(),
     })
   }
 
@@ -4198,6 +4293,10 @@ impl RemoteAudio {
     now: Instant,
     inputs: &mpsc::UnboundedSender<Input>,
   ) -> Result<(), WebCallError> {
+    if !self.reopen_closed_decoder(now, inputs)? {
+      // Waits for its rebuild; the jitter buffer keeps the packets meanwhile, as far as it holds.
+      return Ok(());
+    }
     if self.decoding_samples > 2 * MAX_PACKET_SAMPLES_PER_CHANNEL {
       // Output the count waits for never came (a packet the decoder refused): count afresh
       // rather than wait for ever.
@@ -4221,6 +4320,34 @@ impl RemoteAudio {
       }
     }
     Ok(())
+  }
+
+  /// Builds a new WebCodecs decoder where WebCodecs closed the stream's after an error (#2460):
+  /// the output still on its way is gone, so the stream's audio goes on after a short gap.
+  /// `false` while that has to wait ([`AUDIO_CODEC_REBUILD_EVERY`]).
+  fn reopen_closed_decoder(
+    &mut self,
+    now: Instant,
+    inputs: &mpsc::UnboundedSender<Input>,
+  ) -> Result<bool, WebCallError> {
+    let RemoteDecoder::WebCodecs(decoder) = &self.decoder else {
+      return Ok(true);
+    };
+    if !decoder.is_closed() {
+      return Ok(true);
+    }
+    if !self.rebuilds.admit(now) {
+      return Ok(false);
+    }
+    self.decoder = RemoteDecoder::WebCodecs(WebCodecsAudio::new(self.stream, inputs)?);
+    self.decoding_samples = 0;
+    warn!(
+      sender = %self.stream.0,
+      origin = ?self.stream.1,
+      "an audio decoder closed after an error; built anew"
+    );
+    let _ = inputs.unbounded_send(Input::AudioCodecRebuilt(AudioCodecRole::Decoder));
+    Ok(true)
   }
 
   /// The voice worker took over the decoder (#2140), or the worker failed: back to WebCodecs.
@@ -4348,6 +4475,10 @@ impl WebCodecsAudio {
     // Microseconds of 48 kHz samples.
     self.timestamp_us += samples as f64 * 1_000_000.0 / f64::from(SAMPLE_RATE_HZ);
     self.decoder.decode(&chunk).map_err(browser("AudioDecoder"))
+  }
+
+  fn is_closed(&self) -> bool {
+    self.decoder.state() == CODEC_CLOSED
   }
 }
 
@@ -5350,6 +5481,162 @@ mod tests {
       codec: VideoCodec::H264,
       layers: layers(),
       maybe_publication_id,
+    }
+  }
+
+  /// #2460: a closed audio codec is built anew at once, then at most once per
+  /// [`AUDIO_CODEC_REBUILD_EVERY`] while it keeps failing.
+  mod audio_codec_rebuilds {
+    use super::*;
+
+    #[test]
+    fn the_first_rebuild_runs_at_once_and_the_next_waits_a_second() {
+      let mut gate = RebuildGate::default();
+      let start = Instant::now();
+      assert!(gate.admit(start));
+      assert!(!gate.admit(start + Duration::from_millis(20)));
+      assert!(!gate.admit(start + Duration::from_millis(999)));
+      assert!(gate.admit(start + AUDIO_CODEC_REBUILD_EVERY));
+      assert!(!gate.admit(start + AUDIO_CODEC_REBUILD_EVERY + Duration::from_millis(500)));
+    }
+  }
+
+  /// #2460 in a browser with WebCodecs (`WASM_BINDGEN_USE_BROWSER=1`): an injected codec error
+  /// (a configuration the browser can't run) closes the codec as a failing one does, and the
+  /// call's next use of it builds it anew and goes on.
+  #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+  mod browser_audio_codecs {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// Longest wait for a codec's callback.
+    const CALLBACK_WAIT: Duration = Duration::from_secs(3);
+
+    #[wasm_bindgen_test]
+    async fn a_closed_encoder_is_built_anew_and_encodes_again() {
+      let (inputs, mut received) = mpsc::unbounded();
+      let mut encoder = OpusEncoder::new(&inputs, OpusProfile::Voice).unwrap();
+      inject_codec_error(|config| encoder.encoder.configure(config));
+      assert!(matches!(
+        next_input(&mut received).await,
+        Input::CodecFailed { .. }
+      ));
+      assert!(encoder.is_closed());
+      // Reconfiguring a closed encoder (the uplink changed) waits for the rebuild.
+      encoder.set_measured_loss_percent(30).unwrap();
+
+      push_frames(&mut encoder, 10);
+      assert!(matches!(
+        next_input(&mut received).await,
+        Input::AudioCodecRebuilt(AudioCodecRole::Encoder)
+      ));
+      assert!(!encoder.is_closed());
+      assert!(!encoded_packets(&mut received, 1).await.is_empty());
+
+      // Failing again at once: no rebuild within the second, the samples are a gap. Packets of
+      // the frames before still come out first.
+      inject_codec_error(|config| encoder.encoder.configure(config));
+      loop {
+        match next_input(&mut received).await {
+          Input::Encoded { .. } => {},
+          Input::CodecFailed { .. } => break,
+          other => panic!("{}", input_name(&other)),
+        }
+      }
+      push_frames(&mut encoder, 10);
+      assert!(encoder.is_closed());
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_closed_decoder_is_built_anew_and_decodes_again() {
+      // The packets come from an encoder of their own, so its outputs stay apart.
+      let (encoder_inputs, mut encoded) = mpsc::unbounded();
+      let mut encoder = OpusEncoder::new(&encoder_inputs, OpusProfile::Voice).unwrap();
+      push_frames(&mut encoder, 6);
+      let packets = encoded_packets(&mut encoded, 6).await;
+      let (inputs, mut received) = mpsc::unbounded();
+      let stream = (device(1), AudioOrigin::Screen);
+      let mut remote = RemoteAudio::new(stream, JitterBufferConfig::default(), &inputs).unwrap();
+      let RemoteDecoder::WebCodecs(decoder) = &remote.decoder else {
+        panic!("a new stream decodes with WebCodecs");
+      };
+      inject_codec_error(|config| decoder.decoder.configure(config));
+      assert!(matches!(
+        next_input(&mut received).await,
+        Input::CodecFailed { .. }
+      ));
+
+      for (number, packet) in (0u16..).zip(packets) {
+        remote.push(SequenceNumber(number), packet);
+      }
+      let mut voice = VoiceFec::new(None);
+      remote.decode_due(&mut voice, Instant::now(), &inputs).unwrap();
+      assert!(matches!(
+        next_input(&mut received).await,
+        Input::AudioCodecRebuilt(AudioCodecRole::Decoder)
+      ));
+      match next_input(&mut received).await {
+        Input::Decoded {
+          stream: from,
+          samples,
+        } => {
+          assert_eq!(from, stream);
+          assert!(!samples.is_empty());
+        },
+        other => panic!("{}", input_name(&other)),
+      }
+    }
+
+    /// Configures the codec with one no browser runs: WebCodecs closes it and calls its error
+    /// callback, as with a failure while it runs.
+    fn inject_codec_error(configure: impl FnOnce(&Object) -> Result<(), JsValue>) {
+      let config = dictionary(&[
+        ("codec", JsValue::from_str("x-unsupported")),
+        ("sampleRate", JsValue::from(SAMPLE_RATE_HZ)),
+        ("numberOfChannels", JsValue::from(1)),
+      ])
+      .unwrap();
+      configure(&config).unwrap();
+    }
+
+    fn push_frames(encoder: &mut OpusEncoder, frames: usize) {
+      let tone: Vec<f32> = (0..frames * FRAME_SAMPLES_PER_CHANNEL)
+        .map(|index| (index as f32 * 0.05).sin() * 0.3)
+        .collect();
+      encoder.push(&tone).unwrap();
+    }
+
+    async fn encoded_packets(received: &mut mpsc::UnboundedReceiver<Input>, count: usize) -> Vec<Vec<u8>> {
+      let mut packets = Vec::new();
+      while packets.len() < count {
+        match next_input(received).await {
+          Input::Encoded { opus, .. } => packets.push(opus),
+          other => panic!("{}", input_name(&other)),
+        }
+      }
+      packets
+    }
+
+    async fn next_input(received: &mut mpsc::UnboundedReceiver<Input>) -> Input {
+      let next = received.next();
+      let timeout = sleep(CALLBACK_WAIT);
+      futures::pin_mut!(next, timeout);
+      match select(next, timeout).await {
+        Either::Left((Some(input), _)) => input,
+        Either::Left((None, _)) => panic!("the inputs closed"),
+        Either::Right(_) => panic!("no codec callback within {CALLBACK_WAIT:?}"),
+      }
+    }
+
+    fn input_name(input: &Input) -> &'static str {
+      match input {
+        Input::CodecFailed { .. } => "codec failed",
+        Input::AudioCodecRebuilt(_) => "codec rebuilt",
+        Input::Encoded { .. } => "encoded",
+        Input::Decoded { .. } => "decoded",
+        _ => "another input",
+      }
     }
   }
 

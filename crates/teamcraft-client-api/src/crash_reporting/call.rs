@@ -125,6 +125,9 @@ pub enum CallProblem {
     waited_s: u32,
     has_left: bool,
   },
+  /// WebCodecs closed an audio encoder or decoder after an error (#2460): the call built a new
+  /// one and went on, with a short gap in that audio. Once per call.
+  AudioCodecRebuilt { codec: AudioCodecRole },
   #[serde(other)]
   Unknown,
 }
@@ -177,6 +180,28 @@ pub enum ResumeFailure {
   NotResumed,
   /// It held a member the call's roster no longer has.
   MemberOffRoster,
+}
+
+/// Which side of the audio a rebuilt codec was (#2460).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AudioCodecRole {
+  /// The own microphone's (or shared screen sound's) encoder.
+  Encoder,
+  /// A remote stream's decoder.
+  Decoder,
+  #[serde(other)]
+  Unknown,
+}
+
+impl AudioCodecRole {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Encoder => "encoder",
+      Self::Decoder => "decoder",
+      Self::Unknown => "unknown",
+    }
+  }
 }
 
 impl JoinStage {
@@ -403,6 +428,7 @@ impl CallProblem {
       Self::PoorCall(_) => "poor_call",
       Self::CaptureStalled { .. } => "capture_stalled",
       Self::JoinStalled { .. } => "join_stalled",
+      Self::AudioCodecRebuilt { .. } => "audio_codec_rebuilt",
       Self::Unknown => "unknown",
     }
   }
@@ -430,6 +456,7 @@ impl CallProblem {
       | Self::SfuRejected { .. }
       | Self::PoorCall(_)
       | Self::JoinStalled { has_left: false, .. }
+      | Self::AudioCodecRebuilt { .. }
       | Self::Unknown => CrashLevel::Warning,
     }
   }
@@ -451,6 +478,7 @@ impl CallProblem {
       Self::PoorCall(_) => "PoorCall",
       Self::CaptureStalled { .. } => "CaptureStalled",
       Self::JoinStalled { .. } => "CallJoinStalled",
+      Self::AudioCodecRebuilt { .. } => "CallAudioCodecRebuilt",
       Self::Unknown => "CallProblem",
     }
   }
@@ -497,6 +525,7 @@ impl CallProblem {
         parts.push(stage.as_str().to_owned());
         parts.push(if *has_left { "left" } else { "waiting" }.to_owned());
       },
+      Self::AudioCodecRebuilt { codec } => parts.push(codec.as_str().to_owned()),
       _ => {},
     }
     parts
@@ -572,6 +601,9 @@ impl CallProblem {
         has_left: true,
         ..
       } => format!("join stalled, left: {}", stage.as_str()),
+      Self::AudioCodecRebuilt { codec } => {
+        format!("audio {} closed after an error; built anew", codec.as_str())
+      },
       Self::Unknown => "call problem".to_owned(),
     }
   }
@@ -1059,9 +1091,33 @@ mod tests {
           waited_s: 15,
           has_left: false,
         },
+        CallProblem::AudioCodecRebuilt {
+          codec: AudioCodecRole::Decoder,
+        },
       ] {
         assert_eq!(problem.level(), CrashLevel::Warning, "{problem:?}");
       }
+    }
+
+    /// A rebuilt audio codec is one issue per side (#2460), and reads back from the snapshot's JSON;
+    /// a side a newer client names reads as unknown.
+    #[test]
+    fn a_rebuilt_audio_codec_is_grouped_by_its_side() {
+      let rebuilt = CallProblem::AudioCodecRebuilt {
+        codec: AudioCodecRole::Encoder,
+      };
+      assert_eq!(rebuilt.fingerprint(), ["call", "audio_codec_rebuilt", "encoder"]);
+      assert_eq!(
+        rebuilt.message(),
+        "audio encoder closed after an error; built anew"
+      );
+      assert_eq!(rebuilt.error_type(), "CallAudioCodecRebuilt");
+      let json = serde_json::to_string(&rebuilt).unwrap();
+      assert_eq!(json, r#"{"kind":"audio_codec_rebuilt","codec":"encoder"}"#);
+      let read: CallProblem = serde_json::from_str(&json).unwrap();
+      assert_eq!(read, rebuilt);
+      let newer: AudioCodecRole = serde_json::from_str(r#""a_later_codec""#).unwrap();
+      assert_eq!(newer, AudioCodecRole::Unknown);
     }
 
     /// A stalled join is one issue per stage and outcome, whatever it waited (#2419); the stage

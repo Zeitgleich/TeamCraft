@@ -456,6 +456,10 @@ pub enum CallEngineEvent {
   },
   /// Not from the engine but from the media driver: that capture gives pictures again.
   CaptureRecovered(VideoTrackKind),
+  /// Not from the engine but from the media driver: WebCodecs closed an audio codec after an
+  /// error and the driver built a new one (#2460), so the call went on with a short gap in that
+  /// audio. The call's crash reports hear of it.
+  AudioCodecRebuilt(AudioCodecRole),
   /// Another device's capture of a track this device receives stalled (`is_stalled`) or gives
   /// pictures again (#1805), as its frames say: the UI tells whose video isn't updating.
   RemoteCaptureStalled {
@@ -635,6 +639,15 @@ pub enum DaveResumeFailure {
   NotResumed,
   /// It held a member the call's roster no longer has, or one that left while this device was away.
   MemberOffRoster,
+}
+
+/// Which audio codec the driver rebuilt ([`CallEngineEvent::AudioCodecRebuilt`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioCodecRole {
+  /// An own encoder: the microphone, its thin copy or a shared screen's sound.
+  Encoder,
+  /// A remote stream's decoder.
+  Decoder,
 }
 
 /// When an own track that ended by itself ([`CallEngineEvent::OwnVideoEnded`]) ended.
