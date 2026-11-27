@@ -2151,10 +2151,8 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
       None => Vec::new(),
     };
     let is_rewind = self.is_strict_rewind(conversation);
-    // A rewind replaces only the refused commit this device stopped at: a continuation another
-    // admin got in first is an epoch conflict, and this device catches up (e2ee.md §4.6.2, D4).
     let maybe_replaces = match is_rewind {
-      true => self.strict_stop(conversation)?.map(|stop| stop.commit_id),
+      true => self.strict_rewind_replaces(conversation)?,
       false => None,
     };
     let request = PostMlsCommitRequest {

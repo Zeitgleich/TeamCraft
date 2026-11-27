@@ -105,6 +105,16 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     self.maybe_strict_rewind == Some(conversation)
   }
 
+  /// The refused commit a rewind from this device replaces: where it stopped. A continuation
+  /// another admin got in first is then an epoch conflict, and this device catches up (e2ee.md
+  /// §4.6.2, D4, "Epoch conflicts and convergence").
+  pub(super) fn strict_rewind_replaces(
+    &mut self,
+    conversation: ConversationId,
+  ) -> Result<Option<MlsMessageId>, CoreError> {
+    Ok(self.strict_stop(conversation)?.map(|stop| stop.commit_id))
+  }
+
   /// Where this device stopped in the conversation's strict channel, if it did and the group is
   /// still there (e2ee.md §4.6.2, D4). A commit for the stopped epoch that this device takes (an
   /// admin's continuation) ends the stop with the epoch.

@@ -36,6 +36,13 @@ impl<A: ServerApi, S: LocalStore> Client<A, S> {
     false
   }
 
+  pub(super) fn strict_rewind_replaces(
+    &mut self,
+    _conversation: ConversationId,
+  ) -> Result<Option<MlsMessageId>, CoreError> {
+    Ok(None)
+  }
+
   pub(super) fn persist_strict_stop_at(
     &mut self,
     _message: &MlsMessageResponse,
